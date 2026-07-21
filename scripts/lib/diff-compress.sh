@@ -25,9 +25,12 @@ build_review_input() {
   local base="$1" head="$2" out_diff="$3" out_omitted="$4" chunk_dir="$5"
   : > "$out_diff"; : > "$out_omitted"
   mkdir -p "$chunk_dir"
+  # 省略清单契约要求 chunk 为绝对路径（下游读取方 cwd 不一定等于调用方 cwd）
+  chunk_dir=$(cd "$chunk_dir" && pwd)
 
+  # --no-renames：重命名按删除+新增处理，保证总量与 chunk 大小口径一致
   local total
-  total=$(git diff "$base" "$head" | wc -c | tr -d ' ')
+  total=$(git diff --no-renames "$base" "$head" | wc -c | tr -d ' ')
   if [[ "$total" -le "$DIFF_SIZE_LIMIT" ]]; then
     git diff "$base" "$head" > "$out_diff"
     return 0
@@ -39,11 +42,11 @@ build_review_input() {
   while IFS= read -r -d '' path; do
     n=$((n + 1))
     chunk=$(printf '%s/%04d.diff' "$chunk_dir" "$n")
-    git diff "$base" "$head" -- "$path" > "$chunk"
+    git diff --no-renames "$base" "$head" -- "$path" > "$chunk"
     prio=$(_diff_priority "$path" "$chunk")
     size=$(wc -c < "$chunk" | tr -d ' ')
     printf '%s\t%s\t%s\t%s\n' "$prio" "$size" "$chunk" "$path" >> "$index"
-  done < <(git diff --name-only -z "$base" "$head")
+  done < <(git diff --no-renames --name-only -z "$base" "$head")
 
   # 优先级升序、同级内小文件优先，逐个装填预算；整文件删除(3)永不直传
   local sorted="$chunk_dir/.index.sorted" used=0 added removed

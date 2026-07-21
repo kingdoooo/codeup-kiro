@@ -52,6 +52,31 @@ assert_contains "$(cat "$del_chunk")" "-line1" "big: 删除内容可读"
 # 含空格路径正常处理
 assert_contains "$(cat "$tmp/out2.diff")$omitted" "conf file.yaml" "big: 含空格路径被处理"
 
+# --- 超限 + 相对 chunk 目录：省略清单必须给出绝对路径 ---
+cd "$tmp/repo"
+rc=0
+DIFF_SIZE_LIMIT=120 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out3.diff" "$tmp/omitted3.txt" "chunks_rel" || rc=$?
+assert_rc "$rc" 10 "relative: 返回 10（已截断）"
+[[ -s "$tmp/omitted3.txt" ]] || { echo "FAIL: relative: 省略清单为空" >&2; exit 1; }
+while IFS= read -r line; do
+  chunk_path=$(printf '%s' "$line" | sed 's/.*=> //')
+  case "$chunk_path" in
+    /*) ;;
+    *) echo "FAIL: relative: 清单 chunk 路径非绝对 [$chunk_path]" >&2; exit 1 ;;
+  esac
+done < "$tmp/omitted3.txt"
+TESTS_PASSED=$((TESTS_PASSED + 1))
+
+# --- 超限 + 预算恰好装下最小代码 chunk：直传与省略清单互斥 ---
+# 预算动态取自目标 chunk 实际大小，避免 git 版本间 diff 字节数差异
+main_size=$(git diff --no-renames "$BASE" "$HEAD_SHA" -- src/main.go | wc -c | tr -d ' ')
+rc=0
+DIFF_SIZE_LIMIT="$main_size" build_review_input "$BASE" "$HEAD_SHA" "$tmp/out4.diff" "$tmp/omitted4.txt" "$tmp/chunks4" || rc=$?
+assert_rc "$rc" 10 "pack: 返回 10（部分直传仍截断）"
+assert_contains "$(cat "$tmp/out4.diff")" "src/main.go" "pack: 代码 chunk 被直传"
+assert_not_contains "$(cat "$tmp/omitted4.txt")" "src/main.go" "pack: 直传文件不再列入省略清单"
+assert_contains "$(cat "$tmp/omitted4.txt")" "conf file.yaml" "pack: 其余文件仍在省略清单"
+
 # --- 优先级函数 ---
 c=$(mktemp); echo "deleted file mode 100644" > "$c"
 assert_eq "$(_diff_priority "any.go" "$c")" "3" "priority: 整文件删除=3"
