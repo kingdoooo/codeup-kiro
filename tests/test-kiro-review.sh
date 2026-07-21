@@ -64,4 +64,9 @@ rc=0; out=$(MAX_COMMENT_BYTES=200 "$ROOT/scripts/kiro-review.sh" 2>&1) || rc=$?
 assert_rc "$rc" 0 "截断路径仍成功"
 assert_contains "$out" "已截断" "截断注明"
 
+# --- 失败路径：提示词文件不可读 → 立即失败，不带空提示词跑 Kiro ---
+rc=0; out=$(PROMPT_FILE=/nonexistent "$ROOT/scripts/kiro-review.sh" 2>&1) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "提示词缺失：非零退出"
+assert_contains "$out" "提示词文件不可读" "提示词缺失：报错说明"
+
 report

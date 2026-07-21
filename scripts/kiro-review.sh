@@ -58,6 +58,8 @@ command -v timeout >/dev/null && TIMEOUT_BIN=timeout
 : "${YUNXIAO_ORG_ID:?缺少 YUNXIAO_ORG_ID}"
 : "${CODEUP_REPO_ID:?缺少 CODEUP_REPO_ID}"
 [[ -d "$REVIEW_REPO_DIR/.git" ]] || die "REVIEW_REPO_DIR 不是 git 仓库：$REVIEW_REPO_DIR"
+[[ -r "$PROMPT_FILE" ]] || die "评审提示词文件不可读：$PROMPT_FILE"
+[[ -r "$AGENT_FILE" ]] || die "custom agent 配置文件不可读：$AGENT_FILE"
 
 # --- 1. 安装/检测 kiro-cli ---
 if ! command -v kiro-cli >/dev/null; then
