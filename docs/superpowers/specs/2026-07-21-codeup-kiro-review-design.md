@@ -1,7 +1,7 @@
 # 设计：Codeup MR 自动触发 Kiro CLI 代码评审
 
 - 日期：2026-07-21
-- 状态：已评审通过
+- 状态：已评审通过（v2：吸收外部对抗性评审后修订——信任边界重构、OpenAPI 契约修正、diff chunk 索引方案、超时/评论长度/失败路径加固）
 - 术语说明：本文中 **MR（Merge Request，合并请求）** 即 Codeup 平台上的代码合并评审流程，等同于 GitHub 的 PR（Pull Request）。
 
 ## 1. 背景与目标
@@ -11,12 +11,12 @@
 参考：
 
 - Kiro headless 文档：https://kiro.dev/docs/cli/headless/
-- Kiro headless 介绍：https://kiro.dev/blog/introducing-headless-mode/
+- Kiro custom agent 配置：https://kiro.dev/docs/cli/custom-agents/configuration-reference
 - GitHub Actions 集成范例：https://builder.aws.com/content/35cLFnKM6DJMgRzdZQ7XPZkJmoz/automate-reviews-in-github-actions-with-kiro-headless-mode
 
 ### 成功标准
 
-在客户组织的测试仓库提交一个带明显问题的 MR（如硬编码密钥），MR 页面自动出现 Kiro 的中文评审评论。
+在客户组织的测试仓库提交一个带明显问题的 MR，MR 页面自动出现 Kiro 的中文评审评论。验收用的"硬编码密钥"必须是**明确无效的合成假密钥**（如 `SECRET_KEY = "FAKE-TEST-KEY-0000"`），严禁使用真实凭证。
 
 ### 需求决策（已与用户确认）
 
@@ -28,31 +28,34 @@
 | Kiro 订阅 | 客户已有 Pro 及以上订阅和 API Key 生成权限 |
 | 交付物 | 可复用集成包（脚本 + 流水线配置 + 部署文档），存于本仓库 |
 | diff 直传阈值 | 300KB，可通过环境变量调整 |
+| 信任边界 | 集成脚本/提示词/agent 配置**只从受信来源（本集成包仓库的固定版本）执行**，绝不执行待评审源分支中的脚本 |
+| 回写语义 | append-only / at-least-once（每次运行追加一条新评论，含 `<!-- kiro-review:<sha> -->` 标记）；**不承诺幂等** |
 
 ## 2. 关键事实（调研已验证）
 
 ### Codeup / Flow（中心站）
 
-- Flow 流水线支持「代码源触发」，Codeup 代码源支持 **「合并请求新建/更新」** 事件（该事件为 Codeup 独有，其他 Git 源不支持）。触发后 Flow 使用 **源分支** 作为运行分支。
-- 开启代码源触发后，Flow 自动将 webhook 注册到 Codeup 仓库（Webhooks 设置页可见）。若服务连接无自动配置权限，需手动在 Codeup 仓库设置中配置（常见触发失败原因）。
-- 中心站 OpenAPI 接入点：`https://openapi-rdc.aliyuncs.com`，认证用个人访问令牌（请求头 `x-yunxiao-token`），中心站路径必须带 `organizationId`（组织管理后台「基本信息」页获取）。
-- 回写评论接口：`POST /oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/comments`，`comment_type=GLOBAL_COMMENT`。
-- 查询 MR 列表可按源分支/目标分支/状态过滤，用于反查 `localId`。
+- Flow 流水线支持「代码源触发」，Codeup 代码源支持 **「合并请求新建/更新」** 事件。触发后 Flow 使用 **源分支** 作为运行分支。
+- Flow YAML 中该触发事件可显式声明：`triggerEvents: [mergeRequestOpenedOrUpdate]`（见 https://help.aliyun.com/zh/yunxiao/user-guide/pipeline-sources ）。**未配置 triggerEvents 时流水线默认不能由代码源事件触发。**
+- 开启代码源触发后，Flow 自动将 webhook 注册到 Codeup 仓库。若服务连接无自动配置权限，需手动在 Codeup 仓库设置中配置（常见触发失败原因）。
+- 中心站 OpenAPI 接入点：`https://openapi-rdc.aliyuncs.com`，认证用个人访问令牌（请求头 `x-yunxiao-token`），中心站路径必须带 `organizationId`。
+- **ListChangeRequests**（`GET /oapi/v1/codeup/organizations/{orgId}/changeRequests`）：支持 `projectIds`（代码库 ID，逗号分隔）、`state`（opened/merged/closed）、`orderBy`（created_at/updated_at）、`sort`（asc/desc）、`page`/`perPage`。返回字段为 **`updatedAt`/`createdAt`**（注意：与 MergeChangeRequest 等旧接口的 `updateTime` 命名不同）。
+- **CreateChangeRequestComment**（`POST .../changeRequests/{localId}/comments`）：`comment_type=GLOBAL_COMMENT`，`content` 长度限制 **1–65535**；响应体字段为 snake_case 的 **`comment_biz_id`**（响应可能为数组形态）。成功判定以 HTTP 状态码为准，不依赖响应体结构。
 - Flow 内置环境变量：`CI_COMMIT_REF_NAME`（运行分支，MR 触发时为源分支）、`CI_COMMIT_SHA`、`PIPELINE_ID`、`BUILD_NUMBER`、`PROJECT_DIR` 等。Git 相关变量要求流水线包含「获取代码」步骤。
 
 ### Kiro CLI Headless
 
 - 认证：环境变量 `KIRO_API_KEY`（仅 Pro / Pro+ / Pro Max / Power 订阅可生成；组织订阅需管理员开启 API Key 生成权限）。
-- 调用：`kiro-cli chat --no-interactive "<prompt>"`，支持管道输入（`git diff | kiro-cli chat --no-interactive "..."`）。
-- 权限控制：`--trust-tools=read,grep` 只授予只读工具（评审场景最佳实践，绝不授予 write/shell）。
+- 调用：`kiro-cli chat --no-interactive "<prompt>"`，支持管道输入。
+- 权限控制：`--trust-tools=read,grep` 只授予只读工具；绝不授予 write/shell。
+- Custom agent 配置支持 `includeMcpJson` 字段：设为 `false` 时不加载 `~/.kiro/settings/mcp.json` 与 `<cwd>/.kiro/settings/mcp.json` 中的 MCP server —— 这是隔离工作区级恶意 MCP 配置的关键开关。Agent 可安装在全局目录 `~/.kiro/agents/`（不受工作区内容影响）。
 - CI 环境设置 `KIRO_LOG_NO_COLOR=1`，避免终端颜色码污染评论内容。
 
 ### 待实施时验证的点
 
-Flow 文档未明确列出 MR 编号（localId）的内置环境变量。实施采用双保险：
-
-1. 实施第一步在 MR 触发的流水线里 `env | sort` dump 全部环境变量，确认是否存在 MR 相关变量（参考社区项目 yunxiao-LLM-reviewer，其 `CodeSource` 类从流水线环境变量解析出合并请求 ID，说明 MR 触发场景下存在此类变量）；
-2. 若取不到，调 OpenAPI 按「源分支 + 目标分支 + 状态=评审中」查询 MR 列表反查 `localId`。
+1. **MR 编号（localId）的流水线环境变量名**：Flow 文档未明确。实施时首次运行用 `env | cut -d= -f1 | sort` 输出**变量名清单**（严禁输出值——env 值含私密变量，流水线日志长期保存）确认；取不到则按第 5 节 OpenAPI 反查兜底。
+2. **`kiro-cli chat` 是否支持 `--agent <name>` 旗标**（headless 限制页只说明 `/agent` 斜杠命令不可用）：实施时用 `kiro-cli chat --help` 验证；若不支持，降级方案见第 4 节。
+3. **Flow YAML 的 `step: Checkout` 步骤标识**：交付 YAML 需在 Flow 编辑器中实际粘贴校验通过（列入验收步骤）。
 
 ## 3. 整体架构
 
@@ -60,109 +63,141 @@ Flow 文档未明确列出 MR 编号（localId）的内置环境变量。实施�
 开发者提交/更新 MR (Codeup)
         │  webhook（Flow 自动注册，事件：合并请求新建/更新）
         ▼
-云效 Flow 流水线（运行源分支代码）
+云效 Flow 流水线
+  ├─ 代码源 1：业务代码库（触发源，checkout 源分支 → 仅作为【被分析的数据】）
+  └─ 代码源 2：本集成包仓库（固定分支/tag，受信 → 提供可执行脚本）
         │
         ▼
-Shell 任务步骤（执行仓库内版本化脚本 kiro-review.sh）
-  1. 安装/检测 kiro-cli（KIRO_API_KEY 认证）
-  2. 定位本次 MR（localId）+ 生成 diff（git diff origin/<target>...HEAD）
-  3. kiro-cli chat --no-interactive --trust-tools=read,grep 执行评审
-  4. 调 Codeup OpenAPI（中心站）以 GLOBAL_COMMENT 回写 Markdown 评审报告
+Shell 任务步骤（执行【受信集成包】中的 kiro-review.sh，绝不执行业务仓库中的脚本）
+  1. 检测依赖（git/curl/jq/timeout）+ 安装/检测 kiro-cli
+  2. 移除业务仓库 checkout 中的 .kiro/ 目录（消除工作区级 MCP/hooks/steering 注入面）
+     + 安装受信只读 custom agent 到 ~/.kiro/agents/（includeMcpJson: false）
+  3. 定位本次 MR（localId）+ 生成 diff（merge-base 三点比较）
+  4. 超阈值时按文件拆 chunk 落盘并建立索引
+  5. kiro-cli chat --no-interactive --trust-tools=read,grep（强制 timeout）
+  6. 调 Codeup OpenAPI（中心站）以 GLOBAL_COMMENT 回写 Markdown 评审报告
 ```
 
 ### 方案选型
 
 | 方案 | 说明 | 结论 |
 |---|---|---|
-| A. Flow + Shell 脚本 | MR 触发流水线，Shell 步骤跑版本化脚本 | **采用**：交付快、维护简单、脚本可版本化 |
+| A. Flow + Shell 脚本 | MR 触发流水线，Shell 步骤跑受信仓库中的版本化脚本 | **采用**：交付快、维护简单、脚本可版本化 |
 | B. Flow 自定义步骤（flow-cli 发布） | 封装为组织级步骤，界面化配置 | 放弃：开发/发布成本高，适合后期规模化推广 |
-| C. Webhook + 自建服务 | 自建常驻评审服务接收 webhook | 放弃：运维负担最重，不依赖 Flow 的优势对本场景无价值 |
+| C. Webhook + 自建服务 | 自建常驻评审服务接收 webhook | 放弃：运维负担最重 |
 
-## 4. 交付物结构（本仓库）
+## 4. 信任边界与威胁模型
+
+**核心原则：MR 源分支的全部内容（代码、脚本、配置、文档）都是不受信数据。** 流水线持有 `KIRO_API_KEY` 与 `YUNXIAO_TOKEN`，任何"执行源分支代码"的路径都等于把密钥交给任意 MR 提交者。
+
+| 威胁 | 缓解措施 |
+|---|---|
+| MR 修改集成脚本窃取密钥 | 脚本/提示词/agent 配置只从集成包仓库（流水线第二代码源，固定分支/tag）执行；业务仓库 checkout 仅作数据。指南明确禁止把脚本拷入业务仓库执行 |
+| 工作区 `.kiro/settings/mcp.json` 注入恶意 MCP server（可启动任意命令） | 运行 Kiro 前 `rm -rf <业务仓库>/.kiro`；custom agent 设 `includeMcpJson: false` 双保险 |
+| 工作区 hooks/steering/agents 注入 | 同上（`.kiro/` 整体移除）；agent 安装于全局 `~/.kiro/agents/`，`resources: []` 不继承工作区资源 |
+| Kiro 工具越权 | agent `tools`/`allowedTools` 仅 `read,grep`；CLI 侧再加 `--trust-tools=read,grep` |
+| 源码/README 中的提示词注入误导评审结论 | **残余风险，明确接受**：Kiro 只有只读工具，注入最坏结果是评审结论失真；评论仅供人工参考、不设卡点，最终合并决策在人。指南中向客户披露 |
+| diff 中出现真实密钥被评论原样复述 | 提示词明确禁止完整复述疑似密钥，只允许掩码展示（前 4 后 4）并报告为严重问题 |
+| curl\|bash 安装脚本供应链 | `KIRO_INSTALL_URL` 可固定；生产环境建议自建构建机预装固定版本（指南说明）。完整 checksum 校验体系列为生产化改进项，不进 v1 |
+| 令牌权限过大 | `YUNXIAO_TOKEN` 建议使用专用机器人账号，权限最小化（代码只读 + MR 读写），定期轮换（指南说明） |
+
+**数据治理前置条件**（写入指南第 1 节）：MR diff 与仓库上下文会发送至 Kiro 服务端（境外）。实施前需客户确认：① 允许相关代码库内容出境评审；② 知悉 Kiro 的数据保留与模型使用策略；③ 涉密仓库不接入本方案。
+
+**Custom agent 降级方案**：若实施时验证 `kiro-cli chat` 不支持 `--agent` 旗标，则依赖「`.kiro/` 移除 + `--trust-tools=read,grep`」两层缓解，并在指南中注明差异。
+
+## 5. 交付物结构（本仓库）
 
 ```
 codeup-kiro/
-├── README.md                  # 快速开始 + 架构说明
+├── README.md                  # 快速开始 + 架构 + 安全模型说明
 ├── scripts/
-│   ├── kiro-review.sh         # 主脚本：装 CLI → 评审 → 回写（幂等，可重复跑）
+│   ├── kiro-review.sh         # 主脚本：依赖检测 → 隔离 → 评审 → 回写（append-only）
 │   └── lib/
-│       └── codeup-api.sh      # OpenAPI 封装：查 MR、发评论
+│       ├── codeup-api.sh      # OpenAPI 封装：查 MR、发评论（HTTP 状态码判定成败）
+│       └── diff-compress.sh   # diff 压缩：文件级优先级 + chunk 索引
 ├── prompts/
-│   └── review-prompt.md       # 评审提示词模板（中文输出、按严重级别分类）
+│   └── review-prompt.md       # 评审提示词模板（中文、分级、密钥掩码、chunk 读取指引）
+├── kiro/
+│   └── agent-codeup-reviewer.json  # 受信只读 custom agent（includeMcpJson: false）
 ├── pipeline/
-│   ├── flow-pipeline.yaml     # Flow YAML 流水线参考配置
-│   └── setup-guide.md         # 控制台逐步配置指南（含两种构建环境）
-└── docs/superpowers/specs/    # 设计文档（本文件）
+│   ├── flow-pipeline.yaml     # Flow YAML（双代码源 + triggerEvents）
+│   └── setup-guide.md         # 配置指南（前提/导入/触发/探测/连通性/自建机/排查）
+└── docs/superpowers/          # 设计文档与实施计划
 ```
-
-### 各单元职责与接口
-
-- **`kiro-review.sh`**：入口。读取环境变量（见下），编排「安装 → 定位 MR → 生成 diff → 评审 → 回写」全流程。任何环节失败均有明确日志与退出码。可在同一 MR 上重复运行（每次追加一条新评论，评论头部含 commit SHA 区分版本）。
-- **`lib/codeup-api.sh`**：Codeup OpenAPI 的薄封装，提供 `codeup_find_mr <source_branch> <target_branch>`（返回 localId）与 `codeup_post_comment <localId> <markdown_file>` 两个函数。支持 `DRY_RUN=1` 只打印不发请求。
-- **`prompts/review-prompt.md`**：评审提示词模板，要求中文输出、按「严重 / 警告 / 建议」分级、引用文件路径与行号、明确指示 Kiro 可用 read/grep 自行查阅仓库上下文。
-- **`pipeline/flow-pipeline.yaml`**：Flow YAML 参考（代码源触发事件、Shell 步骤、变量声明）。
-- **`pipeline/setup-guide.md`**：面向客户的控制台配置指南：创建令牌、配置流水线变量、开启代码源触发、连通性验证、两种构建环境差异、常见故障排查。
 
 ### 流水线变量（Flow「变量和缓存」中配置，私密模式）
 
 | 变量 | 说明 |
 |---|---|
 | `KIRO_API_KEY` | Kiro API Key（私密） |
-| `YUNXIAO_TOKEN` | 云效个人访问令牌，需代码只读 + MR 读写权限（私密） |
+| `YUNXIAO_TOKEN` | 云效令牌，建议专用机器人账号（代码只读 + MR 读写）（私密） |
 | `YUNXIAO_ORG_ID` | 云效组织 ID（中心站必需） |
+| `CODEUP_REPO_ID` | Codeup 代码库数字 ID |
+| `REVIEW_REPO_DIR` | 业务仓库 checkout 目录（多代码源场景必填） |
 | `DIFF_SIZE_LIMIT` | diff 直传阈值，默认 `307200`（300KB），可调 |
 | `KIRO_TIMEOUT` | Kiro 评审超时秒数，默认 `900`（15 分钟），可调 |
+| `MAX_COMMENT_BYTES` | 评论截断阈值，默认 `60000`（Codeup 上限 65535 字符），可调 |
 
-## 5. 核心流程（kiro-review.sh）
+## 6. 核心流程（kiro-review.sh）
 
-1. **安装/检测 kiro-cli**：已存在则跳过（自建机预装场景）；否则 curl 安装（云托管场景）。安装失败快速退出，日志给出代理/自建机指引。
-2. **获取目标分支并 fetch**：从环境变量或 OpenAPI 反查得到 MR 的目标分支，`git fetch origin <target>`。
-3. **生成 diff**：`git diff origin/<target>...HEAD`，统计大小（`wc -c` 近似 token 预算）。
-4. **组装提示词**（含 diff 压缩策略，见第 6 节）：模板 + diff（或压缩后的 diff + 文件清单）。
-5. **执行评审**：`KIRO_LOG_NO_COLOR=1 kiro-cli chat --no-interactive --trust-tools=read,grep`，工作目录为仓库根（Kiro 可用 read/grep 查阅完整源码上下文——这是 agentic 评审优于纯 diff 评审的关键）。设置超时（默认 15 分钟，可调）。
-6. **回写评论**：捕获输出为 Markdown，头部加元信息（commit SHA、源/目标分支、时间、是否截断），调 `codeup_post_comment` 发布 GLOBAL_COMMENT。
-7. **失败处理**：评审失败（CLI 报错/超时）时回写一条「评审未完成」说明性评论并以非零退出——流水线标红提醒人工关注，**不设合并卡点，不阻塞合并**。
+1. **依赖检测**：git / curl / jq / **timeout（或 gtimeout）**缺一即报错退出——超时能力是强制依赖，不允许静默降级为无超时。
+2. **安装/检测 kiro-cli**：已存在则跳过（自建机预装场景）；否则按 `KIRO_INSTALL_URL` curl 安装（云托管场景）。
+3. **工作区隔离**：删除业务仓库 checkout 中的 `.kiro/` 目录；将集成包内 `kiro/agent-codeup-reviewer.json` 安装到 `~/.kiro/agents/`。
+4. **定位 MR**：优先环境变量 `MR_LOCAL_ID`/`MR_TARGET_BRANCH`；否则 OpenAPI 按源分支反查（`state=opened&orderBy=updated_at&sort=desc&projectIds=<repo>`）。**同源分支存在多个 opened MR 时报错退出、要求显式配置 MR_LOCAL_ID，不静默取最新**。
+5. **生成 diff**：`git fetch` 目标分支 → merge-base 三点比较（浅克隆自动 `--unshallow`）。空 diff 直接成功退出。
+6. **组装评审输入**（超限走第 7 节压缩）。
+7. **执行评审**：`timeout $KIRO_TIMEOUT kiro-cli chat --no-interactive --trust-tools=read,grep [--agent codeup-reviewer]`，工作目录为业务仓库（Kiro 可用 read/grep 查阅完整源码上下文）。**输出为空视为失败**。
+8. **回写评论**：Markdown 头部含元信息（commit SHA、分支、时间、截断说明）与 `<!-- kiro-review:<sha> -->` 标记；超 `MAX_COMMENT_BYTES` 时按字节截断并注明。HTTP 2xx 即成功；仅对网络错误/429/5xx 重试（至多 2 次），4xx 不重试（避免非幂等 POST 重复发评论）。
+9. **失败处理**：定位到 MR 之后的**任何**失败路径（fetch 失败、压缩失败、Kiro 失败/超时/空输出、回写失败）统一走 best-effort「评审未完成」评论 + 非零退出。定位 MR 之前的失败只写日志。不设合并卡点。
 
-## 6. diff 压缩策略（大 MR 处理）
+## 7. diff 压缩策略（大 MR 处理）
 
-参考 PR-Agent（Qodo）的 Compression Strategy（https://docs.pr-agent.ai/core-abilities/compression_strategy/），并利用 Kiro 的 agentic 能力简化：
+参考 PR-Agent（Qodo）的 Compression Strategy（https://docs.pr-agent.ai/core-abilities/compression_strategy/ ），结合 Kiro agentic 能力调整：
 
 - **阈值内**（diff ≤ `DIFF_SIZE_LIMIT`，默认 300KB）：整个 diff 进提示词。
 - **超阈值**：
-  1. 按优先级排序：代码文件优先于文档/配置；增量（新增/修改）优先于纯删除 hunk；删除文件只保留文件名；
-  2. 按预算逐文件装填，装不下的不硬塞；
-  3. **未装入的文件不静默丢弃**：列成「变更文件清单（含每文件 +/- 行数）」写进提示词，并明确指示 Kiro 用 read 工具自行读取这些文件的变更部分；
-  4. 评论头部注明「diff 超出直传阈值（300KB），已按优先级截断，其余文件由 Kiro 自主读取」，保证透明。
+  1. 用 `git diff --name-only -z` 逐文件生成独立 diff chunk 文件落盘（NUL 分隔，路径含空格安全）；
+  2. **文件级**优先级排序：代码(0) > 配置(1) > 文档(2)；整文件删除(3) 永不直传（注：v1 为文件级分类，不做 hunk 级拆分）；
+  3. 按预算逐文件装填直传；
+  4. **未直传的文件不丢弃**：省略清单每项为「路径 (+增/-删行数) → 该文件完整 diff 的 chunk 文件路径」，提示词明确指示 Kiro 用 read 工具读取这些 **diff chunk 文件**（而非仓库当前文件——当前文件无法体现改动内容，删除文件更是已不存在）；
+  5. 评论头部注明「diff 超出直传阈值已按优先级截断，其余变更 Kiro 通过 diff 索引自主读取」。
 
-## 7. 错误处理与安全
+## 8. 错误处理汇总
 
 | 场景 | 处理 |
 |---|---|
+| 依赖缺失（含 timeout） | 启动即报错退出，日志给出安装指引 |
 | kiro-cli 安装失败/网络不通 | 快速失败，日志给出代理（`HTTP_PROXY`/`HTTPS_PROXY`）与自建机预装指引 |
-| MR localId 取不到 | 先环境变量，后 OpenAPI 按分支反查；仍失败则跳过回写、评审结果仅输出到流水线日志，流水线标记失败 |
-| diff 超 300KB | 第 6 节压缩策略 |
-| OpenAPI 回写失败 | 重试 2 次（间隔退避）；仍失败则打印评审结果到日志，流水线标记失败 |
-| Kiro 评审超时 | 默认 15 分钟超时，回写「评审未完成」评论，非零退出 |
-| 密钥安全 | `KIRO_API_KEY`/`YUNXIAO_TOKEN` 全走 Flow 私密变量；脚本不落盘、不 echo；`set +x` 保护 |
-| Kiro 工具权限 | 仅 `--trust-tools=read,grep`，绝不授予 write/shell |
+| MR 定位失败（无匹配/歧义） | 报错退出并给出明确指引（歧义时列出候选，要求配置 MR_LOCAL_ID） |
+| diff 超 300KB | 第 7 节压缩策略 |
+| OpenAPI 调用 | `--connect-timeout 10 --max-time 60`；仅网络错误/429/5xx 重试（退避），4xx 立即失败 |
+| Kiro 超时/失败/空输出 | 回写「评审未完成」评论，非零退出 |
+| 评论超长 | 60000 字节截断 + 末尾注明 |
+| 定位 MR 后的任何失败 | best-effort 回写失败说明评论 |
+| 密钥安全 | 全走 Flow 私密变量；脚本不落盘、不 echo、不开 `set -x`；日志只打印变量名不打印值 |
 
-## 8. 两种构建环境
+## 9. 两种构建环境
 
 | | 云托管构建机 | 自建构建机 |
 |---|---|---|
-| kiro-cli | 脚本内联 curl 安装 | 预装（脚本检测到已存在则跳过） |
-| 境外网络 | 需先验证：setup-guide 提供一条最小连通性验证流水线（安装 kiro-cli + 一次最小 headless 调用） | 可控：支持配置 HTTP 代理 |
-| 适用 | 网络通畅时最省事 | 网络受限或需固化环境时 |
+| kiro-cli | 脚本内联 curl 安装（`KIRO_INSTALL_URL` 可固定版本） | 预装固定版本（生产推荐） |
+| 境外网络 | 需先验证：setup-guide 提供最小连通性验证流水线 | 可控：支持配置 HTTP 代理 |
+| 适用 | 网络通畅时最省事 | 网络受限或需固化环境/供应链时 |
 
-## 9. 测试与验证
+## 10. 测试与验证
 
-- **脚本单测/冒烟**：`codeup-api.sh` 用 `DRY_RUN=1` 本地验证请求组装；用固定 diff 样例本地跑 `kiro-review.sh` 的提示词组装与压缩逻辑（不实际调用 Kiro）。
+- **脚本单测/冒烟**：`DRY_RUN=1` + mock kiro-cli（含参数记录、失败模拟、**挂起模拟**验证超时强杀），本地 bare git 仓库模拟完整流程，全程无网络。
+- **契约测试**：Codeup API fixture 采用官方文档响应形态（`updatedAt`、数组 + `comment_biz_id`）。
 - **连通性验证**：最小流水线确认构建机可安装 kiro-cli 并完成一次 headless 调用。
-- **端到端验收**：客户组织建测试仓库 → 导入本集成包 → 按 setup-guide 配置流水线 → 提交带明显问题的 MR（硬编码密钥等）→ 确认 MR 页面出现 Kiro 中文评审评论；再提交一次更新，确认评论追加且头部 SHA 正确。
+- **YAML 校验**：flow-pipeline.yaml 粘贴进 Flow 编辑器校验通过（验收步骤）。
+- **端到端验收**：客户组织建测试仓库 → 按 setup-guide 配置（集成包为独立受信代码源）→ 提交含**合成假密钥**的 MR → 确认 MR 页面出现 Kiro 中文评审评论（含掩码而非完整"密钥"）；重跑流水线确认追加新评论且标记 SHA 正确。
 
-## 10. 范围外（YAGNI）
+## 11. 范围外（YAGNI）
 
 - 行内评论（INLINE_COMMENT）与精准行号定位
 - 合并卡点 / Commit Status / Check Runs 回写
-- Flow 自定义步骤封装（方案 B，规模化推广时再考虑）
-- 多仓库批量接入自动化
+- Flow 自定义步骤封装（方案 B）
+- 评论查重-更新（幂等化）——当前为 append-only；重复评论仅在人工重跑时出现，可接受
+- Kiro 输出的自动敏感信息扫描/清洗（生产化改进项）
+- kiro-cli 安装包 checksum 校验体系（生产化改进项，以自建机预装替代）
+- hunk 级删除内容分类（v1 为文件级）
