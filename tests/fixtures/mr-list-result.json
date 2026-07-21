@@ -1,0 +1,7 @@
+{
+  "result": [
+    {"localId": 7, "sourceBranch": "feature/x", "targetBranch": "master", "status": "UNDER_REVIEW", "updatedAt": "2026-07-21T10:00:00Z"},
+    {"localId": 3, "sourceBranch": "feature/dup", "targetBranch": "master", "status": "UNDER_REVIEW", "updatedAt": "2026-07-20T10:00:00Z"},
+    {"localId": 4, "sourceBranch": "feature/dup", "targetBranch": "develop", "status": "UNDER_REVIEW", "updatedAt": "2026-07-21T09:00:00Z"}
+  ]
+}
