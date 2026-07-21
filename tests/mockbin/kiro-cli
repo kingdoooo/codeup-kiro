@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# 测试替身：记录参数与 stdin，输出固定评审报告。
+# MOCK_KIRO_FAIL=1 模拟失败；MOCK_KIRO_HANG=1 模拟挂起（验证超时强杀）；
+# MOCK_KIRO_EMPTY=1 模拟退出码 0 但输出为空。
+if [[ "${1:-}" == "chat" && "${2:-}" == "--help" ]]; then
+  echo "--no-interactive --trust-tools --agent"; exit 0
+fi
+[[ -n "${MOCK_ARGS_FILE:-}" ]] && printf '%s\n' "$@" > "$MOCK_ARGS_FILE"
+if [[ -n "${MOCK_STDIN_FILE:-}" ]]; then cat > "$MOCK_STDIN_FILE"; else cat > /dev/null; fi
+[[ "${MOCK_KIRO_HANG:-0}" == "1" ]] && sleep 300
+if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
+  echo "mock: 模拟 kiro 失败" >&2; exit 1
+fi
+[[ "${MOCK_KIRO_EMPTY:-0}" == "1" ]] && exit 0
+echo "## 评审结果"
+echo "🔴 严重：发现硬编码密钥 src/app.py:2（值已掩码：FAKE****0000），建议改用环境变量。"
+echo "总体结论：建议修改后合并。"
