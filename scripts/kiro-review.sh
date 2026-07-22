@@ -144,7 +144,7 @@ fi
 # --- 6. 执行 Kiro headless 评审（强制超时）---
 log "开始 Kiro 评审（超时 ${KIRO_TIMEOUT}s）……"
 kiro_rc=0
-KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" "$KIRO_TIMEOUT" kiro-cli chat --no-interactive \
+KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" kiro-cli chat --no-interactive \
   --trust-tools=read,grep "${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"}" \
   "$(cat "$PROMPT_FILE")" \
   < "$WORK/input.txt" > "$WORK/review-output.md" 2> "$WORK/kiro-stderr.log" || kiro_rc=$?

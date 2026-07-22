@@ -87,6 +87,12 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    提交一个 >300KB 的大 MR，确认评审报告覆盖了省略清单中的文件。
 5. 安装源核对：确认 `https://cli.kiro.dev/install` 与 kiro.dev 官方文档一致；
    生产环境建议自建构建机预装固定版本（见第 7 节）。
+6. stdin 内容是否真正到达 Kiro：脚本以「提示词作参数 + diff 走 stdin」方式调用
+   （`kiro-cli chat "<prompt>" < input.txt`）。若真实 CLI 在有参数时忽略 stdin，
+   评审会在没有 diff 的情况下静默运行且不报错。核对方法：确认评审报告明确引用了
+   本次 MR 的源/目标分支与 diff 中的具体改动（元信息与 diff 均来自 stdin）；
+   若报告内容与本次变更无关或过于泛化，即为 stdin 未生效，需改造调用方式
+   （如将 diff 并入提示词参数）并反馈集成包维护者。
 
 ## 9. 端到端验收
 1. 在业务测试库提交含**合成假密钥**的 MR（如 `SECRET_KEY = "FAKE-TEST-KEY-0000"`，
