@@ -32,7 +32,7 @@ build_review_input() {
   local total
   total=$(git diff --no-renames "$base" "$head" | wc -c | tr -d ' ')
   if [[ "$total" -le "$DIFF_SIZE_LIMIT" ]]; then
-    git diff "$base" "$head" > "$out_diff"
+    git diff --no-renames "$base" "$head" > "$out_diff"
     return 0
   fi
 
@@ -42,7 +42,9 @@ build_review_input() {
   while IFS= read -r -d '' path; do
     n=$((n + 1))
     chunk=$(printf '%s/%04d.diff' "$chunk_dir" "$n")
-    git diff --no-renames "$base" "$head" -- "$path" > "$chunk"
+    # :(literal) 防止路径中的 pathspec 魔法前缀（如冒号开头）或 glob 字符
+    # 导致 chunk 为空或串入其他文件的 diff
+    git diff --no-renames "$base" "$head" -- ":(literal)$path" > "$chunk"
     prio=$(_diff_priority "$path" "$chunk")
     size=$(wc -c < "$chunk" | tr -d ' ')
     printf '%s\t%s\t%s\t%s\n' "$prio" "$size" "$chunk" "$path" >> "$index"

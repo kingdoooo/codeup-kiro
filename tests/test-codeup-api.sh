@@ -48,6 +48,11 @@ assert_rc "$(_codeup_http_ok 200 && echo 0 || echo 1)" "0" "http_ok: 200"
 assert_rc "$(_codeup_http_ok 201 && echo 0 || echo 1)" "0" "http_ok: 201"
 assert_rc "$(_codeup_http_ok 400 && echo 0 || echo 1)" "1" "http_ok: 400"
 
+# --- find_mr HTTP 失败分支：连接拒绝（无需真实服务），须留痕日志且 rc=2 ---
+rc=0; err=$(CODEUP_API_BASE="http://127.0.0.1:1" codeup_find_mr "feature/x" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 2 "find_mr: HTTP 失败 rc=2"
+assert_contains "$err" "ListChangeRequests 调用失败（HTTP 000）" "find_mr: HTTP 失败留痕日志"
+
 # --- 重试分类 ---
 assert_rc "$(_codeup_should_retry 500 && echo y || echo n)" "y" "retry: 5xx 重试"
 assert_rc "$(_codeup_should_retry 429 && echo y || echo n)" "y" "retry: 429 重试"

@@ -86,4 +86,37 @@ assert_eq "$(_diff_priority "a.yaml" "$c")" "1" "priority: 配置=1"
 assert_eq "$(_diff_priority "a.go" "$c")" "0" "priority: 代码=0"
 rm -f "$c"
 
+# --- pathspec 特殊字符文件名：glob 方括号与冒号前缀（新仓库，避免 chunks_rel 污染） ---
+cd "$tmp" && git init -q repo2 && cd repo2
+git config user.email t@t && git config user.name t
+mkdir pages
+printf 'export default 1\n' > 'pages/[id].tsx'
+printf 'export default 2\n' > 'pages/i.tsx'
+printf 'package evil\n' > ':evil.go'
+git add -A && git commit -qm special-base
+SP_BASE=$(git rev-parse HEAD)
+printf 'export default 1\nbracket_changed\n' > 'pages/[id].tsx'
+printf 'export default 2\nplain_changed\n' > 'pages/i.tsx'
+printf 'package evil\nevil_changed\n' > ':evil.go'
+git add -A && git commit -qm special-change
+SP_HEAD=$(git rev-parse HEAD)
+rc=0
+DIFF_SIZE_LIMIT=1 build_review_input "$SP_BASE" "$SP_HEAD" "$tmp/out5.diff" "$tmp/omitted5.txt" "$tmp/chunks5" || rc=$?
+assert_rc "$rc" 10 "special: 返回 10（已截断）"
+# 方括号文件在直传+清单中恰好出现一次
+n_bracket=$(cat "$tmp/out5.diff" "$tmp/omitted5.txt" | grep -cF 'pages/[id].tsx' || true)
+assert_eq "$n_bracket" "1" "special: 方括号文件恰好出现一次"
+bracket_chunk=$(grep -F 'pages/[id].tsx' "$tmp/omitted5.txt" | sed 's/.*=> //')
+[[ -s "$bracket_chunk" ]] || { echo "FAIL: special: 方括号文件 chunk 为空" >&2; exit 1; }
+TESTS_PASSED=$((TESTS_PASSED + 1))
+assert_contains "$(cat "$bracket_chunk")" "bracket_changed" "special: 方括号 chunk 含自身改动"
+# glob 展开会把 pages/i.tsx 的 diff 串进来；literal 后 chunk 只含一个文件
+assert_not_contains "$(cat "$bracket_chunk")" "plain_changed" "special: 方括号 chunk 不串入他文件"
+assert_eq "$(grep -c '^diff --git' "$bracket_chunk")" "1" "special: 方括号 chunk 仅一个 diff 头"
+# 冒号前缀文件：旧代码 pathspec 解析为空导致 chunk 为空
+evil_chunk=$(grep -F ':evil.go' "$tmp/omitted5.txt" | sed 's/.*=> //')
+[[ -s "$evil_chunk" ]] || { echo "FAIL: special: 冒号前缀文件 chunk 为空（pathspec 未按字面处理）" >&2; exit 1; }
+TESTS_PASSED=$((TESTS_PASSED + 1))
+assert_contains "$(cat "$evil_chunk")" "evil_changed" "special: 冒号前缀 chunk 含自身改动"
+
 report

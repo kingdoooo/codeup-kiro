@@ -54,7 +54,11 @@ codeup_find_mr() {
       "/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/changeRequests?projectIds=${CODEUP_REPO_ID}&state=opened&orderBy=updated_at&sort=desc&page=${page}&perPage=100" \
       > "$resp_tmp"
     resp=$(cat "$resp_tmp"); rm -f "$resp_tmp"
-    _codeup_http_ok "$CODEUP_HTTP_CODE" || return 2
+    if ! _codeup_http_ok "$CODEUP_HTTP_CODE"; then
+      # 与「真无匹配」区分开：HTTP 失败必须留痕，否则上层只报「无法定位 MR」误导排查
+      echo "codeup_find_mr: ListChangeRequests 调用失败（HTTP ${CODEUP_HTTP_CODE}）" >&2
+      return 2
+    fi
     page_out=$(printf '%s' "$resp" | codeup_parse_mr "$src")
     [[ -n "$page_out" ]] && matches="${matches}${matches:+$'\n'}${page_out}"
     # 该页结果数不足 100 说明已到末页

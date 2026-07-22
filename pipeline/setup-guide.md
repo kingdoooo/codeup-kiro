@@ -35,7 +35,7 @@
 3. 集成包代码源不开启任何触发。
 4. 可选：目标分支过滤（如 `master|release/.*`）。
 5. 保存后到 Codeup 业务库 → 设置 → Webhooks 确认 Flow 已注册 webhook；
-   若无 → 第 9 节排查。
+   若无 → 第 10 节排查。
 
 ## 5. 首次运行：环境探测（不打印任何变量值）
 1. 临时在命令最前加一行（只输出变量名，严禁 `env` 直接输出——
@@ -72,7 +72,23 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    （NO_PROXY 含 openapi-rdc.aliyuncs.com 与内网地址）。
 4. 流水线任务指定运行在该构建集群。
 
-## 8. 端到端验收
+## 8. 首次联调核对清单
+对以下在本地无法验证、依赖真实 kiro-cli 行为的点，首次联调时逐项确认：
+1. custom agent 是否生效：查看流水线日志——出现「使用受信 custom agent：codeup-reviewer」
+   说明 `kiro-cli chat --help` 列出了 `--agent` 且已启用；出现
+   「警告：kiro-cli chat 不支持 --agent」则说明降级为 .kiro 移除 + --trust-tools
+   两层缓解（可接受，但需知悉差异，见设计文档 §4）。
+2. agent 名称解析：本包安装的文件名为 `agent-codeup-reviewer.json`，agent 名为
+   `codeup-reviewer`。若真实 CLI 按文件名解析导致 `--agent codeup-reviewer` 报错
+   （表现为 die_review「评审未完成」且日志含 agent 相关错误），
+   将文件重命名为 `codeup-reviewer.json` 后重试。
+3. `--trust-tools=read,grep` 等号语法是否被真实 CLI 接受（报错会在流水线日志明确显示）。
+4. Kiro 的 read 工具能否读取工作区外的绝对路径（/tmp 下的 diff chunk 文件）——
+   提交一个 >300KB 的大 MR，确认评审报告覆盖了省略清单中的文件。
+5. 安装源核对：确认 `https://cli.kiro.dev/install` 与 kiro.dev 官方文档一致；
+   生产环境建议自建构建机预装固定版本（见第 7 节）。
+
+## 9. 端到端验收
 1. 在业务测试库提交含**合成假密钥**的 MR（如 `SECRET_KEY = "FAKE-TEST-KEY-0000"`，
    严禁用真实凭证做验收）。
 2. 确认 MR 页面出现 Kiro 中文评审评论，密钥以掩码呈现（非完整值）。
@@ -80,7 +96,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    （append-only 语义，重复评论仅在人工重跑时出现）。
 4. 提交一个改动很大的 MR（>300KB diff）验证截断说明与评审仍覆盖省略文件。
 
-## 9. 故障排查
+## 10. 故障排查
 | 现象 | 排查 |
 |---|---|
 | MR 提交后流水线未触发 | Codeup 库 Webhooks 页无 Flow 条目 → 服务连接无自动配置权限，手动配置；确认触发事件勾选「合并请求新建/更新」；YAML 模式确认 triggerEvents 已配置 |
