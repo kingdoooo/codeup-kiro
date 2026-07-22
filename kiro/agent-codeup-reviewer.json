@@ -5,6 +5,14 @@
   "prompt": "你是只读代码评审助手。只允许读取文件与搜索内容，绝不执行命令、修改文件或访问网络。",
   "tools": ["read", "grep"],
   "allowedTools": ["read", "grep"],
+  "toolsSettings": {
+    "read": {
+      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh/**", "~/.aws/**", "~/.kiro/**", "~/.config/**", "/root/.ssh/**", "/root/.aws/**", "**/.git/config", "**/.netrc"]
+    },
+    "grep": {
+      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh/**", "~/.aws/**", "~/.kiro/**", "~/.config/**", "/root/.ssh/**", "/root/.aws/**", "**/.git/config", "**/.netrc"]
+    }
+  },
   "resources": [],
   "includeMcpJson": false
 }

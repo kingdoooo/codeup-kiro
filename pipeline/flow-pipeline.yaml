@@ -1,5 +1,8 @@
 # 云效 Flow 流水线参考配置 — Kiro MR 自动评审
 #
+# 本文件为「2026-07-23 客户中心站环境端到端联调通过」的实测配置骨架。
+# 与 pipeline/setup-guide.md、docs 中的示例保持一致口径。
+#
 # 安全架构（必读）：
 # - business_repo 是被评审对象（MR 触发时 Flow checkout 其源分支）——【不受信数据】。
 # - integration_repo 是本集成包（固定分支/tag）——【受信脚本来源】。
@@ -7,37 +10,51 @@
 #   否则 MR 作者可修改脚本窃取流水线密钥。
 #
 # 变量 KIRO_API_KEY / YUNXIAO_TOKEN 必须在 UI「变量和缓存」配置为私密变量，不要写入本文件。
-# 验收要求：本文件需粘贴进 Flow 编辑器 YAML 模式校验通过（字段以 Flow 实际校验为准）。
+# 使用前替换 <...> 占位：两个 endpoint、以及 serviceConnection（首次在 YAML 编辑器粘贴后，
+# 校验器会识别并回填你组织的服务连接 ID）。
 sources:
   business_repo:
     type: codeup
     name: 业务代码库（被评审对象，不受信）
-    endpoint: <业务代码库地址，如 https://codeup.aliyun.com/org/app.git>
-    branch: master          # 默认分支；MR 触发时 Flow 自动使用源分支
+    endpoint: https://codeup.aliyun.com/<organization-id>/<business-repo>.git
+    branch: master                      # 默认分支；MR 触发时 Flow 自动使用源分支
     triggerEvents:
-      - mergeRequestOpenedOrUpdate   # 官方 YAML 触发事件标识；不配置则代码源事件不会触发流水线
+      - mergeRequestOpenedOrUpdate       # 必须显式声明，否则代码源事件不触发流水线
+    certificate:
+      type: serviceConnection
+      serviceConnection: "<service-connection-id>"
   integration_repo:
     type: codeup
     name: 集成包仓库（受信脚本来源）
-    endpoint: <本集成包仓库地址>
-    branch: main            # 固定分支；生产建议固定 tag 并按版本升级
-
+    endpoint: https://codeup.aliyun.com/<organization-id>/<integration-repo>.git
+    branch: main                        # 固定分支；生产建议固定 tag 并按版本升级
+    certificate:
+      type: serviceConnection
+      serviceConnection: "<service-connection-id>"
+defaultWorkspace: business_repo         # 多代码源必填；使 PROJECT_DIR 指向业务库 checkout 目录
 stages:
-  review:
-    name: "代码评审"
+  review_stage:
+    name: 代码评审
     jobs:
       kiro_review:
-        name: "Kiro 自动评审"
+        name: Kiro 自动评审
+        runsOn:                          # PoC 用公共构建集群；生产建议固定镜像 digest（见 setup-guide §7）
+          group: public/cn-beijing
+          container: build-steps-public-registry.cn-beijing.cr.aliyuncs.com/build-steps/alinux3:latest
         steps:
-          review:
+          review_step:
             step: Command
-            name: "运行 Kiro 评审（脚本来自受信集成包）"
+            name: 运行 Kiro 评审（脚本来自受信集成包）
             with:
               run: |
-                # Flow 多代码源的 checkout 目录名以实际运行为准（通常与 source 名一致，
-                # 首次运行时确认；见 setup-guide.md 第 5 节）
-                export REVIEW_REPO_DIR="${PROJECT_DIR}/business_repo"
-                bash "${PROJECT_DIR}/integration_repo/scripts/kiro-review.sh"
+                # 多代码源下无下标 CI_COMMIT_REF_NAME 取值不可预期（可能取到集成包分支）；
+                # 用带下标变量显式指定业务库源分支与 MR 目标分支（见 setup-guide §5、§12）。
+                # 首次接入务必用 `env | cut -d= -f1 | sort`（只打变量名）核对本组织的变量名。
+                export REVIEW_REPO_DIR="$PROJECT_DIR"
+                export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"
+                export MR_TARGET_BRANCH="$CI_COMMIT_TARGET_REF_NAME_1"
+                # business_repo 与 integration_repo 是兄弟目录，故用 ../ 定位集成包脚本
+                bash "$PROJECT_DIR/../integration_repo/scripts/kiro-review.sh"
 
 # UI 中需配置的变量（变量和缓存 → 字符变量）：
 #   KIRO_API_KEY       （私密）Kiro API Key
