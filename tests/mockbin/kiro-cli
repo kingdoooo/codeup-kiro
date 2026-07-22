@@ -17,6 +17,6 @@ fi
 ESC=$(printf '\033')
 printf '%sReading directory: %s/root/workspace/business_repo%s (using tool: read)\n' "$ESC[38;5;141m" "$ESC[0m" "$ESC[0m"
 printf ' %s✓%s Successfully read directory (47 entries)\n' "$ESC[38;5;10m" "$ESC[0m"
-printf '%s# 代码评审报告%s\n' "$ESC[1m" "$ESC[0m"
+printf '%s> %s# 代码评审报告%s\n' "$ESC[38;5;141m" "$ESC[1m" "$ESC[0m"
 echo "🔴 严重：发现硬编码密钥 src/app.py:2（值已掩码：FAKE****0000），建议改用环境变量。"
 echo "总体结论：建议修改后合并。"

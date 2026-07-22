@@ -162,9 +162,12 @@ fi
 ESC=$(printf '\033')
 sed "s/${ESC}\\[[0-9;?]*[a-zA-Z]//g" "$WORK/review-output.md" > "$WORK/clean.md"
 # 报告正文以一级标题「# 代码评审报告」为锚点（见 prompts/review-prompt.md 第 9 条）；
-# 找到则从该行截到结尾，找不到则降级保留清洗后全文（不丢内容）。
-if grep -q '^# 代码评审报告' "$WORK/clean.md"; then
-  awk '/^# 代码评审报告/{f=1} f' "$WORK/clean.md" > "$WORK/report.md"
+# kiro-cli 可能给锚点行加 Markdown 引用前缀（如 "> # 代码评审报告"），故锚点允许
+# 行首出现「> 」「#」「空白」等前缀字符。找到则从该行截到结尾（并去掉锚点行的引用前缀），
+# 找不到则降级保留清洗后全文（不丢内容）。
+if grep -qE '^[[:space:]>#]*# 代码评审报告' "$WORK/clean.md"; then
+  awk '/^[[:space:]>#]*# 代码评审报告/{f=1} f' "$WORK/clean.md" \
+    | sed '1s/^[[:space:]>]*//' > "$WORK/report.md"
 else
   cp "$WORK/clean.md" "$WORK/report.md"
   log "警告：未找到报告标题锚点「# 代码评审报告」，回退保留清洗后全文（可能含过程轨迹）"

@@ -42,6 +42,7 @@ assert_contains "$out" "代码评审报告" "评论含清洗后报告正文（�
 assert_contains "$out" "硬编码密钥" "评论含报告内容"
 assert_not_contains "$out" "using tool: read" "清洗：不含工具调用轨迹"
 assert_not_contains "$out" "Successfully read directory" "清洗：不含工具执行轨迹"
+assert_contains "$out" "# 代码评审报告" "清洗：锚点行引用前缀已剥离"
 esc=$(printf '\033')
 assert_not_contains "$out" "${esc}[" "清洗：不含 ANSI 控制序列"
 
