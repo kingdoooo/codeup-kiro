@@ -87,7 +87,14 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    提交一个 >300KB 的大 MR，确认评审报告覆盖了省略清单中的文件。
 5. 安装源核对：确认 `https://cli.kiro.dev/install` 与 kiro.dev 官方文档一致；
    生产环境建议自建构建机预装固定版本（见第 7 节）。
-6. stdin 内容是否真正到达 Kiro：脚本以「提示词作参数 + diff 走 stdin」方式调用
+6. 模型是否生效：agent 配置指定了 `"model": "gpt-5.6-sol"`（GPT-5.6 Sol，
+   Kiro 官方已上线，实验性支持，credit 倍率 2.4x）。两点核对：
+   ① 确切模型 ID 以交互式会话 `/model` 列表为准——若 ID 不匹配或组织
+   管理员的模型访问策略未放行，Kiro 会**静默回退默认模型并打警告**，
+   不会报错中断，因此需检查流水线日志中无模型 fallback 警告；
+   ② 模型配置依赖 `--agent` 生效（见第 1 项），若 CLI 降级则模型字段
+   随之失效，评审将使用账号默认模型。
+7. stdin 内容是否真正到达 Kiro：脚本以「提示词作参数 + diff 走 stdin」方式调用
    （`kiro-cli chat "<prompt>" < input.txt`）。若真实 CLI 在有参数时忽略 stdin，
    评审会在没有 diff 的情况下静默运行且不报错。核对方法：确认评审报告明确引用了
    本次 MR 的源/目标分支与 diff 中的具体改动（元信息与 diff 均来自 stdin）；

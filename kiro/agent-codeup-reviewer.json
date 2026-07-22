@@ -1,6 +1,7 @@
 {
   "name": "codeup-reviewer",
-  "description": "Codeup MR 自动评审专用只读 agent：仅允许读文件与搜索，不加载任何工作区 MCP/资源",
+  "description": "Codeup MR 自动评审专用只读 agent：仅允许读文件与搜索，不加载任何工作区 MCP/资源。model 指定 GPT-5.6 Sol；ID 不匹配或组织策略限制时 Kiro 自动回退默认模型并打警告（见 setup-guide §8）",
+  "model": "gpt-5.6-sol",
   "prompt": "你是只读代码评审助手。只允许读取文件与搜索内容，绝不执行命令、修改文件或访问网络。",
   "tools": ["read", "grep"],
   "allowedTools": ["read", "grep"],
