@@ -47,3 +47,5 @@ stages:
 #   DIFF_SIZE_LIMIT    可选，默认 307200（300KB）
 #   KIRO_TIMEOUT       可选，默认 900（秒）
 #   MAX_COMMENT_BYTES  可选，默认 60000（字节）
+#   MR_LOCAL_ID        可选，MR 编号（与 MR_TARGET_BRANCH 必须同时设置才生效；
+#   MR_TARGET_BRANCH   可选，目标分支  未设置时脚本按源分支反查 OpenAPI，见指南第 5 节）

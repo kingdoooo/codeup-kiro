@@ -47,15 +47,21 @@
 4. 若存在 MR 编号/目标分支变量：在「变量和缓存」把它们映射为
    MR_LOCAL_ID / MR_TARGET_BRANCH（值填 `${实际变量名}`），可免 OpenAPI 反查。
 5. 若不存在：无需配置，脚本自动按源分支反查；注意——同一源分支同时存在
-   多个打开的 MR 时脚本会明确报错，需显式配置 MR_LOCAL_ID。
+   多个打开的 MR 时脚本会明确报错，需显式配置 MR_LOCAL_ID 与 MR_TARGET_BRANCH
+   （两者必须同时设置，只设其一时脚本仍走反查路径）。
 6. 确认后删除探测行。
 
 ## 6. 连通性验证（云托管构建机必做）
+前提：先在该验证流水线的「变量和缓存」中配置 `KIRO_API_KEY`（私密变量）——
+headless 调用必须依赖它认证，未配置时 chat 命令会因认证失败而报错。
 最小验证流水线命令：
     curl -fsSL https://cli.kiro.dev/install | bash
     export PATH="$HOME/.local/bin:$PATH"
     KIRO_LOG_NO_COLOR=1 kiro-cli chat --no-interactive "回复 ok 两个字母即可"
-成功输出 ok → 可用；失败 → 第 7 节自建构建机。
+成功输出 ok → 可用。失败时先区分两类：
+- `curl | bash` 安装失败 → 网络不通 → 第 7 节自建构建机；
+- 安装成功但 chat 失败 → 多为认证问题（KIRO_API_KEY 未配置/无效/订阅无 API Key 权限），
+  与网络无关，回到第 1 节核对 Key。
 同时验证构建机具备 timeout 命令（GNU coreutils）：`command -v timeout`。
 
 ## 7. 自建构建机（网络受限/生产推荐）
@@ -81,7 +87,7 @@
 | 报错「缺少依赖：timeout」 | 构建机安装 GNU coreutils（超时是强制依赖，防 Kiro 挂起占死流水线） |
 | kiro-cli 安装失败 | 网络不通 → 第 6/7 节 |
 | 报错「缺少 KIRO_API_KEY」等 | 流水线变量未配置或拼写错误 |
-| 报错「MR 定位歧义」 | 同源分支多个打开 MR → 显式配置 MR_LOCAL_ID |
+| 报错「MR 定位歧义」 | 同源分支多个打开 MR → 显式配置 MR_LOCAL_ID 与 MR_TARGET_BRANCH（需同时设置） |
 | 报错「无法定位 MR」 | MR 已关闭/合并；或第 5 节显式配置 |
 | OpenAPI 401/403 | 令牌过期/权限不足（代码只读+MR 读写）；YUNXIAO_ORG_ID 是否正确；注意 4xx 不重试直接失败 |
 | 评论被截断 | 属预期（65535 上限）；完整报告在流水线日志；可调 MAX_COMMENT_BYTES |
