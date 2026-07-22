@@ -12,6 +12,11 @@ if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
   echo "mock: 模拟 kiro 失败" >&2; exit 1
 fi
 [[ "${MOCK_KIRO_EMPTY:-0}" == "1" ]] && exit 0
-echo "## 评审结果"
+# 模拟真实 kiro-cli headless 输出：先是带 ANSI 色码的工具调用轨迹（噪音），
+# 再是以「# 代码评审报告」为锚点的正文。用于验证脚本的清洗逻辑。
+ESC=$(printf '\033')
+printf '%sReading directory: %s/root/workspace/business_repo%s (using tool: read)\n' "$ESC[38;5;141m" "$ESC[0m" "$ESC[0m"
+printf ' %s✓%s Successfully read directory (47 entries)\n' "$ESC[38;5;10m" "$ESC[0m"
+printf '%s# 代码评审报告%s\n' "$ESC[1m" "$ESC[0m"
 echo "🔴 严重：发现硬编码密钥 src/app.py:2（值已掩码：FAKE****0000），建议改用环境变量。"
 echo "总体结论：建议修改后合并。"

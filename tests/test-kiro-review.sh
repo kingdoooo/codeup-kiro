@@ -38,7 +38,12 @@ assert_eq "$([[ -d "$tmp/work/.kiro" ]] && echo exists || echo gone)" "gone" "�
 assert_eq "$([[ -f "$HOME/.kiro/agents/agent-codeup-reviewer.json" ]] && echo y || echo n)" "y" "受信 agent 已安装"
 assert_contains "$out" "changeRequests/7/comments" "回写到 MR 7"
 assert_contains "$out" "kiro-review:" "评论含 append-only 标记"
-assert_contains "$out" "评审结果" "评论含 kiro 输出"
+assert_contains "$out" "代码评审报告" "评论含清洗后报告正文（锚点标题）"
+assert_contains "$out" "硬编码密钥" "评论含报告内容"
+assert_not_contains "$out" "using tool: read" "清洗：不含工具调用轨迹"
+assert_not_contains "$out" "Successfully read directory" "清洗：不含工具执行轨迹"
+esc=$(printf '\033')
+assert_not_contains "$out" "${esc}[" "清洗：不含 ANSI 控制序列"
 
 # --- 失败路径：kiro 失败 → 回写"评审未完成" + 非零退出 ---
 rc=0; out=$(MOCK_KIRO_FAIL=1 "$ROOT/scripts/kiro-review.sh" 2>&1) || rc=$?

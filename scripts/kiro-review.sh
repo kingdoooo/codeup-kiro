@@ -156,6 +156,21 @@ if [[ "$kiro_rc" -ne 0 ]]; then
 fi
 [[ -s "$WORK/review-output.md" ]] || die_review "Kiro 退出码为 0 但输出为空"
 
+# --- 6.1 清洗 kiro-cli 输出：剥离 ANSI 控制序列，并从报告锚点截取正文 ---
+# headless 模式下 kiro-cli 会把工具调用轨迹（Reading directory / using tool...）
+# 和 ANSI 色码一并打到 stdout，需剔除后只保留报告正文。
+ESC=$(printf '\033')
+sed "s/${ESC}\\[[0-9;?]*[a-zA-Z]//g" "$WORK/review-output.md" > "$WORK/clean.md"
+# 报告正文以一级标题「# 代码评审报告」为锚点（见 prompts/review-prompt.md 第 9 条）；
+# 找到则从该行截到结尾，找不到则降级保留清洗后全文（不丢内容）。
+if grep -q '^# 代码评审报告' "$WORK/clean.md"; then
+  awk '/^# 代码评审报告/{f=1} f' "$WORK/clean.md" > "$WORK/report.md"
+else
+  cp "$WORK/clean.md" "$WORK/report.md"
+  log "警告：未找到报告标题锚点「# 代码评审报告」，回退保留清洗后全文（可能含过程轨迹）"
+fi
+[[ -s "$WORK/report.md" ]] || die_review "清洗后报告为空"
+
 # --- 7. 组装评论（含标记与截断）并回写 ---
 DIFF_NOTE="完整直传"
 [[ "$truncated" == "10" ]] && DIFF_NOTE="超出阈值（${DIFF_SIZE_LIMIT}B）已按优先级截断，其余变更 Kiro 通过 diff 索引自主读取"
@@ -173,7 +188,7 @@ DIFF_NOTE="完整直传"
   echo ""
   echo "---"
   echo ""
-  cat "$WORK/review-output.md"
+  cat "$WORK/report.md"
 } > "$WORK/comment.md"
 
 # Codeup content 上限 65535 字符；按字节截断留足余量，iconv 清理截断产生的残缺 UTF-8 序列
@@ -186,7 +201,7 @@ if [[ "$(wc -c < "$WORK/comment.md" | tr -d ' ')" -gt "$MAX_COMMENT_BYTES" ]]; t
   } >> "$WORK/comment.trunc.md"
   mv "$WORK/comment.trunc.md" "$WORK/comment.md"
   log "评审报告超长已截断；完整内容如下："
-  cat "$WORK/review-output.md" >&2
+  cat "$WORK/report.md" >&2
 fi
 
 if codeup_post_comment "$LOCAL_ID" "$WORK/comment.md"; then
