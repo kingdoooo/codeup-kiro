@@ -1,7 +1,8 @@
 # 设计：Codeup MR 自动触发 Kiro CLI 代码评审
 
-- 日期：2026-07-21
-- 状态：已评审通过（v2：吸收外部对抗性评审后修订——信任边界重构、OpenAPI 契约修正、diff chunk 索引方案、超时/评论长度/失败路径加固）
+- 日期：2026-07-21（v3 联调修订：2026-07-23）
+- 状态：已在客户中心站环境端到端联调通过（v3：补充真实环境实测发现与修复，见第 12 节）
+- v2 修订：吸收外部对抗性评审——信任边界重构、OpenAPI 契约修正、diff chunk 索引方案、超时/评论长度/失败路径加固
 - 术语说明：本文中 **MR（Merge Request，合并请求）** 即 Codeup 平台上的代码合并评审流程，等同于 GitHub 的 PR（Pull Request）。
 
 ## 1. 背景与目标
@@ -201,3 +202,32 @@ codeup-kiro/
 - Kiro 输出的自动敏感信息扫描/清洗（生产化改进项）
 - kiro-cli 安装包 checksum 校验体系（生产化改进项，以自建机预装替代）
 - hunk 级删除内容分类（v1 为文件级）
+
+## 12. 联调实测发现与修复（2026-07-23，中心站真实环境）
+
+在客户中心站环境完成端到端联调（Flow 双代码源流水线 + demo-app 业务库 + 含 5 处安全问题的测试 MR），发现并修复了 3 个本地测试无法覆盖的真实环境问题。三者均属"接口/环境细节"，验证了"必须在真实环境联调"这一判断。
+
+### 12.1 多代码源下源分支变量被污染（配置层，非代码 bug）
+
+- 现象：脚本用无下标的 `CI_COMMIT_REF_NAME` 猜源分支，多代码源场景下它取到的是 `main`（集成包源分支），而非业务库 MR 的源分支 `feature/user-search`，导致 OpenAPI 反查不到 MR。
+- 根因：Flow 多代码源时，无下标内置变量的取值不可预期（文档已警示），必须用带下标变量。实测 MR 触发时可用：`CI_COMMIT_REF_NAME_1`=业务库源分支、`CI_COMMIT_TARGET_REF_NAME_1`=MR 目标分支。
+- 修复：流水线「执行命令」步骤显式修正——`export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"` 与 `export MR_TARGET_BRANCH="$CI_COMMIT_TARGET_REF_NAME_1"`，再调脚本。已写入 setup-guide 与本文档的流水线示例。
+- 教训：setup-guide §5「首次运行环境探测（只打变量名）」正是为此设计——不同组织/多源顺序下变量名需实测确认。
+
+### 12.2 回写评论接口 `resolved` 字段必填（OpenAPI 契约）
+
+- 现象：Kiro 评审成功，但回写报 `HTTP 400 "resolved can not be null"`。
+- 根因：中心站 CreateChangeRequestComment 接口 `resolved` 字段实际必填，官方文档示例将其标为可选，与实测不符。
+- 修复：`codeup-api.sh` 请求体补 `resolved: false`，并加测试断言锁定（commit f7c9de1）。
+
+### 12.3 kiro-cli headless 输出混入工具轨迹与 ANSI 色码（输出清洗）
+
+- 现象：回写的 MR 评论正文前段混入 kiro-cli 的工具调用轨迹（`Reading directory...`、`using tool: read`）与 ANSI 颜色控制序列，真报告被往下挤。
+- 根因：headless 模式下 kiro-cli 把执行轨迹和最终报告一并打到 stdout；`KIRO_LOG_NO_COLOR=1` 未能完全抑制色码；且报告标题被加了 Markdown 引用前缀 `> `。
+- 修复（commit 81645cd、fe937b9）：脚本在捕获输出后 ① `sed` 剥离 ANSI 控制序列；② 以 `# 代码评审报告` 为锚点（正则兼容 `> `/`#`/空白前缀）截取正文并去掉引用前缀；找不到锚点则降级保留全文并告警。提示词固定报告首行为该标题；mock 与测试覆盖清洗逻辑。
+- 残留改进项：该清洗依赖 kiro-cli 的输出格式，属"生产化改进项"级别的脆弱点；kiro-cli 若提供 headless 纯结果输出旗标（类似 `--output-format`），应优先改用。
+
+### 12.4 评论身份（Kiro Bot）
+
+- 现状：评论经 `YUNXIAO_TOKEN` 所属账号发出，作者名/头像即令牌账号；正文以 `## 🤖 Kiro 自动代码评审` 打品牌。
+- 建议：生产用**专用机器人成员账号**（名如 `Kiro Review Bot`、头像上传 Kiro icon、仅授予目标库 MR 读写），令牌作为 `YUNXIAO_TOKEN` —— 视觉上即"Kiro 在评论"。Codeup 无第三方 App/Bot 平台身份能力，这是最接近的做法，且不需改代码。
