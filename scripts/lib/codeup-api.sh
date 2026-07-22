@@ -77,8 +77,9 @@ codeup_find_mr() {
 codeup_post_comment() {
   local local_id="$1" markdown_file="$2"
   local body attempt
+  # 注意：中心站 CreateChangeRequestComment 要求 resolved 字段必填（缺失报 400 "resolved can not be null"）
   body=$(jq -n --rawfile content "$markdown_file" \
-    '{comment_type: "GLOBAL_COMMENT", content: $content, draft: false}')
+    '{comment_type: "GLOBAL_COMMENT", content: $content, draft: false, resolved: false}')
   for attempt in 1 2 3; do
     _codeup_request POST \
       "/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/repositories/${CODEUP_REPO_ID}/changeRequests/${local_id}/comments" \

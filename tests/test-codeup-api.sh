@@ -40,6 +40,7 @@ rc=0; err=$(codeup_post_comment 7 "$md" 2>&1 >/dev/null) || rc=$?
 assert_rc "$rc" 0 "post_comment: DRY_RUN 成功"
 assert_contains "$err" "changeRequests/7/comments" "post_comment: URL"
 assert_contains "$err" "GLOBAL_COMMENT" "post_comment: 评论类型"
+assert_contains "$err" "resolved" "post_comment: body 含 resolved 字段（中心站必填）"
 rm -f "$md"
 
 # --- 真实响应契约：_codeup_http_ok 状态码判定 ---
