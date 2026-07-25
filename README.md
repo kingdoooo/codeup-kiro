@@ -71,7 +71,3 @@
     bash tests/run-tests.sh
 
 全程无网络依赖（DRY_RUN + mock kiro-cli）。
-
-## 设计文档
-
-docs/superpowers/specs/2026-07-21-codeup-kiro-review-design.md
