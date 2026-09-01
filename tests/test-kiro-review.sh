@@ -3,6 +3,14 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source helpers.sh
 
+# kiro-review.sh 把 timeout/gtimeout 当强制依赖（无超时能力时拒绝运行），
+# 本机缺失时它在第一步就退出，本套件的每条断言都测不到真实行为。
+# 与其让成功路径断言炸掉（macOS 默认无 timeout），整体跳过并说明原因。
+if ! command -v timeout >/dev/null && ! command -v gtimeout >/dev/null; then
+  echo "SKIP: 本机无 timeout/gtimeout（GNU coreutils），跳过 test-kiro-review.sh" >&2
+  exit 0
+fi
+
 ROOT=$(cd .. && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
@@ -56,14 +64,10 @@ rc=0; out=$(MOCK_KIRO_EMPTY=1 "$ROOT/scripts/kiro-review.sh" 2>&1) || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "空输出：非零退出"
 assert_contains "$out" "评审未完成" "空输出：回写说明评论"
 
-# --- 失败路径：挂起 → 超时强杀（需 timeout/gtimeout；缺失则跳过）---
-if command -v timeout >/dev/null || command -v gtimeout >/dev/null; then
-  rc=0; out=$(MOCK_KIRO_HANG=1 KIRO_TIMEOUT=3 "$ROOT/scripts/kiro-review.sh" 2>&1) || rc=$?
-  assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "挂起：超时后非零退出"
-  assert_contains "$out" "评审未完成" "挂起：回写说明评论"
-else
-  echo "SKIP: 本机无 timeout/gtimeout，跳过挂起测试" >&2
-fi
+# --- 失败路径：挂起 → 超时强杀（timeout/gtimeout 已由文件开头的前置检查保证）---
+rc=0; out=$(MOCK_KIRO_HANG=1 KIRO_TIMEOUT=3 "$ROOT/scripts/kiro-review.sh" 2>&1) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "挂起：超时后非零退出"
+assert_contains "$out" "评审未完成" "挂起：回写说明评论"
 
 # --- 评论截断：MAX_COMMENT_BYTES 很小时评论被截断并注明 ---
 rc=0; out=$(MAX_COMMENT_BYTES=200 "$ROOT/scripts/kiro-review.sh" 2>&1) || rc=$?

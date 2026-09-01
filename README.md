@@ -71,3 +71,7 @@
     bash tests/run-tests.sh
 
 全程无网络依赖（DRY_RUN + mock kiro-cli）。
+
+`kiro-review.sh` 把 `timeout`/`gtimeout` 作为强制依赖（无超时能力时拒绝运行），
+Linux 自带。macOS 需要 `brew install coreutils` 提供 `gtimeout`，否则
+`tests/test-kiro-review.sh` 会整体跳过并打印 SKIP。
