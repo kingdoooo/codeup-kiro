@@ -1,0 +1,19 @@
+{
+  "contract": "codeup-reviewer/1",
+  "summary": "为搜索接口新增模糊查询，修复建议里带一段较长的代码块，用来验证按字节截断落在代码围栏内时的行为。",
+  "verdict": "MERGE_AFTER_FIX",
+  "verdict_reason": "存在一处 SQL 注入。",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "用户输入直接拼接进 SQL",
+      "file": "src/app.py",
+      "line_start": 30,
+      "line_end": 31,
+      "body": "`q` 未做处理就拼进 SQL 字符串。",
+      "fix": "改用参数化查询，例如：\n\n```python\ndef search(cursor, q):\n    row_1 = fetch(cursor, 1)  # 这一行是为了把 diff 里的代码块撑长\n    row_2 = fetch(cursor, 2)  # 这一行是为了把 diff 里的代码块撑长\n    row_3 = fetch(cursor, 3)  # 这一行是为了把 diff 里的代码块撑长\n    row_4 = fetch(cursor, 4)  # 这一行是为了把 diff 里的代码块撑长\n    row_5 = fetch(cursor, 5)  # 这一行是为了把 diff 里的代码块撑长\n    row_6 = fetch(cursor, 6)  # 这一行是为了把 diff 里的代码块撑长\n    row_7 = fetch(cursor, 7)  # 这一行是为了把 diff 里的代码块撑长\n    row_8 = fetch(cursor, 8)  # 这一行是为了把 diff 里的代码块撑长\n    row_9 = fetch(cursor, 9)  # 这一行是为了把 diff 里的代码块撑长\n    row_10 = fetch(cursor, 10)  # 这一行是为了把 diff 里的代码块撑长\n    row_11 = fetch(cursor, 11)  # 这一行是为了把 diff 里的代码块撑长\n    row_12 = fetch(cursor, 12)  # 这一行是为了把 diff 里的代码块撑长\n    row_13 = fetch(cursor, 13)  # 这一行是为了把 diff 里的代码块撑长\n    row_14 = fetch(cursor, 14)  # 这一行是为了把 diff 里的代码块撑长\n    row_15 = fetch(cursor, 15)  # 这一行是为了把 diff 里的代码块撑长\n    row_16 = fetch(cursor, 16)  # 这一行是为了把 diff 里的代码块撑长\n    row_17 = fetch(cursor, 17)  # 这一行是为了把 diff 里的代码块撑长\n    row_18 = fetch(cursor, 18)  # 这一行是为了把 diff 里的代码块撑长\n    row_19 = fetch(cursor, 19)  # 这一行是为了把 diff 里的代码块撑长\n    row_20 = fetch(cursor, 20)  # 这一行是为了把 diff 里的代码块撑长\n    row_21 = fetch(cursor, 21)  # 这一行是为了把 diff 里的代码块撑长\n    row_22 = fetch(cursor, 22)  # 这一行是为了把 diff 里的代码块撑长\n    row_23 = fetch(cursor, 23)  # 这一行是为了把 diff 里的代码块撑长\n    row_24 = fetch(cursor, 24)  # 这一行是为了把 diff 里的代码块撑长\n    row_25 = fetch(cursor, 25)  # 这一行是为了把 diff 里的代码块撑长\n    return rows\n```\n\n并为该函数补一个注入用例。"
+    }
+  ]
+}

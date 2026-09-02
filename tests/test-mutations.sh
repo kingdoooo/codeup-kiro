@@ -42,6 +42,31 @@ run_case() {
   RC=0; OUT=$(env "$@" "$pkg/scripts/kiro-review.sh" 2>&1) || RC=$?
 }
 
+# 从 DRY_RUN 输出里取出将要回写的评论正文（与 test-kiro-review.sh 同一份实现意图）
+posted_comment() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+s = sys.stdin.read()
+i = s.rfind("DRY_RUN body: ")
+if i < 0:
+    sys.exit(0)
+b = s[i + len("DRY_RUN body: "):]
+d = 0
+for n, ch in enumerate(b):
+    if ch == "{":
+        d += 1
+    elif ch == "}":
+        d -= 1
+        if d == 0:
+            b = b[:n + 1]
+            break
+try:
+    sys.stdout.write(json.loads(b).get("content", ""))
+except Exception:
+    pass
+'
+}
+
 # --- 对照：未变异的实现，三项守卫全部成立（否则下面的「失败」没有参照意义）---
 run_case baseline "$ROOT"
 assert_rc "$RC" 0 "对照：未变异实现成功"
@@ -85,7 +110,9 @@ assert_rc "$RC" 0 "M5：变异体仍能跑完"
 assert_eq "$(grep -c -x -- '--trust-tools=read,grep,glob' "$CASE/args")" "0" "M5：精确的 --trust-tools=read,grep,glob 不再出现——端到端断言会失败"
 
 # --- M6：删掉任意深度 .kiro/ 的删除逻辑 → 子目录 .kiro/ 残留、Kiro 启动时能看到 ---
-pkg=$(make_mutant m6-kiro-dirs '/-name .kiro -type d/d')
+# 模式只用 `-name .kiro`：任意深度 .kiro 的删除条件已改为 \( -type d -o -type l \)（覆盖符号链接），
+# 带 -type d 的旧模式会失配（make_mutant 会因此报错，这正是它存在的意义）
+pkg=$(make_mutant m6-kiro-dirs '/-name .kiro/d')
 run_case m6 "$pkg"
 assert_rc "$RC" 0 "M6：变异体仍能跑完"
 assert_eq "$([[ -d "$CASE/work/src/sub/.kiro" ]] && echo exists || echo gone)" "exists" "M6：子目录 .kiro/ 残留——端到端断言「.kiro 已移除」会失败"
@@ -142,6 +169,35 @@ assert_rc "$RC" 0 "M12：变异体仍能跑完"
 assert_contains "$OUT" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" \
   "M12：降级评论里出现完整密钥——端到端「评论里不出现完整密钥」断言会失败"
 assert_contains "$OUT" "AKIAIOSFODNN7EXAMPLE" "M12：AWS 访问密钥 ID 同样泄漏"
+
+# --- M13：让「补齐未闭合代码围栏」的判定永不成立 → 截断提示被吞进代码块 ---
+pkg=$(make_mutant m13-fence-close 's/% 2 )) -eq 1/% 2 )) -eq 99/')
+run_case m13 "$pkg" MAX_COMMENT_BYTES=900 MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/fenced-code.json"
+assert_rc "$RC" 0 "M13：变异体仍能跑完"
+comment=$(posted_comment "$OUT")
+fences=$(printf '%s\n' "$comment" | grep -c '^```' || true)
+assert_eq "$(( fences % 2 ))" "1" "M13：围栏落单（${fences} 个）——端到端「围栏成对」断言会失败"
+notice_ln=$(printf '%s\n' "$comment" | grep -n '报告超长已截断' | tail -1 | cut -d: -f1)
+before=$(printf '%s\n' "$comment" | grep -n '^```' | cut -d: -f1 | awk -v n="$notice_ln" '$1 < n' | wc -l | tr -d ' ')
+assert_eq "$(( before % 2 ))" "1" \
+  "M13：截断提示之前只有一个未闭合的围栏（${before} 个），提示被吞进代码块——端到端断言会失败"
+
+# --- M14：让 Markdown 结构清洗变成恒等函数 → 模型文本能注入第二个评审标记与伪造标题 ---
+pkg=$(make_mutant m14-sanitize 's/if type != "string" then "" else/if true then . else/' scripts/lib/review-render.sh)
+run_case m14 "$pkg" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/inject.json"
+assert_rc "$RC" 0 "M14：变异体仍能跑完"
+comment=$(posted_comment "$OUT")
+assert_eq "$(printf '%s\n' "$comment" | grep -c '<!-- kiro-review:')" "2" \
+  "M14：评论里出现两个评审标记——端到端「标记恰好一个」断言会失败（后续票按标记原地更新会被打乱）"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^### 结论：')" "2" \
+  "M14：模型文本里的伪造结论章节成了真章节——端到端断言会失败"
+
+# --- M15：让「受信 agent 契约标识」检查永远通过 → 非受信产出会被贴到 MR 上 ---
+pkg=$(make_mutant m15-contract-id 's/(.contract \/\/ "") == $id/true/' scripts/lib/review-render.sh)
+run_case m15 "$pkg" MOCK_KIRO_NO_CONTRACT=1
+assert_rc "$RC" 0 "M15：变异体仍能跑完（这正是问题：本该失败）"
+assert_not_contains "$OUT" "受信 agent 未生效" "M15：不再识别受信 agent 未生效——端到端断言会失败"
+assert_contains "$OUT" "P0 1 · P1 1 · P2 1" "M15：非受信产出被照常渲染并回写 MR"
 
 # --- M3：删掉 settings 调用 → 继承未被禁用 ---
 pkg=$(make_mutant m3-settings '/chat.disableInheritingDefaultResources true/d')

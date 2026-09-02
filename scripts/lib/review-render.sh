@@ -26,10 +26,55 @@ REVIEW_SEVERITIES="P0 P1 P2"
 # --- 文本清洗：剥离 ANSI 控制序列（stdin → stdout）---
 # stream-json 的 stdout 实测不含 ANSI，但降级路径要贴的是模型原文，且纯文本回退路径仍需清洗，
 # 所以清洗放在公共函数里，两条路径都过一遍。
+# LC_ALL=C 是必需的（R9）：模型输出里混进无效 UTF-8 字节时，带 UTF-8 locale 的 sed（macOS/BSD）会
+# 直接报错退出；在 `set -o pipefail` 的管道里，这个失败会被上游当成「awk 没找到标记」，一次编码问题
+# 就被写成「被评审代码里有假标记」。按字节处理既不会失败，对 ANSI 序列的剥离也不受影响。
 review_clean_text() {
   local esc
   esc=$(printf '\033')
-  sed "s/${esc}\\[[0-9;?]*[a-zA-Z]//g"
+  LC_ALL=C sed "s/${esc}\\[[0-9;?]*[a-zA-Z]//g"
+}
+
+# --- 模型文本的 Markdown 结构清洗（R1）---
+# 威胁：summary / verdict_reason / title / body / fix 与降级原文全部来自模型，而模型按 agent 提示词
+# 会把业务库里的注入内容作为 P0 原文引用出来。业务库因此可以往这些槽位里塞：
+#   ① 第二个评审标记 `<!-- kiro-review:deadbee run:1 -->`——后续票「按标记找自己那条评论」会被打乱；
+#   ② 伪造的 `## 🤖 Kiro 代码评审` / `### 结论：可合并` 标题与 `---` 页脚分隔线——读者看到的结构
+#      就不再是脚本渲染的结构（降级路径尤其严重，那里贴的是整段原文）。
+# 因此：评论里的结构（评审标记、标题层级、页脚分隔线）只能来自脚本，模型文本一律降级为普通文本。
+# 做法（jq 实现，避免同一套转义规则出现两份）：
+#   - `<!--` / `-->` 转义为 `&lt;!--` / `--&gt;`：注释语法失效，标记再也构不成 HTML 注释。
+#     无条件执行（也包括代码围栏内）——后续票的去重是对评论原文做文本匹配，围栏内的标记同样会被匹配到。
+#   - 代码围栏外，行首的 `#{1,6}` 标题与 `---`/`***`/`___`/`===` 分隔线前加反斜杠转义（渲染成字面量）。
+#     围栏内不动：那里的 `#` 是代码注释，转义会破坏代码，而围栏内的 `#` 本来也不会渲染成标题。
+#   - 围栏数为奇数时补一个闭合围栏：否则模型开一个不闭合的围栏就能把后面脚本渲染的章节与页脚一起吞掉。
+_REVIEW_JQ_SANITIZE='
+  def _sanitize_md:
+    if type != "string" then "" else
+    (gsub("<!--"; "&lt;!--") | gsub("-->"; "--&gt;"))
+    | split("\n")
+    | reduce .[] as $l ({fence: false, out: []};
+        if ($l | test("^[[:space:]]{0,3}(```|~~~)")) then
+          {fence: (.fence | not), out: (.out + [$l])}
+        elif .fence then
+          {fence: .fence, out: (.out + [$l])}
+        elif ($l | test("^[[:space:]]{0,3}#{1,6}([[:space:]]|$)")) then
+          {fence: .fence, out: (.out + [($l | sub("^(?<sp>[[:space:]]{0,3})(?<h>#{1,6})"; .sp + "\\" + .h))])}
+        elif ($l | test("^[[:space:]]{0,3}[-*_=]{3,}[[:space:]]*$")) then
+          {fence: .fence, out: (.out + [($l | sub("^(?<sp>[[:space:]]{0,3})"; .sp + "\\"))])}
+        else
+          {fence: .fence, out: (.out + [$l])}
+        end)
+    | (if .fence then (.out + ["```"]) else .out end)
+    | join("\n")
+    end;
+'
+
+# 用法：review_sanitize_md < 文件 → stdout（降级原文走这条；契约字段在 review_validate 里用同一个 jq def）
+# -j（join output，不额外补换行）：输入文件末尾本来就有换行，split/join 会原样保留它；
+# 用 -r 的话 jq 还会再补一个，降级评论的正文与页脚之间就多出一个空行。
+review_sanitize_md() {
+  jq -Rjs "${_REVIEW_JQ_SANITIZE} _sanitize_md"
 }
 
 # --- 从 JSON Lines 事件流取最终消息 ---
@@ -37,11 +82,12 @@ review_clean_text() {
 #   rc 0 → stdout = finalText
 #   rc 2 → 没有 runFinished 事件（Kiro 未跑完：视为 Kiro 失败）
 #   rc 3 → runFinished.data.status 非 success；stdout = status 值（供失败评论写明原因）
-#   rc 6 → 文件不可读
+#   rc 7 → 事件流文件不可读（**不能**与 review_extract_json 的「标记不唯一」rc 6 复用同一个码：
+#          那会把一次 I/O 故障在 MR 上写成「被评审代码里有假标记」）
 # 用 `jq -R 'fromjson?'` 逐行解析：stdout 里混进 CLI 的非 JSON 警告行时跳过该行，而不是整体失败。
 review_stream_final_text() {
   local jsonl="$1" rf status
-  [[ -r "$jsonl" ]] || { echo "review_stream_final_text: 事件流文件不可读：${jsonl}" >&2; return 6; }
+  [[ -r "$jsonl" ]] || { echo "review_stream_final_text: 事件流文件不可读：${jsonl}" >&2; return 7; }
   rf=$(jq -c -R 'fromjson? | select(type == "object" and .type == "runFinished")' "$jsonl" 2>/dev/null | tail -1)
   [[ -n "$rf" ]] || return 2
   status=$(printf '%s' "$rf" | jq -r '.data.status // ""')
@@ -55,7 +101,9 @@ review_stream_final_text() {
 # --- 成本与上下文可观测指标（写流水线日志；spec §4.1「metadata.meteringUsage 写入日志」）---
 # 用法：review_stream_usage <jsonl 文件> → stdout "credits=0.2609 context=3.8%"
 # credits 累加所有 metadata 事件里 unit=credit 的 value（实测一次评审会分多笔计量）；
-# context 取最后一个 contextUsagePercentage。缺数据时对应字段为 -，永不失败（日志不该拖垮评审）。
+# context 取**峰值**而不是最后一个：实测事件流里这个值不单调（real-shape.jsonl 是 12.02 → 1.30，
+# 取最后一个会把「上下文最高用到 12%」记成 1.3%，这个指标本来就是为了看离上限还有多远）。
+# 缺数据时对应字段为 -，永不失败（日志不该拖垮评审）。
 review_stream_usage() {
   local jsonl="$1" credits ctx
   if [[ ! -r "$jsonl" ]]; then printf 'credits=- context=-\n'; return 0; fi
@@ -64,7 +112,7 @@ review_stream_usage() {
               "$jsonl" 2>/dev/null | LC_ALL=C awk '{s += $1; n++} END {if (n) printf "%.4f", s; else printf "-"}')
   ctx=$(jq -r -R 'fromjson? | select(type == "object" and .type == "metadata")
                   | .data.contextUsagePercentage // empty' "$jsonl" 2>/dev/null \
-        | tail -1 | LC_ALL=C awk 'NF {printf "%.1f%%", $1; f = 1} END {if (!f) printf "-"}')
+        | LC_ALL=C awk 'NF { if (!f || $1 > m) m = $1; f = 1 } END {if (f) printf "%.1f%%", m; else printf "-"}')
   printf 'credits=%s context=%s\n' "${credits:--}" "${ctx:--}"
 }
 
@@ -80,15 +128,33 @@ review_stream_final_truncated() {
   [[ "$v" == "true" ]]
 }
 
+# --- 本次运行的标记随机串（R4）---
+# 固定字面量标记是可被业务库利用的：提示词要求把注入企图作为 P0 报出来，模型常常直接原文引用
+# 那行 `<<<KIRO_REVIEW_JSON>>>`，于是标记计数变成 2、每次评审都被打成「标记不唯一」而降级——
+# 业务库提交一行文本就能让评审永久失去结构化输出。改成每次运行生成随机 nonce、标记里带上它，
+# 攻击者无法预先把本次的 nonce 提交进仓库。
+review_new_nonce() {
+  # 优先 /dev/urandom（Linux/macOS 都有）；取不到时退回 PID + 纳秒/秒级时间戳，仍然不可预测到「提前提交」
+  od -An -tx1 -N8 /dev/urandom 2>/dev/null | tr -d ' \n' | grep -qE '^[0-9a-f]{16}$' \
+    && od -An -tx1 -N8 /dev/urandom | tr -d ' \n' \
+    || printf '%08x%08x' "$$" "$(date +%s)"
+}
+
+# 用法：review_marker_start <nonce> / review_marker_end <nonce>
+review_marker_start() { printf '<<<KIRO_REVIEW_JSON:%s>>>' "$1"; }
+review_marker_end()   { printf '<<<END_KIRO_REVIEW_JSON:%s>>>' "$1"; }
+
 # --- 从最终消息里截出标记包裹的那段 JSON（stdin → stdout）---
 # 安全要求：业务库内容不受信，而 agent 提示词要求评审员把注入企图作为 P0 报告出来——也就是说
-# **被评审代码里的假契约块很可能被评审员原文引用到最终消息里**。此时输出中会出现两对标记，
-# 无法从文本本身判断哪一段是评审员的结论。取「最后一对」会让伪造块直接顶掉真结论
-# （伪造 `verdict: MERGE / findings: []` 就能把「不建议合并」变成「可合并」）；取「第一对」同样可被
-# 先引用后作答的顺序绕过。因此：**标记不唯一就拒绝解析**，交给降级路径贴出原文，让人来看。
-# rc 1 = 没有成对标记；rc 2 = 标记出现多于一对（起始或结束标记计数 != 1）。
+# **被评审代码里的假契约块很可能被评审员原文引用到最终消息里**。带 nonce 之后攻击者已经无法预先
+# 造出「本次」标记，但模型自己复述一遍本次标记仍然可能发生，此时输出里会出现两对标记、无法判定
+# 哪一段是结论。取「最后一对」会让后一段顶掉前一段，取「第一对」也只是换一种被绕过的顺序。
+# 因此：**本次标记不唯一就拒绝解析**，交给降级路径贴出原文，让人来看。
+# LC_ALL=C：按字节处理，模型输出里的无效 UTF-8 不会让 awk 罢工（与 review_clean_text 同理）。
+# 用法：_review_slice_marker <起始标记> <结束标记>
+# rc 1 = 没有成对标记；rc 2 = 起始或结束标记出现多于一次。
 _review_slice_marker() {
-  awk -v S='<<<KIRO_REVIEW_JSON>>>' -v E='<<<END_KIRO_REVIEW_JSON>>>' '
+  LC_ALL=C awk -v S="$1" -v E="$2" '
     # 统计 hay 中 needle 出现的次数
     function count(hay, needle,   c, p) {
       c = 0
@@ -126,21 +192,24 @@ _review_strip_code_fence() {
 }
 
 # --- 提取契约 JSON ---
-# 用法：review_extract_json <jsonl 文件>
+# 用法：review_extract_json <jsonl 文件> <本次运行的 nonce>
 #   rc 0 → stdout = 契约 JSON（compact，单个对象）
-#   rc 2/3 → 透传 review_stream_final_text：Kiro 失败，调用方走失败评论路径（不是降级）
+#   rc 2/3/7 → 透传 review_stream_final_text：Kiro 失败或事件流不可读，调用方走失败评论路径（不是降级）
 #   rc 4 → 没有成对的契约标记 → 降级
 #   rc 5 → 标记内不是「恰好一个」JSON 对象 → 降级
-#   rc 6 → 输出里出现多于一对契约标记（很可能是被评审内容里的假标记被引用）→ 降级
+#   rc 6 → 输出里出现多于一对契约标记 → 降级
+#   rc 8 → 用法错误（没传 nonce）：绝不退回固定标记，否则 R4 的防护就白做了
 review_extract_json() {
-  local jsonl="$1" final slice rc=0 slice_rc=0
+  local jsonl="$1" nonce="${2:-}" final slice rc=0 slice_rc=0 ms me
+  [[ -n "$nonce" ]] || { echo "review_extract_json: 缺少 nonce 参数（标记必须带本次运行的随机串）" >&2; return 8; }
+  ms=$(review_marker_start "$nonce"); me=$(review_marker_end "$nonce")
   final=$(review_stream_final_text "$jsonl") || rc=$?
   if [[ "$rc" != "0" ]]; then
     # rc 3 时 review_stream_final_text 把 status 值写在 stdout；透传给调用方，让失败评论能写明原因
     [[ "$rc" == "3" ]] && printf '%s\n' "$final"
     return "$rc"
   fi
-  slice=$(printf '%s\n' "$final" | review_clean_text | _review_slice_marker) || slice_rc=$?
+  slice=$(printf '%s\n' "$final" | review_clean_text | _review_slice_marker "$ms" "$me") || slice_rc=$?
   case "$slice_rc" in
     0) ;;
     2) return 6 ;;
@@ -153,18 +222,35 @@ review_extract_json() {
   printf '%s\n' "$slice" | jq -c -s '.[0]'
 }
 
+# --- 受信 agent 的契约标识（R3）---
+# 这个字段**只**写在 agent 提示词里，运行时提示词绝不提它。kiro-cli 对 `--agent` 的未知名字是静默接受的，
+# runStarted 事件也不含 agent 名，所以「受信 agent 到底有没有生效」在事件流里看不出来。
+# 一旦 agent 没加载（文件改名、安装回归、CLI 行为变化），模型拿到的是裸提示词：拒绝路径全部失效，
+# 输出也不合契约——而降级路径会把那份输出贴到 MR 上。有了这个字段，缺失/不符就能判定为
+# 「不是受信 agent 的产出」，走失败评论而**不是**降级（不能把非受信产出贴出去）。
+REVIEW_CONTRACT_ID="codeup-reviewer/1"
+
 # --- 契约校验（stdin = 契约 JSON → stdout = 规范化 JSON）---
-# 规范化后的形态：{summary, verdict, verdict_reason, findings:[…], dropped_findings:N}
+# 规范化后的形态：
+#   {summary, verdict, verdict_reason, findings:[…], dropped_findings:N, delocated_findings:N}
 # 丢弃规则（spec §4.1「字段校验失败的 finding 丢弃并计数」）：
 #   - 不是 JSON 对象
 #   - severity 规范化（去首尾空白 + 大写）后不是 P0/P1/P2
 #   - title 或 body 去空白后为空（缺字段同样算空）
-# 保留但置空的情形：file 为空/非字符串 → null（仓库级意见）；line_start/line_end 不是 ≥1 的整数 → null。
-# file 为 null 时行号一并置 null（没有文件的行号无意义）；line_end 缺失或小于 line_start 时取 line_start。
-# body/fix 原样保留（不做 trim）：它们是 Markdown，可能以缩进代码块开头，裁掉缩进会破坏渲染。
+# 置空（不丢弃）的情形：
+#   - file 为空/非字符串 → null（仓库级意见）
+#   - file 含换行/回车/`|`/反引号 → null 并计入 delocated_findings（R2）：file 会被渲染进
+#     「重点关注文件」表格的单元格（`|` 会造出幻影列、截断表格）和被反引号包裹的定位串（反引号会破坏配对），
+#     换行更是直接把表格截断、给攻击者一个塞伪造章节的位置。这类路径本来也不可能是真实文件名。
+#   - line_start/line_end 不是 ≥1 的整数 → null；file 为 null 时行号一并置 null
+# 文本清洗：summary / verdict_reason / title / body / fix 全部过 _sanitize_md（见 R1 说明）；
+#   title 与 verdict 额外把空白折叠成单空格——它们要渲染进单行（`##### …` 标题行与 `### 结论：…`），
+#   带换行就会把标题行截断。
+# body/fix 不做 trim：它们是 Markdown，可能以缩进代码块开头，裁掉缩进会破坏渲染。
 # dropped_findings 直接写进输出 JSON 而不是回传全局变量：调用方普遍用 $(…) 取结果，
 # 命令替换在子 shell 里跑，全局变量传不回来（codeup-api.sh 里踩过同一个坑）。
-# rc 1 = 顶层不是对象 / findings 不是数组 / 不是合法 JSON（调用方走降级）。
+# rc 1 = 顶层不是对象 / findings 不是数组 / 不是合法 JSON（调用方走降级）
+# rc 3 = contract 字段缺失或不等于 REVIEW_CONTRACT_ID（调用方走失败评论，**不得**贴出模型内容）
 review_validate() {
   local input
   input=$(cat)
@@ -172,37 +258,47 @@ review_validate() {
     || { echo "review_validate: 契约不是 JSON 对象" >&2; return 1; }
   printf '%s' "$input" | jq -e '(.findings // []) | type == "array"' >/dev/null 2>&1 \
     || { echo "review_validate: 契约的 findings 不是数组" >&2; return 1; }
-  printf '%s' "$input" | jq -c '
+  printf '%s' "$input" | jq -e --arg id "$REVIEW_CONTRACT_ID" '(.contract // "") == $id' >/dev/null 2>&1 \
+    || { echo "review_validate: 契约缺少 contract=\"${REVIEW_CONTRACT_ID}\" 字段（该字段只在受信 agent 提示词里要求，说明受信 agent 未生效）" >&2; return 3; }
+  printf '%s' "$input" | jq -c "${_REVIEW_JQ_SANITIZE}"'
     # \A / \z 是显式的「字符串首/尾」锚点：jq 的 ^ / $ 在不同版本可能被当行锚点，
     # 那会连多行字符串里每一行的缩进都裁掉。
     def tr(v): if (v | type) == "string"
                then (v | gsub("\\A[[:space:]]+"; "") | gsub("[[:space:]]+\\z"; ""))
                else "" end;
+    # 单行槽位：折叠所有空白（含换行）为单空格，再做 Markdown 结构清洗
+    def oneline(v): (tr(v) | gsub("[[:space:]]+"; " ") | _sanitize_md);
     def lineno(v): if (v | type) == "number" and (v | floor) == v and v >= 1 then (v | floor) else null end;
-    def fpath(v): (tr(v)) as $t | if ($t | length) > 0 then $t else null end;
+    # 文件路径：非空字符串，且不含换行/回车/`|`/反引号（否则按未定位处理）
+    def fpath(v): (tr(v)) as $t
+                  | if ($t | length) == 0 then null
+                    elif ($t | test("[\n\r|`]")) then null
+                    else $t end;
     . as $root
     | ((.findings // []) | length) as $total
     | [ (.findings // [])[]
         | select(type == "object")
         | (tr(.severity) | ascii_upcase) as $sev
-        | (tr(.title)) as $title
+        | (oneline(.title)) as $title
         | select(($sev == "P0" or $sev == "P1" or $sev == "P2")
                  and ($title | length) > 0
                  and ((tr(.body)) | length) > 0)
         | fpath(.file) as $file
+        | ((tr(.file) | length) > 0 and $file == null) as $delocated
         | (if $file == null then null else lineno(.line_start) end) as $ls
         | (if $ls == null then null
            else (lineno(.line_end)) as $le | (if $le == null or $le < $ls then $ls else $le end) end) as $le
-        | { id: (tr(.id)), severity: $sev, category: (tr(.category)), title: $title,
-            file: $file, line_start: $ls, line_end: $le,
-            body: (if (.body | type) == "string" then .body else "" end),
-            fix: (if (.fix | type) == "string" then .fix else "" end) }
+        | { id: (oneline(.id)), severity: $sev, category: (oneline(.category)), title: $title,
+            file: $file, line_start: $ls, line_end: $le, delocated: $delocated,
+            body: (if (.body | type) == "string" then (.body | _sanitize_md) else "" end),
+            fix: (if (.fix | type) == "string" then (.fix | _sanitize_md) else "" end) }
       ] as $kept
-    | { summary: (tr($root.summary)),
-        verdict: (tr($root.verdict) | ascii_upcase),
-        verdict_reason: (tr($root.verdict_reason)),
-        findings: $kept,
-        dropped_findings: ($total - ($kept | length)) }'
+    | { summary: (tr($root.summary) | _sanitize_md),
+        verdict: (tr($root.verdict) | ascii_upcase | gsub("[[:space:]]+"; " ") | _sanitize_md),
+        verdict_reason: (tr($root.verdict_reason) | _sanitize_md),
+        findings: ($kept | map(del(.delocated))),
+        dropped_findings: ($total - ($kept | length)),
+        delocated_findings: ([$kept[] | select(.delocated)] | length) }'
 }
 
 # --- 内部：总体结论的中文化（CONTEXT.md 的「总体结论」词汇）---
@@ -288,14 +384,16 @@ review_render_summary() {
   # 缺 dropped_findings 时 `[[ "$dropped" -gt 0 ]]` 还会在 set -u 下直接崩（null: unbound variable）。
   jq -e '(type == "object")
          and ((.dropped_findings | type) == "number")
+         and ((.delocated_findings | type) == "number")
          and ((.findings | type) == "array")' "$_RR_JSON" >/dev/null 2>&1 \
-    || { echo "review_render_summary: --json 不是 review_validate 的输出（需要对象 + 数值 dropped_findings + 数组 findings）：${_RR_JSON}" >&2; return 2; }
+    || { echo "review_render_summary: --json 不是 review_validate 的输出（需要对象 + 数值 dropped_findings/delocated_findings + 数组 findings）：${_RR_JSON}" >&2; return 2; }
 
-  local summary verdict verdict_cn verdict_reason dropped n0 n1 n2 total
+  local summary verdict verdict_cn verdict_reason dropped delocated n0 n1 n2 total stat
   summary=$(jq -r '.summary // ""' "$_RR_JSON")
   verdict=$(jq -r '.verdict // ""' "$_RR_JSON")
   verdict_reason=$(jq -r '.verdict_reason // ""' "$_RR_JSON")
   dropped=$(jq -r '.dropped_findings' "$_RR_JSON")
+  delocated=$(jq -r '.delocated_findings' "$_RR_JSON")
   total=$(jq -r '.findings | length' "$_RR_JSON")
   n0=$(jq -r '[.findings[] | select(.severity == "P0")] | length' "$_RR_JSON")
   n1=$(jq -r '[.findings[] | select(.severity == "P1")] | length' "$_RR_JSON")
@@ -321,11 +419,10 @@ review_render_summary() {
   echo ""
   echo "### 问题统计"
   echo ""
-  if [[ "$dropped" -gt 0 ]]; then
-    echo "P0 ${n0} · P1 ${n1} · P2 ${n2}（另有 ${dropped} 条不合契约已丢弃）"
-  else
-    echo "P0 ${n0} · P1 ${n1} · P2 ${n2}"
-  fi
+  stat="P0 ${n0} · P1 ${n1} · P2 ${n2}"
+  [[ "$dropped" -gt 0 ]] && stat="${stat}（另有 ${dropped} 条不合契约已丢弃）"
+  [[ "$delocated" -gt 0 ]] && stat="${stat}（${delocated} 条的文件路径不合规，已按未定位处理）"
+  echo "$stat"
 
   # 重点关注文件：按 P0→P1→P2 计数降序、同计数按路径升序，最多 10 行；无可归属文件时整节省略。
   if [[ "$(jq -r '[.findings[] | select(.file != null)] | length' "$_RR_JSON")" -gt 0 ]]; then
@@ -380,12 +477,21 @@ review_render_summary() {
 # --- 疑似密钥的脚本侧掩码（stdin → stdout）---
 # 只用在降级路径上。正常路径的掩码由评审员按 agent 提示词完成（前 4 后 4），但降级恰恰意味着
 # 评审员没有遵守输出契约——此时再假设它遵守了掩码规则是不成立的，而降级评论会把原文整段贴到
-# 组织内可见的 MR 上。所以这里按已知凭证形态做一次保守的脚本侧掩码：
-#   宁可把不是密钥的长串也掩掉（降级评论本就是兜底形态），也不要漏一个真凭证。
+# 组织内可见的 MR 上。所以这里按已知凭证形态做一次脚本侧掩码。
 # 掩码规则与提示词一致：长度 ≥ 12 保留前 4 后 4，其余整体替换为 ****。
-# 注意这不是完备的密钥检测，只覆盖有明确前缀/形态的常见类型 + key=value 赋值。
+#
+# 精度要求（R7）：降级评论正是人要**手读**的那一份。早先的 key=value 规则只看键名，把
+#   `password: os.environ.get("PW")`、`token = request.headers.get("Authorization")`、
+#   `private_key=/etc/ssl/private/server.key`
+# 一并掩成乱码——这些是表达式和路径，不是凭证，掩掉只会让人读不懂而毫无安全收益。
+# 所以 key=value 只对「看起来像字面量凭证」的取值生效：引号里的字符串，或不含调用/属性访问/
+# 路径特征的高熵 token。有明确前缀的形态（AWS/GitHub/Slack/JWT/PEM/Bearer/URL 内嵌凭证）另走白名单，
+# 不受这条限制。
 review_redact_secrets() {
   LC_ALL=C awk '
+    # 注意：本函数整体在 LC_ALL=C 下运行（按字节），所以**所有取值的字符类都必须是显式 ASCII 白名单**，
+    # 不能用 [^…] 这种否定类——中文标点等高位字节不属于 [[:space:]]/[[:punct:]]，取值会一路吞进中文正文，
+    # 掩码还会从多字节字符中间切断（输出 U+FFFD）。
     function mask(s) {
       if (length(s) >= 12) return substr(s, 1, 4) "****" substr(s, length(s) - 3)
       return "****"
@@ -401,17 +507,26 @@ review_redact_secrets() {
       }
       return out line
     }
+    # 取值像不像「字面量凭证」。排除表达式与路径，避免把可读的代码掩成乱码。
+    function looks_literal(v) {
+      if (length(v) < 12) return 0
+      if (v ~ /[(){}$<>[:space:]]/) return 0            # 函数调用 / 变量展开 / 模板
+      if (v ~ /^[\/.~\-]/) return 0                      # 绝对路径、./ 相对路径、~/、选项
+      if (v ~ /[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_]/) return 0  # 属性访问（os.environ、server.key）
+      if (v ~ /[0-9]/) return 1                          # 含数字：当作高熵
+      if (v ~ /[a-z]/ && v ~ /[A-Z]/) return 1           # 大小写混合：当作高熵
+      return 0
+    }
     # 形如 SECRET_KEY = "xxx" / token: xxx 的赋值：只掩码取值部分，保留键名（键名是排查线索）
     # 大小写不敏感靠 tolower 副本定位——tolower 不改变长度，下标可以直接套回原串
     function redact_assign(line,   lo, out, seg, vstart, val, i, ch) {
       out = ""
       while (1) {
         lo = tolower(line)
-        if (match(lo, /(secret|token|passwd|password|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credential)[a-z0-9_-]*[[:space:]]*[:=][[:space:]]*"?'"'"'?[a-za-z0-9\/+_=.-]{12,}/) == 0) break
+        if (match(lo, /(secret|token|passwd|password|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credential)[a-z0-9_-]*[[:space:]]*[:=][[:space:]]*"?'"'"'?[A-Za-z0-9._~+\/=-]+/) == 0) break
         seg = substr(line, RSTART, RLENGTH)
         out = out substr(line, 1, RSTART - 1)
         line = substr(line, RSTART + RLENGTH)
-        # 在 seg 里找最后一个 : 或 = 之后的取值起点（跳过空白与引号）
         vstart = 0
         for (i = length(seg); i >= 1; i--) {
           ch = substr(seg, i, 1)
@@ -420,7 +535,56 @@ review_redact_secrets() {
         if (vstart == 0) { out = out seg; continue }
         while (vstart <= length(seg) && substr(seg, vstart, 1) ~ /[[:space:]"'"'"']/) vstart++
         val = substr(seg, vstart)
-        out = out substr(seg, 1, vstart - 1) mask(val)
+        if (looks_literal(val)) out = out substr(seg, 1, vstart - 1) mask(val)
+        else                    out = out seg
+      }
+      return out line
+    }
+    # Authorization: Bearer <token> / Authorization: Basic <b64>：掩码方案后面的那一段
+    function redact_bearer(line,   lo, out, seg, p, val) {
+      out = ""
+      while (1) {
+        lo = tolower(line)
+        if (match(lo, /(bearer|basic)[[:space:]]+[A-Za-z0-9._~+\/=-]{8,}/) == 0) break
+        seg = substr(line, RSTART, RLENGTH)
+        out = out substr(line, 1, RSTART - 1)
+        line = substr(line, RSTART + RLENGTH)
+        p = match(seg, /[[:space:]]+/)
+        val = substr(seg, p + RLENGTH)
+        out = out substr(seg, 1, p + RLENGTH - 1) mask(val)
+      }
+      return out line
+    }
+    # 自定义令牌头（云效令牌走这条：x-yunxiao-token: xxx）
+    function redact_header(line,   lo, out, seg, vstart, val, i, ch) {
+      out = ""
+      while (1) {
+        lo = tolower(line)
+        if (match(lo, /(x-yunxiao-token|x-api-key|x-auth-token|private-token|authorization)[[:space:]]*:[[:space:]]*[A-Za-z0-9._~+\/=-]+/) == 0) break
+        seg = substr(line, RSTART, RLENGTH)
+        out = out substr(line, 1, RSTART - 1)
+        line = substr(line, RSTART + RLENGTH)
+        vstart = index(seg, ":") + 1
+        while (vstart <= length(seg) && substr(seg, vstart, 1) ~ /[[:space:]]/) vstart++
+        val = substr(seg, vstart)
+        # 值本身是 Bearer/Basic 方案时交给 redact_bearer，别把方案名掩掉
+        if (tolower(val) ~ /^(bearer|basic)/) out = out seg
+        else out = out substr(seg, 1, vstart - 1) mask(val)
+      }
+      return out line
+    }
+    # URL 内嵌凭证 scheme://user:pass@host：只掩 pass
+    function redact_url(line,   out, seg, p, q, user, pass) {
+      out = ""
+      while (match(line, /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[A-Za-z0-9._~+-]+:[A-Za-z0-9._~+\/=%-]+@/) > 0) {
+        seg = substr(line, RSTART, RLENGTH)
+        out = out substr(line, 1, RSTART - 1)
+        line = substr(line, RSTART + RLENGTH)
+        p = index(seg, "://") + 3
+        q = index(substr(seg, p), ":")
+        user = substr(seg, p, q - 1)
+        pass = substr(seg, p + q, length(seg) - (p + q))   # 去掉结尾的 @
+        out = out substr(seg, 1, p - 1) user ":" mask(pass) "@"
       }
       return out line
     }
@@ -433,7 +597,7 @@ review_redact_secrets() {
       pat[++n] = "xox[baprs]-[0-9A-Za-z-]{10,}"                              # Slack
       pat[++n] = "AIza[0-9A-Za-z_-]{30,}"                                    # Google API key
       pat[++n] = "sk-[0-9A-Za-z]{20,}"                                       # OpenAI 风格
-      pat[++n] = "eyJ[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}\.[0-9A-Za-z_-]{8,}" # JWT
+      pat[++n] = "eyJ[0-9A-Za-z_-]{8,}\\.[0-9A-Za-z_-]{8,}\\.[0-9A-Za-z_-]{8,}" # JWT
     }
     # PEM 私钥整块屏蔽：这种内容没有「保留前 4 后 4」的意义
     /-----BEGIN [A-Z ]*PRIVATE KEY-----/ { inpem = 1; print "**** （脚本已屏蔽一段 PRIVATE KEY 内容）"; next }
@@ -442,6 +606,9 @@ review_redact_secrets() {
     {
       line = $0
       for (i = 1; i <= n; i++) line = redact(line, pat[i])
+      line = redact_url(line)
+      line = redact_bearer(line)
+      line = redact_header(line)
       print redact_assign(line)
     }'
 }
@@ -458,11 +625,13 @@ review_render_degraded() {
   _review_render_header "## 🤖 Kiro 代码评审 · ⚠️ 结构化解析失败"
   echo ""
   echo "> ⚠️ 评审已完成，但输出不符合结构化契约（${_RR_REASON:-未说明原因}），无法给出分级问题清单与统计。"
-  echo "> 下面是评审员输出的原文（已由脚本对疑似凭证再做一次掩码）；重跑评审（评论 \`/kiro review\`）通常可恢复结构化输出。"
+  echo "> 下面是评审员输出的原文（已由脚本对疑似凭证再做一次掩码，并把其中的 Markdown 标题、分隔线与"
+  echo "> HTML 注释降级为普通文本——评论的结构只能来自脚本，否则原文里可以伪造标题与评审标记）。"
+  echo "> 重跑评审（评论 \`/kiro review\`）通常可恢复结构化输出。"
   echo ""
   echo "---"
   echo ""
-  review_redact_secrets < "$_RR_TEXT"
+  review_redact_secrets < "$_RR_TEXT" | review_sanitize_md
   echo ""
   _review_render_footer
 }

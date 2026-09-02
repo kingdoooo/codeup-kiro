@@ -1,4 +1,5 @@
 {
+  "contract": "codeup-reviewer/1",
   "summary": "只调整了注释与格式，没有行为变化。",
   "verdict": "MERGE",
   "verdict_reason": "无实质风险。",

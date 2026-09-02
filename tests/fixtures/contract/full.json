@@ -1,4 +1,5 @@
 {
+  "contract": "codeup-reviewer/1",
   "summary": "为搜索接口新增了用户名模糊查询，并把结果直接拼进 SQL；同时调整了分页默认值。",
   "verdict": "MERGE_AFTER_FIX",
   "verdict_reason": "存在一处 SQL 注入，修复后可合并。",

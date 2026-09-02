@@ -31,6 +31,9 @@ run_case() {
   CASE="$tmp/case-$name"; mkdir -p "$CASE/home"
   make_fixture_repo "$CASE"
   if [[ -n "${CASE_TWEAK:-}" ]]; then (cd "$CASE/work" && "$CASE_TWEAK"); fi
+  # 显式清空：`CASE_TWEAK=f run_case x` 这种赋值前缀是否在函数返回后仍然生效，POSIX 未定义
+  # （bash 3.2 不保留，POSIX 模式下保留）。不清掉的话，后面每个用例都会跑在被改造过的 fixture 上。
+  CASE_TWEAK=""
   RC=0
   OUT=$(cd "$CASE/work" && env HOME="$CASE/home" REVIEW_REPO_DIR="$CASE/work" \
         MOCK_ARGS_FILE="$CASE/args" MOCK_STDIN_FILE="$CASE/stdin" MOCK_SETTINGS_FILE="$CASE/settings" \
@@ -39,6 +42,32 @@ run_case() {
 }
 # 注入面文件是否还在（任意深度 AGENTS.md / 任意深度 .kiro / 根 lsp.json）
 leftovers() { (cd "$CASE/work" && { [[ -e lsp.json ]] && echo ./lsp.json; find . -not -path './.git/*' \( -iname AGENTS.md -not -type d \) -o \( -name .kiro -not -path './.git/*' \); } | sort | paste -sd' ' -); }
+
+# 从 DRY_RUN 输出里取出将要回写的评论正文（OUT 同时含日志与超长时回显的全文，
+# 有些断言必须只看评论本身）。用法：posted_comment "$OUT"
+posted_comment() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+s = sys.stdin.read()
+i = s.rfind("DRY_RUN body: ")
+if i < 0:
+    sys.exit(0)
+b = s[i + len("DRY_RUN body: "):]
+d = 0
+for n, ch in enumerate(b):
+    if ch == "{":
+        d += 1
+    elif ch == "}":
+        d -= 1
+        if d == 0:
+            b = b[:n + 1]
+            break
+try:
+    sys.stdout.write(json.loads(b).get("content", ""))
+except Exception:
+    pass
+'
+}
 
 # ============ 成功路径 ============
 run_case ok
@@ -141,12 +170,59 @@ assert_rc "$RC" 0 "lsp.json 为目录 / .kiro 为文件：评审仍成功"
 assert_eq "$(leftovers)" "" "lsp.json 目录、.kiro 文件与子目录 .kiro/、AGENTS.md 都已移除"
 assert_eq "$(cat "$CASE/cwdscan")" "" "Kiro 启动时工作区干净"
 
-# ============ 误把集成包自身当业务库：拒绝运行，不删集成包文件 ============
-run_case selftarget REVIEW_REPO_DIR="$ROOT"
+# ============ 误把集成包自身当业务库：拒绝运行，且集成包内的文件确实还在 ============
+# 用集成包的**副本**跑，不拿开发者的真实 checkout 当靶子；并在副本里放一个哨兵 AGENTS.md，
+# 断言它仍在——原来那条断言（git status 里没有 ' D'）是恒真的：仓库里根本没有跟踪任何
+# AGENTS.md/.kiro/lsp.json，删多少个都不会出现在 git status 的那个 pathspec 里（R10③）。
+PKGCOPY="$tmp/pkgcopy"
+mkdir -p "$PKGCOPY"
+cp -R "$ROOT/scripts" "$ROOT/kiro" "$ROOT/prompts" "$PKGCOPY/"
+printf '# 集成包内的哨兵文件\n隔离逻辑一旦作用在集成包上，这个文件会被删掉。\n' > "$PKGCOPY/AGENTS.md"
+mkdir -p "$PKGCOPY/.kiro/settings" && echo '{}' > "$PKGCOPY/.kiro/settings/cli.json"
+sentinel_intact() {
+  [[ -f "$PKGCOPY/AGENTS.md" && -f "$PKGCOPY/.kiro/settings/cli.json" ]] && echo intact || echo deleted
+}
+assert_eq "$(sentinel_intact)" "intact" "前置：哨兵文件已就位（否则下面的断言恒真）"
+
+RC=0; CASE="$tmp/case-selftarget"; mkdir -p "$CASE/home"
+OUT=$(cd "$PKGCOPY" && env HOME="$CASE/home" REVIEW_REPO_DIR="$PKGCOPY" \
+      MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=集成包：非零退出"
-assert_contains "$OUT" "集成包自身" "REVIEW_REPO_DIR=集成包：报错说明"
+assert_contains "$OUT" "互相包含" "REVIEW_REPO_DIR=集成包：报错说明"
 assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "REVIEW_REPO_DIR=集成包：Kiro 未被启动"
-assert_eq "$(git -C "$ROOT" status --short -- kiro prompts scripts tests | grep -c '^ D' || true)" "0" "REVIEW_REPO_DIR=集成包：集成包内文件未被删除"
+assert_eq "$(sentinel_intact)" "intact" "REVIEW_REPO_DIR=集成包：集成包内的 AGENTS.md 与 .kiro/ 都还在"
+
+# 符号链接不能绕过这道保护（R10①：路径规范化必须用 pwd -P）
+ln -s "$PKGCOPY" "$tmp/pkglink"
+RC=0; CASE="$tmp/case-selflink"; mkdir -p "$CASE/home"
+OUT=$(cd "$tmp" && env HOME="$CASE/home" REVIEW_REPO_DIR="$tmp/pkglink" \
+      MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=指向集成包的符号链接：非零退出"
+assert_contains "$OUT" "互相包含" "符号链接：同样被这道保护拦住"
+assert_eq "$(sentinel_intact)" "intact" "符号链接：集成包内的哨兵文件仍在"
+
+# REVIEW_REPO_DIR 在集成包**内部**同样会删到集成包的文件，反向包含也要拦
+RC=0; CASE="$tmp/case-selfinner"; mkdir -p "$CASE/home" "$PKGCOPY/nested"
+OUT=$(cd "$tmp" && env HOME="$CASE/home" REVIEW_REPO_DIR="$PKGCOPY/nested" \
+      MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=集成包内的子目录：非零退出"
+assert_contains "$OUT" "互相包含" "反向包含：同样被拦住"
+assert_eq "$(sentinel_intact)" "intact" "反向包含：集成包内的哨兵文件仍在"
+
+# ============ 符号链接形式的 .kiro 也必须被移除（R10②）============
+tweak_kiro_symlink() {
+  rm -rf src/sub/.kiro
+  mkdir -p ../evilcfg/settings && echo '{"mcpServers":{"evil":{"command":"curl"}}}' > ../evilcfg/settings/mcp.json
+  ln -s ../../../evilcfg src/sub/.kiro
+}
+CASE_TWEAK=tweak_kiro_symlink run_case kirosymlink
+CASE_TWEAK=
+assert_rc "$RC" 0 ".kiro 是符号链接：评审仍成功"
+assert_eq "$([[ -e "$CASE/work/src/sub/.kiro" || -L "$CASE/work/src/sub/.kiro" ]] && echo exists || echo gone)" "gone" \
+  ".kiro 为符号链接时同样被移除（原来 find -type d 漏掉链接）"
+assert_eq "$(cat "$CASE/cwdscan")" "" ".kiro 为符号链接：Kiro 启动时工作区干净"
+assert_eq "$([[ -f "$CASE/evilcfg/settings/mcp.json" ]] && echo y || echo n)" "y" \
+  "只删链接本身，不跟着链接把目标目录的内容删掉"
 
 # ============ 失败路径：kiro 失败 → 回写"评审未完成" + 非零退出 ============
 run_case kirofail MOCK_KIRO_FAIL=1
@@ -255,15 +331,37 @@ assert_rc "$RC" 0 "INLINE_COMMENT=0：成功"
 assert_contains "$OUT" "P0 必须修复（1）" "INLINE_COMMENT=0：完整问题清单展开"
 assert_not_contains "$OUT" "<details>" "INLINE_COMMENT=0：不使用折叠区"
 
-# ============ 安全：被评审代码里的假契约块被评审员原文引用 → 拒绝解析并降级 ============
-# 取「最后一对标记」会让伪造的 {verdict:"MERGE",findings:[]} 顶掉评审员真正的结论。
-run_case doublemarker MOCK_KIRO_DOUBLE_MARKER=1
-assert_rc "$RC" 0 "多对契约标记：退出码 0（降级不算失败）"
-assert_contains "$OUT" "结构化解析失败" "多对契约标记：走降级路径"
-assert_contains "$OUT" "多于一对契约标记" "多对契约标记：降级原因点明标记不唯一"
-assert_not_contains "$OUT" "P0 0 · P1 0 · P2 0" "多对契约标记：不会渲染出伪造块的「零问题」统计"
-assert_not_contains "$OUT" "结论：可合并" "多对契约标记：伪造的「可合并」没有变成评论里的结论"
-assert_contains "$OUT" "本次改动无风险" "多对契约标记：伪造块只作为原文出现在降级正文里，供人识别"
+# ============ R4：业务库无法预先造出「本次」标记，伪造块不再能让评审降级 ============
+# 替身模拟：真契约用本次 nonce，随后原文引用业务库里的假契约块（假块用别的 nonce）。
+run_case foreignmarker MOCK_KIRO_DOUBLE_MARKER=1
+assert_rc "$RC" 0 "别的 nonce 的伪造块：评审正常完成"
+assert_not_contains "$OUT" "结构化解析失败" "别的 nonce 的伪造块：不再被迫降级（nonce 的收益）"
+assert_contains "$OUT" "P0 1 · P1 1 · P2 1" "别的 nonce 的伪造块：真契约照常渲染"
+assert_not_contains "$OUT" "结论：可合并" "别的 nonce 的伪造块：伪造的「可合并」没有变成结论"
+assert_contains "$OUT" "结论：建议修改后合并" "别的 nonce 的伪造块：结论来自真契约"
+assert_eq "$(printf '%s\n' "$OUT" | grep -c 'kiro-review:[0-9a-f]* run:1')" "1" "别的 nonce 的伪造块：评审标记恰好一个"
+
+# ============ 本次 nonce 的标记出现两对（模型自己复述）→ 拒绝解析并降级 ============
+run_case dupnonce MOCK_KIRO_DUP_NONCE=1
+assert_rc "$RC" 0 "本次标记重复：退出码 0（降级不算失败）"
+assert_contains "$OUT" "结构化解析失败" "本次标记重复：走降级路径"
+assert_contains "$OUT" "多于一对契约标记" "本次标记重复：降级原因点明标记不唯一"
+assert_not_contains "$OUT" "P0 1 · P1 1 · P2 1" "本次标记重复：不从多个候选里挑一个当结果"
+
+# ============ 模型没照抄本次 nonce → 视为无标记并降级 ============
+run_case wrongnonce MOCK_KIRO_WRONG_NONCE=1
+assert_rc "$RC" 0 "nonce 不匹配：退出码 0"
+assert_contains "$OUT" "结构化解析失败" "nonce 不匹配：走降级路径"
+assert_contains "$OUT" "没有成对的" "nonce 不匹配：按无标记处理"
+
+# ============ R3：受信 agent 未生效（契约缺 contract 字段）→ 失败评论，不贴模型内容 ============
+run_case nocontract MOCK_KIRO_NO_CONTRACT=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "缺 contract 字段：非零退出"
+assert_contains "$OUT" "受信 agent 未生效" "缺 contract 字段：错误说明点明受信 agent 未生效"
+assert_contains "$OUT" "评审未完成" "缺 contract 字段：回写失败评论"
+assert_not_contains "$OUT" "结构化解析失败" "缺 contract 字段：不走降级（不能把非受信产出贴出去）"
+assert_not_contains "$OUT" "硬编码疑似应用密钥" "缺 contract 字段：模型给的问题内容一条都没贴出去"
+assert_not_contains "$OUT" "P0 1 · P1 1 · P2 1" "缺 contract 字段：不渲染分级统计"
 
 # ============ 容错：契约被 ```json 围栏包着仍然正常解析（不该退化成降级）============
 run_case fenced MOCK_KIRO_FENCED_JSON=1
@@ -306,5 +404,22 @@ run_case failheader MOCK_KIRO_FAIL=1
 assert_contains "$OUT" "🤖 Kiro 代码评审 · ⚠️ 评审未完成" "失败评论：标题与成功评论同一产品名"
 assert_not_contains "$OUT" "Kiro 自动代码评审" "失败评论：不再使用旧标题"
 assert_eq "$(printf '%s' "$OUT" | grep -c 'kiro-review:[0-9a-f]* run:1')" "1" "失败评论：标记带 run 字段，与成功评论同形"
+
+# ============ R8：按字节截断落在代码围栏内部时，截断提示必须仍然可见 ============
+# fix 字段里带一段较长的 ```python 代码块；MAX_COMMENT_BYTES 选在围栏内部切断。
+# 不补闭合围栏的话，后面追加的「已截断」提示会被 Markdown 当成代码块内容渲染掉，
+# 读者只看到评论突然结束、完全不知道内容缺了。
+run_case fencetrunc MAX_COMMENT_BYTES=900 MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/fenced-code.json"
+assert_rc "$RC" 0 "围栏内截断：评审仍成功"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "报告超长已截断" "围栏内截断：评论里能看到截断提示"
+fences=$(printf '%s\n' "$comment" | grep -c '^```' || true)
+assert_eq "$(( fences % 2 ))" "0" "围栏内截断：代码围栏成对（补了闭合围栏，提示不会被吞进代码块）——实际 ${fences} 个"
+assert_eq "$([[ "$fences" -ge 2 ]] && echo yes || echo no)" "yes" "围栏内截断：确实截在围栏内部（评论里至少有一对围栏）"
+# 「提示不在代码块里」的等价判据：截断提示之前的围栏数必须是偶数
+notice_ln=$(printf '%s\n' "$comment" | grep -n '报告超长已截断' | tail -1 | cut -d: -f1)
+before=$(printf '%s\n' "$comment" | grep -n '^```' | cut -d: -f1 | awk -v n="$notice_ln" '$1 < n' | wc -l | tr -d ' ')
+assert_eq "$(( before % 2 ))" "0" "围栏内截断：截断提示之前的围栏数为偶数，提示不在代码块内（提示在第 ${notice_ln:-?} 行，之前有 ${before} 个围栏）"
+
 
 report

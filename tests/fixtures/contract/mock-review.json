@@ -1,4 +1,5 @@
 {
+  "contract": "codeup-reviewer/1",
   "summary": "在 src/app.py 中新增了一个硬编码的 SECRET_KEY，并加入若干注入面配置文件；其余为无行为变化的调整。",
   "verdict": "MERGE_AFTER_FIX",
   "verdict_reason": "硬编码凭证必须先移除，其余问题不阻塞。",

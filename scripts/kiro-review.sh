@@ -9,8 +9,10 @@
 # 退出码：0=评审完成并回写；非 0=失败（不卡合并，仅流水线标红）。
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PKG_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# -P 解析掉符号链接：两侧都用物理路径，下面的「REVIEW_REPO_DIR 不得指向集成包自身」比较才拦得住
+# `ln -s <集成包> /tmp/link; REVIEW_REPO_DIR=/tmp/link` 这种绕过（R10①）
+PKG_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 source "${SCRIPT_DIR}/lib/codeup-api.sh"
 source "${SCRIPT_DIR}/lib/diff-compress.sh"
 source "${SCRIPT_DIR}/lib/kiro-agent.sh"
@@ -74,27 +76,19 @@ command -v timeout >/dev/null && TIMEOUT_BIN=timeout
 : "${YUNXIAO_TOKEN:?缺少 YUNXIAO_TOKEN}"
 : "${YUNXIAO_ORG_ID:?缺少 YUNXIAO_ORG_ID}"
 : "${CODEUP_REPO_ID:?缺少 CODEUP_REPO_ID}"
-REVIEW_REPO_DIR=$(cd "$REVIEW_REPO_DIR" 2>/dev/null && pwd) || die "REVIEW_REPO_DIR 不存在或不可进入：${REVIEW_REPO_DIR}"
+REVIEW_REPO_DIR=$(cd "$REVIEW_REPO_DIR" >/dev/null 2>&1 && pwd -P) || die "REVIEW_REPO_DIR 不存在或不可进入：${REVIEW_REPO_DIR}"
 # 第 5.5 步会删掉业务库工作树里的 AGENTS.md/.kiro/lsp.json，而 DRY_RUN 并不拦删除：
 # 本地把集成包自身（或它的上级目录）误当业务库跑，会把集成包自己的文件删掉，直接拒绝。
-[[ "$PKG_ROOT" != "$REVIEW_REPO_DIR" && "$PKG_ROOT" != "$REVIEW_REPO_DIR"/* ]] \
-  || die "REVIEW_REPO_DIR（${REVIEW_REPO_DIR}）指向集成包自身或其上级目录，拒绝运行：隔离步骤会删除集成包内的文件"
+[[ "$PKG_ROOT" != "$REVIEW_REPO_DIR" && "$PKG_ROOT" != "$REVIEW_REPO_DIR"/* && "$REVIEW_REPO_DIR" != "$PKG_ROOT"/* ]] \
+  || die "REVIEW_REPO_DIR（${REVIEW_REPO_DIR}）与集成包（${PKG_ROOT}）互相包含，拒绝运行：隔离步骤会删除集成包内的文件"
 [[ -d "$REVIEW_REPO_DIR/.git" ]] || die "REVIEW_REPO_DIR 不是 git 仓库：$REVIEW_REPO_DIR"
 [[ -r "$PROMPT_FILE" ]] || die "评审提示词文件不可读：$PROMPT_FILE"
 [[ -r "$AGENT_FILE" ]] || die "custom agent 配置文件不可读：$AGENT_FILE"
 
-# --- 1. 安装/检测 kiro-cli ---
-if ! command -v kiro-cli >/dev/null; then
-  log "kiro-cli 不存在，尝试安装（云托管构建机场景）……"
-  curl -fsSL --connect-timeout 10 --max-time 300 "$KIRO_INSTALL_URL" | bash \
-    || die "kiro-cli 安装失败。网络受限时请使用自建构建机预装固定版本，或配置 HTTP_PROXY/HTTPS_PROXY（见 pipeline/setup-guide.md）"
-  command -v kiro-cli >/dev/null || export PATH="$HOME/.local/bin:$PATH"
-  command -v kiro-cli >/dev/null || die "安装后仍找不到 kiro-cli，请检查安装日志中的 PATH 提示"
-fi
-
 cd "$REVIEW_REPO_DIR"
 
-# --- 2. 定位 MR（先定位，之后的任何失败都能回写「评审未完成」评论：spec I10 失败可见）---
+# --- 1. 定位 MR（放在最前面：此后任何失败都能回写「评审未完成」评论，spec I10 失败可见。
+#        定位只需要 git 与 Codeup OpenAPI，不需要 kiro-cli，所以安装排在它后面）---
 SOURCE_BRANCH="${CI_COMMIT_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
 if [[ -n "${MR_LOCAL_ID:-}" && -n "${MR_TARGET_BRANCH:-}" ]]; then
   LOCAL_ID="$MR_LOCAL_ID"; TARGET_BRANCH="$MR_TARGET_BRANCH"
@@ -114,6 +108,16 @@ else
 fi
 SHORT_SHA=$(git rev-parse --short HEAD)
 MR_LOCATED=1
+
+# --- 2. 安装/检测 kiro-cli（失败用 die_review：网络受限的构建机上这是最常见的失败，
+#        原来用 die 会让 MR 上什么都看不到、只有流水线标红，违反 I10）---
+if ! command -v kiro-cli >/dev/null; then
+  log "kiro-cli 不存在，尝试安装（云托管构建机场景）……"
+  curl -fsSL --connect-timeout 10 --max-time 300 "$KIRO_INSTALL_URL" | bash \
+    || die_review "kiro-cli 安装失败。网络受限时请使用自建构建机预装固定版本，或配置 HTTP_PROXY/HTTPS_PROXY（见 pipeline/setup-guide.md）"
+  command -v kiro-cli >/dev/null || export PATH="$HOME/.local/bin:$PATH"
+  command -v kiro-cli >/dev/null || die_review "安装后仍找不到 kiro-cli，请检查安装日志中的 PATH 提示"
+fi
 
 # --- 3. 安装受信 agent + kiro-cli 能力检查（放在 MR 定位之后：失败用 die_review 回写评论，而不是只让流水线标红）---
 # agent 定义里的 prompt 是相对 file:// 引用（kiro 相对 agent 文件所在目录解析），复制到 ~/.kiro/agents/
@@ -184,7 +188,9 @@ log "diff 已生成：$(wc -c < "$WORK/review.diff" | tr -d ' ') 字节（merge-
 # 同名目录（如 lsp.json/）不是注入面，但也一并删除：rm -f 遇到目录会失败，让 MR 作者能用一个目录名卡死评审。
 : > "$WORK/removed-agents-md.txt"; : > "$WORK/removed-kiro-dirs.txt"
 find . -not -path './.git/*' -iname AGENTS.md -not -type d -print -delete >> "$WORK/removed-agents-md.txt" || die_review "隔离失败：无法移除业务库中的 AGENTS.md"
-find . -path ./.git -prune -o -name .kiro -type d -print -prune -exec rm -rf {} + >> "$WORK/removed-kiro-dirs.txt" || die_review "隔离失败：无法移除业务库中的 .kiro/"
+# `\( -type d -o -type l \)`：`.kiro` 也可能是指向别处的**符号链接**（R10②）。原来只匹配 -type d，
+# 业务库提交 `src/sub/.kiro -> ../../evilcfg` 就能让一份工作区配置在隔离之后依然可读。
+find . -path ./.git -prune -o -name .kiro \( -type d -o -type l \) -print -prune -exec rm -rf {} + >> "$WORK/removed-kiro-dirs.txt" || die_review "隔离失败：无法移除业务库中的 .kiro/"
 rm -rf ./.kiro || die_review "隔离失败：无法移除业务库根目录 .kiro"
 rm -rf ./lsp.json || die_review "隔离失败：无法移除业务库根目录 lsp.json"
 log "隔离：已移除业务库工作树中 $(wc -l < "$WORK/removed-agents-md.txt" | tr -d ' ') 个 AGENTS.md、$(wc -l < "$WORK/removed-kiro-dirs.txt" | tr -d ' ') 个 .kiro/（均任意深度）与根 lsp.json"
@@ -201,13 +207,25 @@ log "隔离：已设置 chat.disableInheritingDefaultResources=true"
 # kiro-probe-t01r-toolnames、kiro-probe-t01r-trusttools）。
 # --output-format stream-json 只在 v2/v3 引擎上被接受（v1 直接报错），结构化输出契约依赖它：
 # 评审报告要从 runFinished.data.finalText 里取（spec §4.1、§4.7.1 P1-08）。
+# 本次运行的契约标记随机串。固定字面量标记可被业务库利用：提示词要求把注入企图作为 P0 报出来，
+# 模型常常直接原文引用那行标记，标记计数变 2 → 每次评审都降级。nonce 让攻击者无法预先提交。
+REVIEW_NONCE=$(review_new_nonce)
+[[ "$REVIEW_NONCE" =~ ^[0-9a-f]{16}$ ]] || die_review "生成契约标记随机串失败（得到：${REVIEW_NONCE}）"
+grep -q '{{REVIEW_NONCE}}' "$PROMPT_FILE" \
+  || die_review "运行时提示词缺少 {{REVIEW_NONCE}} 占位符：模型拿不到本次标记，每次评审都会降级。请同步更新 ${PROMPT_FILE}"
+sed "s/{{REVIEW_NONCE}}/${REVIEW_NONCE}/g" "$PROMPT_FILE" > "$WORK/prompt.txt" \
+  || die_review "运行时提示词渲染失败"
+# 只打随机串、不打完整标记：日志里出现标记字面量会干扰「评论/日志里不该有契约标记」这类断言，
+# 排查时有随机串就够了（标记模板是固定的）。
+log "本次契约标记随机串：${REVIEW_NONCE}"
+
 log "Kiro 引擎：${KIRO_ENGINE}（--agent-engine ${KIRO_ENGINE}；ADR-0004：v1/v3 不阻断 AGENTS.md 注入，不得使用）"
 log "开始 Kiro 评审（超时 ${KIRO_TIMEOUT}s，输出格式 stream-json）……"
 kiro_rc=0
 KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" kiro-cli chat --no-interactive \
   --agent-engine "$KIRO_ENGINE" --output-format stream-json \
   --trust-tools=read,grep,glob --agent "$AGENT_NAME" \
-  "$(cat "$PROMPT_FILE")" \
+  "$(cat "$WORK/prompt.txt")" \
   < "$WORK/input.txt" > "$WORK/stream.jsonl" 2> "$WORK/kiro-stderr.log" || kiro_rc=$?
 
 if [[ "$kiro_rc" -ne 0 ]]; then
@@ -225,10 +243,13 @@ log "Kiro 用量：$(review_stream_usage "$WORK/stream.jsonl")"
 # rc 2/3 是「Kiro 没跑完 / 自报失败」——不是解析问题，走既有失败评论路径。
 # rc 4/5 是「跑完了但输出不合契约」——评审已产出，降级为贴出原文（退出码仍为 0）。
 extract_rc=0
-review_extract_json "$WORK/stream.jsonl" > "$WORK/contract.json" || extract_rc=$?
+review_extract_json "$WORK/stream.jsonl" "$REVIEW_NONCE" > "$WORK/contract.json" || extract_rc=$?
 case "$extract_rc" in
   2) die_review "Kiro 事件流中没有 runFinished 事件（评审未跑完；确认 --agent-engine ${KIRO_ENGINE} 与 --output-format stream-json 被接受）" ;;
   3) die_review "Kiro 自报运行失败（runFinished.status=$(tr -d '\n' < "$WORK/contract.json")）" ;;
+  # rc 7/8 是本地故障，绝不能和「被评审代码里有假标记」（rc 6）共用一个文案
+  7) die_review "读不到 Kiro 事件流文件（本地 I/O 故障，不是评审内容问题）：${WORK}/stream.jsonl" ;;
+  8) die_review "内部错误：提取契约时没有传入本次标记随机串（集成包缺陷，请报告）" ;;
 esac
 
 DEGRADE_REASON=""
@@ -247,9 +268,15 @@ fi
 
 # --- 6.3 字段校验：不合契约的问题丢弃并计数 ---
 if [[ -z "$DEGRADE_REASON" ]]; then
-  if ! review_validate < "$WORK/contract.json" > "$WORK/validated.json" 2> "$WORK/validate-err.log"; then
-    DEGRADE_REASON="契约 JSON 顶层结构不符（$(tail -1 "$WORK/validate-err.log")）"
-  fi
+  validate_rc=0
+  review_validate < "$WORK/contract.json" > "$WORK/validated.json" 2> "$WORK/validate-err.log" || validate_rc=$?
+  case "$validate_rc" in
+    0) ;;
+    # 受信 agent 未生效：contract 字段只在 agent 提示词里要求，缺了就说明模型拿的是裸提示词——
+    # 拒绝路径与掩码规则都没生效，这份输出不能贴到 MR 上，所以走失败评论而不是降级。
+    3) die_review "受信 agent 未生效：评审输出缺少 contract=\"${REVIEW_CONTRACT_ID}\" 标识（只在受信 agent 提示词里要求）。这份输出不是受信只读 agent 的产出，已拒绝回写其内容。请检查 ${AGENT_FILE} 的安装与 --agent ${AGENT_NAME} 是否生效" ;;
+    *) DEGRADE_REASON="契约 JSON 顶层结构不符（$(tail -1 "$WORK/validate-err.log")）" ;;
+  esac
 fi
 
 # --- 7. 渲染汇总评论并回写 ---
@@ -271,8 +298,11 @@ if [[ -n "$DEGRADE_REASON" ]]; then
     > "$WORK/comment.md" || die_review "降级评论渲染失败"
 else
   dropped=$(jq -r '.dropped_findings' "$WORK/validated.json")
+  delocated=$(jq -r '.delocated_findings' "$WORK/validated.json")
   [[ "$dropped" == "0" ]] \
     || log "警告：${dropped} 条问题不符合输出契约已丢弃（级别不在 P0/P1/P2，或缺 title/body）"
+  [[ "$delocated" == "0" ]] \
+    || log "警告：${delocated} 条问题的 file 含换行/竖线/反引号，已按未定位处理（这类值会破坏表格与定位串）"
   log "评审报告：P0 $(jq -r '[.findings[] | select(.severity == "P0")] | length' "$WORK/validated.json") · P1 $(jq -r '[.findings[] | select(.severity == "P1")] | length' "$WORK/validated.json") · P2 $(jq -r '[.findings[] | select(.severity == "P2")] | length' "$WORK/validated.json")，结论 $(jq -r '.verdict' "$WORK/validated.json")，丢弃 ${dropped}"
   review_render_summary --json "$WORK/validated.json" --inline-comment "$INLINE_COMMENT" "${render_args[@]}" \
     > "$WORK/comment.md" || die_review "汇总评论渲染失败"
@@ -284,6 +314,9 @@ if [[ "$(wc -c < "$WORK/comment.md" | tr -d ' ')" -gt "$MAX_COMMENT_BYTES" ]]; t
   cp "$WORK/comment.md" "$WORK/comment.full.md"
   head -c "$MAX_COMMENT_BYTES" "$WORK/comment.md" | iconv -f UTF-8 -t UTF-8 -c > "$WORK/comment.trunc.md" || \
     head -c "$MAX_COMMENT_BYTES" "$WORK/comment.md" > "$WORK/comment.trunc.md"
+  # 按字节截断几乎总是切在行中间：先补一个换行，否则后面追加的内容会接在那半行后面——
+  # 闭合围栏不在行首就不起作用（实测截断后得到的是 `    row_2 = fetc``` `，围栏没闭合）。
+  [[ $(tail -c1 "$WORK/comment.trunc.md" | wc -l | tr -d ' ') -eq 1 ]] || printf '\n' >> "$WORK/comment.trunc.md"
   # fix 字段里会带 ```代码块```：截断点落在围栏中间时，随后追加的截断提示会被 Markdown 当成
   # 代码块内容渲染掉，读者只看到评论突然结束、完全看不到「已截断」。所以先补闭合围栏，再写提示。
   if [[ $(( $(grep -c '^```' "$WORK/comment.trunc.md" || true) % 2 )) -eq 1 ]]; then
