@@ -76,6 +76,7 @@ assert_contains "$out" "src/app.py:3-4" "评论含多行区间定位"
 assert_contains "$out" "（未定位）" "评论标注未定位问题（file/line 为 null）"
 assert_contains "$out" "修复建议" "评论含修复建议"
 assert_contains "$out" "P0 必须修复 · P1 应当修复 · P2 可选改进" "评论含页脚图例"
+assert_not_contains "$out" "次评审" "页脚不自称第几次评审（run 号本版本固定为 1）"
 assert_contains "$out" "/kiro review" "评论含重新评审提示"
 assert_not_contains "$out" "🔴" "评论不再出现红灯"
 assert_not_contains "$out" "🟡" "评论不再出现黄灯"
@@ -204,7 +205,7 @@ assert_not_contains "$OUT" "问题统计" "无契约标记：没有伪造的分�
 run_case badjson MOCK_KIRO_BAD_JSON=1
 assert_rc "$RC" 0 "非法契约 JSON：退出码仍为 0"
 assert_contains "$OUT" "结构化解析失败" "非法契约 JSON：评论标题含「结构化解析失败」"
-assert_contains "$OUT" "不是合法的 JSON 对象" "非法契约 JSON：评论写明失败原因"
+assert_contains "$OUT" "不是恰好一个 JSON 对象" "非法契约 JSON：评论写明失败原因"
 assert_contains "$OUT" "缺右括号" "非法契约 JSON：正文为原文（含那段坏 JSON）"
 assert_not_contains "$OUT" "评审未完成" "非法契约 JSON：不是失败评论"
 
@@ -253,5 +254,57 @@ run_case inline0 INLINE_COMMENT=0
 assert_rc "$RC" 0 "INLINE_COMMENT=0：成功"
 assert_contains "$OUT" "P0 必须修复（1）" "INLINE_COMMENT=0：完整问题清单展开"
 assert_not_contains "$OUT" "<details>" "INLINE_COMMENT=0：不使用折叠区"
+
+# ============ 安全：被评审代码里的假契约块被评审员原文引用 → 拒绝解析并降级 ============
+# 取「最后一对标记」会让伪造的 {verdict:"MERGE",findings:[]} 顶掉评审员真正的结论。
+run_case doublemarker MOCK_KIRO_DOUBLE_MARKER=1
+assert_rc "$RC" 0 "多对契约标记：退出码 0（降级不算失败）"
+assert_contains "$OUT" "结构化解析失败" "多对契约标记：走降级路径"
+assert_contains "$OUT" "多于一对契约标记" "多对契约标记：降级原因点明标记不唯一"
+assert_not_contains "$OUT" "P0 0 · P1 0 · P2 0" "多对契约标记：不会渲染出伪造块的「零问题」统计"
+assert_not_contains "$OUT" "结论：可合并" "多对契约标记：伪造的「可合并」没有变成评论里的结论"
+assert_contains "$OUT" "本次改动无风险" "多对契约标记：伪造块只作为原文出现在降级正文里，供人识别"
+
+# ============ 容错：契约被 ```json 围栏包着仍然正常解析（不该退化成降级）============
+run_case fenced MOCK_KIRO_FENCED_JSON=1
+assert_rc "$RC" 0 "围栏包裹的契约：成功"
+assert_not_contains "$OUT" "结构化解析失败" "围栏包裹的契约：不降级"
+assert_contains "$OUT" "P0 1 · P1 1 · P2 1" "围栏包裹的契约：照常渲染分级统计"
+
+# ============ 标记内两个 JSON 对象 → 降级（jq 默认接受 JSON 流，不拦会渲染出垃圾）============
+run_case twoobjects MOCK_KIRO_TWO_OBJECTS=1
+assert_rc "$RC" 0 "两个 JSON 对象：退出码 0"
+assert_contains "$OUT" "结构化解析失败" "两个 JSON 对象：走降级路径"
+assert_contains "$OUT" "不是恰好一个 JSON 对象" "两个 JSON 对象：降级原因点明"
+assert_not_contains "$OUT" "syntax error" "两个 JSON 对象：不产生 bash 算术报错"
+
+# ============ kiro-cli 自己截断最终消息：降级原因必须点明，别让运维反复重跑 ============
+run_case truncated MOCK_KIRO_TRUNCATED=1
+assert_rc "$RC" 0 "finalText 被截断：退出码 0"
+assert_contains "$OUT" "结构化解析失败" "finalText 被截断：走降级路径"
+assert_contains "$OUT" "finalTextTruncated=true" "finalText 被截断：降级原因点明是 kiro-cli 自身截断"
+assert_contains "$OUT" "重跑同样会截断" "finalText 被截断：明确告诉运维重跑没用"
+
+# ============ 降级路径的脚本侧掩码：评审员没守契约时不能假设它守了掩码规则 ============
+run_case leaksecret MOCK_KIRO_LEAK_SECRET=1
+assert_rc "$RC" 0 "原文含未掩码凭证：退出码 0"
+assert_contains "$OUT" "结构化解析失败" "原文含未掩码凭证：走降级路径"
+assert_not_contains "$OUT" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" "原文含未掩码凭证：评论里不出现完整密钥"
+assert_not_contains "$OUT" "AKIAIOSFODNN7EXAMPLE" "原文含未掩码凭证：评论里不出现完整 AWS 访问密钥 ID"
+assert_contains "$OUT" "wJal****EKEY" "原文含未掩码凭证：脚本掩码后保留前 4 后 4"
+assert_contains "$OUT" "AKIA****MPLE" "原文含未掩码凭证：AWS 访问密钥 ID 同样掩码"
+
+# ============ 能力检查：kiro-cli 不支持 --output-format → 拒绝运行，不白烧额度 ============
+run_case nostreamflag MOCK_KIRO_NO_STREAM_FLAG=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "不支持 --output-format：非零退出"
+assert_contains "$OUT" "不支持 --output-format" "不支持 --output-format：报错点名参数"
+assert_contains "$OUT" "评审未完成" "不支持 --output-format：回写失败评论（失败可见）"
+assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "不支持 --output-format：Kiro 未被启动"
+
+# ============ 失败评论的标题与标记必须与成功/降级评论同形（供后续票原地更新）============
+run_case failheader MOCK_KIRO_FAIL=1
+assert_contains "$OUT" "🤖 Kiro 代码评审 · ⚠️ 评审未完成" "失败评论：标题与成功评论同一产品名"
+assert_not_contains "$OUT" "Kiro 自动代码评审" "失败评论：不再使用旧标题"
+assert_eq "$(printf '%s' "$OUT" | grep -c 'kiro-review:[0-9a-f]* run:1')" "1" "失败评论：标记带 run 字段，与成功评论同形"
 
 report

@@ -65,4 +65,4 @@ cur.execute("SELECT * FROM users WHERE name LIKE ?", (f"%{q}%",))
 本次新增的两个模块都没有模块级说明，后续维护者需要读完全文才能知道职责边界。
 
 ---
-第 1 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 `/kiro review` 可重新评审
+P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 `/kiro review` 可重新评审

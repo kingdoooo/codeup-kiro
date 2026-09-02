@@ -47,9 +47,11 @@ die_review() {
     local f
     f=$(mktemp)
     {
-      echo "## 🤖 Kiro 自动代码评审"
+      # 标题与标记必须与成功/降级评论同形：后续票要靠 `<!-- kiro-review:<sha> run:N -->` 找到
+      # 自己那条评论做原地更新，失败评论用另一种标记就会被漏掉；两种标题也会让 MR 上出现两个产品名。
+      echo "## 🤖 Kiro 代码评审 · ⚠️ 评审未完成"
+      echo "<!-- kiro-review:${SHORT_SHA:-unknown} run:${REVIEW_RUN} -->"
       echo ""
-      echo "<!-- kiro-review:${SHORT_SHA:-unknown} -->"
       echo "⚠️ 评审未完成：$*"
       echo ""
       echo "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。"
@@ -125,6 +127,10 @@ grep -q -- '--agent-engine' <<<"$KIRO_CHAT_HELP" \
   || die_review "kiro-cli chat 不支持 --agent-engine，无法钉死 ${KIRO_ENGINE} 引擎（ADR-0004：默认引擎不阻断 AGENTS.md 注入），拒绝运行。请升级 kiro-cli（≥ 2.21）"
 grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
   || die_review "kiro-cli chat 不支持 --agent，无法套用受信只读 agent（拒绝路径、无 MCP/shell/write/web），拒绝运行。请升级 kiro-cli"
+# 结构化输出契约完全依赖 stream-json（报告从 runFinished.data.finalText 取）。不预检的话，
+# 不支持该参数的版本会先把额度烧掉、再以 clap 退出码 2 失败，MR 上只剩「退出码 2」这种不可行动的信息。
+grep -q -- '--output-format' <<<"$KIRO_CHAT_HELP" \
+  || die_review "kiro-cli chat 不支持 --output-format，无法取得结构化评审报告（契约在 runFinished.data.finalText 里），拒绝运行。请升级 kiro-cli（≥ 2.21）"
 # 开关校验放在 MR 定位之后：配错开关也要在 MR 上看得见，而不是只让流水线标红
 [[ "$INLINE_COMMENT" == "0" ]] \
   || die_review "INLINE_COMMENT=${INLINE_COMMENT} 尚未实现（行内评论属后续票），当前版本只支持 INLINE_COMMENT=0。请把该流水线变量改回 0 或删除"
@@ -229,9 +235,15 @@ DEGRADE_REASON=""
 case "$extract_rc" in
   0) ;;
   4) DEGRADE_REASON="评审员输出中没有成对的 <<<KIRO_REVIEW_JSON>>> 契约标记" ;;
-  5) DEGRADE_REASON="契约标记内不是合法的 JSON 对象" ;;
+  5) DEGRADE_REASON="契约标记内不是恰好一个 JSON 对象" ;;
+  6) DEGRADE_REASON="输出里出现多于一对契约标记（很可能是被评审代码里的假标记被评审员原文引用），无法判定哪一段是评审结果" ;;
   *) DEGRADE_REASON="提取契约 JSON 失败（rc=${extract_rc}）" ;;
 esac
+# kiro-cli 自己截断了最终消息时，契约必然缺尾巴。不点明这一点，运维只会照着评论里的
+# 「重跑评审」提示一遍遍重跑同一个必然失败的评审。
+if [[ -n "$DEGRADE_REASON" ]] && review_stream_final_truncated "$WORK/stream.jsonl"; then
+  DEGRADE_REASON="${DEGRADE_REASON}；且 kiro-cli 标记 finalTextTruncated=true（最终消息被其自身截断，重跑同样会截断，需要缩小 diff 或调高 kiro-cli 输出上限）"
+fi
 
 # --- 6.3 字段校验：不合契约的问题丢弃并计数 ---
 if [[ -z "$DEGRADE_REASON" ]]; then
@@ -272,6 +284,11 @@ if [[ "$(wc -c < "$WORK/comment.md" | tr -d ' ')" -gt "$MAX_COMMENT_BYTES" ]]; t
   cp "$WORK/comment.md" "$WORK/comment.full.md"
   head -c "$MAX_COMMENT_BYTES" "$WORK/comment.md" | iconv -f UTF-8 -t UTF-8 -c > "$WORK/comment.trunc.md" || \
     head -c "$MAX_COMMENT_BYTES" "$WORK/comment.md" > "$WORK/comment.trunc.md"
+  # fix 字段里会带 ```代码块```：截断点落在围栏中间时，随后追加的截断提示会被 Markdown 当成
+  # 代码块内容渲染掉，读者只看到评论突然结束、完全看不到「已截断」。所以先补闭合围栏，再写提示。
+  if [[ $(( $(grep -c '^```' "$WORK/comment.trunc.md" || true) % 2 )) -eq 1 ]]; then
+    echo '```' >> "$WORK/comment.trunc.md"
+  fi
   {
     echo ""
     echo "> ⚠️ 报告超长已截断（上限 ${MAX_COMMENT_BYTES} 字节），完整内容见流水线日志。"

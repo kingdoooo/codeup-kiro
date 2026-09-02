@@ -126,6 +126,23 @@ assert_rc "$RC" 0 "M10：变异体仍能跑完"
 assert_not_contains "$OUT" "7 条问题不符合输出契约已丢弃" "M10：级别白名单被拿掉后丢弃数不再是 7——端到端丢弃断言会失败"
 assert_contains "$OUT" "4 条问题不符合输出契约已丢弃" "M10：只剩缺 title/body 与非对象被丢弃（4 条）"
 
+# --- M11：删掉「标记必须唯一」这道检查 → 契约不再唯一可辨，降级断言失效 ---
+# 有这道检查时，输出里出现两对标记一律拒绝解析、走降级；删掉之后脚本会从两个候选契约里
+# 挑一个（取第一对）当成评审结果——挑中哪一个取决于模型的叙述顺序，而顺序是被评审代码能影响的。
+pkg=$(make_mutant m11-marker-unique '/if (ns > 1 || ne > 1) exit 2/d' scripts/lib/review-render.sh)
+run_case m11 "$pkg" MOCK_KIRO_DOUBLE_MARKER=1
+assert_rc "$RC" 0 "M11：变异体仍能跑完"
+assert_not_contains "$OUT" "多于一对契约标记" "M11：不再报「标记不唯一」——端到端断言会失败"
+assert_not_contains "$OUT" "结构化解析失败" "M11：不再降级，而是从多个候选契约里挑一个当结果——端到端降级断言会失败"
+
+# --- M12：把降级路径的脚本侧掩码换回原样 cat → 未掩码的凭证直接进 MR 评论 ---
+pkg=$(make_mutant m12-degrade-redact 's|review_redact_secrets < "\$_RR_TEXT"|cat "$_RR_TEXT"|' scripts/lib/review-render.sh)
+run_case m12 "$pkg" MOCK_KIRO_LEAK_SECRET=1
+assert_rc "$RC" 0 "M12：变异体仍能跑完"
+assert_contains "$OUT" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" \
+  "M12：降级评论里出现完整密钥——端到端「评论里不出现完整密钥」断言会失败"
+assert_contains "$OUT" "AKIAIOSFODNN7EXAMPLE" "M12：AWS 访问密钥 ID 同样泄漏"
+
 # --- M3：删掉 settings 调用 → 继承未被禁用 ---
 pkg=$(make_mutant m3-settings '/chat.disableInheritingDefaultResources true/d')
 run_case m3 "$pkg"
