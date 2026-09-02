@@ -1,18 +1,35 @@
 {
   "name": "codeup-reviewer",
-  "description": "Codeup MR 自动评审专用只读 agent：仅允许读文件与搜索，不加载任何工作区 MCP/资源。model 指定 GPT-5.6 Sol；ID 不匹配或组织策略限制时 Kiro 自动回退默认模型并打警告（见 setup-guide §8）",
+  "description": "Codeup MR 自动评审专用只读 agent：仅允许读文件与搜索，不加载任何工作区 MCP/Powers/资源。V2 引擎读 toolsSettings.*.deniedPaths，V3 引擎读 permissions.rules，两套并列写入以便切换引擎不改配置（ADR-0004）。model 指定 GPT-5.6 Sol；ID 不匹配或组织策略限制时 Kiro 自动回退默认模型并打警告（见 setup-guide §8）",
   "model": "gpt-5.6-sol",
-  "prompt": "你是只读代码评审助手。只允许读取文件与搜索内容，绝不执行命令、修改文件或访问网络。",
-  "tools": ["read", "grep"],
-  "allowedTools": ["read", "grep"],
+  "prompt": "file://../prompts/review-agent-prompt.md",
+  "tools": ["read", "grep", "glob"],
+  "allowedTools": ["read", "grep", "glob"],
   "toolsSettings": {
     "read": {
-      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh/**", "~/.aws/**", "~/.kiro/**", "~/.config/**", "/root/.ssh/**", "/root/.aws/**", "**/.git/config", "**/.netrc"]
+      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc"]
     },
     "grep": {
-      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh/**", "~/.aws/**", "~/.kiro/**", "~/.config/**", "/root/.ssh/**", "/root/.aws/**", "**/.git/config", "**/.netrc"]
+      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc"]
+    },
+    "glob": {
+      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc"]
     }
   },
+  "permissions": {
+    "rules": [
+      {
+        "capability": "fs_read",
+        "match": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc"],
+        "effect": "deny"
+      },
+      { "capability": "fs_write", "effect": "deny" },
+      { "capability": "shell", "effect": "deny" },
+      { "capability": "web_fetch", "effect": "deny" },
+      { "capability": "web_search", "effect": "deny" }
+    ]
+  },
   "resources": [],
-  "includeMcpJson": false
+  "includeMcpJson": false,
+  "includePowers": false
 }

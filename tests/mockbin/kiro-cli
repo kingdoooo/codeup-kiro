@@ -1,12 +1,47 @@
 #!/usr/bin/env bash
-# 测试替身：记录参数与 stdin，输出固定评审报告。
-# MOCK_KIRO_FAIL=1 模拟失败；MOCK_KIRO_HANG=1 模拟挂起（验证超时强杀）；
-# MOCK_KIRO_EMPTY=1 模拟退出码 0 但输出为空。
-if [[ "${1:-}" == "chat" && "${2:-}" == "--help" ]]; then
-  echo "--no-interactive --trust-tools --agent"; exit 0
+# 测试替身：模拟 kiro-cli 的三种用法，并把观察到的东西写进 MOCK_* 指定的文件。
+#   kiro-cli chat --help        → 打印支持的参数名（含 --agent、--agent-engine、--output-format）
+#   kiro-cli settings KEY VALUE → 追加 "KEY VALUE" 到 MOCK_SETTINGS_FILE
+#   kiro-cli chat ...           → 记录参数(MOCK_ARGS_FILE)与 stdin(MOCK_STDIN_FILE)；扫描启动时 cwd
+#                                 里残留的 AGENTS.md（任意深度）/根 lsp.json/.kiro（任意深度）写入
+#                                 MOCK_CWD_SCAN_FILE；再输出固定评审报告
+# 每次调用把子命令名（help 调用记为 "help"）追加到 MOCK_CALLS_FILE，用于断言调用顺序。
+# 故障注入：MOCK_KIRO_FAIL=1 chat 失败；MOCK_KIRO_HANG=1 挂起（验证超时强杀）；
+#   MOCK_KIRO_EMPTY=1 退出码 0 但输出为空；MOCK_SETTINGS_FAIL=1 settings 失败；
+#   MOCK_KIRO_NO_ENGINE_FLAG=1 模拟不支持 --agent-engine 的旧版（--help 不列出、传入即报错）。
+if [[ -n "${MOCK_CALLS_FILE:-}" ]]; then
+  if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$MOCK_CALLS_FILE"; else printf '%s\n' "${1:-}" >> "$MOCK_CALLS_FILE"; fi
+fi
+case "${1:-}" in
+  settings)
+    shift
+    [[ -n "${MOCK_SETTINGS_FILE:-}" ]] && printf '%s\n' "$*" >> "$MOCK_SETTINGS_FILE"
+    if [[ "${MOCK_SETTINGS_FAIL:-0}" == "1" ]]; then echo "mock: 模拟 settings 失败" >&2; exit 1; fi
+    exit 0 ;;
+  chat) ;;
+  *) echo "mock kiro-cli: 不支持的子命令: $*" >&2; exit 2 ;;
+esac
+if [[ "${2:-}" == "--help" ]]; then
+  if [[ "${MOCK_KIRO_NO_ENGINE_FLAG:-0}" == "1" ]]; then
+    echo "--no-interactive --trust-tools --agent"
+  else
+    echo "--no-interactive --trust-tools --agent --agent-engine --output-format"
+  fi
+  exit 0
+fi
+if [[ "${MOCK_KIRO_NO_ENGINE_FLAG:-0}" == "1" ]]; then
+  for a in "$@"; do
+    [[ "$a" == "--agent-engine" ]] && { echo "error: unexpected argument '--agent-engine' found" >&2; exit 2; }
+  done
 fi
 [[ -n "${MOCK_ARGS_FILE:-}" ]] && printf '%s\n' "$@" > "$MOCK_ARGS_FILE"
 if [[ -n "${MOCK_STDIN_FILE:-}" ]]; then cat > "$MOCK_STDIN_FILE"; else cat > /dev/null; fi
+if [[ -n "${MOCK_CWD_SCAN_FILE:-}" ]]; then
+  {
+    [[ -e lsp.json ]] && echo "./lsp.json"
+    find . -not -path './.git/*' \( -iname AGENTS.md -not -type d \) -o \( -name .kiro -not -path './.git/*' \)
+  } > "$MOCK_CWD_SCAN_FILE"
+fi
 [[ "${MOCK_KIRO_HANG:-0}" == "1" ]] && sleep 300
 if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
   echo "mock: 模拟 kiro 失败" >&2; exit 1

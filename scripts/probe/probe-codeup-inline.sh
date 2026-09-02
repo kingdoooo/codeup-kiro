@@ -181,4 +181,4 @@ fi
 
 jq -n --arg ts "$TS" --arg mr "$MR_LOCAL_ID" --arg file "$PROBE_FILE" --argjson results "$RESULTS" \
   '{probe:"codeup-inline", ts:$ts, mr_local_id:$mr, probe_file:$file, results:$results}' > "$OUT_JSON"
-log "结果已写入 $OUT_JSON（不含令牌）。请把 PASS/FAIL 结论回填到 .scratch/codeup-kiro-v2/spec.md §4.7"
+log "结果已写入 ${OUT_JSON}（不含令牌）。请把 PASS/FAIL 结论回填到 .scratch/codeup-kiro-v2/spec.md §4.7"

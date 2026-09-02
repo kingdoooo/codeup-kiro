@@ -2,7 +2,8 @@
 # Codeup MR 自动 Kiro 评审 — 主编排脚本。
 # 安全前提：本脚本必须从受信集成包仓库（流水线独立代码源，固定分支/tag）执行，
 # 绝不从被评审的业务仓库源分支执行（源分支可被 MR 作者任意修改）。
-# 业务仓库 checkout 目录由 REVIEW_REPO_DIR 指定，仅作为被分析数据。
+# 业务仓库 checkout 目录由 REVIEW_REPO_DIR 指定，仅作为被分析数据；其中的 AGENTS.md/lsp.json/.kiro/
+# 在 diff 生成之后、Kiro 启动之前被移除（第 5.5 步），Kiro 固定以 v2 引擎运行（ADR-0004）。
 # 退出码：0=评审完成并回写；非 0=失败（不卡合并，仅流水线标红）。
 set -euo pipefail
 
@@ -10,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/codeup-api.sh"
 source "${SCRIPT_DIR}/lib/diff-compress.sh"
+source "${SCRIPT_DIR}/lib/kiro-agent.sh"
 
 KIRO_TIMEOUT="${KIRO_TIMEOUT:-900}"
 MAX_COMMENT_BYTES="${MAX_COMMENT_BYTES:-60000}"
@@ -20,6 +22,10 @@ KIRO_INSTALL_URL="${KIRO_INSTALL_URL:-https://cli.kiro.dev/install}"
 PROMPT_FILE="${PROMPT_FILE:-${PKG_ROOT}/prompts/review-prompt.md}"
 AGENT_FILE="${PKG_ROOT}/kiro/agent-codeup-reviewer.json"
 REVIEW_REPO_DIR="${REVIEW_REPO_DIR:-$PWD}"
+# Kiro 引擎钉死为 v2，写在脚本里而不是 agent 配置里（ADR-0004）：实测 kiro-cli 2.21 headless 的默认
+# 引擎 v1 与预览版 v3 都不阻断工作区 AGENTS.md 注入，只有 v2 配合 chat.disableInheritingDefaultResources
+# 才阻断。故意不读环境变量——引擎不是可配置项，避免被流水线变量或工作区设置改掉。
+KIRO_ENGINE=v2
 
 log() { echo "[kiro-review] $*" >&2; }
 die() { log "错误：$*"; exit 1; }
@@ -47,7 +53,7 @@ die_review() {
 
 # --- 0. 依赖与必填变量检查（timeout 为强制依赖，不允许无超时运行）---
 for cmd in git curl jq; do
-  command -v "$cmd" >/dev/null || die "缺少依赖：$cmd（请在构建机安装）"
+  command -v "$cmd" >/dev/null || die "缺少依赖：${cmd}（请在构建机安装）"
 done
 TIMEOUT_BIN=""
 command -v timeout >/dev/null && TIMEOUT_BIN=timeout
@@ -70,20 +76,18 @@ if ! command -v kiro-cli >/dev/null; then
   command -v kiro-cli >/dev/null || die "安装后仍找不到 kiro-cli，请检查安装日志中的 PATH 提示"
 fi
 
-# --- 2. 工作区隔离：移除业务仓库的 .kiro/（MCP/hooks/steering 注入面）+ 安装受信 agent ---
-if [[ -d "$REVIEW_REPO_DIR/.kiro" ]]; then
-  log "移除业务仓库工作区 .kiro/ 目录（不受信内容）"
-  rm -rf "$REVIEW_REPO_DIR/.kiro"
-fi
-mkdir -p "$HOME/.kiro/agents"
-cp "$AGENT_FILE" "$HOME/.kiro/agents/"
-AGENT_ARGS=()
-if kiro-cli chat --help 2>&1 | grep -q -- '--agent'; then
-  AGENT_ARGS=(--agent codeup-reviewer)
-  log "使用受信 custom agent：codeup-reviewer（includeMcpJson=false）"
-else
-  log "警告：kiro-cli chat 不支持 --agent，降级为 .kiro 移除 + --trust-tools 两层缓解"
-fi
+# --- 2. 安装受信 agent + kiro-cli 能力检查（业务库工作树的隔离在 diff 生成之后做，见第 5.5 步）---
+# agent 定义里的 prompt 是相对 file:// 引用（kiro 相对 agent 文件所在目录解析），复制到 ~/.kiro/agents/
+# 后会失效；kiro_install_agent 在安装时把它改写为集成包内提示词文件的绝对路径。
+INSTALLED_AGENT=$(kiro_install_agent "$AGENT_FILE" "$HOME/.kiro/agents") || die "受信 agent 安装失败：$AGENT_FILE"
+AGENT_NAME=$(basename "$INSTALLED_AGENT" .json)
+log "已安装受信 custom agent：${AGENT_NAME}（${INSTALLED_AGENT}；includeMcpJson=false，includePowers=false）"
+# --help 在集成包目录下执行：此刻业务库工作树尚未隔离，不在其中运行任何 kiro-cli 子命令
+KIRO_CHAT_HELP=$(cd "$PKG_ROOT" && "$TIMEOUT_BIN" 60 kiro-cli chat --help 2>&1 || true)
+grep -q -- '--agent-engine' <<<"$KIRO_CHAT_HELP" \
+  || die "kiro-cli chat 不支持 --agent-engine，无法钉死 ${KIRO_ENGINE} 引擎（ADR-0004：默认引擎不阻断 AGENTS.md 注入），拒绝运行。请升级 kiro-cli（≥ 2.21）"
+grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
+  || die "kiro-cli chat 不支持 --agent，无法套用受信只读 agent（拒绝路径、无 MCP/shell/write/web），拒绝运行。请升级 kiro-cli"
 
 cd "$REVIEW_REPO_DIR"
 
@@ -119,11 +123,12 @@ fi
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 truncated=0
 build_review_input "$BASE" "HEAD" "$WORK/review.diff" "$WORK/omitted.txt" "$WORK/chunks" || truncated=$?
-[[ "$truncated" == "0" || "$truncated" == "10" ]] || die_review "diff 压缩失败（rc=$truncated）"
+[[ "$truncated" == "0" || "$truncated" == "10" ]] || die_review "diff 压缩失败（rc=${truncated}）"
 if [[ ! -s "$WORK/review.diff" && ! -s "$WORK/omitted.txt" ]]; then
   log "diff 为空，跳过评审。"
   exit 0
 fi
+log "diff 已生成：$(wc -c < "$WORK/review.diff" | tr -d ' ') 字节（merge-base ${BASE:0:12}..HEAD，$([[ "$truncated" == "10" ]] && echo 已按阈值截断 || echo 完整直传)）"
 
 # --- 5. 组装评审输入 ---
 {
@@ -141,11 +146,31 @@ fi
   cat "$WORK/review.diff"
 } > "$WORK/input.txt"
 
+# --- 5.5 工作区隔离：必须在 diff 生成之后、Kiro 启动之前 ---
+# 业务库内容一律不受信。下面三类文件 Kiro 会从工作区自动读取，MR 作者可借此操纵评审员：
+#   AGENTS.md（任意深度；V3 把子目录 AGENTS.md 也当 steering）、根 lsp.json（可指定任意可执行文件）、
+#   .kiro/（MCP/hooks/steering/agents；任意深度——Kiro 是否只看 cwd 下的 .kiro/ 无官方保证，多删无害）。
+# diff 已从 git 对象算好并写入 $WORK，删工作树文件不影响评审输入。
+# 用 -iname：大小写不敏感文件系统（macOS/Windows 执行器）上 agents.md 同样会被当作 AGENTS.md 读到。
+# 同名目录（如 lsp.json/）不是注入面，但也一并删除：rm -f 遇到目录会失败，让 MR 作者能用一个目录名卡死评审。
+: > "$WORK/removed-agents-md.txt"; : > "$WORK/removed-kiro-dirs.txt"
+find . -not -path './.git/*' -iname AGENTS.md -not -type d -print -delete >> "$WORK/removed-agents-md.txt" || die_review "隔离失败：无法移除业务库中的 AGENTS.md"
+find . -path ./.git -prune -o -name .kiro -type d -print -prune -exec rm -rf {} + >> "$WORK/removed-kiro-dirs.txt" || die_review "隔离失败：无法移除业务库中的 .kiro/"
+rm -rf ./.kiro || die_review "隔离失败：无法移除业务库根目录 .kiro"
+rm -rf ./lsp.json || die_review "隔离失败：无法移除业务库根目录 lsp.json"
+log "隔离：已移除业务库工作树中 $(wc -l < "$WORK/removed-agents-md.txt" | tr -d ' ') 个 AGENTS.md、$(wc -l < "$WORK/removed-kiro-dirs.txt" | tr -d ' ') 个 .kiro/（均任意深度）与根 lsp.json"
+# 执行环境：禁止 Kiro 继承工作区默认资源（AGENTS.md/README.md 等），只对 v2 引擎有效（ADR-0004）。
+# 与上面删文件并列的第二道防线：即使业务库在别处塞入默认资源文件，也不会进入 agent 上下文。
+# 写入的是执行器 $HOME 的全局设置且刻意不回滚（spec I1）：常驻构建机上它保持为 true 只会更严格。
+"$TIMEOUT_BIN" 60 kiro-cli settings chat.disableInheritingDefaultResources true || die_review "隔离失败：无法设置 kiro-cli chat.disableInheritingDefaultResources=true"
+log "隔离：已设置 chat.disableInheritingDefaultResources=true"
+
 # --- 6. 执行 Kiro headless 评审（强制超时）---
+log "Kiro 引擎：${KIRO_ENGINE}（--agent-engine ${KIRO_ENGINE}；ADR-0004：v1/v3 不阻断 AGENTS.md 注入，不得使用）"
 log "开始 Kiro 评审（超时 ${KIRO_TIMEOUT}s）……"
 kiro_rc=0
 KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" kiro-cli chat --no-interactive \
-  --trust-tools=read,grep "${AGENT_ARGS[@]+"${AGENT_ARGS[@]}"}" \
+  --agent-engine "$KIRO_ENGINE" --trust-tools=read,grep,glob --agent "$AGENT_NAME" \
   "$(cat "$PROMPT_FILE")" \
   < "$WORK/input.txt" > "$WORK/review-output.md" 2> "$WORK/kiro-stderr.log" || kiro_rc=$?
 
