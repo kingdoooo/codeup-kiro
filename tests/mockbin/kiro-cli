@@ -5,7 +5,8 @@
 #   kiro-cli chat ...           → 记录参数(MOCK_ARGS_FILE)与 stdin(MOCK_STDIN_FILE)；扫描启动时 cwd
 #                                 里残留的 AGENTS.md（任意深度）/根 lsp.json/.kiro（任意深度）写入
 #                                 MOCK_CWD_SCAN_FILE；再输出固定评审报告
-# 每次调用把子命令名（help 调用记为 "help"）追加到 MOCK_CALLS_FILE，用于断言调用顺序。
+# 每次调用把子命令名（help 调用记为 "help"）追加到 MOCK_CALLS_FILE，用于断言调用顺序；
+# help 调用时的 cwd 写入 MOCK_HELP_CWD_FILE。
 # 故障注入：MOCK_KIRO_FAIL=1 chat 失败；MOCK_KIRO_HANG=1 挂起（验证超时强杀）；
 #   MOCK_KIRO_EMPTY=1 退出码 0 但输出为空；MOCK_SETTINGS_FAIL=1 settings 失败；
 #   MOCK_KIRO_NO_ENGINE_FLAG=1 模拟不支持 --agent-engine 的旧版（--help 不列出、传入即报错）。
@@ -22,6 +23,7 @@ case "${1:-}" in
   *) echo "mock kiro-cli: 不支持的子命令: $*" >&2; exit 2 ;;
 esac
 if [[ "${2:-}" == "--help" ]]; then
+  [[ -n "${MOCK_HELP_CWD_FILE:-}" ]] && pwd > "$MOCK_HELP_CWD_FILE"   # 断言 --help 不在未隔离的业务库目录里跑
   if [[ "${MOCK_KIRO_NO_ENGINE_FLAG:-0}" == "1" ]]; then
     echo "--no-interactive --trust-tools --agent"
   else

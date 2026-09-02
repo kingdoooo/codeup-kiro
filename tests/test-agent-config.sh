@@ -12,7 +12,10 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # --- 基本形态 ---
 assert_rc "$(jq -e . "$A" >/dev/null 2>&1 && echo 0 || echo 1)" 0 "agent JSON 合法"
 assert_eq "$(jq -r .name "$A")" "codeup-reviewer" "name"
-assert_eq "$(jq -c .tools "$A")" '["read","grep","glob"]' "tools 只有 read/grep/glob（V2 工具名；V3 把 read 当标签）"
+# 三个工具名已在 v2 stream-json 事件的 _meta.kiro.toolName 实证（kiro-cli 对未知名字静默接受，agent validate 也不报）：
+#   read → probe-results/kiro-headless/kiro-probe-t01-v2-iso、kiro-probe-t01-v2-forced-read
+#   grep、glob → probe-results/kiro-headless/kiro-probe-t01r-toolnames（kind=search，两者均 completed）
+assert_eq "$(jq -c .tools "$A")" '["read","grep","glob"]' "tools 只有 read/grep/glob（V2 工具名，已实证；V3 把 read 当标签）"
 assert_eq "$(jq -c .allowedTools "$A")" '["read","grep","glob"]' "allowedTools 与 tools 一致"
 assert_eq "$(jq -c .resources "$A")" '[]' "resources 为空（不自动载入任何工作区文件）"
 assert_eq "$(jq -r .includeMcpJson "$A")" "false" "includeMcpJson=false"

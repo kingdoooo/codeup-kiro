@@ -63,6 +63,11 @@ command -v timeout >/dev/null && TIMEOUT_BIN=timeout
 : "${YUNXIAO_TOKEN:?缺少 YUNXIAO_TOKEN}"
 : "${YUNXIAO_ORG_ID:?缺少 YUNXIAO_ORG_ID}"
 : "${CODEUP_REPO_ID:?缺少 CODEUP_REPO_ID}"
+REVIEW_REPO_DIR=$(cd "$REVIEW_REPO_DIR" 2>/dev/null && pwd) || die "REVIEW_REPO_DIR 不存在或不可进入：${REVIEW_REPO_DIR}"
+# 第 5.5 步会删掉业务库工作树里的 AGENTS.md/.kiro/lsp.json，而 DRY_RUN 并不拦删除：
+# 本地把集成包自身（或它的上级目录）误当业务库跑，会把集成包自己的文件删掉，直接拒绝。
+[[ "$PKG_ROOT" != "$REVIEW_REPO_DIR" && "$PKG_ROOT" != "$REVIEW_REPO_DIR"/* ]] \
+  || die "REVIEW_REPO_DIR（${REVIEW_REPO_DIR}）指向集成包自身或其上级目录，拒绝运行：隔离步骤会删除集成包内的文件"
 [[ -d "$REVIEW_REPO_DIR/.git" ]] || die "REVIEW_REPO_DIR 不是 git 仓库：$REVIEW_REPO_DIR"
 [[ -r "$PROMPT_FILE" ]] || die "评审提示词文件不可读：$PROMPT_FILE"
 [[ -r "$AGENT_FILE" ]] || die "custom agent 配置文件不可读：$AGENT_FILE"
@@ -76,22 +81,9 @@ if ! command -v kiro-cli >/dev/null; then
   command -v kiro-cli >/dev/null || die "安装后仍找不到 kiro-cli，请检查安装日志中的 PATH 提示"
 fi
 
-# --- 2. 安装受信 agent + kiro-cli 能力检查（业务库工作树的隔离在 diff 生成之后做，见第 5.5 步）---
-# agent 定义里的 prompt 是相对 file:// 引用（kiro 相对 agent 文件所在目录解析），复制到 ~/.kiro/agents/
-# 后会失效；kiro_install_agent 在安装时把它改写为集成包内提示词文件的绝对路径。
-INSTALLED_AGENT=$(kiro_install_agent "$AGENT_FILE" "$HOME/.kiro/agents") || die "受信 agent 安装失败：$AGENT_FILE"
-AGENT_NAME=$(basename "$INSTALLED_AGENT" .json)
-log "已安装受信 custom agent：${AGENT_NAME}（${INSTALLED_AGENT}；includeMcpJson=false，includePowers=false）"
-# --help 在集成包目录下执行：此刻业务库工作树尚未隔离，不在其中运行任何 kiro-cli 子命令
-KIRO_CHAT_HELP=$(cd "$PKG_ROOT" && "$TIMEOUT_BIN" 60 kiro-cli chat --help 2>&1 || true)
-grep -q -- '--agent-engine' <<<"$KIRO_CHAT_HELP" \
-  || die "kiro-cli chat 不支持 --agent-engine，无法钉死 ${KIRO_ENGINE} 引擎（ADR-0004：默认引擎不阻断 AGENTS.md 注入），拒绝运行。请升级 kiro-cli（≥ 2.21）"
-grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
-  || die "kiro-cli chat 不支持 --agent，无法套用受信只读 agent（拒绝路径、无 MCP/shell/write/web），拒绝运行。请升级 kiro-cli"
-
 cd "$REVIEW_REPO_DIR"
 
-# --- 3. 定位 MR ---
+# --- 2. 定位 MR（先定位，之后的任何失败都能回写「评审未完成」评论：spec I10 失败可见）---
 SOURCE_BRANCH="${CI_COMMIT_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
 if [[ -n "${MR_LOCAL_ID:-}" && -n "${MR_TARGET_BRANCH:-}" ]]; then
   LOCAL_ID="$MR_LOCAL_ID"; TARGET_BRANCH="$MR_TARGET_BRANCH"
@@ -111,6 +103,19 @@ else
 fi
 SHORT_SHA=$(git rev-parse --short HEAD)
 MR_LOCATED=1
+
+# --- 3. 安装受信 agent + kiro-cli 能力检查（放在 MR 定位之后：失败用 die_review 回写评论，而不是只让流水线标红）---
+# agent 定义里的 prompt 是相对 file:// 引用（kiro 相对 agent 文件所在目录解析），复制到 ~/.kiro/agents/
+# 后会失效；kiro_install_agent 在安装时把它改写为集成包内提示词文件的绝对路径。
+INSTALLED_AGENT=$(kiro_install_agent "$AGENT_FILE" "$HOME/.kiro/agents") || die_review "受信 agent 安装失败：$AGENT_FILE"
+AGENT_NAME=$(basename "$INSTALLED_AGENT" .json)
+log "已安装受信 custom agent：${AGENT_NAME}（${INSTALLED_AGENT}；includeMcpJson=false，includePowers=false）"
+# --help 在集成包目录下执行：此刻业务库工作树尚未隔离，不在其中运行任何 kiro-cli 子命令
+KIRO_CHAT_HELP=$(cd "$PKG_ROOT" && "$TIMEOUT_BIN" 60 kiro-cli chat --help 2>&1 || true)
+grep -q -- '--agent-engine' <<<"$KIRO_CHAT_HELP" \
+  || die_review "kiro-cli chat 不支持 --agent-engine，无法钉死 ${KIRO_ENGINE} 引擎（ADR-0004：默认引擎不阻断 AGENTS.md 注入），拒绝运行。请升级 kiro-cli（≥ 2.21）"
+grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
+  || die_review "kiro-cli chat 不支持 --agent，无法套用受信只读 agent（拒绝路径、无 MCP/shell/write/web），拒绝运行。请升级 kiro-cli"
 
 # --- 4. 生成 diff（merge-base 三点比较；浅克隆自动加深）---
 git fetch -q origin "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}" \
@@ -149,7 +154,13 @@ log "diff 已生成：$(wc -c < "$WORK/review.diff" | tr -d ' ') 字节（merge-
 # --- 5.5 工作区隔离：必须在 diff 生成之后、Kiro 启动之前 ---
 # 业务库内容一律不受信。下面三类文件 Kiro 会从工作区自动读取，MR 作者可借此操纵评审员：
 #   AGENTS.md（任意深度；V3 把子目录 AGENTS.md 也当 steering）、根 lsp.json（可指定任意可执行文件）、
-#   .kiro/（MCP/hooks/steering/agents；任意深度——Kiro 是否只看 cwd 下的 .kiro/ 无官方保证，多删无害）。
+#   .kiro/（MCP/hooks/steering/agents/settings；任意深度——Kiro 是否只看 cwd 下的 .kiro/ 无官方保证，多删无害）。
+# 删 .kiro/ 是后面两道措施的前提，不是可选项（kiro-cli 2.21 实测）：
+#   ① `.kiro/settings/cli.json`（`settings --workspace` 写入）会覆盖全局设置——业务库放一份
+#      {"chat.disableInheritingDefaultResources": false} 就能把下面设置的 true 顶掉；
+#   ② `agent list` 显示 Workspace（$CWD/.kiro/agents）优先于 Global（~/.kiro/agents）——业务库放一份
+#      .kiro/agents/codeup-reviewer.json 就能顶替受信 agent（拒绝路径、只读工具集全部失效）。
+# 所以三道措施的依赖关系是：删 .kiro/ → 全局设置与受信 agent 才可信；删 AGENTS.md 独立于引擎与设置。
 # diff 已从 git 对象算好并写入 $WORK，删工作树文件不影响评审输入。
 # 用 -iname：大小写不敏感文件系统（macOS/Windows 执行器）上 agents.md 同样会被当作 AGENTS.md 读到。
 # 同名目录（如 lsp.json/）不是注入面，但也一并删除：rm -f 遇到目录会失败，让 MR 作者能用一个目录名卡死评审。
@@ -160,12 +171,16 @@ rm -rf ./.kiro || die_review "隔离失败：无法移除业务库根目录 .kir
 rm -rf ./lsp.json || die_review "隔离失败：无法移除业务库根目录 lsp.json"
 log "隔离：已移除业务库工作树中 $(wc -l < "$WORK/removed-agents-md.txt" | tr -d ' ') 个 AGENTS.md、$(wc -l < "$WORK/removed-kiro-dirs.txt" | tr -d ' ') 个 .kiro/（均任意深度）与根 lsp.json"
 # 执行环境：禁止 Kiro 继承工作区默认资源（AGENTS.md/README.md 等），只对 v2 引擎有效（ADR-0004）。
-# 与上面删文件并列的第二道防线：即使业务库在别处塞入默认资源文件，也不会进入 agent 上下文。
+# 它依赖上面对 .kiro/ 的删除（见 ①），本身只覆盖「AGENTS.md 没删干净 / 藏在别处」这一种漏网情形。
 # 写入的是执行器 $HOME 的全局设置且刻意不回滚（spec I1）：常驻构建机上它保持为 true 只会更严格。
 "$TIMEOUT_BIN" 60 kiro-cli settings chat.disableInheritingDefaultResources true || die_review "隔离失败：无法设置 kiro-cli chat.disableInheritingDefaultResources=true"
 log "隔离：已设置 chat.disableInheritingDefaultResources=true"
 
 # --- 6. 执行 Kiro headless 评审（强制超时）---
+# --trust-tools 用 V2 短名（read/grep/glob）：kiro-cli 对未知名字静默接受，所以名字靠实测而非 --help
+# （--help 示例里的 fs_read/fs_write 已过期：--trust-tools=fs_write 不生效，=write 生效）。三个名字都在 v2
+# stream-json 事件的 _meta.kiro.toolName 里实证过（probe-results/kiro-headless/kiro-probe-t01-v2-iso、
+# kiro-probe-t01r-toolnames、kiro-probe-t01r-trusttools）。
 log "Kiro 引擎：${KIRO_ENGINE}（--agent-engine ${KIRO_ENGINE}；ADR-0004：v1/v3 不阻断 AGENTS.md 注入，不得使用）"
 log "开始 Kiro 评审（超时 ${KIRO_TIMEOUT}s）……"
 kiro_rc=0

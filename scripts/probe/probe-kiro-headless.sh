@@ -9,7 +9,8 @@
 # 认证：KIRO_API_KEY，或本机已 `kiro-cli login`（IAM Identity Center / Builder ID 均可）。
 # 因登录态绑定真实 HOME，本脚本在真实 HOME 下运行，但所有改动可逆：
 #   - 临时安装 ~/.kiro/agents/codeup-reviewer.json（走与执行器相同的 kiro_install_agent，因此同时验证
-#     仓库里的双兼容 agent 定义与 file:// 提示词改写；结束删除；若已存在则先备份再恢复）
+#     仓库里的双兼容 agent 定义与 file:// 提示词改写；结束删除。安装函数会清掉目录里所有声明同一 name 的
+#     文件，所以事先把它们全部备份、结束全部恢复）
 #   - 临时设置 chat.disableInheritingDefaultResources=true（结束恢复原值；原值用 `settings all -f json`
 #     读取——纯文本形式带 "(global)" 后缀，直接回写会把布尔值变成字符串并逐次累加后缀）
 #   - canary 文件放在 ~/.kiro/probe-canary-*.txt（agent 拒绝路径 ~/.kiro/** 之内；结束删除）
@@ -39,10 +40,16 @@ echo "[probe] kiro-cli $(kiro-cli --version 2>/dev/null | head -1) engine=${KIRO
 # ---------- 可逆的环境准备 ----------
 source "$PKG_ROOT/scripts/lib/kiro-agent.sh"
 AGENT_SRC="$PKG_ROOT/kiro/agent-codeup-reviewer.json"
-AGENT_DST="$HOME/.kiro/agents/$(jq -r .name "$AGENT_SRC").json"; AGENT_BAK=""
-mkdir -p "$HOME/.kiro/agents"
-[[ -f "$AGENT_DST" ]] && { AGENT_BAK="${AGENT_DST}.probe-bak"; cp "$AGENT_DST" "$AGENT_BAK"; }
-kiro_install_agent "$AGENT_SRC" "$HOME/.kiro/agents" >/dev/null || { echo "安装 agent 失败" >&2; exit 1; }
+AGENT_NAME=$(jq -r .name "$AGENT_SRC")
+AGENT_DIR="$HOME/.kiro/agents"; AGENT_DST="$AGENT_DIR/${AGENT_NAME}.json"
+mkdir -p "$AGENT_DIR"
+# kiro_install_agent 会清掉目录里所有声明同一 name 的文件（不只是 codeup-reviewer.json），所以先把它们全部备份
+AGENT_BAK_DIR=$(mktemp -d)
+for f in "$AGENT_DIR"/*.json; do
+  [[ -f "$f" ]] || continue
+  [[ "$(jq -r '.name // empty' "$f" 2>/dev/null)" == "$AGENT_NAME" ]] && cp "$f" "$AGENT_BAK_DIR/"
+done
+kiro_install_agent "$AGENT_SRC" "$AGENT_DIR" >/dev/null || { echo "安装 agent 失败" >&2; exit 1; }
 SETTING_KEY="chat.disableInheritingDefaultResources"
 # 原值：JSON 形式读取，避免把纯文本里的 "(global)" 后缀回写进设置。未设置=空；布尔值取 true/false 字面量，
 # `kiro-cli settings KEY true|false` 会重新解析为布尔（实测）。形态不是对象就中止，宁可不跑也不误删用户设置。
@@ -53,7 +60,9 @@ CANARY_PATH="$HOME/.kiro/probe-canary-${TS}.txt"; printf 'token=%s\n' "$CANARY_F
 WORK=$(mktemp -d)
 cleanup() {
   rm -f "$CANARY_PATH"
-  if [[ -n "$AGENT_BAK" ]]; then mv -f "$AGENT_BAK" "$AGENT_DST"; else rm -f "$AGENT_DST"; fi
+  rm -f "$AGENT_DST"
+  for f in "$AGENT_BAK_DIR"/*.json; do [[ -f "$f" ]] && cp "$f" "$AGENT_DIR/"; done
+  rm -rf "$AGENT_BAK_DIR"
   if [[ -z "$ORIG_SETTING" ]]; then
     kiro-cli settings --delete "$SETTING_KEY" >/dev/null 2>&1 || kiro-cli settings "$SETTING_KEY" false >/dev/null 2>&1 || true
   else

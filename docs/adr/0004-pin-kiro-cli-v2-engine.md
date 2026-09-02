@@ -11,6 +11,7 @@ Kiro CLI 3.0 目前是 early access：随 2.x 稳定版一起安装，需 `--v3`
 
 - **v1 不可用于生产**：实测 v1（2.21 headless 的默认引擎）下 `chat.disableInheritingDefaultResources=true` 不阻止工作区 `AGENTS.md` 进入自定义 agent 上下文，v2 才阻止；因此 `--agent-engine v2` 是安全要求而非仅为结构化输出。同时执行器在运行前删除业务库 checkout 中任意深度的 `AGENTS.md` 作为不依赖引擎的纵深防御。
 - 调用命令固定为 `kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json --agent codeup-reviewer …`；引擎不写在配置里而写在脚本里，避免被工作区设置覆盖。
+- **实测备注（2026-09-02，不改决策）**：kiro-cli 2.21.0 的 `chat --help` 把 `--agent-engine` 标为 `"v2" (default)`，但 headless（`--no-interactive`）实测不传该参数时 `--output-format stream-json` 被拒「not supported on the v1 engine」，且工作区 `AGENTS.md` 的 canary 出现在输出中（`.scratch/codeup-kiro-v2/probe-results/kiro-headless/kiro-probe-t01-default-iso`）——帮助文本与实际默认行为不一致。因此必须显式传 `--agent-engine v2`，不能信任「默认就是 v2」。
 
 - 切换到 V3 的门槛，全部满足才切：官方 GA 公告；headless 文档明确支持 V3；`--trust-tools` 在 V3 的语义定型；canary 负向测试（读禁止路径、AGENTS.md 注入、shell 执行）在 V3 下全部通过。**2026-09-02 实测：V3 下 `chat.disableInheritingDefaultResources=true` 不能阻止工作区 `AGENTS.md` 进入自定义 agent 的上下文（v2 可以），因此当前 V3 直接不满足 AGENTS.md 注入这一项。**
 - 探测阶段保留一个时间盒（≤ 半天）的 `--engine v3` 对照实验，只为提前发现迁移成本，不作为上线依据。

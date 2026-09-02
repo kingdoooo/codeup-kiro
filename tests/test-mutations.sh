@@ -45,6 +45,7 @@ run_case baseline "$ROOT"
 assert_rc "$RC" 0 "对照：未变异实现成功"
 assert_eq "$([[ -e "$CASE/work/AGENTS.md" || -e "$CASE/work/src/sub/AGENTS.md" ]] && echo exists || echo gone)" "gone" "对照：AGENTS.md 已移除"
 assert_eq "$(cat "$CASE/cwdscan")" "" "对照：Kiro 启动时工作区干净"
+assert_eq "$([[ -e "$CASE/work/src/sub/.kiro" || -e "$CASE/work/lsp.json" ]] && echo exists || echo gone)" "gone" "对照：子目录 .kiro/ 与根 lsp.json 已移除"
 assert_contains "$(paste -sd' ' "$CASE/args")" "--agent codeup-reviewer" "对照：参数含 --agent codeup-reviewer"
 assert_eq "$(grep -c -x -- '--trust-tools=read,grep,glob' "$CASE/args")" "1" "对照：--trust-tools 精确"
 assert_contains "$(paste -sd' ' "$CASE/args")" "--agent-engine v2" "对照：参数含 --agent-engine v2"
@@ -76,6 +77,20 @@ pkg=$(make_mutant m5-trust 's/--trust-tools=read,grep,glob/--trust-tools=read,gr
 run_case m5 "$pkg"
 assert_rc "$RC" 0 "M5：变异体仍能跑完"
 assert_eq "$(grep -c -x -- '--trust-tools=read,grep,glob' "$CASE/args")" "0" "M5：精确的 --trust-tools=read,grep,glob 不再出现——端到端断言会失败"
+
+# --- M6：删掉任意深度 .kiro/ 的删除逻辑 → 子目录 .kiro/ 残留、Kiro 启动时能看到 ---
+pkg=$(make_mutant m6-kiro-dirs '/-name .kiro -type d/d')
+run_case m6 "$pkg"
+assert_rc "$RC" 0 "M6：变异体仍能跑完"
+assert_eq "$([[ -d "$CASE/work/src/sub/.kiro" ]] && echo exists || echo gone)" "exists" "M6：子目录 .kiro/ 残留——端到端断言「.kiro 已移除」会失败"
+assert_contains "$(cat "$CASE/cwdscan")" "src/sub/.kiro" "M6：Kiro 启动时工作区扫描到子目录 .kiro——端到端断言「工作区干净」会失败"
+
+# --- M7：删掉根 lsp.json 的删除逻辑 → lsp.json 残留 ---
+pkg=$(make_mutant m7-lspjson '/rm -rf .\/lsp.json/d')
+run_case m7 "$pkg"
+assert_rc "$RC" 0 "M7：变异体仍能跑完"
+assert_eq "$([[ -e "$CASE/work/lsp.json" ]] && echo exists || echo gone)" "exists" "M7：根 lsp.json 残留——端到端断言「lsp.json 已移除」会失败"
+assert_contains "$(cat "$CASE/cwdscan")" "./lsp.json" "M7：Kiro 启动时工作区扫描到 lsp.json——端到端断言「工作区干净」会失败"
 
 # --- M3：删掉 settings 调用 → 继承未被禁用 ---
 pkg=$(make_mutant m3-settings '/chat.disableInheritingDefaultResources true/d')
