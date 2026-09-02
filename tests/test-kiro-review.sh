@@ -105,7 +105,7 @@ assert_contains "$out" "src/app.py:3-4" "评论含多行区间定位"
 assert_contains "$out" "（未定位）" "评论标注未定位问题（file/line 为 null）"
 assert_contains "$out" "修复建议" "评论含修复建议"
 assert_contains "$out" "P0 必须修复 · P1 应当修复 · P2 可选改进" "评论含页脚图例"
-assert_not_contains "$out" "次评审" "页脚不自称第几次评审（run 号本版本固定为 1）"
+assert_contains "$out" "第 1 次评审 · P0 必须修复" "页脚自报第 1 次评审"
 assert_contains "$out" "/kiro review" "评论含重新评审提示"
 assert_not_contains "$out" "🔴" "评论不再出现红灯"
 assert_not_contains "$out" "🟡" "评论不再出现黄灯"
@@ -329,7 +329,9 @@ assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-
 run_case inline0 INLINE_COMMENT=0
 assert_rc "$RC" 0 "INLINE_COMMENT=0：成功"
 assert_contains "$OUT" "P0 必须修复（1）" "INLINE_COMMENT=0：完整问题清单展开"
-assert_not_contains "$OUT" "<details>" "INLINE_COMMENT=0：不使用折叠区"
+assert_not_contains "$OUT" "折叠区" "INLINE_COMMENT=0：问题清单不进折叠区"
+# 唯一的 <details> 是票 03 的「历次评审」，问题清单本身仍然全部展开
+assert_eq "$(printf '%s\n' "$(posted_comment "$OUT")" | grep -c '<details>')" "1" "INLINE_COMMENT=0：只有历次评审一个折叠块"
 
 # ============ R4：业务库无法预先造出「本次」标记，伪造块不再能让评审降级 ============
 # 替身模拟：真契约用本次 nonce，随后原文引用业务库里的假契约块（假块用别的 nonce）。
@@ -421,5 +423,122 @@ notice_ln=$(printf '%s\n' "$comment" | grep -n '报告超长已截断' | tail -1
 before=$(printf '%s\n' "$comment" | grep -n '^```' | cut -d: -f1 | awk -v n="$notice_ln" '$1 < n' | wc -l | tr -d ' ')
 assert_eq "$(( before % 2 ))" "0" "围栏内截断：截断提示之前的围栏数为偶数，提示不在代码块内（提示在第 ${notice_ln:-?} 行，之前有 ${before} 个围栏）"
 
+
+# ============ 票 03：汇总评论原地更新 ============
+# DRY_RUN 下用 DRY_RUN_FIXTURE_DIR 注入「MR 上现有的全局评论列表」，
+# 用 stderr 上的 DRY_RUN <方法> <URL> 判定脚本到底是新建（POST …/comments）还是原地更新（PUT …/comments/<id>）。
+CFX="$ROOT/tests/fixtures/comments"
+BOT='aliyun:kingdooo_hvFXC'
+# 用法：req_count <OUT> <方法> [URL 片段]
+req_count() {
+  local pat="DRY_RUN $2 "
+  [[ -n "${3:-}" ]] && pat="${pat}.*$3"
+  printf '%s\n' "$1" | grep -cE -- "$pat" || true
+}
+
+# --- 首次评审：列表为空 → 新建（POST），run:1，历次表 1 行 ---
+run_case first DRY_RUN_FIXTURE_DIR="$CFX/empty" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "首次评审：成功"
+assert_contains "$OUT" "changeRequests/7/comments/list" "首次评审：发汇总前先查询 MR 全局评论"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "首次评审：新建评论（POST …/comments）"
+assert_eq "$(req_count "$OUT" PUT)" "0" "首次评审：不调用更新接口"
+assert_contains "$OUT" "未找到本评审员的旧汇总评论" "首次评审：日志说明按新建处理"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "<!-- kiro-review:" "首次评审：评论带评审标记"
+assert_contains "$comment" "run:1 -->" "首次评审：标记 run:1"
+assert_contains "$comment" "<details><summary>历次评审（1）</summary>" "首次评审：历次表只有 1 行"
+assert_contains "$comment" "第 1 次评审 · P0 必须修复" "首次评审：页脚第 1 次评审"
+
+# --- 二次评审：找到旧汇总 → 原地更新同一个 biz_id，run:2，历次表两行 ---
+run_case second DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "二次评审：成功"
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" \
+  "二次评审：PUT 到旧评论同一个 biz_id（评论 ID 不变）"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "0" "二次评审：不再新建第二条汇总"
+assert_contains "$OUT" "已原地更新汇总评论" "二次评审：日志说明原地更新"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "run:2 -->" "二次评审：标记 run:2（计数 +1）"
+assert_contains "$comment" "第 2 次评审 · P0 必须修复" "二次评审：页脚第 2 次评审"
+assert_contains "$comment" "<details><summary>历次评审（2）</summary>" "二次评审：历次表两行"
+assert_contains "$comment" "| 1 | \`90fcb05\` | 建议修改后合并 | 1/1/1 |" "二次评审：历次表保留上一次那一行"
+assert_contains "$comment" "| 2 | \`" "二次评审：历次表追加本次那一行"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '<!-- kiro-review:')" "1" "二次评审：更新后的评论里评审标记仍恰好一个"
+
+# --- 机器人用户名未显式配置：从「带评审标记的评论作者」推断，仍然原地更新 ---
+run_case inferred DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME=
+assert_rc "$RC" 0 "推断机器人账号：成功"
+assert_contains "$OUT" "机器人账号由评审标记推断为 ${BOT}" "推断机器人账号：日志写明推断结果"
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" "推断机器人账号：仍然原地更新"
+
+# --- 旧评论被人删除（列表里 state=DELETED）→ 重新新建，run 回到 1 ---
+run_case deleted DRY_RUN_FIXTURE_DIR="$CFX/deleted" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "旧评论被删除：成功"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "旧评论被删除：新建"
+assert_eq "$(req_count "$OUT" PUT)" "0" "旧评论被删除：不去更新已删除的评论"
+assert_contains "$(posted_comment "$OUT")" "run:1 -->" "旧评论被删除：run 从 1 重新开始"
+
+# --- 带评审标记的评论是别人发的 → 不改别人的评论，新建自己的 ---
+run_case otherauthor DRY_RUN_FIXTURE_DIR="$CFX/other-author" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "标记评论作者是别人：成功"
+assert_eq "$(req_count "$OUT" PUT)" "0" "标记评论作者是别人：不去改别人的评论"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "标记评论作者是别人：新建自己的汇总"
+
+# --- 用户名未知且多个作者都带标记 → 歧义，宁可新建 ---
+run_case ambiguous DRY_RUN_FIXTURE_DIR="$CFX/ambiguous" CODEUP_BOT_USERNAME=
+assert_rc "$RC" 0 "机器人账号歧义：成功"
+assert_contains "$OUT" "无法推断机器人账号" "机器人账号歧义：日志说明"
+assert_eq "$(req_count "$OUT" PUT)" "0" "机器人账号歧义：不去改任何人的评论"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "机器人账号歧义：新建"
+
+# --- 更新接口失败（404，例如评论刚被人删掉）→ 4xx 不重试，退回新建并在日志说明 ---
+run_case updatefail DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" \
+  DRY_RUN_FAIL_ROUTES="update-comment:404"
+assert_rc "$RC" 0 "更新失败退回新建：评审仍成功"
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" "更新失败退回新建：只尝试了一次 PUT（4xx 不重试）"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "更新失败退回新建：随后新建"
+assert_contains "$OUT" "退回新建" "更新失败退回新建：日志说明"
+
+# --- 更新接口 5xx：按既有重试策略重试 2 次后仍失败 → 退回新建 ---
+run_case updateretry DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" \
+  DRY_RUN_FAIL_ROUTES="update-comment:500" CODEUP_RETRY_BACKOFF=0
+assert_rc "$RC" 0 "更新 5xx：评审仍成功"
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "3" "更新 5xx：共尝试 3 次（重试 2 次）"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "更新 5xx：最终退回新建"
+
+# --- 查询评论列表失败 → 按新建处理，不阻断评审 ---
+run_case listfail DRY_RUN_FAIL_ROUTES="list-comments:403" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "查询评论列表失败：评审仍成功"
+assert_contains "$OUT" "查询 MR 全局评论失败" "查询评论列表失败：日志说明"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "查询评论列表失败：按新建处理"
+
+# --- 降级评论同样原地更新，历次表记「结构化解析失败」 ---
+run_case degradeupdate DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_NO_MARKER=1
+assert_rc "$RC" 0 "降级 + 原地更新：退出码 0"
+assert_contains "$OUT" "结构化解析失败" "降级 + 原地更新：仍是降级评论"
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" "降级 + 原地更新：更新同一条评论"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "| 2 | \`" "降级 + 原地更新：历次表追加本次"
+assert_contains "$comment" "结构化解析失败 | -/-/- |" "降级 + 原地更新：历次表记结构化解析失败、计数未知"
+
+# --- 失败评论也原地更新：否则一次失败就会在 MR 上留下第二条汇总（违反「每评审员至多一条」）---
+run_case failupdate DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_FAIL=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "失败评论 + 原地更新：非零退出"
+assert_contains "$OUT" "评审未完成" "失败评论 + 原地更新：仍是失败评论"
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" "失败评论 + 原地更新：更新同一条评论"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "0" "失败评论 + 原地更新：不新建第二条"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "run:2 -->" "失败评论 + 原地更新：标记 run:2"
+assert_contains "$comment" "第 2 次评审 · P0 必须修复" "失败评论 + 原地更新：页脚第 2 次评审"
+assert_contains "$comment" "| 1 | \`90fcb05\` | 建议修改后合并 | 1/1/1 |" "失败评论 + 原地更新：历次表保留上一次的成功记录"
+assert_contains "$comment" "评审未完成 | -/-/- |" "失败评论 + 原地更新：历次表记本次评审未完成"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '<!-- kiro-review:')" "1" "失败评论 + 原地更新：评审标记恰好一个"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '<!-- kiro-history:')" "1" "失败评论 + 原地更新：历史标记恰好一个"
+
+# --- 同一机器人留下过两条带标记的汇总（上次退回新建）→ 继续更新 run 最大的那条 ---
+run_case tworuns DRY_RUN_FIXTURE_DIR="$CFX/two-runs" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "两条候选：成功"
+assert_eq "$(req_count "$OUT" PUT 'comments/f0000000000000000000000000000003$')" "1" "两条候选：更新 run 最大的那条"
+assert_contains "$(posted_comment "$OUT")" "run:4 -->" "两条候选：run 从 3 递增到 4"
+assert_contains "$(posted_comment "$OUT")" "<details><summary>历次评审（4）</summary>" "两条候选：历次表继承 3 行再追加 1 行"
 
 report

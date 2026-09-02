@@ -1,0 +1,52 @@
+[
+  {
+    "comment_biz_id": "c0000000000000000000000000000001",
+    "comment_type": "GLOBAL_COMMENT",
+    "content": "这个改动我看过了，SQL 拼接确实要改。\n\n另外 `<details>` 折叠区很好用。",
+    "state": "OPENED",
+    "draft": false,
+    "author": {
+      "username": "aliyun:human_dev",
+      "name": "张三"
+    },
+    "out_dated": false
+  },
+  {
+    "comment_biz_id": "c0000000000000000000000000000002",
+    "comment_type": "GLOBAL_COMMENT",
+    "content": "流水线已开始评审，请稍候。",
+    "state": "OPENED",
+    "draft": false,
+    "author": {
+      "username": "aliyun:kingdooo_hvFXC",
+      "name": "Kiro"
+    },
+    "out_dated": false
+  },
+  {
+    "comment_biz_id": "b1f0e9d8c7b6a5948372615049382716",
+    "comment_type": "GLOBAL_COMMENT",
+    "content": "## 🤖 Kiro 代码评审\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-history:[{\"run\":1,\"sha\":\"90fcb05\",\"verdict\":\"MERGE_AFTER_FIX\",\"status\":\"\",\"p0\":1,\"p1\":1,\"p2\":1}] -->\n\n| Commit | 分支 | 时间 | diff |\n|---|---|---|---|\n| `90fcb05` | `feature/x` → `master` | 2026-09-02 20:10:02 | 完整直传 |\n\n### 问题统计\n\nP0 1 · P1 1 · P2 1\n\n---\n第 1 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 `/kiro review` 可重新评审",
+    "state": "OPENED",
+    "draft": false,
+    "author": {
+      "username": "aliyun:kingdooo_hvFXC",
+      "name": "Kiro"
+    },
+    "out_dated": false
+  },
+  {
+    "comment_biz_id": "c0000000000000000000000000000004",
+    "comment_type": "INLINE_COMMENT",
+    "content": "### P0 · 硬编码凭证\n\n改用环境变量。\n\n— Kiro 评审 · 提交 `90fcb05`",
+    "state": "OPENED",
+    "draft": false,
+    "author": {
+      "username": "aliyun:kingdooo_hvFXC",
+      "name": "Kiro"
+    },
+    "filePath": "src/app.py",
+    "line_number": 2,
+    "out_dated": false
+  }
+]

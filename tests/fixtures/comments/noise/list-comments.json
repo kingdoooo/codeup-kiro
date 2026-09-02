@@ -1,0 +1,26 @@
+[
+  {
+    "comment_biz_id": "d0000000000000000000000000000001",
+    "comment_type": "GLOBAL_COMMENT",
+    "content": "这个改动我看过了，SQL 拼接确实要改。\n\n另外 `<details>` 折叠区很好用。",
+    "state": "OPENED",
+    "draft": false,
+    "author": {
+      "username": "aliyun:human_dev",
+      "name": "张三"
+    },
+    "out_dated": false
+  },
+  {
+    "comment_biz_id": "d0000000000000000000000000000002",
+    "comment_type": "GLOBAL_COMMENT",
+    "content": "流水线已开始评审，请稍候。",
+    "state": "OPENED",
+    "draft": false,
+    "author": {
+      "username": "aliyun:kingdooo_hvFXC",
+      "name": "Kiro"
+    },
+    "out_dated": false
+  }
+]

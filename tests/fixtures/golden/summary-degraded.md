@@ -1,5 +1,6 @@
 ## 🤖 Kiro 代码评审 · ⚠️ 结构化解析失败
 <!-- kiro-review:90fcb05 run:1 -->
+<!-- kiro-history:[{"run":1,"sha":"90fcb05","verdict":"","status":"degraded","p0":null,"p1":null,"p2":null}] -->
 
 | Commit | 分支 | 时间 | diff |
 |---|---|---|---|
@@ -18,5 +19,12 @@
 
 总体结论：建议修改后合并。
 
+<details><summary>历次评审（1）</summary>
+
+| 次 | 提交 | 结论 | P0/P1/P2 |
+|---|---|---|---|
+| 1 | `90fcb05` | 结构化解析失败 | -/-/- |
+</details>
+
 ---
-P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 `/kiro review` 可重新评审
+第 1 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 `/kiro review` 可重新评审

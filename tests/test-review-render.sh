@@ -270,8 +270,10 @@ assert_not_contains "$body" "🔴" "渲染：不再出现红灯"
 assert_not_contains "$body" "🟡" "渲染：不再出现黄灯"
 assert_not_contains "$body" "🔵" "渲染：不再出现蓝灯"
 assert_not_contains "$body" "折叠区" "渲染：INLINE_COMMENT=0 无折叠区（清单全部展开）"
-assert_not_contains "$body" "<details>" "渲染：INLINE_COMMENT=0 不折叠"
 assert_not_contains "$body" "已标注在" "渲染：INLINE_COMMENT=0 不提行内计数"
+# INLINE_COMMENT=0 下唯一的 <details> 是「历次评审」（票 03）——问题清单本身仍然全部展开
+assert_eq "$(printf '%s\n' "$body" | grep -c '<details>')" "1" "渲染：INLINE_COMMENT=0 只有历次评审一个折叠块"
+assert_contains "$body" "<details><summary>历次评审" "渲染：那个折叠块是历次评审"
 
 render fixtures/contract/empty.json "$tmp/empty.md"
 assert_golden "$tmp/empty.md" summary-empty.md "渲染：无问题"
@@ -286,13 +288,11 @@ body=$(cat "$tmp/dirty.md")
 assert_contains "$body" "不建议合并" "渲染：DO_NOT_MERGE → 不建议合并"
 assert_contains "$body" "7 条不合契约已丢弃" "渲染：dropped_findings 可见"
 
-# 第 2 次评审：run 参数进入标记与页脚
-render fixtures/contract/full.json "$tmp/run2.md" --run 2
-body=$(cat "$tmp/run2.md")
-assert_contains "$body" "<!-- kiro-review:90fcb05 run:2 -->" "渲染：run 参数进入标记（供后续票原地更新用）"
-# 页脚刻意不写「第 N 次评审」：本版本 run 固定为 1，第二次评审时那句话就是假的
-assert_not_contains "$body" "次评审" "渲染：页脚不自称第几次评审"
-assert_contains "$body" "P0 必须修复 · P1 应当修复 · P2 可选改进" "渲染：页脚只保留图例"
+# 第 2 次评审：run 参数进入标记与页脚（票 03 起页脚自报第 N 次评审）
+render fixtures/contract/full.json "$tmp/run2-basic.md" --run 2
+body=$(cat "$tmp/run2-basic.md")
+assert_contains "$body" "<!-- kiro-review:90fcb05 run:2 -->" "渲染：run 参数进入标记（原地更新的定位依据）"
+assert_contains "$body" "第 2 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进" "渲染：页脚自报第 N 次评审"
 
 # 未知 verdict 不能被静默吞掉
 printf '{%s"summary":"s","verdict":"LGTM","verdict_reason":"r","findings":[]}' "$C" > "$tmp/badverdict.json"
@@ -462,7 +462,8 @@ render "$tmp/badfile.json" "$tmp/badfile.md"
 body=$(cat "$tmp/badfile.md")
 assert_contains "$body" "文件路径不合规" "渲染：统计行说明有多少条按未定位处理"
 assert_not_contains "$body" "a.py | 9 | 9 | 9" "渲染：带竖线的路径不进表格（否则造出幻影列）"
-assert_eq "$(printf '%s\n' "$body" | grep -c '^| ')" "4" "渲染：表格只剩表头 2 行 + 元信息表 2 行，没有被撑出多余行"
+# 以 `| ` 开头的行（分隔行 `|---|` 不算）：元信息表 2 + 重点关注文件 2 + 历次评审 2 = 6
+assert_eq "$(printf '%s\n' "$body" | grep -c '^| ')" "6" "渲染：表格只剩各表表头与数据各一行，没有被撑出多余行"
 assert_not_contains "$body" "### 伪造章节" "渲染：藏在 file 里的伪造章节不会成为章节"
 
 # ============ R1：模型文本不得注入评审标记 / 伪造章节 / 页脚分隔线 ============
@@ -552,6 +553,147 @@ assert_contains "$out" "，还有别的问题。" "掩码：紧跟凭证的中�
 assert_not_contains "$out" "$(printf '\357\277\275')" "掩码：不产生 U+FFFD 替换字符（多字节没被切断）"
 out=$(printf 'Bearer abcdefghij0123456789KLMNOP，请轮换\n' | review_redact_secrets)
 assert_contains "$out" "，请轮换" "掩码：Bearer 之后的中文正文完整保留"
+
+# ============ 票 03：历次记录的解析与追加 ============
+# 隐藏的 kiro-history JSON 是「历次评审」表的机器可读来源：下一次评审从它读回历史，
+# 表格只是它的人类可读投影（不反解表格——表格要中文化结论、要合并计数列，反解会被任何渲染微调打断）。
+: > "$tmp/nohist.md"
+assert_eq "$(review_parse_history "$tmp/nohist.md")" "[]" "parse_history：正文里没有历史标记 → []"
+assert_eq "$(review_parse_history "$tmp/does-not-exist.md")" "[]" "parse_history：文件不可读 → []（不报错）"
+printf '## 标题\n<!-- kiro-history:[{"run":1,"sha":"90fcb05","verdict":"MERGE","status":"","p0":0,"p1":1,"p2":2}] -->\n正文\n' > "$tmp/hist1.md"
+h=$(review_parse_history "$tmp/hist1.md")
+assert_eq "$(printf '%s' "$h" | jq -r 'length')" "1" "parse_history：取到 1 行历史"
+assert_eq "$(printf '%s' "$h" | jq -r '.[0].run')" "1" "parse_history：run 字段"
+assert_eq "$(printf '%s' "$h" | jq -r '.[0].p2')" "2" "parse_history：计数字段"
+# 两个历史标记 → 无法判定哪个是自己的，忽略历史（与「评审标记不唯一就拒绝解析」同一个原则）
+printf '<!-- kiro-history:[{"run":1}] -->\n<!-- kiro-history:[{"run":9}] -->\n' > "$tmp/hist2.md"
+rc=0; err=$(review_parse_history "$tmp/hist2.md" 2>&1 >"$tmp/hist2.out") || rc=$?
+assert_eq "$(cat "$tmp/hist2.out")" "[]" "parse_history：历史标记出现两次 → []"
+assert_contains "$err" "2 次" "parse_history：标记不唯一时留痕日志"
+printf '<!-- kiro-history:{"run":1} -->\n' > "$tmp/histobj.md"
+assert_eq "$(review_parse_history "$tmp/histobj.md" 2>/dev/null)" "[]" "parse_history：不是数组 → []"
+printf '<!-- kiro-history:这不是 JSON -->\n' > "$tmp/histbad.md"
+assert_eq "$(review_parse_history "$tmp/histbad.md" 2>/dev/null)" "[]" "parse_history：非法 JSON → []"
+printf '<!-- kiro-history:[{"run":1},{"noRun":2},"字符串"] -->\n' > "$tmp/histmixed.md"
+assert_eq "$(review_parse_history "$tmp/histmixed.md" 2>/dev/null | jq -r 'length')" "1" "parse_history：丢掉没有数值 run 的行"
+
+# review_history_append：追加一行并做字段白名单过滤
+h=$(review_history_append - 1 90fcb05 MERGE_AFTER_FIX "" 1 2 3)
+assert_eq "$(printf '%s' "$h" | jq -c '.[0]')" '{"run":1,"sha":"90fcb05","verdict":"MERGE_AFTER_FIX","status":"","p0":1,"p1":2,"p2":3}' "history_append：空历史 + 一行"
+printf '%s' "$h" > "$tmp/h1.json"
+h2=$(review_history_append "$tmp/h1.json" 2 abc1234 "" failed - - -)
+assert_eq "$(printf '%s' "$h2" | jq -r 'length')" "2" "history_append：在旧历史上追加"
+assert_eq "$(printf '%s' "$h2" | jq -r '.[1].status')" "failed" "history_append：status 记录失败/降级"
+assert_eq "$(printf '%s' "$h2" | jq -r '.[1].p0')" "null" "history_append：计数未知记为 null"
+# 注入面：写进 HTML 注释的字段必须不可能造出 `-->`（否则下一次评审读回来时注释提前闭合）
+h3=$(review_history_append - 1 'a>b--<!--x' 'MERGE --> 伪造' "" 0 0 0)
+assert_eq "$(printf '%s' "$h3" | jq -r '.[0].sha')" "ab--!--x" "history_append：sha 里的 < > 被剔掉"
+assert_eq "$(printf '%s' "$h3" | jq -r '.[0].verdict')" "MERGE -- 伪造" "history_append：verdict 过滤掉 > 与 <（保留中文）"
+assert_not_contains "$(printf '%s' "$h3")" "-->" "history_append：过滤后不可能出现 -->"
+# 行数上限：避免历史无限增长把评论撑爆
+long='[]'
+for i in $(seq 1 25); do printf '%s' "$long" > "$tmp/long.json"; long=$(review_history_append "$tmp/long.json" "$i" sha0000 MERGE "" 0 0 0); done
+assert_eq "$(printf '%s' "$long" | jq -r 'length')" "$REVIEW_HISTORY_MAX" "history_append：只保留最近 ${REVIEW_HISTORY_MAX} 行"
+assert_eq "$(printf '%s' "$long" | jq -r '.[-1].run')" "25" "history_append：保留的是最近的几行"
+
+# ============ 票 03：定位「本评审员上一次的汇总评论」 ============
+CFX=fixtures/comments
+BOT='aliyun:kingdooo_hvFXC'
+sel() { review_select_prior_comment "$2" < "$CFX/$1/list-comments.json"; }
+
+# 首次评审：评论列表为空 → rc 1（新建）
+rc=0; sel empty "$BOT" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "select：评论列表为空 → rc 1（新建）"
+# 有他人评论与机器人**非汇总**评论时不得误判（判定要求作者匹配 **且** 正文含评审标记）
+rc=0; sel noise "$BOT" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "select：只有他人评论与机器人非汇总评论 → rc 1（不误判）"
+# 命中：作者匹配且含评审标记
+out=$(sel prior-run1 "$BOT" 2>/dev/null)
+assert_eq "$(printf '%s' "$out" | jq -r .comment_biz_id)" "b1f0e9d8c7b6a5948372615049382716" "select：定位到机器人那条汇总"
+assert_eq "$(printf '%s' "$out" | jq -r .run)" "1" "select：从评审标记解析出 run"
+assert_eq "$(printf '%s' "$out" | jq -r .comment_type)" "GLOBAL_COMMENT" "select：选中的是汇总评论"
+# 同一列表里的机器人行内评论、机器人闲聊评论都不能被选中
+assert_not_contains "$(printf '%s' "$out" | jq -r .comment_biz_id)" "c00000000000000000000000000000" "select：不会选中非汇总评论"
+# 旧评论被人删除（state=DELETED）→ rc 1，应新建
+rc=0; sel deleted "$BOT" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "select：旧汇总已被删除（state=DELETED）→ rc 1（新建）"
+# 带标记的评论是别人发的 → 显式配置机器人用户名时不得命中
+rc=0; sel other-author "$BOT" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "select：带标记的评论作者不是机器人 → rc 1（不去改别人的评论）"
+# 同一机器人有多条带标记的评论（上一次退回新建留下的）→ 选 run 最大的那条
+out=$(sel two-runs "$BOT" 2>/dev/null)
+assert_eq "$(printf '%s' "$out" | jq -r .run)" "3" "select：多条候选取 run 最大的"
+assert_eq "$(printf '%s' "$out" | jq -r .comment_biz_id)" "f0000000000000000000000000000003" "select：取到 run 最大那条的 biz_id"
+# 机器人用户名未知时：从「带评审标记的评论作者」推断，要求作者唯一
+out=$(sel prior-run1 "" 2>/dev/null)
+assert_eq "$(printf '%s' "$out" | jq -r .comment_biz_id)" "b1f0e9d8c7b6a5948372615049382716" "select：用户名未知时按标记推断（唯一作者）"
+err=$(sel prior-run1 "" 2>&1 >/dev/null)
+assert_contains "$err" "$BOT" "select：日志写明推断出的机器人账号"
+# 推断有歧义（有人手工复制过一整条报告原文）→ rc 2，宁可新建也不改别人的评论
+rc=0; err=$(sel ambiguous "" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 2 "select：多个作者都带标记且用户名未知 → rc 2（歧义）"
+assert_contains "$err" "无法推断" "select：歧义时留痕日志"
+# 同一份列表下，显式配置了机器人用户名就不再有歧义
+out=$(sel ambiguous "$BOT" 2>/dev/null)
+assert_eq "$(printf '%s' "$out" | jq -r .comment_biz_id)" "e0000000000000000000000000000001" "select：显式用户名消除歧义"
+# 对象形态响应（{result:[…]}）也要兼容
+rc=0; out=$(jq -c '{result: .}' "$CFX/prior-run1/list-comments.json" | review_select_prior_comment "$BOT" 2>/dev/null) || rc=$?
+assert_rc "$rc" 0 "select：{result:[…]} 形态兼容"
+assert_eq "$(printf '%s' "$out" | jq -r .run)" "1" "select：对象形态下同样解析出 run"
+# 正文里有两个评审标记的评论：无法判定次数，不作为候选（R1 的转义保证脚本渲染的评论不会这样）
+jq -n --arg c "$(printf '<!-- kiro-review:aaa run:1 -->\n<!-- kiro-review:bbb run:2 -->\n')" --arg b "$BOT" \
+  '[{comment_biz_id:"x1", comment_type:"GLOBAL_COMMENT", content:$c, state:"OPENED", author:{username:$b}}]' > "$tmp/twomarker.json"
+rc=0; review_select_prior_comment "$BOT" < "$tmp/twomarker.json" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "select：一条评论里有两个评审标记 → 不作为候选"
+
+# ============ 票 03：页脚「第 N 次评审」与「历次评审」折叠区 ============
+render fixtures/contract/full.json "$tmp/run1.md"
+body=$(cat "$tmp/run1.md")
+assert_contains "$body" "第 1 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进" "渲染：页脚含第 N 次评审"
+assert_contains "$body" "<details><summary>历次评审（1）</summary>" "渲染：首次评审历次表 1 行"
+assert_contains "$body" "| 次 | 提交 | 结论 | P0/P1/P2 |" "渲染：历次表表头"
+assert_contains "$body" "| 1 | \`90fcb05\` | 建议修改后合并 | 1/2/1 |" "渲染：历次表本次那一行"
+assert_contains "$body" "<!-- kiro-history:" "渲染：含机器可读的历史标记"
+# 历史标记必须紧跟评审标记放在开头：MAX_COMMENT_BYTES 截断是从尾部砍的，
+# 放在末尾的话超长评论一被截断，下一次评审就读不到历史了
+marker_ln=$(printf '%s\n' "$body" | grep -n '^<!-- kiro-review:' | cut -d: -f1)
+hist_ln=$(printf '%s\n' "$body" | grep -n '^<!-- kiro-history:' | cut -d: -f1)
+assert_eq "$hist_ln" "$(( marker_ln + 1 ))" "渲染：历史标记紧跟评审标记（截断时仍能保住）"
+
+# 第 2 次评审：run 进入标记与页脚，历次表两行（上一行来自 --history）
+review_parse_history "$tmp/run1.md" > "$tmp/prior-hist.json"
+assert_eq "$(jq -r 'length' "$tmp/prior-hist.json")" "1" "往返：从渲染结果里读回 1 行历史"
+render fixtures/contract/empty.json "$tmp/run2.md" --run 2 --history "$tmp/prior-hist.json"
+body=$(cat "$tmp/run2.md")
+assert_contains "$body" "<!-- kiro-review:90fcb05 run:2 -->" "渲染：run 2 进入评审标记"
+assert_contains "$body" "第 2 次评审 · P0 必须修复" "渲染：页脚写第 2 次评审"
+assert_contains "$body" "<details><summary>历次评审（2）</summary>" "渲染：历次表两行"
+assert_contains "$body" "| 1 | \`90fcb05\` | 建议修改后合并 | 1/2/1 |" "渲染：保留上一次那一行"
+assert_contains "$body" "| 2 | \`90fcb05\` | 可合并 | 0/0/0 |" "渲染：追加本次那一行"
+assert_eq "$(printf '%s\n' "$body" | grep -c '^| [0-9] | ')" "2" "渲染：历次表恰好两行数据"
+# 降级评论：历次表记「结构化解析失败」，计数未知记 -
+review_render_degraded --text "$tmp/raw.md" --sha abc1234 --src f --dst m --ts "2026-09-03 01:00:00" \
+  --diff-note 完整直传 --run 3 --history "$tmp/prior-hist.json" --reason "无标记" > "$tmp/degraded3.md"
+body=$(cat "$tmp/degraded3.md")
+assert_contains "$body" "第 3 次评审 · P0 必须修复" "降级：页脚写第 3 次评审"
+assert_contains "$body" "| 3 | \`abc1234\` | 结构化解析失败 | -/-/- |" "降级：历次表记结构化解析失败、计数未知记 -"
+assert_contains "$body" "<details><summary>历次评审（2）</summary>" "降级：历次表含上一次那一行"
+# --history 指向不可读文件 → 非零（拼错路径不能静默丢掉历史）
+rc=0; err=$(review_render_summary --json "$tmp/validated.json" --sha x --src a --dst b --ts t \
+      --diff-note n --history "$tmp/does-not-exist.json" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "渲染：--history 不可读 → 非零"
+assert_contains "$err" "history" "渲染：报错点名 --history"
+# 历史里的取值不受模型控制，但仍要证明表格不会被撑出多余列
+printf '[{"run":1,"sha":"a|b","verdict":"X|Y","status":"","p0":0,"p1":0,"p2":0}]' > "$tmp/pipehist.json"
+render fixtures/contract/empty.json "$tmp/pipehist.md" --run 2 --history "$tmp/pipehist.json"
+assert_not_contains "$(cat "$tmp/pipehist.md")" "| 1 | \`a|b\`" "渲染：历史里的竖线不会原样进表格"
+
+# 失败评论用的两个公开小函数（kiro-review.sh 的 die_review 复用它们，避免页脚/历史各写两份）
+assert_eq "$(review_render_footer 7 | head -1)" "---" "footer：先输出分隔线"
+assert_contains "$(review_render_footer 7)" "第 7 次评审" "footer：写明第 N 次评审"
+assert_contains "$(review_render_history_marker "$tmp/prior-hist.json")" "<!-- kiro-history:[" "history_marker：单行隐藏 JSON"
+assert_eq "$(review_render_history_marker "$tmp/prior-hist.json" | wc -l | tr -d ' ')" "1" "history_marker：只有一行"
+assert_contains "$(review_render_history_table "$tmp/prior-hist.json")" "历次评审（1）" "history_table：折叠区标题带行数"
 
 if [[ "$GOLDEN_DIRTY" == "1" ]]; then
   echo "GOLDEN_UPDATE=1：golden 文件已重写，本次运行不构成通过。请人工读 git diff 确认渲染正确，再不带该变量重跑。" >&2

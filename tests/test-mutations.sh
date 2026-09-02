@@ -199,6 +199,64 @@ assert_rc "$RC" 0 "M15：变异体仍能跑完（这正是问题：本该失败�
 assert_not_contains "$OUT" "受信 agent 未生效" "M15：不再识别受信 agent 未生效——端到端断言会失败"
 assert_contains "$OUT" "P0 1 · P1 1 · P2 1" "M15：非受信产出被照常渲染并回写 MR"
 
+# ============ 票 03 的守卫 ============
+CFX="$ROOT/tests/fixtures/comments"
+BOT='aliyun:kingdooo_hvFXC'
+req_count() { # <OUT> <方法> [URL 片段]
+  local pat="DRY_RUN $2 "
+  [[ -n "${3:-}" ]] && pat="${pat}.*$3"
+  printf '%s\n' "$1" | grep -cE -- "$pat" || true
+}
+
+# --- 对照：原地更新在未变异实现上确实成立 ---
+run_case baseline-update "$ROOT" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "对照：二次评审成功"
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" "对照：原地更新旧评论"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "0" "对照：不新建第二条"
+assert_contains "$(posted_comment "$OUT")" "run:2 -->" "对照：run 递增到 2"
+assert_contains "$(posted_comment "$OUT")" "<details><summary>历次评审（2）</summary>" "对照：历次表两行"
+
+# --- M16：拿掉「作者用户名必须匹配」这一半判定 → 会去改别人的评论 ---
+# 判定本该是「作者匹配 **且** 含评审标记」。只看标记的话，别人手工复制过一份报告原文时
+# （other-author fixture）就会去改那条评论。
+pkg=$(make_mutant m16-author-match 's/elif \$bot != "" then/elif false then/' scripts/lib/review-render.sh)
+run_case m16 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/other-author" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "M16：变异体仍能跑完"
+assert_eq "$(req_count "$OUT" PUT 'comments/a0000000000000000000000000000002$')" "1" \
+  "M16：作者判定被拿掉后去改了别人的评论——端到端「不去改别人的评论」断言会失败"
+
+# --- M17：拿掉「必须含评审标记」这一半判定 → 机器人的闲聊评论被当成汇总改掉 ---
+# noise fixture 里机器人有一条「流水线已开始评审」的普通评论，没有评审标记。
+pkg=$(make_mutant m17-marker-required 's/| map(select((._runs | length) == 1))/| map(select((._runs | length) >= 0))/' scripts/lib/review-render.sh)
+run_case m17 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/noise" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "M17：变异体仍能跑完"
+assert_eq "$(req_count "$OUT" PUT 'comments/d0000000000000000000000000000002$')" "1" \
+  "M17：标记判定被拿掉后把机器人的普通评论当成汇总改掉——端到端「不误判」断言会失败"
+
+# --- M18：让历次记录的解析恒返回空 → 历次表丢掉上一次那一行 ---
+pkg=$(make_mutant m18-history-empty 's|^review_parse_history() {|review_parse_history() { echo "[]"; return 0;|' scripts/lib/review-render.sh)
+run_case m18 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "M18：变异体仍能跑完"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "<details><summary>历次评审（1）</summary>" \
+  "M18：历次记录读不回来 → 表里只剩本次一行——端到端「历次表两行」断言会失败"
+assert_not_contains "$comment" "| 1 | \`90fcb05\` | 建议修改后合并 | 1/1/1 |" "M18：上一次那一行丢失"
+assert_contains "$comment" "run:2 -->" "M18：run 号仍从评审标记算出（与历史解析是两条独立通路）"
+
+# --- M19：把原地更新换成一律新建 → MR 上会出现第二条汇总 ---
+pkg=$(make_mutant m19-always-create 's|if codeup_update_comment "\$LOCAL_ID" "\$PRIOR_COMMENT_ID" "\$file"; then|if false; then|')
+run_case m19 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "M19：变异体仍能跑完"
+assert_eq "$(req_count "$OUT" PUT)" "0" "M19：不再调用更新接口——端到端「PUT 到同一个 biz_id」断言会失败"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "M19：退化成追加第二条汇总"
+
+# --- M20：失败评论绕过 post_summary 直接新建 → 一次失败就多一条汇总 ---
+pkg=$(make_mutant m20-fail-not-updated 's|    post_summary "\$f" |    codeup_post_comment "$LOCAL_ID" "$f" |')
+run_case m20 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_FAIL=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M20：变异体仍以非零退出"
+assert_eq "$(req_count "$OUT" PUT)" "0" "M20：失败评论不再原地更新——端到端断言会失败"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "M20：失败评论变成 MR 上的第二条汇总"
+
 # --- M3：删掉 settings 调用 → 继承未被禁用 ---
 pkg=$(make_mutant m3-settings '/chat.disableInheritingDefaultResources true/d')
 run_case m3 "$pkg"

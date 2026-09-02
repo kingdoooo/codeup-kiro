@@ -8,6 +8,13 @@
 #   → review_render_summary     渲染汇总评论（Markdown）
 # 任一提取步骤失败 → review_render_degraded 渲染「结构化解析失败」评论（评审仍算产出）。
 #
+# 汇总评论的原地更新（票 03）：
+#   review_select_prior_comment  从 MR 的全局评论里定位「本评审员上一次那条」（作者 + 评审标记）
+#   review_parse_history         从那条评论的隐藏 JSON 读回历次记录
+#   review_history_append        追加本次记录（并对所有字段做字符白名单过滤）
+#   review_render_history_marker / review_render_history_table / review_render_footer
+#                                隐藏 JSON、「历次评审」折叠表、含「第 N 次评审」的页脚
+#
 # 事件形态以实测为准（kiro-cli 2.21.0，spec §4.7.1 P1-08，原始输出见
 # .scratch/codeup-kiro-v2/probe-results/kiro-headless/*/out.jsonl，裁剪样例见
 # tests/fixtures/stream/real-shape.jsonl）：
@@ -301,6 +308,127 @@ review_validate() {
         delocated_findings: ([$kept[] | select(.delocated)] | length) }'
 }
 
+# --- 评审标记（原地更新的定位依据）---
+# 形态必须与 _review_render_header 渲染出的那一行严格一致：
+#   <!-- kiro-review:{sha} run:{n} -->
+# 同一条正则同时给 jq（Oniguruma）与 grep/sed（POSIX ERE）用，两个引擎都支持这里用到的字符类。
+# 注意：jq 的 ^/$ 默认锚定整个字符串而不是行，所以在 jq 里必须先 split("\n") 再逐行 match
+# （见 review_select_prior_comment）。
+REVIEW_MARKER_LINE_RE='^<!-- kiro-review:[0-9a-zA-Z._-]+ run:([0-9]+) -->[[:space:]]*$'
+
+# --- 历次评审记录 ---
+# 汇总评论里嵌一行隐藏 JSON 作为机器可读的历次记录，「历次评审」表只是它的人类可读投影：
+#   <!-- kiro-history:[{"run":1,"sha":"90fcb05","verdict":"MERGE","status":"","p0":0,"p1":1,"p2":2}] -->
+# 为什么不反解表格：表格要把结论中文化、要把三个计数合成一列，反解需要一套反向映射，
+# 任何渲染微调都会让历史读不出来。隐藏 JSON 与渲染解耦，是稳定的解析契约。
+# status：""=正常评审；failed=评审未完成；degraded=结构化解析失败（此时计数为 null）。
+# 注入面：这一行会被下一次评审读回来，所以写入时对每个字符串字段做白名单过滤
+# （review_history_append 的 safe()），保证正文里不可能出现 `-->` 而提前闭合注释。
+REVIEW_HISTORY_PREFIX="<!-- kiro-history:"
+REVIEW_HISTORY_SUFFIX=" -->"
+# 行数上限：历史无限增长会把汇总评论撑到 Codeup 的长度上限
+REVIEW_HISTORY_MAX=20
+
+# 用法：review_parse_history <旧评论正文文件> → stdout = JSON 数组（读不到/不合法一律 []）
+# 永不失败：拿不到历史只会让「历次评审」表少几行，不该拖垮评审。
+review_parse_history() {
+  local file="$1" n line json
+  [[ -r "$file" ]] || { echo '[]'; return 0; }
+  n=$(grep -c "^${REVIEW_HISTORY_PREFIX}" "$file" 2>/dev/null || true)
+  n=${n:-0}
+  if [[ "$n" != "1" ]]; then
+    [[ "$n" == "0" ]] \
+      || echo "review_parse_history: 历史标记出现 ${n} 次（预期 1），无法判定哪一份是自己的，忽略历史" >&2
+    echo '[]'; return 0
+  fi
+  line=$(grep "^${REVIEW_HISTORY_PREFIX}" "$file" | head -1)
+  json=${line#"$REVIEW_HISTORY_PREFIX"}
+  json=${json%"$REVIEW_HISTORY_SUFFIX"}
+  printf '%s' "$json" \
+    | jq -c 'if type == "array" then [.[] | select(type == "object" and (.run | type) == "number")] else [] end' 2>/dev/null \
+    || { echo "review_parse_history: 历史标记内不是合法 JSON 数组，忽略历史" >&2; echo '[]'; }
+}
+
+# 用法：review_history_append <历史 JSON 文件或 -> <run> <sha> <verdict> <status> <p0> <p1> <p2>
+#   p0/p1/p2 传 "-"（或任何非数字）表示未知 → 记为 null
+# stdout = 追加本次记录后的 JSON 数组（只保留最近 REVIEW_HISTORY_MAX 行）
+review_history_append() {
+  local hist="$1" run="$2" sha="$3" verdict="$4" status="$5" p0="$6" p1="$7" p2="$8" base
+  if [[ "$hist" == "-" || ! -r "$hist" ]]; then base='[]'; else base=$(cat "$hist"); fi
+  printf '%s' "$base" | jq -c --argjson max "$REVIEW_HISTORY_MAX" \
+    --arg run "$run" --arg sha "$sha" --arg verdict "$verdict" --arg status "$status" \
+    --arg p0 "$p0" --arg p1 "$p1" --arg p2 "$p2" '
+    def num(v): if (v | test("^[0-9]+$")) then (v | tonumber) else null end;
+    def numj(v): if (v | type) == "number" then (v | floor) else null end;
+    # 字符白名单：剔掉 < 与 >，过滤后的取值不可能构成 `-->`／`<!--`，隐藏注释不会被提前闭合；
+    # 剔掉 | 与反引号，历次表的单元格不会被撑出幻影列、定位串的反引号不会失配；
+    # 剔掉控制字符，历次表的行渲染用 \x1f 作字段分隔符，混进控制字符会错位。
+    # 非 ASCII 一律保留（中文结论要能显示）。
+    def safe(v; n): ((v // "") | tostring | gsub("[<>|`\\\\]"; "") | gsub("[[:cntrl:]]"; "") | .[0:n]);
+    # 旧记录同样过一遍过滤与字段规范化：汇总评论在 Codeup 上是人可编辑的，隐藏 JSON 里的取值
+    # 不能当作可信输入（只做「追加时过滤新行」的话，被手工改过的历史会原样渲染进表格）。
+    (if type == "array" then . else [] end)
+    | map(select(type == "object" and (.run | type) == "number")
+          | { run: (.run | floor), sha: safe(.sha; 40), verdict: safe(.verdict; 40),
+              status: safe(.status; 16), p0: numj(.p0), p1: numj(.p1), p2: numj(.p2) })
+    + [{ run: (num($run) // 1), sha: safe($sha; 40), verdict: safe($verdict; 40),
+         status: safe($status; 16), p0: num($p0), p1: num($p1), p2: num($p2) }]
+    | .[-$max:]'
+}
+
+# --- 定位「本评审员上一次的汇总评论」（stdin = ListMergeRequestComments 响应）---
+# 用法：review_select_prior_comment <机器人账号用户名或空串>
+#   rc 0 → stdout = 选中的评论对象（compact JSON，额外带 run 字段＝从评审标记解析出的次数）
+#   rc 1 → 没有候选（首次评审，或旧评论已被人删除）
+#   rc 2 → 用户名为空且带评审标记的评论有多个不同作者，无法唯一推断机器人账号 → 调用方新建
+#
+# 判定 = 作者用户名匹配 **且** 正文含本集成包渲染的评审标记（票 03 验收项）。缺任何一半都不行：
+#   只看作者 → 机器人发的行内评论/状态评论会被当成汇总改掉；
+#   只看标记 → 有人把整条报告原文复制一份留档，就会去改别人的评论。
+# 机器人用户名的来源（spec §4.7.1 P1-00 实测令牌身份接口 403）：
+#   ① CODEUP_BOT_USERNAME 显式配置（推荐）；② 令牌身份接口；
+#   ③ 都取不到时从「带评审标记的评论作者」推断——评审标记只由本集成包写出，带标记的评论就是自建评论。
+#      ③ 要求候选作者唯一，否则返回 rc 2：宁可多发一条，也不改别人的评论。
+# 多条候选时取 run 最大的那条（上一次更新失败退回新建会留下两条，此后应继续更新最新那条）。
+review_select_prior_comment() {
+  local bot="${1-}" input out status inferred
+  input=$(cat)
+  out=$(printf '%s' "$input" | jq -c --arg bot "$bot" --arg re "$REVIEW_MARKER_LINE_RE" '
+    def marker_runs:
+      [ ((.content // "") | split("\n")[] | match($re) | .captures[0].string | tonumber) ];
+    (if type == "object" then (.result // []) else . end)
+    | map(select(type == "object"))
+    | map(select((.comment_type // "GLOBAL_COMMENT") == "GLOBAL_COMMENT"))
+    | map(select(((.state // "") | ascii_upcase) != "DELETED"))
+    | map(select((.draft // false) != true))
+    | map(. + {_runs: marker_runs})
+    # 一条评论里有两个评审标记时无法判定次数，不作为候选（与「契约标记必须唯一」同一个原则）
+    | map(select((._runs | length) == 1))
+    | map(. + {run: ._runs[0]} | del(._runs))
+    | . as $cands
+    | ([$cands[] | (.author.username // "")] | unique) as $authors
+    | if ($cands | length) == 0 then {status: "none"}
+      elif $bot != "" then
+        ([$cands[] | select((.author.username // "") == $bot)] | sort_by(.run) | last) as $sel
+        | if $sel == null then {status: "none"} else {status: "ok", comment: $sel} end
+      elif ($authors | length) > 1 then {status: "ambiguous", authors: $authors}
+      else {status: "ok", comment: ($cands | sort_by(.run) | last), inferred: $authors[0]}
+      end' 2>/dev/null) \
+    || { echo "review_select_prior_comment: 评论列表不是合法 JSON，按「未找到」处理" >&2; return 1; }
+  status=$(printf '%s' "$out" | jq -r '.status // ""')
+  case "$status" in
+    ok)
+      inferred=$(printf '%s' "$out" | jq -r '.inferred // ""')
+      [[ -n "$inferred" ]] && echo "review_select_prior_comment: 机器人账号由评审标记推断为 ${inferred}（未显式配置 CODEUP_BOT_USERNAME，令牌身份接口也不可用）" >&2
+      printf '%s' "$out" | jq -c '.comment'
+      return 0 ;;
+    ambiguous)
+      echo "review_select_prior_comment: 无法推断机器人账号——$(printf '%s' "$out" | jq -r '.authors | length') 个不同作者的评论都带评审标记（$(printf '%s' "$out" | jq -r '.authors | join(", ")')），本次按新建处理" >&2
+      return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- 内部：总体结论的中文化（CONTEXT.md 的「总体结论」词汇）---
 _review_verdict_cn() {
   case "$1" in
@@ -317,10 +445,10 @@ _review_verdict_cn() {
 # 解析结果写入 _RR_* 变量；未知参数或缺值 → rc 2（拼错参数不能静默按默认值渲染）。
 _review_parse_render_args() {
   _RR_JSON=""; _RR_TEXT=""; _RR_SHA=""; _RR_SRC=""; _RR_DST=""; _RR_TS=""
-  _RR_DIFF_NOTE=""; _RR_RUN=1; _RR_INLINE=0; _RR_REASON=""
+  _RR_DIFF_NOTE=""; _RR_RUN=1; _RR_INLINE=0; _RR_REASON=""; _RR_HISTORY=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --json|--text|--sha|--src|--dst|--ts|--diff-note|--run|--inline-comment|--reason)
+      --json|--text|--sha|--src|--dst|--ts|--diff-note|--run|--inline-comment|--reason|--history)
         [[ $# -ge 2 ]] || { echo "review 渲染：参数 $1 缺少取值" >&2; return 2; }
         case "$1" in
           --json) _RR_JSON="$2" ;;
@@ -333,6 +461,7 @@ _review_parse_render_args() {
           --run) _RR_RUN="$2" ;;
           --inline-comment) _RR_INLINE="$2" ;;
           --reason) _RR_REASON="$2" ;;
+          --history) _RR_HISTORY="$2" ;;
         esac
         shift 2 ;;
       *) echo "review 渲染：未知参数：$1" >&2; return 2 ;;
@@ -342,26 +471,65 @@ _review_parse_render_args() {
   for v in _RR_SHA _RR_SRC _RR_DST _RR_TS _RR_DIFF_NOTE; do
     [[ -n "${!v}" ]] || { echo "review 渲染：缺少必填参数 --$(echo "${v#_RR_}" | tr 'A-Z_' 'a-z-')" >&2; return 2; }
   done
-  [[ "$_RR_RUN" =~ ^[0-9]+$ && "$_RR_RUN" -ge 1 ]] || { echo "review 渲染：--run 必须是 ≥1 的整数（实际：${_RR_RUN}）" >&2; return 2; }
+  [[ "$_RR_RUN" =~ ^[0-9]+$ && "$_RR_RUN" -ge 1 ]] || { echo "review 渲染：默认 --run 必须是 ≥1 的整数（实际：${_RR_RUN}）" >&2; return 2; }
+  # --history 拼错路径不能静默按「无历史」渲染：那会把历次表悄悄清空，而评论上看不出异常
+  [[ -z "$_RR_HISTORY" || -r "$_RR_HISTORY" ]] \
+    || { echo "review 渲染：--history 指定的历史文件不可读：${_RR_HISTORY}" >&2; return 2; }
 }
 
-# --- 内部：评论头（标题 + 评审标记 + 元信息表）---
+# --- 历次记录的隐藏 JSON（下一次评审的解析入口）---
+# 用法：review_render_history_marker <历史 JSON 文件>
+# 刻意紧跟评审标记放在评论开头：MAX_COMMENT_BYTES 的截断是从尾部砍的，放在末尾的话
+# 一条超长评论被截断之后，下一次评审就再也读不回历史了。
+review_render_history_marker() {
+  printf '%s%s%s\n' "$REVIEW_HISTORY_PREFIX" "$(jq -c '.' "$1")" "$REVIEW_HISTORY_SUFFIX"
+}
+
+# --- 「历次评审」折叠区（人类可读投影；spec §4.3）---
+# 用法：review_render_history_table <历史 JSON 文件>
+# 结论的中文化复用 _review_verdict_cn（不在 jq 里再写一份映射），所以行渲染走 bash 循环：
+# 历史最多 REVIEW_HISTORY_MAX 行，成本可忽略。
+review_render_history_table() {
+  local hist="$1" n run sha status verdict p0 p1 p2 label
+  n=$(jq -r 'length' "$hist")
+  echo "<details><summary>历次评审（${n}）</summary>"
+  echo ""
+  echo "| 次 | 提交 | 结论 | P0/P1/P2 |"
+  echo "|---|---|---|---|"
+  # 分隔符用 \x1f 而不是制表符：制表符属于 IFS 空白，bash 会把连续分隔符并成一个，
+  # status 或 verdict 为空串时字段就整体错位（实测把 verdict 读成了计数）。
+  while IFS=$'\x1f' read -r run sha status verdict p0 p1 p2; do
+    case "$status" in
+      failed)   label="评审未完成" ;;
+      degraded) label="结构化解析失败" ;;
+      *)        label=$(_review_verdict_cn "$verdict") ;;
+    esac
+    printf '| %s | `%s` | %s | %s/%s/%s |\n' "$run" "$sha" "$label" "$p0" "$p1" "$p2"
+  done < <(jq -r --arg sep "$(printf '\037')" '.[] | [ (.run | tostring), (.sha // ""), (.status // ""), (.verdict // ""),
+                          (if .p0 == null then "-" else (.p0 | tostring) end),
+                          (if .p1 == null then "-" else (.p1 | tostring) end),
+                          (if .p2 == null then "-" else (.p2 | tostring) end) ] | join($sep)' "$hist")
+  echo "</details>"
+}
+
+# --- 页脚（第 N 次评审 + 图例 + 重新评审提示）---
+# 用法：review_render_footer <run>（公开：kiro-review.sh 的失败评论也要用同一份页脚）
+review_render_footer() {
+  echo "---"
+  printf '第 %s 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 `/kiro review` 可重新评审\n' "$1"
+}
+
+# --- 内部：评论头（标题 + 评审标记 + 历史标记 + 元信息表）---
+# $2 = 历史 JSON 文件（已含本次那一行）
 _review_render_header() {
-  local title="$1"
+  local title="$1" hist="$2"
   echo "$title"
   echo "<!-- kiro-review:${_RR_SHA} run:${_RR_RUN} -->"
+  review_render_history_marker "$hist"
   echo ""
   echo "| Commit | 分支 | 时间 | diff |"
   echo "|---|---|---|---|"
   echo "| \`${_RR_SHA}\` | \`${_RR_SRC}\` → \`${_RR_DST}\` | ${_RR_TS} | ${_RR_DIFF_NOTE} |"
-}
-
-# --- 内部：页脚（图例 + 重新评审提示）---
-_review_render_footer() {
-  echo "---"
-  # 刻意不写「第 N 次评审」：本版本 run 号固定为 1（原地更新属后续票），第二次评审时那句话就是假的。
-  # 标记里的 run:N 仍然保留，供后续票做原地更新与历次记录。
-  echo "P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 \`/kiro review\` 可重新评审"
 }
 
 # --- 汇总评论（INLINE_COMMENT=0）---
@@ -388,7 +556,7 @@ review_render_summary() {
          and ((.findings | type) == "array")' "$_RR_JSON" >/dev/null 2>&1 \
     || { echo "review_render_summary: --json 不是 review_validate 的输出（需要对象 + 数值 dropped_findings/delocated_findings + 数组 findings）：${_RR_JSON}" >&2; return 2; }
 
-  local summary verdict verdict_cn verdict_reason dropped delocated n0 n1 n2 total stat
+  local summary verdict verdict_cn verdict_reason dropped delocated n0 n1 n2 total stat hist
   summary=$(jq -r '.summary // ""' "$_RR_JSON")
   verdict=$(jq -r '.verdict // ""' "$_RR_JSON")
   verdict_reason=$(jq -r '.verdict_reason // ""' "$_RR_JSON")
@@ -400,7 +568,12 @@ review_render_summary() {
   n2=$(jq -r '[.findings[] | select(.severity == "P2")] | length' "$_RR_JSON")
   verdict_cn=$(_review_verdict_cn "$verdict")
 
-  _review_render_header "## 🤖 Kiro 代码评审"
+  # 历次记录：把本次这一行追加到 --history 给的旧记录上。由渲染器统一追加（而不是让调用方传全量），
+  # 保证表格里的本次那一行与评审标记里的 run:N、与统计行的计数永远出自同一份输入。
+  hist=$(mktemp)
+  review_history_append "${_RR_HISTORY:--}" "$_RR_RUN" "$_RR_SHA" "$verdict" "" "$n0" "$n1" "$n2" > "$hist"
+
+  _review_render_header "## 🤖 Kiro 代码评审" "$hist"
   echo ""
   echo "### 变更摘要"
   echo ""
@@ -471,7 +644,10 @@ review_render_summary() {
             + (if ($f.fix | length) > 0 then "\n\n**修复建议**\n\n\($f.fix)" else "" end) )' "$_RR_JSON"
   fi
   echo ""
-  _review_render_footer
+  review_render_history_table "$hist"
+  rm -f "$hist"
+  echo ""
+  review_render_footer "$_RR_RUN"
 }
 
 # --- 疑似密钥的脚本侧掩码（stdin → stdout）---
@@ -622,7 +798,11 @@ review_render_degraded() {
   _review_parse_render_args "$@" || return $?
   [[ -n "$_RR_TEXT" ]] || { echo "review_render_degraded: 缺少必填参数 --text" >&2; return 2; }
   [[ -r "$_RR_TEXT" ]] || { echo "review_render_degraded: 原文文件不可读：${_RR_TEXT}" >&2; return 2; }
-  _review_render_header "## 🤖 Kiro 代码评审 · ⚠️ 结构化解析失败"
+  local hist
+  # 降级时没有可信的分级计数（正是因为解析失败），历次表这一行记 status=degraded、计数为 -
+  hist=$(mktemp)
+  review_history_append "${_RR_HISTORY:--}" "$_RR_RUN" "$_RR_SHA" "" degraded - - - > "$hist"
+  _review_render_header "## 🤖 Kiro 代码评审 · ⚠️ 结构化解析失败" "$hist"
   echo ""
   echo "> ⚠️ 评审已完成，但输出不符合结构化契约（${_RR_REASON:-未说明原因}），无法给出分级问题清单与统计。"
   echo "> 下面是评审员输出的原文（已由脚本对疑似凭证再做一次掩码，并把其中的 Markdown 标题、分隔线与"
@@ -633,5 +813,8 @@ review_render_degraded() {
   echo ""
   review_redact_secrets < "$_RR_TEXT" | review_sanitize_md
   echo ""
-  _review_render_footer
+  review_render_history_table "$hist"
+  rm -f "$hist"
+  echo ""
+  review_render_footer "$_RR_RUN"
 }

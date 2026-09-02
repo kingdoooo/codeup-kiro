@@ -6,6 +6,9 @@
 # 在 diff 生成之后、Kiro 启动之前被移除（第 5.5 步），Kiro 固定以 v2 引擎运行（ADR-0004）。
 # 输出契约：Kiro 以 --output-format stream-json 输出事件流，评审报告是 runFinished.data.finalText 里
 # 由 <<<KIRO_REVIEW_JSON>>> 包裹的一段 JSON；汇总评论由 scripts/lib/review-render.sh 渲染。
+# 汇总评论生命周期：每评审员每 MR 至多一条（spec I4）。发评论前先查 MR 的全局评论，按
+# 「作者 = 机器人账号 且 正文含评审标记」定位上一次那条，找到就原地更新（run:N 递增、历次表 +1），
+# 找不到或更新失败就新建。成功、降级、失败三种评论都走 post_summary，形态一致、都参与原地更新。
 # 退出码：0=评审完成并回写；非 0=失败（不卡合并，仅流水线标红）。
 set -euo pipefail
 
@@ -24,8 +27,6 @@ MAX_COMMENT_BYTES="${MAX_COMMENT_BYTES:-60000}"
 # 内含按 P0→P1→P2 分组的完整问题清单。1 的渲染与发布属后续票，这里显式拒绝而不是静默按 0 跑，
 # 否则开关看起来生效了、实际什么也没发生。
 INLINE_COMMENT="${INLINE_COMMENT:-0}"
-# 第几次评审。原地更新汇总评论、维护「历次评审」表属后续票；本版本每次都是新评论，固定为 1。
-REVIEW_RUN=1
 # 官方安装脚本 URL。来源：https://kiro.dev/docs/cli/installation/（页面命令
 # `curl -fsSL https://cli.kiro.dev/install | bash`；脚本本身支持 Linux/macOS，
 # Linux 下安装到 ~/.local/bin，含 glibc 检测与 musl 回退）。核实日期：2026-07-21。
@@ -43,23 +44,53 @@ die() { log "错误：$*"; exit 1; }
 
 # 定位到 MR 后的失败：best-effort 回写"评审未完成"评论再退出
 MR_LOCATED=0
+# 汇总评论原地更新所需的状态，由第 1.5 步填好。die_review 在第 1 步之后的任何时刻都可能被调用，
+# 所以先给出安全默认值：没有旧评论、第 1 次评审、无历次记录。
+PRIOR_COMMENT_ID=""
+REVIEW_RUN=1
+PRIOR_HISTORY_FILE=""
+
+# 发布汇总评论：有旧评论就原地更新（评论 biz_id 不变），更新失败则退回新建。
+# 成功 / 降级 / 失败三种评论都走这里——失败评论若单独新建，一次失败就会在 MR 上留下第二条汇总，
+# 与 spec I4「每评审员每 MR 至多一条汇总评论」相悖。代价是：失败会覆盖上一次报告的问题清单，
+# 但「历次评审」表仍保留历次的提交、结论与 P0/P1/P2 计数。
+post_summary() {
+  local file="$1"
+  if [[ -n "$PRIOR_COMMENT_ID" ]]; then
+    if codeup_update_comment "$LOCAL_ID" "$PRIOR_COMMENT_ID" "$file"; then
+      log "已原地更新汇总评论 ${PRIOR_COMMENT_ID}（第 ${REVIEW_RUN} 次评审）"
+      return 0
+    fi
+    # 最常见的原因是旧评论刚被人删掉（404）：4xx 不重试，直接退回新建
+    log "警告：原地更新汇总评论 ${PRIOR_COMMENT_ID} 失败（已按既有重试策略处理），退回新建"
+  fi
+  codeup_post_comment "$LOCAL_ID" "$file"
+}
+
 die_review() {
   log "错误：$*"
   if [[ "$MR_LOCATED" == "1" ]]; then
-    local f
-    f=$(mktemp)
+    local f hist
+    f=$(mktemp); hist=$(mktemp)
+    # 历次表里本次记为 status=failed（计数未知）；上一次的记录从旧评论里读回来，不因失败而丢失
+    review_history_append "${PRIOR_HISTORY_FILE:--}" "$REVIEW_RUN" "${SHORT_SHA:-unknown}" "" failed - - - > "$hist"
     {
-      # 标题与标记必须与成功/降级评论同形：后续票要靠 `<!-- kiro-review:<sha> run:N -->` 找到
-      # 自己那条评论做原地更新，失败评论用另一种标记就会被漏掉；两种标题也会让 MR 上出现两个产品名。
+      # 标题、评审标记、历史标记与页脚都与成功/降级评论同形：定位旧评论靠
+      # `<!-- kiro-review:<sha> run:N -->`，失败评论用另一种形态就会被漏掉、于是多发一条。
       echo "## 🤖 Kiro 代码评审 · ⚠️ 评审未完成"
       echo "<!-- kiro-review:${SHORT_SHA:-unknown} run:${REVIEW_RUN} -->"
+      review_render_history_marker "$hist"
       echo ""
       echo "⚠️ 评审未完成：$*"
       echo ""
       echo "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。"
+      echo ""
+      review_render_history_table "$hist"
+      echo ""
+      review_render_footer "$REVIEW_RUN"
     } > "$f"
-    codeup_post_comment "$LOCAL_ID" "$f" || log "回写失败评论也未成功，仅保留日志"
-    rm -f "$f"
+    post_summary "$f" || log "回写失败评论也未成功，仅保留日志"
+    rm -f "$f" "$hist"
   fi
   exit 1
 }
@@ -108,6 +139,38 @@ else
 fi
 SHORT_SHA=$(git rev-parse --short HEAD)
 MR_LOCATED=1
+WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+
+# --- 1.5 定位本评审员上一次的汇总评论（spec §4.5 第 8 步、I4；票 03）---
+# 放在这里而不是「发评论前」：此后任何失败都要能带着正确的 run 号与历次记录去更新**同一条**评论，
+# 否则每次失败都会在 MR 上新增一条汇总。任一步失败只降级为「按新建处理」，绝不因此中断评审。
+if BOT_USERNAME=$(codeup_bot_username); then
+  log "机器人账号用户名：${BOT_USERNAME}"
+else
+  BOT_USERNAME=""
+  log "未取得机器人账号用户名（CODEUP_BOT_USERNAME 未配置，令牌身份接口也不可用——P1-00 实测 403），改由评审标记推断"
+fi
+if codeup_list_global_comments "$LOCAL_ID" > "$WORK/comments.json"; then
+  sel_rc=0
+  review_select_prior_comment "$BOT_USERNAME" < "$WORK/comments.json" > "$WORK/prior.json" || sel_rc=$?
+  case "$sel_rc" in
+    0) PRIOR_COMMENT_ID=$(jq -r '.comment_biz_id // ""' "$WORK/prior.json")
+       prior_run=$(jq -r '.run // 1' "$WORK/prior.json")
+       if [[ -z "$PRIOR_COMMENT_ID" ]]; then
+         log "警告：旧汇总评论没有 comment_biz_id，无法原地更新，本次按新建处理"
+       else
+         jq -r '.content // ""' "$WORK/prior.json" > "$WORK/prior.md"
+         PRIOR_HISTORY_FILE="$WORK/prior-history.json"
+         review_parse_history "$WORK/prior.md" > "$PRIOR_HISTORY_FILE"
+         REVIEW_RUN=$((prior_run + 1))
+         log "找到本评审员的旧汇总评论 ${PRIOR_COMMENT_ID}（上次为第 ${prior_run} 次评审，读回历次记录 $(jq -r 'length' "$PRIOR_HISTORY_FILE") 行），本次原地更新为第 ${REVIEW_RUN} 次"
+       fi ;;
+    2) log "警告：机器人账号无法唯一推断（见上一行），本次按新建处理" ;;
+    *) log "未找到本评审员的旧汇总评论，本次新建（第 ${REVIEW_RUN} 次评审）" ;;
+  esac
+else
+  log "警告：查询 MR 全局评论失败，本次按新建处理（可能在 MR 上留下第二条汇总）"
+fi
 
 # --- 2. 安装/检测 kiro-cli（失败用 die_review：网络受限的构建机上这是最常见的失败，
 #        原来用 die 会让 MR 上什么都看不到、只有流水线标红，违反 I10）---
@@ -147,7 +210,6 @@ if ! BASE=$(git merge-base "origin/${TARGET_BRANCH}" HEAD 2>/dev/null); then
   git fetch -q --unshallow origin 2>/dev/null || true
   BASE=$(git merge-base "origin/${TARGET_BRANCH}" HEAD) || die_review "无法计算 merge-base"
 fi
-WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 truncated=0
 build_review_input "$BASE" "HEAD" "$WORK/review.diff" "$WORK/omitted.txt" "$WORK/chunks" || truncated=$?
 [[ "$truncated" == "0" || "$truncated" == "10" ]] || die_review "diff 压缩失败（rc=${truncated}）"
@@ -285,6 +347,8 @@ DIFF_NOTE="完整直传"
 REVIEW_TS=$(date '+%Y-%m-%d %H:%M:%S')
 render_args=(--sha "$SHORT_SHA" --src "$SOURCE_BRANCH" --dst "$TARGET_BRANCH"
              --ts "$REVIEW_TS" --diff-note "$DIFF_NOTE" --run "$REVIEW_RUN")
+# 上一条汇总里读回的历次记录：渲染器会在它后面追加本次那一行
+[[ -n "$PRIOR_HISTORY_FILE" ]] && render_args+=(--history "$PRIOR_HISTORY_FILE")
 
 if [[ -n "$DEGRADE_REASON" ]]; then
   # 降级：评审已经产出、只是没按契约输出——贴清洗后的原文并在标题标明，退出码仍为 0。
@@ -331,7 +395,7 @@ if [[ "$(wc -c < "$WORK/comment.md" | tr -d ' ')" -gt "$MAX_COMMENT_BYTES" ]]; t
   cat "$WORK/comment.full.md" >&2
 fi
 
-if codeup_post_comment "$LOCAL_ID" "$WORK/comment.md"; then
+if post_summary "$WORK/comment.md"; then
   log "评审完成，已回写 MR #${LOCAL_ID}"
 else
   log "OpenAPI 回写失败（已按策略重试）。评审结果如下："

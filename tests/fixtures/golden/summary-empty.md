@@ -1,5 +1,6 @@
 ## 🤖 Kiro 代码评审
 <!-- kiro-review:90fcb05 run:1 -->
+<!-- kiro-history:[{"run":1,"sha":"90fcb05","verdict":"MERGE","status":"","p0":0,"p1":0,"p2":0}] -->
 
 | Commit | 分支 | 时间 | diff |
 |---|---|---|---|
@@ -21,5 +22,12 @@ P0 0 · P1 0 · P2 0
 
 未发现明显问题。
 
+<details><summary>历次评审（1）</summary>
+
+| 次 | 提交 | 结论 | P0/P1/P2 |
+|---|---|---|---|
+| 1 | `90fcb05` | 可合并 | 0/0/0 |
+</details>
+
 ---
-P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 `/kiro review` 可重新评审
+第 1 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 `/kiro review` 可重新评审
