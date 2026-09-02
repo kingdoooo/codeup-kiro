@@ -56,12 +56,15 @@ jget() { jq -r "$1" <<<"$RESP" 2>/dev/null || echo ""; }
 
 # ---------- P1-00 当前身份与 MR 基本信息 ----------
 call GET "/oapi/v1/platform/user"
-if ok; then ME=$(jget '.username // .name // empty'); record P1-00a PASS "令牌身份 username=${ME:-?}"; else record P1-00a FAIL "GetUserByToken HTTP ${CODEUP_HTTP_CODE}"; ME=""; fi
+if ok; then ME=$(jget '.username // .name // empty'); record P1-00a PASS "令牌身份 username=${ME:-?}"
+else record P1-00a INFO "GetUserByToken HTTP ${CODEUP_HTTP_CODE}（令牌无平台用户权限属正常；身份改由首条创建的评论 author.username 推断）"; ME=""; fi
 
 call GET "$MR_BASE"
 if ok; then
-  record P1-00b PASS "MR #${MR_LOCAL_ID} state=$(jget .state) $(jget .sourceBranch) -> $(jget .targetBranch) title=$(jget .title | cut -c1-40)"
-  [[ "$(jget .state)" =~ ^(opened|OPENED|UNDER_REVIEW)$ ]] || log "警告：MR 非打开状态，后续步骤可能失败"
+  # 实测：MR 对象的状态字段是 status（如 TO_BE_MERGED / UNDER_REVIEW），不是 state
+  MR_STATUS=$(jget '.status // .state')
+  record P1-00b PASS "MR #${MR_LOCAL_ID} status=${MR_STATUS} $(jget .sourceBranch) -> $(jget .targetBranch) reviewers=$(jq -r '[.reviewers[]?.username] | length' <<<"$RESP") title=$(jget .title | cut -c1-40)"
+  [[ "$MR_STATUS" =~ ^(TO_BE_MERGED|UNDER_REVIEW|opened|OPENED)$ ]] || log "警告：MR 状态 ${MR_STATUS} 非打开态，后续步骤可能失败"
 else
   record P1-00b FAIL "GetChangeRequest HTTP ${CODEUP_HTTP_CODE}: $(cut -c1-160 <<<"$RESP")"; exit 1
 fi
@@ -109,6 +112,7 @@ probe_inline() { # id label line with_from_to
   if ok; then
     local cid; cid=$(jget '.comment_biz_id')
     [[ -n "$cid" && "$cid" != "null" ]] && CREATED_IDS+=("$cid")
+    [[ -z "$ME" ]] && ME=$(jget '.author.username // empty') && log "机器人身份（由评论作者推断）：${ME:-?}"
     record "$1" PASS "HTTP ${CODEUP_HTTP_CODE} id=${cid:0:8}… state=$(jget .state) can_located=$(jget .location.can_located) located_line=$(jget .location.located_line_number) out_dated=$(jget .out_dated)" \
       "$(jq -c '{state:.state, location:.location, line_number:.line_number, filePath:.filePath}' <<<"$RESP" 2>/dev/null || echo null)"
   else
@@ -131,6 +135,8 @@ if ((${#CREATED_IDS[@]})); then
   if ok; then
     STATES=$(jq -r --argjson ids "$IDS_JSON" '[.[] | select(.comment_biz_id as $c | $ids | index($c)) | .state] | join(",")' <<<"$RESP")
     record P1-06b PASS "提交后我方草稿状态：${STATES:-未在列表中找到}"
+    LOCS=$(jq -c --argjson ids "$IDS_JSON" '[.[] | select(.comment_biz_id as $c | $ids | index($c)) | {line:.line_number, location:.location, out_dated:.out_dated, ps:(.related_patchset.versionNo|tostring)+"/"+.related_patchset.relatedMergeItemType}]' <<<"$RESP")
+    record P1-02c INFO "提交后定位字段：${LOCS}（实测 location 为 null，侧向语义需在 MR 页面目测）" "$LOCS"
   fi
 else
   record P1-04 SKIP "没有成功创建的草稿"
