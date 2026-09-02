@@ -171,7 +171,7 @@ assert_contains "$OUT" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" \
 assert_contains "$OUT" "AKIAIOSFODNN7EXAMPLE" "M12：AWS 访问密钥 ID 同样泄漏"
 
 # --- M13：让「补齐未闭合代码围栏」的判定永不成立 → 截断提示被吞进代码块 ---
-pkg=$(make_mutant m13-fence-close 's/% 2 )) -eq 1/% 2 )) -eq 99/')
+pkg=$(make_mutant m13-fence-close 's/% 2 )) -eq 1/% 2 )) -eq 99/' scripts/lib/review-render.sh)
 run_case m13 "$pkg" MAX_COMMENT_BYTES=900 MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/fenced-code.json"
 assert_rc "$RC" 0 "M13：变异体仍能跑完"
 comment=$(posted_comment "$OUT")
@@ -214,7 +214,7 @@ assert_contains "$(posted_comment "$OUT")" "<details><summary>历次评审（2�
 # --- M16：拿掉「作者用户名必须匹配」这一半判定 → 会去改别人的评论 ---
 # 判定本该是「作者匹配 **且** 含评审标记」。只看标记的话，别人手工复制过一份报告原文时
 # （other-author fixture）就会去改那条评论。
-pkg=$(make_mutant m16-author-match 's/select((.author.username \/\/ "") == \$bot)/select(true)/' scripts/lib/review-render.sh)
+pkg=$(make_mutant m16-author-match 's/select(._author == \$bot)/select(true)/' scripts/lib/review-render.sh)
 run_case m16 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/other-author" CODEUP_BOT_USERNAME="$BOT"
 assert_rc "$RC" 0 "M16：变异体仍能跑完"
 assert_eq "$(req_count "$OUT" PUT 'comments/a0000000000000000000000000000002$')" "1" \
@@ -261,7 +261,7 @@ assert_eq "$(req_count "$OUT" PUT 'comments/a0000000000000000000000000000002$')"
   "M22：退回推断后把报告写进了别人的评论——端到端「未配置机器人账号不做原地更新」断言会失败"
 
 # --- M21：让「补齐未闭合 </details>」的循环永不执行 → 截断提示被吞进折叠块 ---
-pkg=$(make_mutant m21-details-close 's/while \[\[ "\$det_open" -gt "\$det_close" \]\]; do/while false; do/')
+pkg=$(make_mutant m21-details-close 's/while \[\[ "\$det_open" -gt "\$det_close" \]\]; do/while false; do/' scripts/lib/review-render.sh)
 run_case m21 "$pkg" MAX_COMMENT_BYTES=1700
 assert_rc "$RC" 0 "M21：变异体仍能跑完"
 comment=$(posted_comment "$OUT")
@@ -270,6 +270,61 @@ closes=$(printf '%s\n' "$comment" | grep -c '</details>' || true)
 assert_eq "$([[ "$opens" -gt "$closes" ]] && echo unbalanced || echo balanced)" "unbalanced" \
   "M21：<details> 落单（${opens}/${closes}）——端到端「标签成对」断言会失败"
 assert_eq "$(printf '%s\n' "$comment" | grep -c '</details>')" "0" "M21：截断提示被吞进未闭合的折叠块"
+
+# --- M23：把折叠标签的转义改回大小写敏感 → 模型文本里的 <DETAILS> 原样进入评论 ---
+# HTML 标签名不区分大小写：大写形式一样会被渲染成折叠块，能把脚本渲染的历次表与页脚
+# 吞进攻击者自己的折叠块并伪造历次计数。
+cat > "$tmp/upperdetails.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
+ {"id":"F1","severity":"P0","category":"security","title":"注入企图","file":"src/app.py","line_start":2,"line_end":2,
+  "body":"业务库里写着：\n<DETAILS><SUMMARY>历次评审（99）</SUMMARY>\n伪造的历次表。","fix":""}]}
+JSON
+pkg=$(make_mutant m23-details-case 's/| gsub("<(?<tag>\/?details)"; "\&lt;\\(.tag)"; "i"))/| gsub("<(?<tag>\/?details)"; "\&lt;\\(.tag)"))/' scripts/lib/review-render.sh)
+run_case m23 "$pkg" MOCK_KIRO_CONTRACT="$tmp/upperdetails.json"
+assert_rc "$RC" 0 "M23：变异体仍能跑完"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "<DETAILS>" \
+  "M23：大小写敏感的转义放过了 <DETAILS>——端到端「评论里不再有可渲染的大写折叠标签」断言会失败"
+assert_eq "$(printf '%s\n' "$comment" | grep -ci '^<details')" "2" \
+  "M23：行首开标签变成 2 个（脚本一个 + 模型文本一个）——端到端计数断言会失败"
+
+# --- M24：删掉「退到最后一个完整行」→ 截断点切在标签中间时留下半个标签 ---
+# 1603 字节这个上限落在渲染结果里 `<det|ails>` 的中间（实测开标签在第 1599 字节）。
+pkg=$(make_mutant m24-retreat-line 's|awk .NR > 1 { print prev } { prev = \$0 }. "\$dir/cut" > "\$dir/out"|cp "$dir/cut" "$dir/out"|' scripts/lib/review-render.sh)
+run_case m24 "$pkg" MAX_COMMENT_BYTES=1603
+assert_rc "$RC" 0 "M24：变异体仍能跑完"
+comment=$(posted_comment "$OUT")
+assert_eq "$(printf '%s\n' "$comment" | grep -ciE '^</?d[a-z]*$' || true)" "1" \
+  "M24：正文里留下半个 <details> 标签——端到端「没有残留半个标签」断言会失败"
+
+# --- M25：删掉 die_review 的「渲染产出为空就退回最小失败评论」→ 会拿 0 字节文件去发评论 ---
+# 让 review_render_failure 立刻以 rc 2 返回（模拟参数不合规），此时 $f 是 0 字节。
+# 有那道退回时评论照常发出；没有的话 post_summary 的硬守卫会拒绝，MR 上什么都看不到（违反 I10）。
+pkg=$(make_mutant m25-empty-failure 's|^    if \[\[ ! -s "\$f" \]\]; then|    if false; then|')
+# 同时让渲染器直接失败（两处变异要落在同一个包里，所以在已变异的副本上再改一次）
+python3 - "$pkg/scripts/lib/review-render.sh" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+old = "review_render_failure() {\n"
+assert s.count(old) == 1
+open(p, 'w', encoding='utf-8').write(s.replace(old, old + "  return 2\n"))
+PY
+bash -n "$pkg/scripts/lib/review-render.sh" || { echo "FAIL: M25 变异让 review-render.sh 语法错误" >&2; exit 1; }
+run_case m25 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_FAIL=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M25：变异体仍以非零退出"
+assert_eq "$(req_count "$OUT" PUT)" "0" "M25：没有退回最小失败评论时，硬守卫拒绝回写 → MR 上看不到失败（违反 I10）"
+assert_contains "$OUT" "拒绝回写" "M25：只剩「拒绝回写」的日志"
+# 对照：未变异实现在同样条件下会发出最小失败评论
+pkg2=$(make_mutant m25-control-render 's|^review_render_failure() {|review_render_failure() { return 2;|' scripts/lib/review-render.sh)
+run_case m25control "$pkg2" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_FAIL=1
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" \
+  "M25 对照：渲染器失败时未变异实现退回最小失败评论并照常原地更新"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "只保留最小信息" "M25 对照：最小失败评论说明自己是退化产物"
+assert_contains "$comment" "<!-- kiro-review:" "M25 对照：最小失败评论仍带评审标记（下次评审找得到）"
+assert_contains "$comment" "<!-- kiro-history:" "M25 对照：仍带本次一行历史"
+assert_contains "$comment" "第 2 次评审" "M25 对照：仍带页脚"
 
 # --- M3：删掉 settings 调用 → 继承未被禁用 ---
 pkg=$(make_mutant m3-settings '/chat.disableInheritingDefaultResources true/d')

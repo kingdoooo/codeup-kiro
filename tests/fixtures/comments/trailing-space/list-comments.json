@@ -1,0 +1,14 @@
+[
+ {
+  "comment_biz_id": "ts0000000000000000000000000000001",
+  "comment_type": "GLOBAL_COMMENT",
+  "content": "## 🤖 Kiro 代码评审\n<!-- kiro-review:90fcb05 run:1 -->  \n<!-- kiro-history:[{\"run\":1,\"sha\":\"90fcb05\",\"verdict\":\"MERGE_AFTER_FIX\",\"status\":\"\",\"p0\":1,\"p1\":1,\"p2\":1}] --> \t \n\n### 问题统计\n\nP0 1 · P1 1 · P2 1\n\n---\n第 1 次评审 · P0 必须修复\n",
+  "state": "OPENED",
+  "draft": false,
+  "author": {
+   "username": "aliyun:kingdooo_hvFXC",
+   "name": "Kiro"
+  },
+  "out_dated": false
+ }
+]

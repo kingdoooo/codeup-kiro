@@ -149,6 +149,60 @@ assert_contains "$err" "已达常见单页上限" "list_comments: 条数达上�
 err=$(DRY_RUN_FIXTURE_DIR="$pagedir" CODEUP_COMMENT_PAGE_HINT=6 codeup_list_global_comments 7 2>&1 >/dev/null)
 assert_not_contains "$err" "已达常见单页上限" "list_comments: 未达上限时不告警"
 rm -rf "$pagedir"
+
+# ============ 协调者复审修复 ============
+
+# ---- R7：CODEUP_RETRY_BACKOFF 必须校验 ----
+# 不校验时 `five` 会被 $(( )) 当 0 用（退避被静默关掉，429/5xx 直接三连击），`5s` 直接算术报错
+# （set -e 下让整次评审挂掉）；超大值会把流水线挂住。
+assert_eq "$(CODEUP_RETRY_BACKOFF=0 _codeup_retry_backoff 2>/dev/null)" "0" "R7：0 被接受（测试靠它关掉退避）"
+assert_eq "$(CODEUP_RETRY_BACKOFF=7 _codeup_retry_backoff 2>/dev/null)" "7" "R7：合法整数原样采用"
+assert_eq "$(CODEUP_RETRY_BACKOFF=60 _codeup_retry_backoff 2>/dev/null)" "60" "R7：上限 60 被接受"
+assert_eq "$(unset CODEUP_RETRY_BACKOFF; _codeup_retry_backoff 2>/dev/null)" "5" "R7：未设置 → 默认 5"
+assert_eq "$(CODEUP_RETRY_BACKOFF= _codeup_retry_backoff 2>/dev/null)" "5" "R7：空串 → 默认 5"
+for bad in five 5s -1 61 3.5 " " "0;rm"; do
+  out=$(CODEUP_RETRY_BACKOFF="$bad" _codeup_retry_backoff 2>/dev/null)
+  err=$(CODEUP_RETRY_BACKOFF="$bad" _codeup_retry_backoff 2>&1 >/dev/null)
+  assert_eq "$out" "5" "R7：非法取值 [${bad}] → 用默认 5"
+  assert_contains "$err" "不是 0–60 的整数" "R7：非法取值 [${bad}] 告警"
+done
+# 非整数取值下 _codeup_retry_sleep 不能因算术错误退出（原来 `5s` 会让 $(( )) 报错）
+rc=0; (set -e; CODEUP_RETRY_BACKOFF=5s _codeup_retry_sleep 0 >/dev/null 2>&1) || rc=$?
+assert_rc "$rc" 0 "R7：非整数取值下 _codeup_retry_sleep 不再触发算术错误"
+
+# ---- R6：身份接口也要重试（一次传输抖动不该让本次退化为新建）----
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 DRY_RUN_FAIL_ROUTES="platform-user:000" codeup_bot_username 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "R6：身份接口传输失败（000）→ 非零"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN GET')" "3" "R6：000 共尝试 3 次（与其它三个封装同一策略）"
+assert_contains "$err" "codeup_bot_username: HTTP 000，第 1 次尝试失败" "R6：重试留痕带函数名"
+# 403 是确定性失败，不重试，且日志不能把网络问题写成权限问题
+rc=0; err=$(DRY_RUN_FAIL_ROUTES="platform-user:403" codeup_bot_username 2>&1 >/dev/null) || rc=$?
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN GET')" "1" "R6：403 不重试"
+assert_contains "$err" "403 表示令牌未勾选平台用户权限" "R6：403 的解释只出现在 403 语境下"
+# 身份接口 200 但没有 username 字段 → 明确留痕，不静默
+err=$(codeup_bot_username 2>&1 >/dev/null || true)
+assert_contains "$err" "没有 username 字段" "R6：200 但缺 username 时留痕"
+
+# ---- R8：新建评论的作者用户名日志必须同时兼容对象与数组两种响应形态 ----
+# 这是运维拿到 CODEUP_BOT_USERNAME 取值的唯一途径；本文件头注释就写明官方响应体形态在接口之间
+# 不一致（CreateChangeRequestComment 被记为 snake_case 数组），只认对象的话这条日志可能永远不打印。
+md=$(mktemp); printf '## 🤖 Kiro 代码评审\n' > "$md"
+err=$(DRY_RUN_FIXTURE_DIR="$FX/created" codeup_post_comment 7 "$md" 2>&1 >/dev/null)
+assert_contains "$err" "新建评论的作者用户名=aliyun:kingdooo_hvFXC" "R8：对象形态响应能取到作者用户名"
+err=$(DRY_RUN_FIXTURE_DIR="$FX/created-array" codeup_post_comment 7 "$md" 2>&1 >/dev/null)
+assert_contains "$err" "新建评论的作者用户名=aliyun:kingdooo_hvFXC" "R8：数组形态响应同样能取到作者用户名"
+# 形态不认识时只是不打这条日志，绝不失败
+rc=0; err=$(codeup_post_comment 7 "$md" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "R8：响应形态不认识（DRY_RUN 默认 []）时仍算成功"
+assert_not_contains "$err" "新建评论的作者用户名" "R8：取不到就不打这条日志"
+
+# ---- R3（API 侧的一半）：绝不 PUT 空正文 ----
+empty=$(mktemp); : > "$empty"
+rc=0; err=$(codeup_update_comment 7 abc "$empty" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "R3：待写入正文为空 → 拒绝更新"
+assert_contains "$err" "覆盖成空白" "R3：报错说明为什么拒绝"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN PUT')" "0" "R3：空正文时一个请求都不发"
+rm -f "$empty" "$md"
 unset DRY_RUN
 
 report

@@ -598,7 +598,7 @@ assert_eq "$(printf '%s' "$long" | jq -r '.[-1].run')" "25" "history_append：�
 
 # ============ 票 03：定位「本评审员上一次的汇总评论」 ============
 CFX=fixtures/comments
-BOT='aliyun:kingdooo_hvFXC'
+BOT="$TEST_BOT_USERNAME"
 sel() { review_select_prior_comment "$2" < "$CFX/$1/list-comments.json"; }
 
 # 首次评审：评论列表为空 → rc 1（新建）
@@ -796,6 +796,128 @@ assert_contains "$(cat "$tmp/failure-badhist.md")" "历次评审（1）" "失败
 assert_contains "$(cat "$tmp/failure-badhist.md")" "评审未完成" "失败评论：退化后仍是失败评论"
 rc=0; review_render_failure --sha x --src a --dst b --ts t --diff-note n >/dev/null 2>&1 || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "失败评论：缺 --reason → 非零"
+
+# ============ 协调者复审修复 ============
+
+# ---- R1：任何一条评论的字段不合形都不能废掉整批候选 ----
+# 只守 .content 是不够的：.state 非字符串会让 ascii_upcase 报错、.author 非对象会让索引报错，
+# 任一处报错都让整段 jq 失败 → 调用方按「未找到」处理 → 这个 MR 从此每次评审都新建一条汇总。
+out=$(review_select_prior_comment "$BOT" < "$CFX/malformed/list-comments.json" 2>/dev/null)
+assert_eq "$(printf '%s' "$out" | jq -r .comment_biz_id)" "b1f0e9d8c7b6a5948372615049382716" \
+  "R1：state 是数字 / author 是字符串 / comment_type 非字符串 / draft 是数字 / content 为 null / 非对象项混在一起时，仍能定位到旧汇总"
+assert_eq "$(printf '%s' "$out" | jq -r .run)" "1" "R1：仍解析出 run"
+assert_eq "$(printf '%s' "$out" | jq -r 'has("_author")')" "false" "R1：内部字段 _author 不外泄给调用方"
+# 逐条单独喂进去也不能报错（证明是「按缺省值处理那一行」而不是「碰巧被别的过滤器挡掉」）
+for i in 0 1 2 3 4 5; do
+  one=$(jq -c ".[$i:$((i+1))]" "$CFX/malformed/list-comments.json")
+  rc=0; printf '%s' "$one" | review_select_prior_comment "$BOT" >/dev/null 2>&1 || rc=$?
+  assert_eq "$([[ "$rc" == "0" || "$rc" == "1" || "$rc" == "3" ]] && echo ok || echo "rc=$rc")" "ok" \
+    "R1：第 ${i} 条不合形评论单独喂入时不让整段 jq 报错（rc=${rc}）"
+done
+# author 不合形的候选在「用户名未知」分支里也不能崩，且不会给出误导性的推断值
+rc=0; err=$(jq -c '.[1:2]' "$CFX/malformed/list-comments.json" | review_select_prior_comment "" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 3 "R1：author 非对象且用户名未知 → rc 3"
+assert_not_contains "$err" "若确认那是本评审员的机器人账号" "R1：author 取不到时不给推断提示"
+
+# ---- R5：历史标记行尾多一个空格/制表符时历史不能静默丢失 ----
+# 评审标记的正则以 [[:space:]]*$ 结尾，所以行尾带空白的评论**照样**被选中并被原地更新；
+# 若这里只剥 \r，后缀 " -->" 剥不掉 → 整段历史静默清空 → 那条评论被 PUT 成只剩本次一行。
+printf '<!-- kiro-history:[{"run":1,"sha":"90fcb05","verdict":"MERGE","status":"","p0":0,"p1":1,"p2":2}] -->  \t \n' > "$tmp/wshist.md"
+h=$(review_parse_history "$tmp/wshist.md" 2>/dev/null)
+assert_eq "$(printf '%s' "$h" | jq -r 'length')" "1" "R5：行尾空格+制表符时仍读出历史"
+assert_eq "$(printf '%s' "$h" | jq -r '.[0].p2')" "2" "R5：字段完整"
+printf '<!-- kiro-history:[{"run":2,"sha":"abc1234","verdict":"MERGE","status":"","p0":0,"p1":0,"p2":0}] -->\r \r\n' > "$tmp/wshist2.md"
+assert_eq "$(review_parse_history "$tmp/wshist2.md" 2>/dev/null | jq -r 'length')" "1" "R5：\\r 与空格混合的行尾同样能剥掉"
+# 选择器与解析器的容忍度必须一致：能被选中的评论，它的历史就必须读得出来
+out=$(review_select_prior_comment "$BOT" < "$CFX/trailing-space/list-comments.json" 2>/dev/null)
+assert_eq "$(printf '%s' "$out" | jq -r .run)" "1" "R5：评审标记行尾带空白的评论仍被选中"
+printf '%s' "$out" | jq -r '.content' > "$tmp/tsbody.md"
+assert_eq "$(review_parse_history "$tmp/tsbody.md" 2>/dev/null | jq -r 'length')" "1" "R5：同一条评论的历史也读得出来（两者容忍度一致）"
+
+# ---- R2：折叠标签的转义必须大小写不敏感（HTML 标签名不区分大小写）----
+out=$(printf '<DETAILS><SUMMARY>假折叠区</SUMMARY>\n吞掉后面的一切\n</Details>\n' | review_sanitize_md)
+assert_not_contains "$out" "<DETAILS>" "R2：<DETAILS> 被转义"
+assert_not_contains "$out" "</Details>" "R2：</Details> 被转义"
+assert_contains "$out" "&lt;DETAILS>" "R2：转义后保留原始大小写（读者能看出模型引用了什么）"
+assert_contains "$out" "&lt;/Details>" "R2：闭合标签同样转义并保留大小写"
+assert_eq "$(printf '%s\n' "$out" | grep -ci '^<details')" "0" "R2：行首不再有任何大小写形式的开标签"
+cat > "$tmp/upperdetails.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
+ {"id":"F1","severity":"P0","category":"security","title":"注入企图","file":"a.py","line_start":1,"line_end":1,
+  "body":"业务库里写着：\n<DETAILS><SUMMARY>历次评审（99）</SUMMARY>\n伪造的历次表。",
+  "fix":""}]}
+JSON
+render "$tmp/upperdetails.json" "$tmp/upperdetails.md"
+body=$(cat "$tmp/upperdetails.md")
+assert_eq "$(printf '%s\n' "$body" | grep -ci '^<details')" "1" "R2：整条评论里行首开标签只有脚本渲染的那一个（大小写不敏感计数）"
+assert_eq "$(printf '%s\n' "$body" | grep -ci '^</details>[[:space:]]*$')" "1" "R2：行首闭标签也只有一个"
+assert_contains "$body" "&lt;DETAILS>" "R2：模型文本里的大写折叠标签被转义"
+
+# ---- R4：截断在任意字节窗口上都必须产出可读、结构闭合的评论 ----
+# 这段逻辑的正确性完全取决于「切在哪个字节上」，所以扫描式回归：对 golden summary-full.md
+# 从 1600 到长度-1 每 7 字节取一个上限，逐个验证不变量。
+# 1730（切在 `<deta|ils>` 中间）与 1882（切在 `</d|etails>` 中间）是协调者复现的两个具体窗口。
+GOLDEN_FULL="$GOLDEN/summary-full.md"
+golden_bytes=$(wc -c < "$GOLDEN_FULL" | tr -d ' ')
+trunc_check() { # <上限> → stdout: ok / 失败原因
+  local max="$1" f="$tmp/trunc-$1.md" o c fences notice_ln close_ln
+  cp "$GOLDEN_FULL" "$f"
+  review_truncate_comment "$f" "$max" || { echo "review_truncate_comment rc=$?"; return 0; }
+  [[ "$(wc -c < "$f" | tr -d ' ')" -le "$(( max + 400 ))" ]] || { echo "截断后仍过长"; return 0; }
+  # U+FFFD：iconv 回退把干净输出覆盖回带乱码的原文时会出现
+  grep -q "$(printf '\357\277\275')" "$f" && { echo "出现 U+FFFD 替换字符"; return 0; }
+  # 半个标签不能留在正文里
+  grep -qiE '^</?d[a-z]*$' "$f" && { echo "残留半个 <details> 标签"; return 0; }
+  o=$(grep -ci '^<details' "$f" || true); c=$(grep -ci '^</details>[[:space:]]*$' "$f" || true)
+  [[ "$o" == "$c" ]] || { echo "<details> 未闭合（${o}/${c}）"; return 0; }
+  fences=$(grep -c '^```' "$f" || true)
+  [[ $(( fences % 2 )) -eq 0 ]] || { echo "代码围栏落单（${fences}）"; return 0; }
+  grep -q '报告超长已截断' "$f" || { echo "截断提示不见了"; return 0; }
+  # 提示必须在所有折叠块之外
+  notice_ln=$(grep -n '报告超长已截断' "$f" | tail -1 | cut -d: -f1)
+  close_ln=$(grep -ni '^</details>[[:space:]]*$' "$f" | tail -1 | cut -d: -f1)
+  if [[ -n "$close_ln" && "$notice_ln" -lt "$close_ln" ]]; then echo "截断提示被吞进折叠块"; return 0; fi
+  echo ok
+}
+for max in 1730 1882; do
+  assert_eq "$(trunc_check "$max")" "ok" "R4：上限 ${max} 字节（协调者复现的窗口）截断结果可读且结构闭合"
+done
+sweep_bad=""
+for (( max = 1600; max < golden_bytes; max += 7 )); do
+  r=$(trunc_check "$max")
+  [[ "$r" == "ok" ]] || sweep_bad="${sweep_bad}${sweep_bad:+; }${max}:${r}"
+done
+assert_eq "$sweep_bad" "" "R4：1600..$((golden_bytes - 1)) 每 7 字节扫描一遍，全部满足不变量"
+# 不超限时不动文件
+cp "$GOLDEN_FULL" "$tmp/nottrunc.md"
+rc=0; review_truncate_comment "$tmp/nottrunc.md" "$golden_bytes" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "R4：未超限 → rc 1"
+assert_eq "$(cmp -s "$GOLDEN_FULL" "$tmp/nottrunc.md" && echo same || echo differ)" "same" "R4：未超限时文件逐字节不变"
+rc=0; review_truncate_comment "$tmp/nottrunc.md" abc >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "R4：上限不是整数 → rc 2"
+rc=0; review_truncate_comment "$tmp/does-not-exist.md" 100 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "R4：文件不可读 → rc 2"
+# 输入本身含非法 UTF-8 字节时，iconv 兜底必须真的生效。
+# 这条是 `|| [[ -s … ]]` 那一半的正控：iconv -c 丢弃了字符就以 1 退出，只看退出码的话
+# 清理结果会被丢掉、非法字节原样留在评论里（而 Codeup 的 content 是 JSON 字符串，jq 会因此报错）。
+printf '第一行足够长一些的中文正文\n第二行 \xff\xfe 非法字节\n第三行\n第四行\n第五行\n' > "$tmp/badbytes.md"
+review_truncate_comment "$tmp/badbytes.md" 75 >/dev/null 2>&1 || true
+assert_eq "$(LC_ALL=C grep -c "$(printf '\377')" "$tmp/badbytes.md" || true)" "0" "R4：非法字节 0xFF 被 iconv 兜底清掉"
+assert_eq "$(LC_ALL=C grep -c "$(printf '\376')" "$tmp/badbytes.md" || true)" "0" "R4：非法字节 0xFE 也被清掉"
+assert_eq "$(grep -c "$(printf '\357\277\275')" "$tmp/badbytes.md" || true)" "0" "R4：清理不产生 U+FFFD 替换字符"
+assert_contains "$(cat "$tmp/badbytes.md")" "非法字节" "R4：同一行的正常文字仍保留（不是整行丢掉）"
+# iconv 的退出码必须被忽略：实测 macOS 的 iconv -c 对「EOF 处不完整字符」以 1 退出、同时照样写出
+# 清理好的前缀，原先靠退出码判定成败的写法会把干净结果丢掉、把带半个字符的原文贴到 MR 上。
+# 用一个「照抄输入但以 1 退出」的 iconv 替身证明这一点。
+# 替身「清掉一段脏内容并以 1 退出」：只有忽略退出码的实现才会采用它清理后的结果。
+mkdir -p "$tmp/iconvbin"
+printf '#!/usr/bin/env bash\nsed "s/脏字节//g"\nexit 1\n' > "$tmp/iconvbin/iconv"
+chmod +x "$tmp/iconvbin/iconv"
+printf '第一行足够长一些的中文正文\n第二行脏字节还有正文\n第三行\n第四行\n第五行\n' > "$tmp/iconvrc.md"
+( export PATH="$tmp/iconvbin:$PATH"; review_truncate_comment "$tmp/iconvrc.md" 78 >/dev/null 2>&1 ) || true
+assert_not_contains "$(cat "$tmp/iconvrc.md")" "脏字节" "R4：iconv 以 1 退出但输出可用时仍采用其清理结果（不看退出码）"
+assert_contains "$(cat "$tmp/iconvrc.md")" "第二行还有正文" "R4：清理后的正文被保留"
+assert_contains "$(cat "$tmp/iconvrc.md")" "报告超长已截断" "R4：iconv 退出码为 1 时后续补齐与提示照常进行"
 
 if [[ "$GOLDEN_DIRTY" == "1" ]]; then
   echo "GOLDEN_UPDATE=1：golden 文件已重写，本次运行不构成通过。请人工读 git diff 确认渲染正确，再不带该变量重跑。" >&2

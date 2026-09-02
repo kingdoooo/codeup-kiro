@@ -56,6 +56,11 @@ PRIOR_HISTORY_FILE=""
 # 但「历次评审」表仍保留历次的提交、结论与 P0/P1/P2 计数。
 post_summary() {
   local file="$1"
+  # 硬守卫：空正文一旦 PUT 上去，会把上一次的完整报告（含隐藏历史）覆盖成空白且不可恢复。
+  # codeup_update_comment 里也有一道同样的检查——这是两个方向都必须堵住的失败：
+  # 成功路径有 `[[ -s ]]`，而失败路径（die_review）曾经把渲染失败产出的 0 字节文件直接交过来。
+  [[ -s "$file" ]] \
+    || { log "错误：待发布的评论正文为空，拒绝回写（空正文会把上一条汇总覆盖成空白）"; return 1; }
   if [[ -n "$PRIOR_COMMENT_ID" ]]; then
     if codeup_update_comment "$LOCAL_ID" "$PRIOR_COMMENT_ID" "$file"; then
       log "已原地更新汇总评论 ${PRIOR_COMMENT_ID}（第 ${REVIEW_RUN} 次评审）"
@@ -82,7 +87,29 @@ die_review() {
       --ts "$(date '+%Y-%m-%d %H:%M:%S')" --diff-note "${DIFF_NOTE:-（本次未生成 diff）}" \
       --run "$REVIEW_RUN" "${hist_args[@]+"${hist_args[@]}"}" \
       --log-hint "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。" > "$f" \
-      || log "警告：失败评论渲染异常，仍尝试回写已生成的内容"
+      || log "警告：失败评论渲染异常（rc≠0），改用最小失败评论"
+    # 渲染器在参数不合规时（例如 --ts 为空、--history 不可读）以 rc 2 提前返回，$f 就是 0 字节。
+    # 那份空文件绝不能交给 post_summary：PUT 空正文会把上一条完整报告覆盖成空白且不可恢复。
+    # 退回一段最小的纯文本失败评论——仍带评审标记（下次评审才找得到这条）与本次一行历史。
+    if [[ ! -s "$f" ]]; then
+      local mh
+      mh=$(mktemp)
+      review_history_append - "$REVIEW_RUN" "${SHORT_SHA:-unknown}" "" failed - - - > "$mh" 2>/dev/null || true
+      _review_history_ok "$mh" die_review 2>/dev/null || printf '[]\n' > "$mh"
+      {
+        echo "## 🤖 Kiro 代码评审 · ⚠️ 评审未完成"
+        echo "<!-- kiro-review:${SHORT_SHA:-unknown} run:${REVIEW_RUN} -->"
+        review_render_history_marker "$mh"
+        echo ""
+        echo "⚠️ 评审未完成（失败评论渲染异常，只保留最小信息）：$*"
+        echo ""
+        echo "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。"
+        echo ""
+        review_render_footer "$REVIEW_RUN"
+      } > "$f"
+      rm -f "$mh"
+      log "已退回最小失败评论（保证不 PUT 空正文）"
+    fi
     post_summary "$f" || log "回写失败评论也未成功，仅保留日志"
     rm -f "$f"
   fi
@@ -373,32 +400,10 @@ fi
 # Codeup content 上限 65535 字符；按字节截断留足余量，iconv 清理截断产生的残缺 UTF-8 序列
 if [[ "$(wc -c < "$WORK/comment.md" | tr -d ' ')" -gt "$MAX_COMMENT_BYTES" ]]; then
   cp "$WORK/comment.md" "$WORK/comment.full.md"
-  head -c "$MAX_COMMENT_BYTES" "$WORK/comment.md" | iconv -f UTF-8 -t UTF-8 -c > "$WORK/comment.trunc.md" || \
-    head -c "$MAX_COMMENT_BYTES" "$WORK/comment.md" > "$WORK/comment.trunc.md"
-  # 按字节截断几乎总是切在行中间：先补一个换行，否则后面追加的内容会接在那半行后面——
-  # 闭合围栏不在行首就不起作用（实测截断后得到的是 `    row_2 = fetc``` `，围栏没闭合）。
-  [[ $(tail -c1 "$WORK/comment.trunc.md" | wc -l | tr -d ' ') -eq 1 ]] || printf '\n' >> "$WORK/comment.trunc.md"
-  # fix 字段里会带 ```代码块```：截断点落在围栏中间时，随后追加的截断提示会被 Markdown 当成
-  # 代码块内容渲染掉，读者只看到评论突然结束、完全看不到「已截断」。所以先补闭合围栏，再写提示。
-  if [[ $(( $(grep -c '^```' "$WORK/comment.trunc.md" || true) % 2 )) -eq 1 ]]; then
-    echo '```' >> "$WORK/comment.trunc.md"
-  fi
-  # 同理对「历次评审」折叠区：截断点落在 <details> 里面时，未闭合的标签会把随后追加的截断提示
-  # 一起吞进折叠块（甚至吞掉页脚）。补齐缺的闭合标签，提示才落在折叠块外面。
-  # 只数**行首**的标签：脚本渲染的折叠块都是行首整行，而模型文本里的 `<details>` 已在
-  # review_validate/_sanitize_md 里被转义成 `&lt;details`——所以这里数到的一定是脚本自己的标签。
-  # 用无锚点的 grep 会把模型原文引用的 `</details>` 也算进闭合数，于是该补的时候反而不补。
-  det_open=$(grep -c '^<details' "$WORK/comment.trunc.md" || true)
-  det_close=$(grep -c '^</details>$' "$WORK/comment.trunc.md" || true)
-  while [[ "$det_open" -gt "$det_close" ]]; do
-    echo '</details>' >> "$WORK/comment.trunc.md"
-    det_close=$((det_close + 1))
-  done
-  {
-    echo ""
-    echo "> ⚠️ 报告超长已截断（上限 ${MAX_COMMENT_BYTES} 字节），完整内容见流水线日志。"
-  } >> "$WORK/comment.trunc.md"
-  mv "$WORK/comment.trunc.md" "$WORK/comment.md"
+  # 截断逻辑在 scripts/lib/review-render.sh（review_truncate_comment）：它的正确性取决于
+  # 「切在哪个字节上」，放在库里才能对几十个截断窗口做扫描式回归测试。
+  review_truncate_comment "$WORK/comment.md" "$MAX_COMMENT_BYTES" \
+    || die_review "评论截断失败（上限 ${MAX_COMMENT_BYTES} 字节）"
   log "评审报告超长已截断；完整内容如下："
   cat "$WORK/comment.full.md" >&2
 fi

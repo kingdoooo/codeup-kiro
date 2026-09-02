@@ -1,0 +1,60 @@
+[
+ {
+  "comment_biz_id": "m1",
+  "comment_type": "GLOBAL_COMMENT",
+  "content": "## 🤖 Kiro 代码评审\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-history:[{\"run\":1,\"sha\":\"90fcb05\",\"verdict\":\"MERGE_AFTER_FIX\",\"status\":\"\",\"p0\":1,\"p1\":1,\"p2\":1}] -->\n\n### 问题统计\n\nP0 1 · P1 1 · P2 1\n\n---\n第 1 次评审 · P0 必须修复\n",
+  "state": 1,
+  "author": {
+   "username": "aliyun:human_dev"
+  },
+  "out_dated": false
+ },
+ {
+  "comment_biz_id": "m2",
+  "comment_type": "GLOBAL_COMMENT",
+  "content": "## 🤖 Kiro 代码评审\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-history:[{\"run\":1,\"sha\":\"90fcb05\",\"verdict\":\"MERGE_AFTER_FIX\",\"status\":\"\",\"p0\":1,\"p1\":1,\"p2\":1}] -->\n\n### 问题统计\n\nP0 1 · P1 1 · P2 1\n\n---\n第 1 次评审 · P0 必须修复\n",
+  "state": "OPENED",
+  "author": "aliyun:human_dev"
+ },
+ {
+  "comment_biz_id": "m3",
+  "comment_type": 7,
+  "content": "## 🤖 Kiro 代码评审\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-history:[{\"run\":1,\"sha\":\"90fcb05\",\"verdict\":\"MERGE_AFTER_FIX\",\"status\":\"\",\"p0\":1,\"p1\":1,\"p2\":1}] -->\n\n### 问题统计\n\nP0 1 · P1 1 · P2 1\n\n---\n第 1 次评审 · P0 必须修复\n",
+  "state": "OPENED",
+  "author": {
+   "username": 123
+  }
+ },
+ {
+  "comment_biz_id": "m4",
+  "comment_type": "GLOBAL_COMMENT",
+  "content": "## 🤖 Kiro 代码评审\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-history:[{\"run\":1,\"sha\":\"90fcb05\",\"verdict\":\"MERGE_AFTER_FIX\",\"status\":\"\",\"p0\":1,\"p1\":1,\"p2\":1}] -->\n\n### 问题统计\n\nP0 1 · P1 1 · P2 1\n\n---\n第 1 次评审 · P0 必须修复\n",
+  "state": "OPENED",
+  "draft": 1,
+  "author": {
+   "username": "aliyun:human_dev"
+  }
+ },
+ {
+  "comment_biz_id": "m5",
+  "comment_type": "GLOBAL_COMMENT",
+  "content": null,
+  "state": "OPENED",
+  "author": {
+   "username": "aliyun:kingdooo_hvFXC"
+  }
+ },
+ "这一项根本不是对象",
+ {
+  "comment_biz_id": "b1f0e9d8c7b6a5948372615049382716",
+  "comment_type": "GLOBAL_COMMENT",
+  "content": "## 🤖 Kiro 代码评审\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-history:[{\"run\":1,\"sha\":\"90fcb05\",\"verdict\":\"MERGE_AFTER_FIX\",\"status\":\"\",\"p0\":1,\"p1\":1,\"p2\":1}] -->\n\n### 问题统计\n\nP0 1 · P1 1 · P2 1\n\n---\n第 1 次评审 · P0 必须修复\n",
+  "state": "OPENED",
+  "draft": false,
+  "author": {
+   "username": "aliyun:kingdooo_hvFXC",
+   "name": "Kiro"
+  },
+  "out_dated": false
+ }
+]

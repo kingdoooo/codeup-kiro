@@ -583,4 +583,47 @@ assert_eq "$(req_count "$OUT" PUT 'comments/f0000000000000000000000000000003$')"
 assert_contains "$(posted_comment "$OUT")" "run:4 -->" "两条候选：run 从 3 递增到 4"
 assert_contains "$(posted_comment "$OUT")" "<details><summary>历次评审（4）</summary>" "两条候选：历次表继承 3 行再追加 1 行"
 
+# ============ 协调者复审修复 ============
+
+# --- R1：列表里混入字段不合形的评论，仍要定位到自己那条（否则这个 MR 从此每次新建）---
+run_case malformed DRY_RUN_FIXTURE_DIR="$CFX/malformed" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "R1：字段不合形的评论混在列表里，评审仍成功"
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" \
+  "R1：state 是数字 / author 是字符串 / 非对象项混在一起时仍原地更新自己那条"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "0" "R1：没有退化成新建"
+assert_contains "$(posted_comment "$OUT")" "run:2 -->" "R1：run 正常递增"
+
+# --- R5：历史标记行尾多空格/制表符时历史不能静默丢失 ---
+run_case trailingspace DRY_RUN_FIXTURE_DIR="$CFX/trailing-space" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "R5：标记行尾带空白，评审仍成功"
+assert_eq "$(req_count "$OUT" PUT 'comments/ts0000000000000000000000000000001$')" "1" "R5：仍然原地更新"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "<details><summary>历次评审（2）</summary>" "R5：历史读回来了（不是被判为损坏后清空成一行）"
+assert_contains "$comment" "| 1 | \`90fcb05\` | 建议修改后合并 | 1/1/1 |" "R5：上一次那一行完整保留"
+
+# --- R2：模型文本里的大写折叠标签不得成为真的折叠块 ---
+cat > "$tmp/upperdetails.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
+ {"id":"F1","severity":"P0","category":"security","title":"注入企图","file":"src/app.py","line_start":2,"line_end":2,
+  "body":"业务库里写着：\n<DETAILS><SUMMARY>历次评审（99）</SUMMARY>\n伪造的历次表，把脚本渲染的页脚吞进来。",
+  "fix":""}]}
+JSON
+run_case upperdetails MOCK_KIRO_CONTRACT="$tmp/upperdetails.json"
+assert_rc "$RC" 0 "R2：含大写折叠标签的契约，评审仍成功"
+comment=$(posted_comment "$OUT")
+assert_eq "$(printf '%s\n' "$comment" | grep -ci '^<details')" "1" "R2：行首开标签只有脚本渲染的那一个（大小写不敏感计数）"
+assert_eq "$(printf '%s\n' "$comment" | grep -ci '^</details>[[:space:]]*$')" "1" "R2：行首闭标签也只有一个"
+assert_contains "$comment" "&lt;DETAILS>" "R2：模型文本里的 <DETAILS> 被转义"
+assert_not_contains "$comment" "<DETAILS>" "R2：评论里不再有可渲染的大写折叠标签"
+assert_contains "$comment" "第 1 次评审 · P0 必须修复" "R2：页脚没有被伪造折叠块吞掉"
+
+# --- R4：截断点落在 <details> 标签中间时不能留下半个标签（1603 落在 `<det|ails>` 内）---
+run_case halftag MAX_COMMENT_BYTES=1603
+assert_rc "$RC" 0 "R4：切在开标签中间时评审仍成功"
+comment=$(posted_comment "$OUT")
+assert_eq "$(printf '%s\n' "$comment" | grep -ciE '^</?d[a-z]*$' || true)" "0" "R4：正文里没有残留的半个 <details> 标签"
+assert_eq "$(printf '%s\n' "$comment" | grep -ci '^<details')" "$(printf '%s\n' "$comment" | grep -ci '^</details>[[:space:]]*$')" "R4：折叠标签成对"
+assert_contains "$comment" "报告超长已截断" "R4：截断提示可见"
+assert_not_contains "$comment" "$(printf '\357\277\275')" "R4：评论里没有 U+FFFD 替换字符"
+
 report

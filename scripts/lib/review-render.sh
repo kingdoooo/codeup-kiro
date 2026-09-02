@@ -52,9 +52,11 @@ review_clean_text() {
 # 做法（jq 实现，避免同一套转义规则出现两份）：
 #   - `<!--` / `-->` 转义为 `&lt;!--` / `--&gt;`：注释语法失效，标记再也构不成 HTML 注释。
 #     无条件执行（也包括代码围栏内）——后续票的去重是对评论原文做文本匹配，围栏内的标记同样会被匹配到。
-#   - `<details` / `</details` 同样转义：折叠区是脚本渲染的结构（票 03 的「历次评审」表就是一个），
-#     模型文本里的 `<details>` 会造出第三个折叠块，也会让「超长截断后补齐未闭合 </details>」这道
-#     修复按错误的标签计数走偏（它靠行首标签识别脚本自己渲染的那几对）。
+#   - `<details` / `</details` 同样转义，且**大小写不敏感**（HTML 标签名不区分大小写，`<DETAILS>`
+#     一样会被渲染成折叠块）：折叠区是脚本渲染的结构（票 03 的「历次评审」表就是一个），
+#     模型文本里的折叠标签能把脚本渲染的历次表与页脚吞进攻击者自己的折叠块、伪造历次计数，
+#     也会让「超长截断后补齐未闭合 </details>」这道修复按错误的标签计数走偏。
+#     用带捕获的单条 gsub 保留原始大小写（转义后的字面量按原样显示，便于读者看出模型引用了什么）。
 #   - 代码围栏外，行首的 `#{1,6}` 标题与 `---`/`***`/`___`/`===` 分隔线前加反斜杠转义（渲染成字面量）。
 #     围栏内不动：那里的 `#` 是代码注释，转义会破坏代码，而围栏内的 `#` 本来也不会渲染成标题。
 #   - 围栏数为奇数时补一个闭合围栏：否则模型开一个不闭合的围栏就能把后面脚本渲染的章节与页脚一起吞掉。
@@ -62,7 +64,7 @@ _REVIEW_JQ_SANITIZE='
   def _sanitize_md:
     if type != "string" then "" else
     (gsub("<!--"; "&lt;!--") | gsub("-->"; "--&gt;")
-     | gsub("<details"; "&lt;details") | gsub("</details"; "&lt;/details"))
+     | gsub("<(?<tag>/?details)"; "&lt;\(.tag)"; "i"))
     | split("\n")
     | reduce .[] as $l ({fence: false, out: []};
         if ($l | test("^[[:space:]]{0,3}(```|~~~)")) then
@@ -349,9 +351,11 @@ review_parse_history() {
     echo '[]'; return 0
   fi
   line=$(grep "^${REVIEW_HISTORY_PREFIX}" "$file" | head -1)
-  # 去掉行尾的 \r：评论正文经 Codeup 网页编辑后回来可能是 CRLF（评审标记的正则以 [[:space:]]*$
-  # 结尾，所以那条评论**照样**会被选中），不剥的话后缀剥不掉、payload 带上 ` -->` 尾巴。
-  line=${line%$'\r'}
+  # 剥掉行尾**所有**空白，不只是 \r：评审标记的正则以 [[:space:]]*$ 结尾，所以行尾多一个空格或
+  # 制表符（Codeup 网页编辑很常见）的评论**照样**会被选中并被原地更新；而这里若剥不掉 " -->"
+  # 后缀，历史就会静默清空，那条评论被 PUT 成只剩本次一行——「历次评审」表悄悄丢掉全部历史。
+  # 容忍度必须与选择器一致。
+  line=$(printf '%s' "$line" | LC_ALL=C sed -E 's/[[:space:]]+$//')
   json=${line#"$REVIEW_HISTORY_PREFIX"}
   json=${json%"$REVIEW_HISTORY_SUFFIX"}
   # 必须 -s 读成数组并要求「恰好一个 JSON 值」：
@@ -417,30 +421,38 @@ review_select_prior_comment() {
   local bot="${1-}" input out status inferred
   input=$(cat)
   out=$(printf '%s' "$input" | jq -c --arg bot "$bot" --arg re "$REVIEW_MARKER_LINE_RE" '
+    # 字段类型守卫：响应形态只在一次探测里见过，不能假定每一行的每个字段都规整。
+    # 任何一条评论里 .content 非字符串（split 报错）、.state 非字符串（ascii_upcase 报错）、
+    # .author 非对象（索引字符串报错）都会让**整个** jq 程序失败 → 调用方按「未找到」处理 →
+    # 这个 MR 从此每次评审都新建一条汇总。不合形的字段一律按缺省值处理，只影响那一行。
+    def str(v): if (v | type) == "string" then v else "" end;
+    def author_name: if (.author | type) == "object" then str(.author.username) else "" end;
     def marker_runs:
-      [ ((.content // "") | split("\n")[] | match($re) | .captures[0].string | tonumber) ];
+      [ (str(.content) | split("\n")[] | match($re) | .captures[0].string | tonumber) ];
     (if type == "object" then (.result // []) else . end)
+    | (if type == "array" then . else [] end)
     | map(select(type == "object"))
-    # content 必须是字符串：任何一条评论的 content 是数字/对象时 split 会让**整个** jq 程序报错，
-    # 于是这个 MR 从此每次评审都新建一条汇总（响应形态只在一次探测里见过，不能假定所有行都规整）
-    | map(select((.content | type) == "string" or .content == null))
-    | map(select((.comment_type // "GLOBAL_COMMENT") == "GLOBAL_COMMENT"))
-    | map(select(((.state // "") | ascii_upcase) != "DELETED"))
-    | map(select((.draft // false) != true))
+    # content 必须是非空字符串才可能带评审标记
+    | map(select((.content | type) == "string"))
+    # comment_type 缺失或不合形 → 按 GLOBAL_COMMENT 处理（接口已按类型过滤过，这里只是纵深防御）
+    | map(select(str(.comment_type) == "" or str(.comment_type) == "GLOBAL_COMMENT"))
+    | map(select((str(.state) | ascii_upcase) != "DELETED"))
+    # 只有布尔真才算草稿；其它取值按「不是草稿」处理
+    | map(select((.draft == true) | not))
     | map(. + {_runs: marker_runs})
     # 一条评论里有两个评审标记时无法判定次数，不作为候选（与「契约标记必须唯一」同一个原则）
     | map(select((._runs | length) == 1))
-    | map(. + {run: ._runs[0]} | del(._runs))
+    | map(. + {run: ._runs[0], _author: author_name} | del(._runs))
     | . as $cands
-    | ([$cands[] | (.author.username // "")] | unique) as $authors
+    | ([$cands[] | ._author] | unique) as $authors
     | if ($cands | length) == 0 then {status: "none"}
       elif $bot == "" then
         {status: "no-identity",
          inferred: (if ($authors | length) == 1 then $authors[0] else "" end),
          authors: $authors}
       else
-        ([$cands[] | select((.author.username // "") == $bot)] | sort_by(.run) | last) as $sel
-        | if $sel == null then {status: "none"} else {status: "ok", comment: $sel} end
+        ([$cands[] | select(._author == $bot)] | sort_by(.run) | last) as $sel
+        | if $sel == null then {status: "none"} else {status: "ok", comment: ($sel | del(._author))} end
       end' 2>/dev/null) \
     || { echo "review_select_prior_comment: 评论列表不是合法 JSON，按「未找到」处理" >&2; return 1; }
   status=$(printf '%s' "$out" | jq -r '.status // ""')
@@ -691,6 +703,70 @@ review_render_summary() {
   rm -f "$hist"
   echo ""
   review_render_footer "$_RR_RUN"
+}
+
+# --- 超长评论的截断（Codeup 的 content 有长度上限）---
+# 用法：review_truncate_comment <评论文件（就地改写）> <字节上限>
+#   rc 0 = 已截断并追加提示；rc 1 = 未超限（文件不变）；rc 2 = 用法错误
+# 放在库里而不是内联在 kiro-review.sh：这段逻辑的正确性取决于「切在哪个字节上」，
+# 只有能在库层面对几十个截断窗口做扫描式回归，才谈得上验证过（见 tests/test-review-render.sh）。
+review_truncate_comment() {
+  local file="$1" max="$2" size dir
+  [[ -r "$file" ]] || { echo "review_truncate_comment: 文件不可读：${file}" >&2; return 2; }
+  [[ "$max" =~ ^[0-9]+$ && "$max" -ge 1 ]] || { echo "review_truncate_comment: 字节上限必须是 ≥1 的整数（实际：${max}）" >&2; return 2; }
+  size=$(wc -c < "$file" | tr -d ' ')
+  [[ "$size" -gt "$max" ]] || return 1
+  dir=$(mktemp -d)
+  head -c "$max" "$file" > "$dir/cut"
+  # **先退到最后一个完整行**（丢掉那半行），再做任何补齐：
+  #   ① 半行会让后面追加的闭合围栏/闭合标签接在半行后面，而它们不在行首就不起作用
+  #      （实测截断后得到的是 `    row_2 = fetc``` `，围栏没闭合）；
+  #   ② 半个标签（切在 `<deta|ils>` 或 `</d|etails>` 中间）会让行首标签计数判断错——
+  #      对 golden summary-full.md，1730 与 1882 这两个上限正好落在这两处；
+  #   ③ 行边界不会落在多字节字符中间，所以退到完整行同时消掉了「截出半个 UTF-8 字符」。
+  # awk 逐行打印时把最后一条记录留在 prev 不输出，正好等于「丢掉末尾那半行」，且输出以换行结尾。
+  if [[ $(tail -c1 "$dir/cut" | wc -l | tr -d ' ') -eq 1 ]]; then
+    cp "$dir/cut" "$dir/out"
+  else
+    awk 'NR > 1 { print prev } { prev = $0 }' "$dir/cut" > "$dir/out"
+  fi
+  # iconv 只作兜底（清掉输入本身可能带的非法字节），且**只看输出是否可用，不看退出码**：
+  # 实测（macOS）`iconv -f UTF-8 -t UTF-8 -c` 对「EOF 处不完整的字符」以 1 退出，同时照样写出
+  # 清理好的前缀。原先写成 `head -c … | iconv -c || head -c …`，这个回退恰好在 iconv 清理成功时
+  # 触发，把干净结果覆盖回带半个字符的原文，评论末尾就出现 U+FFFD。
+  iconv -f UTF-8 -t UTF-8 -c < "$dir/out" > "$dir/iconv" 2>/dev/null || true
+  if [[ -s "$dir/iconv" || ! -s "$dir/out" ]]; then
+    mv "$dir/iconv" "$dir/out"
+  else
+    rm -f "$dir/iconv"
+  fi
+  # 空文件（上限小于第一行）时补一个换行，保证后面追加的内容仍在行首
+  [[ $(tail -c1 "$dir/out" | wc -l | tr -d ' ') -eq 1 ]] || printf '\n' >> "$dir/out"
+  # fix 字段里会带 ```代码块```：截断点落在围栏中间时，随后追加的截断提示会被 Markdown 当成
+  # 代码块内容渲染掉，读者只看到评论突然结束、完全看不到「已截断」。所以先补闭合围栏，再写提示。
+  if [[ $(( $(grep -c '^```' "$dir/out" || true) % 2 )) -eq 1 ]]; then
+    echo '```' >> "$dir/out"
+  fi
+  # 同理对「历次评审」折叠区：截断点落在 <details> 里面时，未闭合的标签会把随后追加的截断提示
+  # 一起吞进折叠块（甚至吞掉页脚）。补齐缺的闭合标签，提示才落在折叠块外面。
+  # 只数**行首**的标签：脚本渲染的折叠块都是行首整行，而模型文本里的折叠标签已被 _sanitize_md
+  # （大小写不敏感地）转义成 `&lt;details`——所以这里数到的一定是脚本自己的标签。用无锚点的 grep
+  # 会把模型原文引用的 `</details>` 也算进闭合数，于是该补的时候反而不补。
+  # 计数用 -i：HTML 标签名不区分大小写。
+  local det_open det_close
+  det_open=$(grep -ci '^<details' "$dir/out" || true)
+  det_close=$(grep -ci '^</details>[[:space:]]*$' "$dir/out" || true)
+  while [[ "$det_open" -gt "$det_close" ]]; do
+    echo '</details>' >> "$dir/out"
+    det_close=$((det_close + 1))
+  done
+  {
+    echo ""
+    echo "> ⚠️ 报告超长已截断（上限 ${max} 字节），完整内容见流水线日志。"
+  } >> "$dir/out"
+  cp "$dir/out" "$file"
+  rm -rf "$dir"
+  return 0
 }
 
 # --- 疑似密钥的脚本侧掩码（stdin → stdout）---
