@@ -201,12 +201,7 @@ assert_contains "$OUT" "P0 1 · P1 1 · P2 1" "M15：非受信产出被照常渲
 
 # ============ 票 03 的守卫 ============
 CFX="$ROOT/tests/fixtures/comments"
-BOT='aliyun:kingdooo_hvFXC'
-req_count() { # <OUT> <方法> [URL 片段]
-  local pat="DRY_RUN $2 "
-  [[ -n "${3:-}" ]] && pat="${pat}.*$3"
-  printf '%s\n' "$1" | grep -cE -- "$pat" || true
-}
+BOT="$TEST_BOT_USERNAME"
 
 # --- 对照：原地更新在未变异实现上确实成立 ---
 run_case baseline-update "$ROOT" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT"
@@ -256,6 +251,17 @@ run_case m20 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M20：变异体仍以非零退出"
 assert_eq "$(req_count "$OUT" PUT)" "0" "M20：失败评论不再原地更新——端到端断言会失败"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "M20：失败评论变成 MR 上的第二条汇总"
+
+# --- M21：让「补齐未闭合 </details>」的循环永不执行 → 截断提示被吞进折叠块 ---
+pkg=$(make_mutant m21-details-close 's/while \[\[ "\$det_open" -gt "\$det_close" \]\]; do/while false; do/')
+run_case m21 "$pkg" MAX_COMMENT_BYTES=1700
+assert_rc "$RC" 0 "M21：变异体仍能跑完"
+comment=$(posted_comment "$OUT")
+opens=$(printf '%s\n' "$comment" | grep -c '<details>' || true)
+closes=$(printf '%s\n' "$comment" | grep -c '</details>' || true)
+assert_eq "$([[ "$opens" -gt "$closes" ]] && echo unbalanced || echo balanced)" "unbalanced" \
+  "M21：<details> 落单（${opens}/${closes}）——端到端「标签成对」断言会失败"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '</details>')" "0" "M21：截断提示被吞进未闭合的折叠块"
 
 # --- M3：删掉 settings 调用 → 继承未被禁用 ---
 pkg=$(make_mutant m3-settings '/chat.disableInheritingDefaultResources true/d')

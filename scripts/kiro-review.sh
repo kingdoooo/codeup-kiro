@@ -70,27 +70,21 @@ post_summary() {
 die_review() {
   log "错误：$*"
   if [[ "$MR_LOCATED" == "1" ]]; then
-    local f hist
-    f=$(mktemp); hist=$(mktemp)
-    # 历次表里本次记为 status=failed（计数未知）；上一次的记录从旧评论里读回来，不因失败而丢失
-    review_history_append "${PRIOR_HISTORY_FILE:--}" "$REVIEW_RUN" "${SHORT_SHA:-unknown}" "" failed - - - > "$hist"
-    {
-      # 标题、评审标记、历史标记与页脚都与成功/降级评论同形：定位旧评论靠
-      # `<!-- kiro-review:<sha> run:N -->`，失败评论用另一种形态就会被漏掉、于是多发一条。
-      echo "## 🤖 Kiro 代码评审 · ⚠️ 评审未完成"
-      echo "<!-- kiro-review:${SHORT_SHA:-unknown} run:${REVIEW_RUN} -->"
-      review_render_history_marker "$hist"
-      echo ""
-      echo "⚠️ 评审未完成：$*"
-      echo ""
-      echo "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。"
-      echo ""
-      review_render_history_table "$hist"
-      echo ""
-      review_render_footer "$REVIEW_RUN"
-    } > "$f"
+    local f
+    local -a hist_args=()
+    f=$(mktemp)
+    # 失败评论的形态（标题/评审标记/历史标记/元信息表/历次表/页脚）由 review_render_failure 统一渲染，
+    # 与成功、降级评论同出一源：定位旧评论靠 `<!-- kiro-review:<sha> run:N -->`，
+    # 失败评论若自己手写一份、哪天与渲染器走形，就会被漏掉、于是在 MR 上多出一条汇总。
+    [[ -n "$PRIOR_HISTORY_FILE" ]] && hist_args=(--history "$PRIOR_HISTORY_FILE")
+    review_render_failure --reason "$*" --sha "${SHORT_SHA:-unknown}" \
+      --src "${SOURCE_BRANCH:-?}" --dst "${TARGET_BRANCH:-?}" \
+      --ts "$(date '+%Y-%m-%d %H:%M:%S')" --diff-note "${DIFF_NOTE:-（本次未生成 diff）}" \
+      --run "$REVIEW_RUN" "${hist_args[@]+"${hist_args[@]}"}" \
+      --log-hint "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。" > "$f" \
+      || log "警告：失败评论渲染异常，仍尝试回写已生成的内容"
     post_summary "$f" || log "回写失败评论也未成功，仅保留日志"
-    rm -f "$f" "$hist"
+    rm -f "$f"
   fi
   exit 1
 }
@@ -386,6 +380,17 @@ if [[ "$(wc -c < "$WORK/comment.md" | tr -d ' ')" -gt "$MAX_COMMENT_BYTES" ]]; t
   if [[ $(( $(grep -c '^```' "$WORK/comment.trunc.md" || true) % 2 )) -eq 1 ]]; then
     echo '```' >> "$WORK/comment.trunc.md"
   fi
+  # 同理对「历次评审」折叠区：截断点落在 <details> 里面时，未闭合的标签会把随后追加的截断提示
+  # 一起吞进折叠块（甚至吞掉页脚）。补齐缺的闭合标签，提示才落在折叠块外面。
+  # 只数**行首**的标签：脚本渲染的折叠块都是行首整行，而模型文本里的 `<details>` 已在
+  # review_validate/_sanitize_md 里被转义成 `&lt;details`——所以这里数到的一定是脚本自己的标签。
+  # 用无锚点的 grep 会把模型原文引用的 `</details>` 也算进闭合数，于是该补的时候反而不补。
+  det_open=$(grep -c '^<details' "$WORK/comment.trunc.md" || true)
+  det_close=$(grep -c '^</details>$' "$WORK/comment.trunc.md" || true)
+  while [[ "$det_open" -gt "$det_close" ]]; do
+    echo '</details>' >> "$WORK/comment.trunc.md"
+    det_close=$((det_close + 1))
+  done
   {
     echo ""
     echo "> ⚠️ 报告超长已截断（上限 ${MAX_COMMENT_BYTES} 字节），完整内容见流水线日志。"

@@ -52,13 +52,17 @@ review_clean_text() {
 # 做法（jq 实现，避免同一套转义规则出现两份）：
 #   - `<!--` / `-->` 转义为 `&lt;!--` / `--&gt;`：注释语法失效，标记再也构不成 HTML 注释。
 #     无条件执行（也包括代码围栏内）——后续票的去重是对评论原文做文本匹配，围栏内的标记同样会被匹配到。
+#   - `<details` / `</details` 同样转义：折叠区是脚本渲染的结构（票 03 的「历次评审」表就是一个），
+#     模型文本里的 `<details>` 会造出第三个折叠块，也会让「超长截断后补齐未闭合 </details>」这道
+#     修复按错误的标签计数走偏（它靠行首标签识别脚本自己渲染的那几对）。
 #   - 代码围栏外，行首的 `#{1,6}` 标题与 `---`/`***`/`___`/`===` 分隔线前加反斜杠转义（渲染成字面量）。
 #     围栏内不动：那里的 `#` 是代码注释，转义会破坏代码，而围栏内的 `#` 本来也不会渲染成标题。
 #   - 围栏数为奇数时补一个闭合围栏：否则模型开一个不闭合的围栏就能把后面脚本渲染的章节与页脚一起吞掉。
 _REVIEW_JQ_SANITIZE='
   def _sanitize_md:
     if type != "string" then "" else
-    (gsub("<!--"; "&lt;!--") | gsub("-->"; "--&gt;"))
+    (gsub("<!--"; "&lt;!--") | gsub("-->"; "--&gt;")
+     | gsub("<details"; "&lt;details") | gsub("</details"; "&lt;/details"))
     | split("\n")
     | reduce .[] as $l ({fence: false, out: []};
         if ($l | test("^[[:space:]]{0,3}(```|~~~)")) then
@@ -314,7 +318,10 @@ review_validate() {
 # 同一条正则同时给 jq（Oniguruma）与 grep/sed（POSIX ERE）用，两个引擎都支持这里用到的字符类。
 # 注意：jq 的 ^/$ 默认锚定整个字符串而不是行，所以在 jq 里必须先 split("\n") 再逐行 match
 # （见 review_select_prior_comment）。
-REVIEW_MARKER_LINE_RE='^<!-- kiro-review:[0-9a-zA-Z._-]+ run:([0-9]+) -->[[:space:]]*$'
+# run 限 1–9 位：汇总评论在 Codeup 上是人可编辑的，`run:99999999999999999999` 这种手改值会让
+# `$((prior_run + 1))` 静默溢出成负数、渲染出一个再也匹配不上的标记。位数上限让这类值直接不算候选
+# （于是新建一条正常的汇总），而不是把 run 号搞坏。
+REVIEW_MARKER_LINE_RE='^<!-- kiro-review:[0-9a-zA-Z._-]+ run:([0-9]{1,9}) -->[[:space:]]*$'
 
 # --- 历次评审记录 ---
 # 汇总评论里嵌一行隐藏 JSON 作为机器可读的历次记录，「历次评审」表只是它的人类可读投影：
@@ -332,7 +339,7 @@ REVIEW_HISTORY_MAX=20
 # 用法：review_parse_history <旧评论正文文件> → stdout = JSON 数组（读不到/不合法一律 []）
 # 永不失败：拿不到历史只会让「历次评审」表少几行，不该拖垮评审。
 review_parse_history() {
-  local file="$1" n line json
+  local file="$1" n line json out
   [[ -r "$file" ]] || { echo '[]'; return 0; }
   n=$(grep -c "^${REVIEW_HISTORY_PREFIX}" "$file" 2>/dev/null || true)
   n=${n:-0}
@@ -342,11 +349,25 @@ review_parse_history() {
     echo '[]'; return 0
   fi
   line=$(grep "^${REVIEW_HISTORY_PREFIX}" "$file" | head -1)
+  # 去掉行尾的 \r：评论正文经 Codeup 网页编辑后回来可能是 CRLF（评审标记的正则以 [[:space:]]*$
+  # 结尾，所以那条评论**照样**会被选中），不剥的话后缀剥不掉、payload 带上 ` -->` 尾巴。
+  line=${line%$'\r'}
   json=${line#"$REVIEW_HISTORY_PREFIX"}
   json=${json%"$REVIEW_HISTORY_SUFFIX"}
-  printf '%s' "$json" \
-    | jq -c 'if type == "array" then [.[] | select(type == "object" and (.run | type) == "number")] else [] end' 2>/dev/null \
-    || { echo "review_parse_history: 历史标记内不是合法 JSON 数组，忽略历史" >&2; echo '[]'; }
+  # 必须 -s 读成数组并要求「恰好一个 JSON 值」：
+  #   ① payload 尾巴上有多余字节时，jq 会先输出一份合法结果、再报错退出，而 `|| echo '[]'` 是
+  #      **追加**不是替换——下游就拿到两个 JSON 值，历次表会渲染出重复行与断成两行的 <summary>；
+  #   ② payload 为空（`<!-- kiro-history: -->`）时，不带 -s 的 jq 无输入即无输出且退出码 0，
+  #      本函数会返回空串而不是 []，把「拿不到历史」升级成整条评论渲染失败。
+  out=$(printf '%s' "$json" | jq -c -s '
+          if length == 1 and (.[0] | type == "array")
+          then [.[0][] | select(type == "object" and (.run | type) == "number")]
+          else [] end' 2>/dev/null) || out=""
+  if [[ -z "$out" ]]; then
+    echo "review_parse_history: 历史标记内不是恰好一个 JSON 数组，忽略历史" >&2
+    out='[]'
+  fi
+  printf '%s\n' "$out"
 }
 
 # 用法：review_history_append <历史 JSON 文件或 -> <run> <sha> <verdict> <status> <p0> <p1> <p2>
@@ -398,6 +419,9 @@ review_select_prior_comment() {
       [ ((.content // "") | split("\n")[] | match($re) | .captures[0].string | tonumber) ];
     (if type == "object" then (.result // []) else . end)
     | map(select(type == "object"))
+    # content 必须是字符串：任何一条评论的 content 是数字/对象时 split 会让**整个** jq 程序报错，
+    # 于是这个 MR 从此每次评审都新建一条汇总（响应形态只在一次探测里见过，不能假定所有行都规整）
+    | map(select((.content | type) == "string" or .content == null))
     | map(select((.comment_type // "GLOBAL_COMMENT") == "GLOBAL_COMMENT"))
     | map(select(((.state // "") | ascii_upcase) != "DELETED"))
     | map(select((.draft // false) != true))
@@ -445,10 +469,10 @@ _review_verdict_cn() {
 # 解析结果写入 _RR_* 变量；未知参数或缺值 → rc 2（拼错参数不能静默按默认值渲染）。
 _review_parse_render_args() {
   _RR_JSON=""; _RR_TEXT=""; _RR_SHA=""; _RR_SRC=""; _RR_DST=""; _RR_TS=""
-  _RR_DIFF_NOTE=""; _RR_RUN=1; _RR_INLINE=0; _RR_REASON=""; _RR_HISTORY=""
+  _RR_DIFF_NOTE=""; _RR_RUN=1; _RR_INLINE=0; _RR_REASON=""; _RR_HISTORY=""; _RR_LOG_HINT=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --json|--text|--sha|--src|--dst|--ts|--diff-note|--run|--inline-comment|--reason|--history)
+      --json|--text|--sha|--src|--dst|--ts|--diff-note|--run|--inline-comment|--reason|--history|--log-hint)
         [[ $# -ge 2 ]] || { echo "review 渲染：参数 $1 缺少取值" >&2; return 2; }
         case "$1" in
           --json) _RR_JSON="$2" ;;
@@ -462,6 +486,7 @@ _review_parse_render_args() {
           --inline-comment) _RR_INLINE="$2" ;;
           --reason) _RR_REASON="$2" ;;
           --history) _RR_HISTORY="$2" ;;
+          --log-hint) _RR_LOG_HINT="$2" ;;
         esac
         shift 2 ;;
       *) echo "review 渲染：未知参数：$1" >&2; return 2 ;;
@@ -475,6 +500,18 @@ _review_parse_render_args() {
   # --history 拼错路径不能静默按「无历史」渲染：那会把历次表悄悄清空，而评论上看不出异常
   [[ -z "$_RR_HISTORY" || -r "$_RR_HISTORY" ]] \
     || { echo "review 渲染：--history 指定的历史文件不可读：${_RR_HISTORY}" >&2; return 2; }
+}
+
+# --- 内部：追加后的历次记录必须是合法 JSON 数组 ---
+# 两个渲染函数都被调用方写成 `review_render_… || die_review …`，而 `||` 会让整个函数体不受 errexit
+# 约束：review_history_append 万一失败（jq 报错、--history 内容不合法），历史文件会是空的，
+# 渲染出来的评论带一行 `<!-- kiro-history: -->` 与一张空表，而调用方看到的仍是退出码 0。
+# 所以在这里显式拦一次：宁可整条评论渲染失败（调用方回写「评审未完成」），也不发一条坏掉的汇总。
+# -s（读成数组后判断「恰好一个」）：不带 -s 时 jq 逐个 JSON 值套用过滤器、退出码取最后一个，
+# 于是 `[…]\n[]` 这种「两个值」的文件会输出 true true 且退出 0——正是本守卫要拦的那种损坏。
+_review_history_ok() {
+  jq -e -s 'length == 1 and (.[0] | type == "array")' "$1" >/dev/null 2>&1 \
+    || { echo "$2: 历次记录渲染失败（review_history_append 未产出恰好一个 JSON 数组）" >&2; return 1; }
 }
 
 # --- 历次记录的隐藏 JSON（下一次评审的解析入口）---
@@ -572,6 +609,7 @@ review_render_summary() {
   # 保证表格里的本次那一行与评审标记里的 run:N、与统计行的计数永远出自同一份输入。
   hist=$(mktemp)
   review_history_append "${_RR_HISTORY:--}" "$_RR_RUN" "$_RR_SHA" "$verdict" "" "$n0" "$n1" "$n2" > "$hist"
+  _review_history_ok "$hist" review_render_summary || { rm -f "$hist"; return 2; }
 
   _review_render_header "## 🤖 Kiro 代码评审" "$hist"
   echo ""
@@ -802,6 +840,7 @@ review_render_degraded() {
   # 降级时没有可信的分级计数（正是因为解析失败），历次表这一行记 status=degraded、计数为 -
   hist=$(mktemp)
   review_history_append "${_RR_HISTORY:--}" "$_RR_RUN" "$_RR_SHA" "" degraded - - - > "$hist"
+  _review_history_ok "$hist" review_render_degraded || { rm -f "$hist"; return 2; }
   _review_render_header "## 🤖 Kiro 代码评审 · ⚠️ 结构化解析失败" "$hist"
   echo ""
   echo "> ⚠️ 评审已完成，但输出不符合结构化契约（${_RR_REASON:-未说明原因}），无法给出分级问题清单与统计。"
@@ -812,6 +851,41 @@ review_render_degraded() {
   echo "---"
   echo ""
   review_redact_secrets < "$_RR_TEXT" | review_sanitize_md
+  echo ""
+  review_render_history_table "$hist"
+  rm -f "$hist"
+  echo ""
+  review_render_footer "$_RR_RUN"
+}
+
+# --- 失败评论：评审没跑完时唯一能到达 MR 的信息通道（spec I10 失败可见）---
+# 用法：review_render_failure --reason <失败说明> --sha X --src A --dst B --ts T --diff-note N
+#                            [--run N] [--history <历史 JSON 文件>] [--log-hint <一句话>]
+# 与成功/降级评论**同形**：标题、评审标记、历史标记、元信息表、历次表、页脚全部出自同一份代码。
+# 早先这段是在 kiro-review.sh 里手写第二份的，结果是「形态一致」这个不变量靠人肉维护，
+# 而给两个渲染函数加的历次记录守卫漏掉了第三份拷贝。
+# 本函数刻意**不因历次记录异常而失败**：历史算不出来就退化成「只有本次一行」，
+# 绝不能出现「评审失败 + 失败评论也发不出去」的组合。
+# --reason 里可能带上 runFinished.status 之类来自事件流的取值（不受信），所以过一遍结构清洗。
+review_render_failure() {
+  _review_parse_render_args "$@" || return $?
+  [[ -n "$_RR_REASON" ]] || { echo "review_render_failure: 缺少必填参数 --reason" >&2; return 2; }
+  local hist
+  hist=$(mktemp)
+  review_history_append "${_RR_HISTORY:--}" "$_RR_RUN" "$_RR_SHA" "" failed - - - > "$hist" 2>/dev/null || true
+  _review_history_ok "$hist" review_render_failure \
+    || review_history_append - "$_RR_RUN" "$_RR_SHA" "" failed - - - > "$hist" 2>/dev/null || true
+  _review_history_ok "$hist" review_render_failure || printf '[]\n' > "$hist"
+  _review_render_header "## 🤖 Kiro 代码评审 · ⚠️ 评审未完成" "$hist"
+  echo ""
+  printf '⚠️ 评审未完成：'
+  printf '%s' "$_RR_REASON" | review_sanitize_md
+  echo ""
+  if [[ -n "$_RR_LOG_HINT" ]]; then
+    echo ""
+    printf '%s' "$_RR_LOG_HINT" | review_sanitize_md
+    echo ""
+  fi
   echo ""
   review_render_history_table "$hist"
   rm -f "$hist"

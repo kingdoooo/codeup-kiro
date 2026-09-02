@@ -428,13 +428,7 @@ assert_eq "$(( before % 2 ))" "0" "围栏内截断：截断提示之前的围栏
 # DRY_RUN 下用 DRY_RUN_FIXTURE_DIR 注入「MR 上现有的全局评论列表」，
 # 用 stderr 上的 DRY_RUN <方法> <URL> 判定脚本到底是新建（POST …/comments）还是原地更新（PUT …/comments/<id>）。
 CFX="$ROOT/tests/fixtures/comments"
-BOT='aliyun:kingdooo_hvFXC'
-# 用法：req_count <OUT> <方法> [URL 片段]
-req_count() {
-  local pat="DRY_RUN $2 "
-  [[ -n "${3:-}" ]] && pat="${pat}.*$3"
-  printf '%s\n' "$1" | grep -cE -- "$pat" || true
-}
+BOT="$TEST_BOT_USERNAME"
 
 # --- 首次评审：列表为空 → 新建（POST），run:1，历次表 1 行 ---
 run_case first DRY_RUN_FIXTURE_DIR="$CFX/empty" CODEUP_BOT_USERNAME="$BOT"
@@ -533,6 +527,47 @@ assert_contains "$comment" "| 1 | \`90fcb05\` | 建议修改后合并 | 1/1/1 |"
 assert_contains "$comment" "评审未完成 | -/-/- |" "失败评论 + 原地更新：历次表记本次评审未完成"
 assert_eq "$(printf '%s\n' "$comment" | grep -c '<!-- kiro-review:')" "1" "失败评论 + 原地更新：评审标记恰好一个"
 assert_eq "$(printf '%s\n' "$comment" | grep -c '<!-- kiro-history:')" "1" "失败评论 + 原地更新：历史标记恰好一个"
+
+# --- 截断点落在「历次评审」折叠区内部：截断提示必须仍然在折叠区外面可见 ---
+# 不补 </details> 的话，未闭合的标签会把随后追加的截断提示（乃至页脚）一起吞进折叠块。
+# 1700 字节这个取值落在渲染结果里 <details> 与 </details> 之间（实测 1599 / 1753）。
+run_case detailstrunc MAX_COMMENT_BYTES=1700
+assert_rc "$RC" 0 "折叠区内截断：评审仍成功"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "报告超长已截断" "折叠区内截断：评论里能看到截断提示"
+opens=$(printf '%s\n' "$comment" | grep -c '<details>' || true)
+closes=$(printf '%s\n' "$comment" | grep -c '</details>' || true)
+assert_eq "$([[ "$opens" -ge 1 ]] && echo yes || echo no)" "yes" "折叠区内截断：确实截在折叠区内部（评论里有 <details>）"
+assert_eq "$opens" "$closes" "折叠区内截断：<details> 与 </details> 成对（补了闭合标签）——实际 ${opens}/${closes}"
+notice_ln=$(printf '%s\n' "$comment" | grep -n '报告超长已截断' | tail -1 | cut -d: -f1)
+close_ln=$(printf '%s\n' "$comment" | grep -n '</details>' | tail -1 | cut -d: -f1)
+assert_eq "$([[ -n "$close_ln" && "$notice_ln" -gt "$close_ln" ]] && echo ok || echo bad)" "ok" \
+  "折叠区内截断：截断提示在 </details> 之后（不在折叠块里，提示在第 ${notice_ln:-?} 行，闭合在第 ${close_ln:-?} 行）"
+
+# --- 复审修复：旧评论经 Codeup 网页编辑后是 CRLF，历史仍要能读回来 ---
+run_case crlf DRY_RUN_FIXTURE_DIR="$CFX/crlf" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "CRLF 旧评论：成功"
+assert_eq "$(req_count "$OUT" PUT 'comments/c11f0000000000000000000000000001$')" "1" "CRLF 旧评论：仍然原地更新"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "run:2 -->" "CRLF 旧评论：run 递增"
+assert_contains "$comment" "<details><summary>历次评审（2）</summary>" "CRLF 旧评论：历史读回来了（不是被判为损坏后清空）"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^<!-- kiro-history:')" "1" "CRLF 旧评论：历史标记恰好一行（不是「合法结果 + []」两行）"
+# <summary> 只有一行：两个 JSON 值时 `length` 会输出两行，把 <summary> 撑成断行的两截
+# （assert_not_contains 不能用带换行的模式——grep -F 会把它当成两个可选模式）
+assert_eq "$(printf '%s\n' "$comment" | grep -c '<summary>历次评审')" "1" "CRLF 旧评论：<summary> 只有一行，没被两个 JSON 值撑断"
+
+# --- 复审修复：某条评论的 content 不是字符串，不能让整个 MR 从此每次都新建 ---
+run_case badcontent DRY_RUN_FIXTURE_DIR="$CFX/badcontent" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "content 非字符串：成功"
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" "content 非字符串：跳过那条，仍然原地更新"
+
+# --- 复审修复：失败评论与成功评论同形（同一个渲染器）---
+run_case failshape MOCK_KIRO_FAIL=1
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "| Commit | 分支 | 时间 | diff |" "失败评论：与成功评论同形（含元信息表）"
+assert_contains "$comment" "<!-- kiro-history:" "失败评论：带历史标记"
+assert_contains "$comment" "<details><summary>历次评审（1）</summary>" "失败评论：带历次表"
+assert_contains "$comment" "第 1 次评审 · P0 必须修复" "失败评论：页脚与成功评论同形"
 
 # --- 同一机器人留下过两条带标记的汇总（上次退回新建）→ 继续更新 run 最大的那条 ---
 run_case tworuns DRY_RUN_FIXTURE_DIR="$CFX/two-runs" CODEUP_BOT_USERNAME="$BOT"

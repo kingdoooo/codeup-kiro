@@ -134,6 +134,21 @@ assert_eq "$out" "" "bot_username: 取不到时不输出任何用户名"
 rc=0; err=$(DRY_RUN_FAIL_ROUTES="platform-user:403" codeup_bot_username 2>&1 >/dev/null) || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "bot_username: 403（P1-00 实测）→ 非零"
 assert_contains "$err" "403" "bot_username: 403 留痕日志"
+# 复审修复：身份接口只给显示名（.name）时必须当作「取不到」。退回 .name 会给出一个永远匹配不上
+# author.username 的非空值，反而把「按评审标记推断」这条兜底路径也关掉 → 每次评审都新建一条汇总。
+nameonly=$(mktemp -d); jq -n '{name:"kiro-bot"}' > "$nameonly/platform-user.json"
+rc=0; out=$(DRY_RUN_FIXTURE_DIR="$nameonly" codeup_bot_username 2>/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "bot_username: 身份接口只有 .name → 非零（不拿显示名冒充用户名）"
+assert_eq "$out" "" "bot_username: 只有 .name 时不输出任何用户名"
+rm -rf "$nameonly"
+
+# 复审修复：评论列表达到常见单页上限时必须留痕——旧汇总落在页外会被误判成「首次评审」
+pagedir=$(mktemp -d); jq -n '[range(5) | {comment_biz_id:"x", comment_type:"GLOBAL_COMMENT", content:"c"}]' > "$pagedir/list-comments.json"
+err=$(DRY_RUN_FIXTURE_DIR="$pagedir" CODEUP_COMMENT_PAGE_HINT=5 codeup_list_global_comments 7 2>&1 >/dev/null)
+assert_contains "$err" "已达常见单页上限" "list_comments: 条数达上限时告警（分页参数未实测，只能留痕）"
+err=$(DRY_RUN_FIXTURE_DIR="$pagedir" CODEUP_COMMENT_PAGE_HINT=6 codeup_list_global_comments 7 2>&1 >/dev/null)
+assert_not_contains "$err" "已达常见单页上限" "list_comments: 未达上限时不告警"
+rm -rf "$pagedir"
 unset DRY_RUN
 
 report

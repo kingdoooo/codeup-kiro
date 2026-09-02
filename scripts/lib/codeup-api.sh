@@ -153,9 +153,13 @@ codeup_post_comment() {
 # 路径与参数以 scripts/probe/probe-codeup-inline.sh 实测为准：POST `…/changeRequests/<id>/comments/list`，
 # body `{"comment_type":"GLOBAL_COMMENT"}`（P1-06 实测支持按 comment_type 过滤）。
 # 响应是评论对象数组，每项含 comment_biz_id / comment_type / content / state / author.username。
+# 分页：探测只在一条评论的新 MR 上调过 `{}`（probe-codeup-inline.sh），**分页参数名未实测**，
+# 因此这里不凭记忆往 body 里塞 page/perPage。取而代之的是：返回条数达到常见单页上限时打警告——
+# 旧汇总评论落在页外时脚本会误判「首次评审」而每次新建一条。补分页需要先做一次探测（见票 03 Comments）。
 # $1=localId → stdout=响应体；rc 1=失败（按既有重试策略重试后仍失败）
+CODEUP_COMMENT_PAGE_HINT="${CODEUP_COMMENT_PAGE_HINT:-100}"
 codeup_list_global_comments() {
-  local local_id="$1" attempt tmp
+  local local_id="$1" attempt tmp cnt
   local body='{"comment_type":"GLOBAL_COMMENT"}'
   for attempt in 1 2 3; do
     tmp=$(mktemp)
@@ -163,6 +167,11 @@ codeup_list_global_comments() {
       "/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/repositories/${CODEUP_REPO_ID}/changeRequests/${local_id}/comments/list" \
       "$body" > "$tmp"
     if _codeup_http_ok "$CODEUP_HTTP_CODE"; then
+      cnt=$(jq -r 'if type == "array" then length elif type == "object" then ((.result // []) | length) else 0 end' \
+              "$tmp" 2>/dev/null || echo 0)
+      if [[ "${cnt:-0}" =~ ^[0-9]+$ && "${cnt:-0}" -ge "$CODEUP_COMMENT_PAGE_HINT" ]]; then
+        echo "codeup_list_global_comments: 返回 ${cnt} 条评论，已达常见单页上限（${CODEUP_COMMENT_PAGE_HINT}），旧汇总评论可能不在本页内 → 可能误判为首次评审并多发一条汇总" >&2
+      fi
       cat "$tmp"; rm -f "$tmp"; return 0
     fi
     rm -f "$tmp"
@@ -211,7 +220,10 @@ codeup_bot_username() {
   tmp=$(mktemp)
   _codeup_request GET "/oapi/v1/platform/user" > "$tmp"
   if _codeup_http_ok "$CODEUP_HTTP_CODE"; then
-    name=$(jq -r 'if type == "object" then (.username // .name // "") else "" end' "$tmp" 2>/dev/null || echo "")
+    # 只取 username：`.name` 是显示名，与要比对的 `author.username`（实测形如 aliyun:kingdooo_hvFXC）
+    # 不同命名空间。退回 .name 会给出一个**永远匹配不上**的非空值，反而把「按评审标记推断」这条
+    # 兜底路径也关掉——结果是每次评审都新建一条汇总。取不到就该返回非零。
+    name=$(jq -r 'if type == "object" then (.username // "") else "" end' "$tmp" 2>/dev/null || echo "")
   else
     echo "codeup_bot_username: GetUserByToken HTTP ${CODEUP_HTTP_CODE}（令牌可能未勾选平台用户权限，属已知情况）" >&2
   fi
