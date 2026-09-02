@@ -4,12 +4,31 @@
 #   kiro-cli settings KEY VALUE → 追加 "KEY VALUE" 到 MOCK_SETTINGS_FILE
 #   kiro-cli chat ...           → 记录参数(MOCK_ARGS_FILE)与 stdin(MOCK_STDIN_FILE)；扫描启动时 cwd
 #                                 里残留的 AGENTS.md（任意深度）/根 lsp.json/.kiro（任意深度）写入
-#                                 MOCK_CWD_SCAN_FILE；再输出固定评审报告
+#                                 MOCK_CWD_SCAN_FILE；再输出评审结果
 # 每次调用把子命令名（help 调用记为 "help"）追加到 MOCK_CALLS_FILE，用于断言调用顺序；
 # help 调用时的 cwd 写入 MOCK_HELP_CWD_FILE。
-# 故障注入：MOCK_KIRO_FAIL=1 chat 失败；MOCK_KIRO_HANG=1 挂起（验证超时强杀）；
-#   MOCK_KIRO_EMPTY=1 退出码 0 但输出为空；MOCK_SETTINGS_FAIL=1 settings 失败；
-#   MOCK_KIRO_NO_ENGINE_FLAG=1 模拟不支持 --agent-engine 的旧版（--help 不列出、传入即报错）。
+#
+# 输出形态跟着参数走，与真实 kiro-cli 2.21.0 一致：
+#   带 `--output-format stream-json` → JSON Lines 事件流（runStarted / sessionUpdate / metadata /
+#     runFinished），`runFinished.data.finalText` 是完整最终消息，内含 <<<KIRO_REVIEW_JSON>>> 契约。
+#     事件形态照抄真实探测输出（.scratch/codeup-kiro-v2/probe-results/kiro-headless/*/out.jsonl，
+#     裁剪样例 tests/fixtures/stream/real-shape.jsonl）。
+#   不带该参数 → 旧的纯文本报告（带 ANSI 噪音 + 「# 代码评审报告」锚点）。生产脚本必定传该参数，
+#     这条分支只在变异测试里出现（删掉参数后应观察到评审失败，而不是静默降级）。
+#
+# 故障注入：
+#   MOCK_KIRO_FAIL=1            chat 失败（退出码 1）
+#   MOCK_KIRO_HANG=1            挂起（验证超时强杀）
+#   MOCK_KIRO_EMPTY=1           退出码 0 但输出为空
+#   MOCK_SETTINGS_FAIL=1        settings 子命令失败
+#   MOCK_KIRO_NO_ENGINE_FLAG=1  模拟不支持 --agent-engine 的旧版（--help 不列出、传入即报错）
+#   MOCK_KIRO_NO_MARKER=1       finalText 无契约标记（→ 脚本应降级）
+#   MOCK_KIRO_BAD_JSON=1        标记内是非法 JSON（→ 脚本应降级）
+#   MOCK_KIRO_STATUS_FAILED=1   runFinished.data.status 非 success（→ 脚本应走失败评论）
+#   MOCK_KIRO_NO_RUNFINISHED=1  事件流里没有 runFinished（→ 脚本应走失败评论）
+#   MOCK_KIRO_NO_METADATA=1     不产出 metadata 事件（credits 不可得时日志不应崩）
+#   MOCK_KIRO_CONTRACT=<文件>   用指定文件的内容当契约 JSON（默认 fixtures/contract/mock-review.json）
+MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -n "${MOCK_CALLS_FILE:-}" ]]; then
   if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$MOCK_CALLS_FILE"; else printf '%s\n' "${1:-}" >> "$MOCK_CALLS_FILE"; fi
 fi
@@ -31,11 +50,17 @@ if [[ "${2:-}" == "--help" ]]; then
   fi
   exit 0
 fi
-if [[ "${MOCK_KIRO_NO_ENGINE_FLAG:-0}" == "1" ]]; then
-  for a in "$@"; do
-    [[ "$a" == "--agent-engine" ]] && { echo "error: unexpected argument '--agent-engine' found" >&2; exit 2; }
-  done
-fi
+STREAM_JSON=0
+prev=""
+for a in "$@"; do
+  # 只认「--output-format stream-json」这一对（或等号形式），不认散落的 stream-json 字面量
+  [[ "$prev" == "--output-format" && "$a" == "stream-json" ]] && STREAM_JSON=1
+  [[ "$a" == "--output-format=stream-json" ]] && STREAM_JSON=1
+  if [[ "${MOCK_KIRO_NO_ENGINE_FLAG:-0}" == "1" && "$a" == "--agent-engine" ]]; then
+    echo "error: unexpected argument '--agent-engine' found" >&2; exit 2
+  fi
+  prev="$a"
+done
 [[ -n "${MOCK_ARGS_FILE:-}" ]] && printf '%s\n' "$@" > "$MOCK_ARGS_FILE"
 if [[ -n "${MOCK_STDIN_FILE:-}" ]]; then cat > "$MOCK_STDIN_FILE"; else cat > /dev/null; fi
 if [[ -n "${MOCK_CWD_SCAN_FILE:-}" ]]; then
@@ -49,11 +74,49 @@ if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
   echo "mock: 模拟 kiro 失败" >&2; exit 1
 fi
 [[ "${MOCK_KIRO_EMPTY:-0}" == "1" ]] && exit 0
-# 模拟真实 kiro-cli headless 输出：先是带 ANSI 色码的工具调用轨迹（噪音），
-# 再是以「# 代码评审报告」为锚点的正文。用于验证脚本的清洗逻辑。
-ESC=$(printf '\033')
-printf '%sReading directory: %s/root/workspace/business_repo%s (using tool: read)\n' "$ESC[38;5;141m" "$ESC[0m" "$ESC[0m"
-printf ' %s✓%s Successfully read directory (47 entries)\n' "$ESC[38;5;10m" "$ESC[0m"
-printf '%s> %s# 代码评审报告%s\n' "$ESC[38;5;141m" "$ESC[1m" "$ESC[0m"
-echo "🔴 严重：发现硬编码密钥 src/app.py:2（值已掩码：FAKE****0000），建议改用环境变量。"
-echo "总体结论：建议修改后合并。"
+
+CONTRACT_FILE="${MOCK_KIRO_CONTRACT:-$MOCK_DIR/../fixtures/contract/mock-review.json}"
+[[ -r "$CONTRACT_FILE" ]] || { echo "mock kiro-cli: 契约 fixture 不可读：$CONTRACT_FILE" >&2; exit 3; }
+
+# --- 纯文本分支（未传 --output-format stream-json）---
+# 模拟真实 kiro-cli headless 的纯文本输出：先是带 ANSI 色码的工具调用轨迹（噪音），
+# 再是以「# 代码评审报告」为锚点的正文。
+if [[ "$STREAM_JSON" == "0" ]]; then
+  ESC=$(printf '\033')
+  printf '%sReading directory: %s/root/workspace/business_repo%s (using tool: read)\n' "$ESC[38;5;141m" "$ESC[0m" "$ESC[0m"
+  printf ' %s✓%s Successfully read directory (47 entries)\n' "$ESC[38;5;10m" "$ESC[0m"
+  printf '%s> %s# 代码评审报告%s\n' "$ESC[38;5;141m" "$ESC[1m" "$ESC[0m"
+  echo "P0 必须修复：发现硬编码密钥 src/app.py:2（值已掩码：FAKE****0000），建议改用环境变量。"
+  echo "总体结论：建议修改后合并。"
+  exit 0
+fi
+
+# --- stream-json 分支 ---
+CONTRACT=$(cat "$CONTRACT_FILE")
+if [[ "${MOCK_KIRO_BAD_JSON:-0}" == "1" ]]; then
+  # 标记在、内容不是合法 JSON（模型把 JSON 写坏 / 输出被截断）
+  FINAL=$(printf '好的，评审完成。\n\n<<<KIRO_REVIEW_JSON>>>\n{"summary": "缺右括号", "findings": [\n<<<END_KIRO_REVIEW_JSON>>>\n')
+elif [[ "${MOCK_KIRO_NO_MARKER:-0}" == "1" ]]; then
+  # 完全不按契约走，只给纯 Markdown 报告（模型忽略输出契约）
+  FINAL=$(printf '# 代码评审报告\n\nP0 必须修复：发现硬编码密钥 src/app.py:2（值已掩码：FAKE****0000），建议改用环境变量。\n\n总体结论：建议修改后合并。\n')
+else
+  FINAL=$(printf '我已读取 src/app.py 并完成评审，结果如下。\n\n<<<KIRO_REVIEW_JSON>>>\n%s\n<<<END_KIRO_REVIEW_JSON>>>\n' "$CONTRACT")
+fi
+SID="mock-0000-1111-2222-333344445555"
+emit() { jq -nc "$@"; }
+emit '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1,engine:"v2"}}'
+emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"tool_call",toolCallId:"call_mock_1",title:"Reading app.py:1-2000",kind:"read",locations:[{path:"src/app.py"}],rawInput:{operations:[{mode:"Line",path:"src/app.py",limit:2000}]},_meta:{kiro:{toolName:"read"}}}}}'
+emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"tool_call_update",toolCallId:"call_mock_1",kind:"read",status:"completed",title:"Reading app.py:1-2000",locations:[{path:"src/app.py"}]}}}'
+emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"agent_message_chunk",content:{type:"text",text:"<<<"}}}}'
+emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"agent_message_chunk",content:{type:"text",text:"KIRO_REVIEW_JSON>>>"}}}}'
+if [[ "${MOCK_KIRO_NO_METADATA:-0}" != "1" ]]; then
+  emit --arg s "$SID" '{type:"metadata",data:{sessionId:$s,contextUsagePercentage:1.1242647171020508}}'
+  emit --arg s "$SID" '{type:"metadata",data:{sessionId:$s,contextUsagePercentage:3.7519,meteringUsage:[{value:0.0669794503482587,unit:"credit",unitPlural:"credits"},{value:0.19391594945273632,unit:"credit",unitPlural:"credits"}],turnDurationMs:10134}}'
+fi
+if [[ "${MOCK_KIRO_NO_RUNFINISHED:-0}" != "1" ]]; then
+  STATUS=success
+  [[ "${MOCK_KIRO_STATUS_FAILED:-0}" == "1" ]] && STATUS=error
+  emit --arg s "$SID" --arg st "$STATUS" --arg f "$FINAL" \
+    '{type:"runFinished",data:{sessionId:$s,status:$st,stopReason:"end_turn",finalText:$f,finalTextTruncated:false}}'
+fi
+exit 0

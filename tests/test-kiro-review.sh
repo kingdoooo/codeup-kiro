@@ -52,16 +52,50 @@ args_line=$(paste -sd' ' "$CASE/args")
 assert_contains "$args_line" "--agent codeup-reviewer" "kiro 参数：套用受信 custom agent codeup-reviewer"
 assert_contains "$args_line" "--agent-engine v2" "kiro 参数：固定 --agent-engine v2"
 assert_contains "$out" "引擎：v2" "日志显式记录所用引擎为 v2"
+# 结构化输出契约依赖 stream-json（v1 引擎不支持该参数）：整行精确匹配，避免别的取值蒙混过关
+assert_eq "$(grep -c -x -- '--output-format' "$CASE/args")" "1" "kiro 参数：只有一个 --output-format"
+assert_contains "$args_line" "--output-format stream-json" "kiro 参数：固定 --output-format stream-json"
 assert_contains "$(cat "$CASE/stdin")" "SECRET_KEY" "diff 已喂入 stdin"
 assert_contains "$out" "changeRequests/7/comments" "回写到 MR 7"
-assert_contains "$out" "kiro-review:" "评论含 append-only 标记"
-assert_contains "$out" "代码评审报告" "评论含清洗后报告正文（锚点标题）"
-assert_contains "$out" "硬编码密钥" "评论含报告内容"
-assert_not_contains "$out" "using tool: read" "清洗：不含工具调用轨迹"
-assert_not_contains "$out" "Successfully read directory" "清洗：不含工具执行轨迹"
-assert_contains "$out" "# 代码评审报告" "清洗：锚点行引用前缀已剥离"
+
+# --- 汇总评论（INLINE_COMMENT=0）：由脚本按契约渲染，不再是模型原文 ---
+assert_contains "$out" "🤖 Kiro 代码评审" "评论标题"
+assert_contains "$out" "<!-- kiro-review:" "评论含评审标记"
+assert_contains "$out" "run:1" "评审标记含评审次数"
+assert_contains "$out" "变更摘要" "评论含变更摘要小节"
+assert_contains "$out" "结论：建议修改后合并" "评论含中文化的总体结论"
+assert_contains "$out" "硬编码凭证必须先移除" "评论含结论理由"
+assert_contains "$out" "P0 1 · P1 1 · P2 1" "评论含问题统计"
+assert_contains "$out" "重点关注文件" "评论含重点关注文件表"
+assert_contains "$out" "P0 必须修复（1）" "评论按级别分组"
+assert_contains "$out" "P1 应当修复（1）" "评论按级别分组：P1"
+assert_contains "$out" "P2 可选改进（1）" "评论按级别分组：P2"
+assert_contains "$out" "硬编码疑似应用密钥" "评论含问题标题"
+assert_contains "$out" "src/app.py:2" "评论含问题定位 文件:行"
+assert_contains "$out" "src/app.py:3-4" "评论含多行区间定位"
+assert_contains "$out" "（未定位）" "评论标注未定位问题（file/line 为 null）"
+assert_contains "$out" "修复建议" "评论含修复建议"
+assert_contains "$out" "P0 必须修复 · P1 应当修复 · P2 可选改进" "评论含页脚图例"
+assert_contains "$out" "/kiro review" "评论含重新评审提示"
+assert_not_contains "$out" "🔴" "评论不再出现红灯"
+assert_not_contains "$out" "🟡" "评论不再出现黄灯"
+assert_not_contains "$out" "🔵" "评论不再出现蓝灯"
+assert_not_contains "$out" "结构化解析失败" "成功路径不出现降级标题"
+# 掩码：评审员按提示词只给掩码值，diff 里的原始假密钥不得出现在评论里
+assert_contains "$out" "FAKE****0000" "评论含掩码后的疑似密钥"
+assert_not_contains "$out" "FAKE-TEST-KEY-0000" "评论不含 diff 里的原始密钥值"
+# stream-json 的事件流本身（工具轨迹、chunk）不得进评论
+assert_not_contains "$out" "agent_message_chunk" "评论不含事件流原文"
+assert_not_contains "$out" "tool_call" "评论不含工具调用事件"
+assert_not_contains "$out" "runFinished" "评论不含事件类型名"
+assert_not_contains "$out" "KIRO_REVIEW_JSON" "评论不含契约标记本身"
 esc=$(printf '\033')
 assert_not_contains "$out" "${esc}[" "清洗：不含 ANSI 控制序列"
+
+# --- credits 与上下文占用写流水线日志（票 02 验收项）---
+assert_contains "$out" "Kiro 用量：credits=0.2609" "日志记录 credits 用量（累加 meteringUsage）"
+assert_contains "$out" "context=3.8%" "日志记录上下文占用"
+assert_contains "$out" "评审报告：P0 1 · P1 1 · P2 1" "日志记录各级别问题数"
 
 # --- 隔离：diff 先算好，随后业务库工作树中的注入面文件在 Kiro 启动前被移除 ---
 assert_contains "$(cat "$CASE/stdin")" "CANARY-AGENTSMD-ROOT" "diff 先算：stdin 仍含根 AGENTS.md 的改动"
@@ -153,5 +187,71 @@ run_case noprompt PROMPT_FILE=/nonexistent
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "提示词缺失：非零退出"
 assert_contains "$OUT" "提示词文件不可读" "提示词缺失：报错说明"
 assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "提示词缺失：Kiro 未被启动"
+
+# ============ 降级：finalText 无契约标记 → 标题标明「结构化解析失败」+ 贴原文 + 退出码 0 ============
+run_case nomarker MOCK_KIRO_NO_MARKER=1
+assert_rc "$RC" 0 "无契约标记：退出码仍为 0（评审已产出，不算失败）"
+assert_contains "$OUT" "结构化解析失败" "无契约标记：评论标题含「结构化解析失败」"
+assert_contains "$OUT" "没有成对的" "无契约标记：评论写明失败原因"
+assert_contains "$OUT" "P0 必须修复：发现硬编码密钥" "无契约标记：正文为评审员输出原文"
+assert_contains "$OUT" "总体结论：建议修改后合并" "无契约标记：原文全文（含结论）"
+assert_contains "$OUT" "changeRequests/7/comments" "无契约标记：评论仍发到 MR"
+assert_contains "$OUT" "<!-- kiro-review:" "无契约标记：降级评论仍带评审标记"
+assert_not_contains "$OUT" "评审未完成" "无契约标记：不是失败评论"
+assert_not_contains "$OUT" "问题统计" "无契约标记：没有伪造的分级统计"
+
+# ============ 降级：标记内 JSON 非法 → 同样降级 ============
+run_case badjson MOCK_KIRO_BAD_JSON=1
+assert_rc "$RC" 0 "非法契约 JSON：退出码仍为 0"
+assert_contains "$OUT" "结构化解析失败" "非法契约 JSON：评论标题含「结构化解析失败」"
+assert_contains "$OUT" "不是合法的 JSON 对象" "非法契约 JSON：评论写明失败原因"
+assert_contains "$OUT" "缺右括号" "非法契约 JSON：正文为原文（含那段坏 JSON）"
+assert_not_contains "$OUT" "评审未完成" "非法契约 JSON：不是失败评论"
+
+# ============ Kiro 失败：runFinished.status 非 success → 走失败评论路径（非零退出）============
+run_case statusfailed MOCK_KIRO_STATUS_FAILED=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "status 非 success：非零退出"
+assert_contains "$OUT" "评审未完成" "status 非 success：回写失败评论"
+assert_contains "$OUT" "自报运行失败" "status 非 success：错误说明点名原因"
+assert_contains "$OUT" "status=error" "status 非 success：错误说明带上 status 值"
+assert_not_contains "$OUT" "结构化解析失败" "status 非 success：不走降级（不是解析问题）"
+
+# ============ Kiro 失败：事件流没有 runFinished → 走失败评论路径 ============
+run_case norunfinished MOCK_KIRO_NO_RUNFINISHED=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "无 runFinished：非零退出"
+assert_contains "$OUT" "评审未完成" "无 runFinished：回写失败评论"
+assert_contains "$OUT" "没有 runFinished 事件" "无 runFinished：错误说明点名原因"
+assert_not_contains "$OUT" "结构化解析失败" "无 runFinished：不走降级"
+
+# ============ 没有 metadata 事件：credits 取不到也不能让评审失败 ============
+run_case nometa MOCK_KIRO_NO_METADATA=1
+assert_rc "$RC" 0 "无 metadata：评审仍成功"
+assert_contains "$OUT" "Kiro 用量：credits=- context=-" "无 metadata：用量日志降级为 -"
+assert_contains "$OUT" "P0 1 · P1 1 · P2 1" "无 metadata：评论照常渲染"
+
+# ============ 字段校验：不合契约的问题被丢弃并计数（级别越界 / 缺 title / 缺 body）============
+run_case dropped MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/dirty.json"
+assert_rc "$RC" 0 "含非法问题的契约：评审仍成功"
+assert_contains "$OUT" "7 条问题不符合输出契约已丢弃" "丢弃计数写进流水线日志"
+assert_contains "$OUT" "另有 7 条不合契约已丢弃" "丢弃计数写进评论的问题统计"
+assert_contains "$OUT" "P0 1 · P1 0 · P2 2" "只统计留下的合法问题"
+assert_contains "$OUT" "合法的 P0" "保留合法问题"
+assert_not_contains "$OUT" "级别越界" "丢弃级别非 P0/P1/P2 的问题"
+assert_not_contains "$OUT" "级别是中文灯" "丢弃用中文灯当级别的问题"
+assert_not_contains "$OUT" "缺说明" "丢弃 body 为空白的问题"
+assert_not_contains "$OUT" "缺 body 字段本身" "丢弃缺 body 字段的问题"
+
+# ============ INLINE_COMMENT=1 尚未实现：拒绝运行且 MR 上可见，不静默按 0 跑 ============
+run_case inline1 INLINE_COMMENT=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "INLINE_COMMENT=1：非零退出"
+assert_contains "$OUT" "INLINE_COMMENT=1 尚未实现" "INLINE_COMMENT=1：报错点名开关"
+assert_contains "$OUT" "评审未完成" "INLINE_COMMENT=1：回写失败评论（失败可见）"
+assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "INLINE_COMMENT=1：不浪费额度，Kiro 未被启动"
+
+# ============ INLINE_COMMENT 显式为 0：与默认一致 ============
+run_case inline0 INLINE_COMMENT=0
+assert_rc "$RC" 0 "INLINE_COMMENT=0：成功"
+assert_contains "$OUT" "P0 必须修复（1）" "INLINE_COMMENT=0：完整问题清单展开"
+assert_not_contains "$OUT" "<details>" "INLINE_COMMENT=0：不使用折叠区"
 
 report

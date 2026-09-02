@@ -1,0 +1,51 @@
+{
+  "summary": "为搜索接口新增了用户名模糊查询，并把结果直接拼进 SQL；同时调整了分页默认值。",
+  "verdict": "MERGE_AFTER_FIX",
+  "verdict_reason": "存在一处 SQL 注入，修复后可合并。",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "用户输入直接拼接进 SQL",
+      "file": "src/app.py",
+      "line_start": 30,
+      "line_end": 31,
+      "body": "`q` 取自 `request.args` 未做任何处理就拼进 SQL 字符串，攻击者可用 `' OR 1=1--` 读取整表。",
+      "fix": "改用参数化查询：\n\n```python\ncur.execute(\"SELECT * FROM users WHERE name LIKE ?\", (f\"%{q}%\",))\n```"
+    },
+    {
+      "id": "F2",
+      "severity": "P1",
+      "category": "error-handling",
+      "title": "分页参数缺少上界校验",
+      "file": "src/app.py",
+      "line_start": 27,
+      "line_end": 27,
+      "body": "`per_page` 直接取自查询串，传入 100000 会一次性把整表读进内存。",
+      "fix": "限制 `per_page` 上界（如 100），超出时取上界值。"
+    },
+    {
+      "id": "F3",
+      "severity": "P2",
+      "category": "maintainability",
+      "title": "缺少模块级 docstring",
+      "file": null,
+      "line_start": null,
+      "line_end": null,
+      "body": "本次新增的两个模块都没有模块级说明，后续维护者需要读完全文才能知道职责边界。",
+      "fix": ""
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "performance",
+      "title": "循环内重复建立数据库连接",
+      "file": "src/db.py",
+      "line_start": 12,
+      "line_end": 12,
+      "body": "每次循环都调用 `connect()`，在 N 条记录时产生 N 次握手。",
+      "fix": "把连接提到循环外，或使用连接池。"
+    }
+  ]
+}

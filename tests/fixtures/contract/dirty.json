@@ -1,0 +1,17 @@
+{
+  "summary": "混入若干不合契约的问题，用于校验丢弃与计数。",
+  "verdict": "DO_NOT_MERGE",
+  "verdict_reason": "存在必须修复的问题。",
+  "findings": [
+    { "id": "G1", "severity": "P0", "title": "合法的 P0", "file": "a.py", "line_start": 1, "line_end": 1, "body": "说明。", "fix": "建议。" },
+    { "id": "G2", "severity": "P3", "title": "级别越界", "file": "a.py", "line_start": 2, "line_end": 2, "body": "说明。", "fix": "" },
+    { "id": "G3", "severity": "严重", "title": "级别是中文灯", "file": "a.py", "line_start": 3, "line_end": 3, "body": "说明。", "fix": "" },
+    { "id": "G4", "severity": null, "title": "级别为 null", "file": "a.py", "line_start": 4, "line_end": 4, "body": "说明。", "fix": "" },
+    { "id": "G5", "severity": "P1", "title": "", "file": "a.py", "line_start": 5, "line_end": 5, "body": "缺标题。", "fix": "" },
+    { "id": "G6", "severity": "P1", "title": "缺说明", "file": "a.py", "line_start": 6, "line_end": 6, "body": "   ", "fix": "" },
+    { "id": "G7", "severity": " p2 ", "title": "级别大小写与空格需规范化", "file": "a.py", "line_start": 7, "line_end": 7, "body": "说明。", "fix": "" },
+    { "id": "G8", "severity": "P2", "title": "行号非法应归为未定位", "file": "a.py", "line_start": 0, "line_end": -3, "body": "说明。", "fix": "" },
+    "这不是对象",
+    { "id": "G9", "severity": "P0", "title": "缺 body 字段本身", "file": "a.py", "line_start": 9, "line_end": 9, "fix": "" }
+  ]
+}
