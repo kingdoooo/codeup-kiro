@@ -458,11 +458,15 @@ assert_contains "$comment" "| 1 | \`90fcb05\` | 建议修改后合并 | 1/1/1 |"
 assert_contains "$comment" "| 2 | \`" "二次评审：历次表追加本次那一行"
 assert_eq "$(printf '%s\n' "$comment" | grep -c '<!-- kiro-review:')" "1" "二次评审：更新后的评论里评审标记仍恰好一个"
 
-# --- 机器人用户名未显式配置：从「带评审标记的评论作者」推断，仍然原地更新 ---
-run_case inferred DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME=
-assert_rc "$RC" 0 "推断机器人账号：成功"
-assert_contains "$OUT" "机器人账号由评审标记推断为 ${BOT}" "推断机器人账号：日志写明推断结果"
-assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" "推断机器人账号：仍然原地更新"
+# --- 机器人用户名未配置（令牌身份接口也不可用）：一律新建，不以评审标记作者作为更新依据 ---
+# 评审标记是明文可复制的，拿它的作者当自己就等于让任何 MR 参与者把报告引到他那条评论上。
+run_case noidentity DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME=
+assert_rc "$RC" 0 "未配置机器人账号：评审仍成功"
+assert_eq "$(req_count "$OUT" PUT)" "0" "未配置机器人账号：不做原地更新"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "未配置机器人账号：新建"
+assert_contains "$OUT" "不做原地更新" "未配置机器人账号：日志说明"
+assert_contains "$OUT" "CODEUP_BOT_USERNAME" "未配置机器人账号：日志点名要配的变量"
+assert_contains "$OUT" "${BOT}——若确认那是本评审员的机器人账号" "未配置机器人账号：日志把用户名作为提示给出"
 
 # --- 旧评论被人删除（列表里 state=DELETED）→ 重新新建，run 回到 1 ---
 run_case deleted DRY_RUN_FIXTURE_DIR="$CFX/deleted" CODEUP_BOT_USERNAME="$BOT"
@@ -477,12 +481,15 @@ assert_rc "$RC" 0 "标记评论作者是别人：成功"
 assert_eq "$(req_count "$OUT" PUT)" "0" "标记评论作者是别人：不去改别人的评论"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "标记评论作者是别人：新建自己的汇总"
 
-# --- 用户名未知且多个作者都带标记 → 歧义，宁可新建 ---
-run_case ambiguous DRY_RUN_FIXTURE_DIR="$CFX/ambiguous" CODEUP_BOT_USERNAME=
-assert_rc "$RC" 0 "机器人账号歧义：成功"
-assert_contains "$OUT" "无法推断机器人账号" "机器人账号歧义：日志说明"
-assert_eq "$(req_count "$OUT" PUT)" "0" "机器人账号歧义：不去改任何人的评论"
-assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "机器人账号歧义：新建"
+# --- 有人把整条报告原文复制了一份，且用户名未配置 → 谁的评论都不改，新建 ---
+run_case forgedmarker DRY_RUN_FIXTURE_DIR="$CFX/ambiguous" CODEUP_BOT_USERNAME=
+assert_rc "$RC" 0 "伪造标记 + 未配置用户名：成功"
+assert_eq "$(req_count "$OUT" PUT)" "0" "伪造标记 + 未配置用户名：不去改任何人的评论"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "伪造标记 + 未配置用户名：新建"
+# 配了用户名之后，同一份列表里那条伪造评论不再有任何影响
+run_case forgedmarker2 DRY_RUN_FIXTURE_DIR="$CFX/ambiguous" CODEUP_BOT_USERNAME="$BOT"
+assert_eq "$(req_count "$OUT" PUT 'comments/e0000000000000000000000000000001$')" "1" "伪造标记 + 已配置用户名：只更新自己那条"
+assert_eq "$(req_count "$OUT" PUT 'comments/e0000000000000000000000000000002$')" "0" "伪造标记 + 已配置用户名：不碰复制者那条"
 
 # --- 更新接口失败（404，例如评论刚被人删掉）→ 4xx 不重试，退回新建并在日志说明 ---
 run_case updatefail DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" \

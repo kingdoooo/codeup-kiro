@@ -138,11 +138,14 @@ WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
 # --- 1.5 定位本评审员上一次的汇总评论（spec §4.5 第 8 步、I4；票 03）---
 # 放在这里而不是「发评论前」：此后任何失败都要能带着正确的 run 号与历次记录去更新**同一条**评论，
 # 否则每次失败都会在 MR 上新增一条汇总。任一步失败只降级为「按新建处理」，绝不因此中断评审。
+# 机器人账号用户名是原地更新的**前置条件**：只接受显式配置或令牌身份接口两个来源。
+# 取不到就一律新建——「按带评审标记的评论作者推断」会让任何 MR 参与者用一条带标记的评论
+# 把本评审员的报告引到他自己那条评论上（见 review_select_prior_comment 的说明）。
 if BOT_USERNAME=$(codeup_bot_username); then
   log "机器人账号用户名：${BOT_USERNAME}"
 else
   BOT_USERNAME=""
-  log "未取得机器人账号用户名（CODEUP_BOT_USERNAME 未配置，令牌身份接口也不可用——P1-00 实测 403），改由评审标记推断"
+  log "未取得机器人账号用户名（CODEUP_BOT_USERNAME 未配置，令牌身份接口也不可用——P1-00 实测 403）：本次只能新建汇总评论，不做原地更新"
 fi
 if codeup_list_global_comments "$LOCAL_ID" > "$WORK/comments.json"; then
   sel_rc=0
@@ -159,7 +162,7 @@ if codeup_list_global_comments "$LOCAL_ID" > "$WORK/comments.json"; then
          REVIEW_RUN=$((prior_run + 1))
          log "找到本评审员的旧汇总评论 ${PRIOR_COMMENT_ID}（上次为第 ${prior_run} 次评审，读回历次记录 $(jq -r 'length' "$PRIOR_HISTORY_FILE") 行），本次原地更新为第 ${REVIEW_RUN} 次"
        fi ;;
-    2) log "警告：机器人账号无法唯一推断（见上一行），本次按新建处理" ;;
+    3) log "未配置 CODEUP_BOT_USERNAME，本次新建汇总评论（见上一行：新建后日志会打出评论的作者用户名，配置该变量即可启用原地更新）" ;;
     *) log "未找到本评审员的旧汇总评论，本次新建（第 ${REVIEW_RUN} 次评审）" ;;
   esac
 else

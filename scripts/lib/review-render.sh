@@ -401,15 +401,17 @@ review_history_append() {
 # 用法：review_select_prior_comment <机器人账号用户名或空串>
 #   rc 0 → stdout = 选中的评论对象（compact JSON，额外带 run 字段＝从评审标记解析出的次数）
 #   rc 1 → 没有候选（首次评审，或旧评论已被人删除）
-#   rc 2 → 用户名为空且带评审标记的评论有多个不同作者，无法唯一推断机器人账号 → 调用方新建
+#   rc 3 → 有候选，但机器人账号用户名未知 → **不得**原地更新，调用方新建（见下）
 #
 # 判定 = 作者用户名匹配 **且** 正文含本集成包渲染的评审标记（票 03 验收项）。缺任何一半都不行：
 #   只看作者 → 机器人发的行内评论/状态评论会被当成汇总改掉；
 #   只看标记 → 有人把整条报告原文复制一份留档，就会去改别人的评论。
-# 机器人用户名的来源（spec §4.7.1 P1-00 实测令牌身份接口 403）：
-#   ① CODEUP_BOT_USERNAME 显式配置（推荐）；② 令牌身份接口；
-#   ③ 都取不到时从「带评审标记的评论作者」推断——评审标记只由本集成包写出，带标记的评论就是自建评论。
-#      ③ 要求候选作者唯一，否则返回 rc 2：宁可多发一条，也不改别人的评论。
+# 机器人用户名只接受两个来源：① CODEUP_BOT_USERNAME 显式配置（推荐）；② 令牌身份接口
+# （spec §4.7.1 P1-00 实测 403，生产上大概率不可用）。
+# **刻意不再**用「带评审标记的评论作者」作为更新依据：评审标记是明文可复制的，任何 MR 参与者
+# 发一条正文含 `<!-- kiro-review:… run:1 -->` 的评论，就能把本评审员的报告引到他自己那条评论上
+# （覆盖其内容，且他之后仍可编辑我们的报告）。「每评审员至多一条汇总」不能建立在可伪造的推断上。
+# 用户名未知时推断值仍会算出来，但**只用于日志提示**（告诉运维该把哪个值配进 CODEUP_BOT_USERNAME）。
 # 多条候选时取 run 最大的那条（上一次更新失败退回新建会留下两条，此后应继续更新最新那条）。
 review_select_prior_comment() {
   local bot="${1-}" input out status inferred
@@ -432,23 +434,26 @@ review_select_prior_comment() {
     | . as $cands
     | ([$cands[] | (.author.username // "")] | unique) as $authors
     | if ($cands | length) == 0 then {status: "none"}
-      elif $bot != "" then
+      elif $bot == "" then
+        {status: "no-identity",
+         inferred: (if ($authors | length) == 1 then $authors[0] else "" end),
+         authors: $authors}
+      else
         ([$cands[] | select((.author.username // "") == $bot)] | sort_by(.run) | last) as $sel
         | if $sel == null then {status: "none"} else {status: "ok", comment: $sel} end
-      elif ($authors | length) > 1 then {status: "ambiguous", authors: $authors}
-      else {status: "ok", comment: ($cands | sort_by(.run) | last), inferred: $authors[0]}
       end' 2>/dev/null) \
     || { echo "review_select_prior_comment: 评论列表不是合法 JSON，按「未找到」处理" >&2; return 1; }
   status=$(printf '%s' "$out" | jq -r '.status // ""')
   case "$status" in
     ok)
-      inferred=$(printf '%s' "$out" | jq -r '.inferred // ""')
-      [[ -n "$inferred" ]] && echo "review_select_prior_comment: 机器人账号由评审标记推断为 ${inferred}（未显式配置 CODEUP_BOT_USERNAME，令牌身份接口也不可用）" >&2
       printf '%s' "$out" | jq -c '.comment'
       return 0 ;;
-    ambiguous)
-      echo "review_select_prior_comment: 无法推断机器人账号——$(printf '%s' "$out" | jq -r '.authors | length') 个不同作者的评论都带评审标记（$(printf '%s' "$out" | jq -r '.authors | join(", ")')），本次按新建处理" >&2
-      return 2 ;;
+    no-identity)
+      inferred=$(printf '%s' "$out" | jq -r '.inferred // ""')
+      echo "review_select_prior_comment: 未配置 CODEUP_BOT_USERNAME、令牌身份接口也不可用，不以「带评审标记的评论作者」作为原地更新依据（评审标记可被任何 MR 参与者复制，那样就会把报告写进别人的评论）" >&2
+      [[ -n "$inferred" ]] \
+        && echo "review_select_prior_comment: 带评审标记的评论作者是 ${inferred}——若确认那是本评审员的机器人账号，把它配进 CODEUP_BOT_USERNAME 即可启用原地更新" >&2
+      return 3 ;;
     *) return 1 ;;
   esac
 }

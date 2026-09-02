@@ -214,7 +214,7 @@ assert_contains "$(posted_comment "$OUT")" "<details><summary>历次评审（2�
 # --- M16：拿掉「作者用户名必须匹配」这一半判定 → 会去改别人的评论 ---
 # 判定本该是「作者匹配 **且** 含评审标记」。只看标记的话，别人手工复制过一份报告原文时
 # （other-author fixture）就会去改那条评论。
-pkg=$(make_mutant m16-author-match 's/elif \$bot != "" then/elif false then/' scripts/lib/review-render.sh)
+pkg=$(make_mutant m16-author-match 's/select((.author.username \/\/ "") == \$bot)/select(true)/' scripts/lib/review-render.sh)
 run_case m16 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/other-author" CODEUP_BOT_USERNAME="$BOT"
 assert_rc "$RC" 0 "M16：变异体仍能跑完"
 assert_eq "$(req_count "$OUT" PUT 'comments/a0000000000000000000000000000002$')" "1" \
@@ -251,6 +251,14 @@ run_case m20 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M20：变异体仍以非零退出"
 assert_eq "$(req_count "$OUT" PUT)" "0" "M20：失败评论不再原地更新——端到端断言会失败"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "M20：失败评论变成 MR 上的第二条汇总"
+
+# --- M22：把「机器人用户名未知就不原地更新」退回成「按评审标记的作者推断」→ 会改到别人的评论 ---
+# 评审标记是明文可复制的：任何 MR 参与者发一条带标记的评论，就能把本评审员的报告引到他那条上。
+pkg=$(make_mutant m22-identity-required 's/{status: "no-identity",/{status: "ok", comment: ($cands | sort_by(.run) | last),/' scripts/lib/review-render.sh)
+run_case m22 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/other-author" CODEUP_BOT_USERNAME=
+assert_rc "$RC" 0 "M22：变异体仍能跑完"
+assert_eq "$(req_count "$OUT" PUT 'comments/a0000000000000000000000000000002$')" "1" \
+  "M22：退回推断后把报告写进了别人的评论——端到端「未配置机器人账号不做原地更新」断言会失败"
 
 # --- M21：让「补齐未闭合 </details>」的循环永不执行 → 截断提示被吞进折叠块 ---
 pkg=$(make_mutant m21-details-close 's/while \[\[ "\$det_open" -gt "\$det_close" \]\]; do/while false; do/')

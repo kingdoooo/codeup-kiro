@@ -624,18 +624,21 @@ assert_rc "$rc" 1 "select：带标记的评论作者不是机器人 → rc 1（�
 out=$(sel two-runs "$BOT" 2>/dev/null)
 assert_eq "$(printf '%s' "$out" | jq -r .run)" "3" "select：多条候选取 run 最大的"
 assert_eq "$(printf '%s' "$out" | jq -r .comment_biz_id)" "f0000000000000000000000000000003" "select：取到 run 最大那条的 biz_id"
-# 机器人用户名未知时：从「带评审标记的评论作者」推断，要求作者唯一
-out=$(sel prior-run1 "" 2>/dev/null)
-assert_eq "$(printf '%s' "$out" | jq -r .comment_biz_id)" "b1f0e9d8c7b6a5948372615049382716" "select：用户名未知时按标记推断（唯一作者）"
-err=$(sel prior-run1 "" 2>&1 >/dev/null)
-assert_contains "$err" "$BOT" "select：日志写明推断出的机器人账号"
-# 推断有歧义（有人手工复制过一整条报告原文）→ rc 2，宁可新建也不改别人的评论
+# 机器人用户名未知（既没配 CODEUP_BOT_USERNAME、令牌身份接口也不可用）→ rc 3，一律新建。
+# 评审标记是明文可复制的：拿「带标记的评论作者」当自己，等于让任何 MR 参与者把报告引到他那条评论上。
+rc=0; out=$(sel prior-run1 "" 2>/dev/null) || rc=$?
+assert_rc "$rc" 3 "select：用户名未知 → rc 3（不以评审标记作者作为更新依据）"
+assert_eq "$out" "" "select：用户名未知时不输出任何候选（绝不原地更新）"
+err=$(sel prior-run1 "" 2>&1 >/dev/null) || true
+assert_contains "$err" "CODEUP_BOT_USERNAME" "select：日志点名要配的变量"
+assert_contains "$err" "$BOT" "select：日志把推断值作为提示给出（只用于提示，不用于判定）"
+# 多个作者都带标记时同样 rc 3，且不给出误导性的推断值
 rc=0; err=$(sel ambiguous "" 2>&1 >/dev/null) || rc=$?
-assert_rc "$rc" 2 "select：多个作者都带标记且用户名未知 → rc 2（歧义）"
-assert_contains "$err" "无法推断" "select：歧义时留痕日志"
-# 同一份列表下，显式配置了机器人用户名就不再有歧义
+assert_rc "$rc" 3 "select：多个作者都带标记且用户名未知 → 同样 rc 3"
+assert_not_contains "$err" "若确认那是本评审员的机器人账号" "select：作者不唯一时不给推断提示"
+# 显式配置了机器人用户名 → 正常定位（同一份列表里有人复制过一整条报告原文也不受影响）
 out=$(sel ambiguous "$BOT" 2>/dev/null)
-assert_eq "$(printf '%s' "$out" | jq -r .comment_biz_id)" "e0000000000000000000000000000001" "select：显式用户名消除歧义"
+assert_eq "$(printf '%s' "$out" | jq -r .comment_biz_id)" "e0000000000000000000000000000001" "select：显式用户名下只认自己那条"
 # 对象形态响应（{result:[…]}）也要兼容
 rc=0; out=$(jq -c '{result: .}' "$CFX/prior-run1/list-comments.json" | review_select_prior_comment "$BOT" 2>/dev/null) || rc=$?
 assert_rc "$rc" 0 "select：{result:[…]} 形态兼容"
