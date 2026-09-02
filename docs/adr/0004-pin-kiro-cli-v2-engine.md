@@ -9,6 +9,7 @@ Kiro CLI 3.0 目前是 early access：随 2.x 稳定版一起安装，需 `--v3`
 
 ## Consequences
 
+- **v1 不可用于生产**：实测 v1（2.21 headless 的默认引擎）下 `chat.disableInheritingDefaultResources=true` 不阻止工作区 `AGENTS.md` 进入自定义 agent 上下文，v2 才阻止；因此 `--agent-engine v2` 是安全要求而非仅为结构化输出。同时执行器在运行前删除业务库 checkout 中任意深度的 `AGENTS.md` 作为不依赖引擎的纵深防御。
 - 调用命令固定为 `kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json --agent codeup-reviewer …`；引擎不写在配置里而写在脚本里，避免被工作区设置覆盖。
 
 - 切换到 V3 的门槛，全部满足才切：官方 GA 公告；headless 文档明确支持 V3；`--trust-tools` 在 V3 的语义定型；canary 负向测试（读禁止路径、AGENTS.md 注入、shell 执行）在 V3 下全部通过。**2026-09-02 实测：V3 下 `chat.disableInheritingDefaultResources=true` 不能阻止工作区 `AGENTS.md` 进入自定义 agent 的上下文（v2 可以），因此当前 V3 直接不满足 AGENTS.md 注入这一项。**
