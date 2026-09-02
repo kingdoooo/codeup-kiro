@@ -184,11 +184,14 @@ publish_inline_comments() {
   # 6. 逐条创建草稿
   : > "$WORK/draft-ids.txt"; : > "$WORK/drafted.tsv"; : > "$WORK/outcomes.tsv"
   while IFS= read -r item; do
-    printf '%s' "$item" > "$WORK/item.json"
-    idx=$(jq -r '.idx' "$WORK/item.json")
-    file=$(jq -r '.file' "$WORK/item.json")
-    ls=$(jq -r '.line_start' "$WORK/item.json")
-    title=$(jq -r '.title' "$WORK/item.json")
+    idx=$(printf '%s' "$item" | jq -r '.idx')
+    # 每条问题的 JSON 单独落盘并按 idx 命名：回退发布那一轮要再读一次它的 file/line_start，
+    # 而**不能**把路径塞进制表符分隔的中间文件——文件名里允许出现制表符（review_validate 只挡了
+    # 换行/回车/竖线/反引号），那样一条带制表符的路径会让字段错位、把评论发到别的位置上。
+    printf '%s' "$item" > "$WORK/item-${idx}.json"
+    file=$(jq -r '.file' "$WORK/item-${idx}.json")
+    ls=$(jq -r '.line_start' "$WORK/item-${idx}.json")
+    title=$(jq -r '.title' "$WORK/item-${idx}.json")
     if ! fp=$(review_fingerprint "$file" "$ls" "$title"); then
       log "警告：算不出问题 #${idx} 的去重指纹，转入折叠区（宁可不发，也不发一条重跑会重复的评论）"
       printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"; n_failed=$((n_failed + 1)); continue
@@ -197,7 +200,7 @@ publish_inline_comments() {
       # 已经挂在那一行上了：算「已标注」而不是折叠区，否则同一条问题在 MR 上出现两次（I4）
       printf '%s\texisting\n' "$idx" >> "$WORK/outcomes.tsv"; n_existing=$((n_existing + 1)); continue
     fi
-    if ! review_render_inline_body "$WORK/item.json" "$SHORT_SHA" "$fp" > "$WORK/body-${idx}.md"; then
+    if ! review_render_inline_body "$WORK/item-${idx}.json" "$SHORT_SHA" "$fp" > "$WORK/body-${idx}.md"; then
       log "警告：问题 #${idx} 的行内评论正文渲染失败，转入折叠区"
       printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"; n_failed=$((n_failed + 1)); continue
     fi
@@ -208,7 +211,8 @@ publish_inline_comments() {
       cid=$(codeup_comment_biz_id "$WORK/created.json")
       if [[ -n "$cid" ]]; then
         printf '%s\n' "$cid" >> "$WORK/draft-ids.txt"
-        printf '%s\t%s\t%s\t%s\n' "$idx" "$cid" "$file" "$ls" >> "$WORK/drafted.tsv"
+        # 只记 idx 与草稿 id（两者都不可能含制表符）；file/line 回退时从 item-<idx>.json 再读
+        printf '%s\t%s\n' "$idx" "$cid" >> "$WORK/drafted.tsv"
       else
         log "警告：问题 #${idx} 的草稿建好了但响应里没有 comment_biz_id，无法纳入一次提交，转入折叠区（那条草稿只有机器人自己看得见，需人工清理）"
         printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"; n_failed=$((n_failed + 1))
@@ -228,11 +232,13 @@ publish_inline_comments() {
       log "警告：草稿一次提交失败（HTTP ${CODEUP_HTTP_CODE}），退回逐条非草稿发布"
       # 先删掉已建的草稿：不删的话同一条问题会同时留下一条草稿（只有机器人自己看得见）
       # 与一条正式评论，而下一次评审看到的是同一个指纹，两条都不会被清理
-      while IFS=$'\t' read -r idx cid file ls; do
+      while IFS=$'\t' read -r idx cid; do
         codeup_delete_comment "$LOCAL_ID" "$cid" \
           || log "警告：删除草稿 ${cid} 失败（HTTP ${CODEUP_HTTP_CODE}），需人工清理该草稿"
       done < "$WORK/drafted.tsv"
-      while IFS=$'\t' read -r idx cid file ls; do
+      while IFS=$'\t' read -r idx cid; do
+        file=$(jq -r '.file' "$WORK/item-${idx}.json")
+        ls=$(jq -r '.line_start' "$WORK/item-${idx}.json")
         if codeup_create_inline_comment "$LOCAL_ID" "$WORK/body-${idx}.md" "$file" "$ls" \
              "$from_ps" "$to_ps" false "$WORK/created.json"; then
           n_created=$((n_created + 1)); printf '%s\tcreated\n' "$idx" >> "$WORK/outcomes.tsv"
@@ -244,7 +250,7 @@ publish_inline_comments() {
     fi
   fi
   if [[ "$submitted" == "1" ]]; then
-    while IFS=$'\t' read -r idx cid file ls; do
+    while IFS=$'\t' read -r idx cid; do
       n_created=$((n_created + 1)); printf '%s\tcreated\n' "$idx" >> "$WORK/outcomes.tsv"
     done < "$WORK/drafted.tsv"
   fi

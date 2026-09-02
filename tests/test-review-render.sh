@@ -859,9 +859,10 @@ assert_contains "$body" "&lt;DETAILS>" "R2：模型文本里的大写折叠标�
 # 1730（切在 `<deta|ils>` 中间）与 1882（切在 `</d|etails>` 中间）是协调者复现的两个具体窗口。
 GOLDEN_FULL="$GOLDEN/summary-full.md"
 golden_bytes=$(wc -c < "$GOLDEN_FULL" | tr -d ' ')
-trunc_check() { # <上限> → stdout: ok / 失败原因
+TRUNC_SRC="$GOLDEN_FULL"
+trunc_check() { # <上限> → stdout: ok / 失败原因（被截断的源文件由 TRUNC_SRC 指定）
   local max="$1" f="$tmp/trunc-$1.md" o c fences notice_ln close_ln
-  cp "$GOLDEN_FULL" "$f"
+  cp "$TRUNC_SRC" "$f"
   review_truncate_comment "$f" "$max" || { echo "review_truncate_comment rc=$?"; return 0; }
   [[ "$(wc -c < "$f" | tr -d ' ')" -le "$(( max + 400 ))" ]] || { echo "截断后仍过长"; return 0; }
   # U+FFFD：iconv 回退把干净输出覆盖回带乱码的原文时会出现
@@ -888,6 +889,17 @@ for (( max = 1600; max < golden_bytes; max += 7 )); do
   [[ "$r" == "ok" ]] || sweep_bad="${sweep_bad}${sweep_bad:+; }${max}:${r}"
 done
 assert_eq "$sweep_bad" "" "R4：1600..$((golden_bytes - 1)) 每 7 字节扫描一遍，全部满足不变量"
+# 票 04 的汇总有**两个**折叠块（折叠区 + 历次评审），补齐闭合标签的循环要数对个数才行——
+# 只扫一个折叠块的 golden 证明不了这一点，所以对新形态再扫一遍。
+TRUNC_SRC="$GOLDEN/summary-inline.md"
+inline_bytes=$(wc -c < "$TRUNC_SRC" | tr -d ' ')
+sweep_bad=""
+for (( max = 900; max < inline_bytes; max += 7 )); do
+  r=$(trunc_check "$max")
+  [[ "$r" == "ok" ]] || sweep_bad="${sweep_bad}${sweep_bad:+; }${max}:${r}"
+done
+assert_eq "$sweep_bad" "" "R4：INLINE_COMMENT=1 的汇总（两个折叠块）在 900..$((inline_bytes - 1)) 上同样满足不变量"
+TRUNC_SRC="$GOLDEN_FULL"
 # 不超限时不动文件
 cp "$GOLDEN_FULL" "$tmp/nottrunc.md"
 rc=0; review_truncate_comment "$tmp/nottrunc.md" "$golden_bytes" >/dev/null 2>&1 || rc=$?
