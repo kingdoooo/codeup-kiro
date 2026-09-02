@@ -719,6 +719,9 @@ run_inline_case badprofile ifx-badprofile INLINE_PROFILE=严格模式
 assert_rc "$RC" 0 "非法档位：评审仍成功"
 assert_contains "$OUT" "不是 quiet/balanced/critical" "非法档位：日志告警"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "非法档位：按 quiet 发 3 条"
+# 配错档位这件事必须在 MR 上看得见：阿里云侧开发者看不到流水线日志（I10）
+assert_contains "$(posted_comment "$OUT")" "INLINE_PROFILE=严格模式" "非法档位：汇总评论里说明已回落"
+assert_contains "$(posted_comment "$OUT")" "已按默认 quiet 处理" "非法档位：汇总评论点明回落到哪个档位"
 
 # ---- 上限截取 ----
 run_inline_case max1 ifx-max1 MAX_INLINE_COMMENTS=1
@@ -868,10 +871,31 @@ run_inline_case inlineempty ifx-inlineempty MOCK_KIRO_CONTRACT="$tmp/empty-contr
 assert_rc "$RC" 0 "无问题 + 行内开启：退出码 0"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "无问题 + 行内开启：不发行内评论"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "无问题 + 行内开启：不调提交接口"
+# 没有可发的行内评论时连版本列表与现有评论列表都不该查：白跑两个接口，还可能在一条
+# 「未发现明显问题」的汇总上挂一句「下面是完整问题清单」
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "0" "无问题 + 行内开启：不查版本列表"
+assert_eq "$(printf '%s\n' "$OUT" | grep -cF 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}')" "0" "无问题 + 行内开启：不查现有行内评论"
+assert_contains "$OUT" "本次没有可发的行内评论" "无问题 + 行内开启：日志说明为什么跳过"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "P0 0 · P1 0 · P2 0 —— 其中 0 条已标注在「文件改动」对应行" "无问题 + 行内开启：统计行完整"
 assert_contains "$comment" "未发现明显问题。" "无问题 + 行内开启：明确说明"
 assert_not_contains "$comment" "折叠区" "无问题 + 行内开启：折叠区整体省略"
+assert_not_contains "$comment" "行内评论未发出" "无问题 + 行内开启：不挂无意义的告警"
+
+# ---- 已有那条行内评论 out_dated（绑在被取代的旧版本上）→ 按当前版本重发 ----
+# 不重发的话，汇总里那句「已标注在「文件改动」对应行」就是假的：Codeup 会把 out_dated 的评论
+# 折叠/隐藏在 diff 视图里，读者在当前版本上根本看不到它。
+IFX_DIR="$tmp/ifx-outdated"; mkdir -p "$IFX_DIR"
+jq -n --arg fp "$fp_dup" --arg bot "$BOT" '[
+  {comment_biz_id:"od-1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false, out_dated:true,
+   filePath:"src/app.py", line_number:2, author:{username:$bot},
+   content:("### P0 · 硬编码疑似应用密钥\n<!-- kiro-inline:" + $fp + " -->\n")}
+]' > "$IFX_DIR/list-comments-inline.json"
+CASE_TWEAK=mk_inline_fixture run_case outdated DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+assert_rc "$RC" 0 "out_dated：评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "out_dated：那条旧评论不算已发出，三条全部重发"
+assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" "硬编码疑似应用密钥" "out_dated：被取代的那条按当前版本重发"
 
 # ---- 行内评论正文里的模型注入不成立（正文与汇总同一套清洗）----
 cat > "$tmp/inline-inject.json" <<'JSON'

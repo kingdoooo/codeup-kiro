@@ -433,6 +433,8 @@ _review_profile_levels() {
 #                          [--profile quiet] [--max 10]
 # stdout = 在输入 JSON 上追加以下字段：
 #   inline_profile / max_inline            实际生效的档位与上限（非法取值已回落）
+#   config_notice                          档位/上限被回落时的一句话说明（正常为空串），
+#                                          由调用方接到汇总评论的 --notice 上（I10 失败可见）
 #   inline: [问题…]                        本次要发成行内评论的问题（已排序、已截取）
 #   folded: {profile,overflow,unlocated,failed}
 #       profile   = 可定位但档位不覆盖其级别（quiet 下就是 P2）
@@ -445,6 +447,7 @@ _review_profile_levels() {
 # rc 2 = 参数错误（缺参数 / 文件不可读）——绝不静默按默认值规划，那会让开关看起来生效了。
 review_plan_inline() {
   local json="" changed="" profile="${REVIEW_INLINE_PROFILE_DEFAULT}" max="${REVIEW_MAX_INLINE_DEFAULT}" levels
+  local notice=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --json|--changed-lines|--profile|--max)
@@ -461,18 +464,23 @@ review_plan_inline() {
   done
   [[ -n "$json" && -r "$json" ]] || { echo "review_plan_inline: --json 不可读：${json:-<未提供>}" >&2; return 2; }
   [[ -n "$changed" && -r "$changed" ]] || { echo "review_plan_inline: --changed-lines 不可读：${changed:-<未提供>}" >&2; return 2; }
-  # 档位与上限来自流水线变量，配错不该让评审失败，但必须回落到默认值并留痕
+  # 档位与上限来自流水线变量，配错不该让评审失败，但必须回落到默认值并留痕。
+  # 留痕不能只在 stderr：阿里云侧开发者看不到流水线日志（I10），所以同时写进 config_notice，
+  # 由调用方接到汇总评论的 --notice 上——否则「档位配错了」这件事在 MR 上完全看不出来，
+  # 而评论看起来一切正常（只是覆盖范围不是运维以为的那个）。
   if ! levels=$(_review_profile_levels "$profile"); then
     echo "review_plan_inline: INLINE_PROFILE=${profile} 不是 quiet/balanced/critical，按默认 ${REVIEW_INLINE_PROFILE_DEFAULT} 处理" >&2
+    notice="INLINE_PROFILE=${profile} 不是 quiet/balanced/critical，本次已按默认 ${REVIEW_INLINE_PROFILE_DEFAULT} 处理。"
     profile="$REVIEW_INLINE_PROFILE_DEFAULT"
     levels=$(_review_profile_levels "$profile")
   fi
   if ! [[ "$max" =~ ^[0-9]+$ ]]; then
     echo "review_plan_inline: MAX_INLINE_COMMENTS=${max} 不是非负整数，按默认 ${REVIEW_MAX_INLINE_DEFAULT} 处理" >&2
+    notice="${notice}${notice:+ }MAX_INLINE_COMMENTS=${max} 不是非负整数，本次已按默认 ${REVIEW_MAX_INLINE_DEFAULT} 处理。"
     max="$REVIEW_MAX_INLINE_DEFAULT"
   fi
   jq -c --slurpfile changed "$changed" --argjson max "$max" \
-        --arg profile "$profile" --arg levels "$levels" '
+        --arg profile "$profile" --arg levels "$levels" --arg notice "$notice" '
     def sevrank: {"P0":0,"P1":1,"P2":2}[.] // 3;
     def ordered: sort_by([(.severity | sevrank), (.file // ""), (.line_start // 0), .idx]);
     ($changed[0] // {}) as $cl
@@ -496,6 +504,7 @@ review_plan_inline() {
     | $root + {
         inline_profile: $profile,
         max_inline: $max,
+        config_notice: $notice,
         inline: $inline,
         folded: { profile: ($prof | ordered), overflow: $overflow,
                   unlocated: ($unloc | ordered), failed: [] },
@@ -510,15 +519,18 @@ review_plan_inline() {
 #   created  = 本次新发出的行内评论
 #   existing = 指纹命中、MR 上已有同一条 → 仍算「已标注在对应行」（spec §4.5 第 5 步「跳过并计数」）
 #   failed   = 没发出去 → 必须移进折叠区，否则这条问题在 MR 上一条都看不到（违反 I4「同一问题只出现一次」）
-# 未在结果里出现的项按 created 处理（调用方漏记只会让计数偏乐观，不会让问题消失）。
+# **缺失的结果按 failed 处理**（fail-closed）。这里绝不能按 created 兜底：调用方给每一条 inline 项
+# 都会记一个结果，所以「查不到结果」只有一种含义——结果文件出了问题。此时按 created 兜底会把
+# 一条根本没发出去的 P0 算成「已标注在对应行」，而 INLINE_COMMENT=1 的汇总不展开问题清单，
+# 那条 P0 就在 MR 上彻底消失了。按 failed 兜底最坏只是让一条已经发出去的评论在折叠区里重复一次。
 review_plan_apply_outcomes() {
   local plan="$1" outcomes="$2"
   [[ -r "$plan" ]] || { echo "review_plan_apply_outcomes: 计划文件不可读：${plan}" >&2; return 2; }
   [[ -r "$outcomes" ]] || { echo "review_plan_apply_outcomes: 结果文件不可读：${outcomes}" >&2; return 2; }
   jq -c --slurpfile oc "$outcomes" '
     (($oc[0] // []) | map(select(type == "object" and (.idx | type) == "number"))
-                    | map({key: (.idx | tostring), value: (.outcome // "created")}) | from_entries) as $o
-    | def status(f): ($o[(f.idx | tostring)] // "created");
+                    | map({key: (.idx | tostring), value: (.outcome // "failed")}) | from_entries) as $o
+    | def status(f): ($o[(f.idx | tostring)] // "failed");
       (.inline // []) as $in
     | [ $in[] | select(status(.) != "failed") ] as $kept
     | [ $in[] | select(status(.) == "failed") ] as $failed
@@ -565,6 +577,12 @@ review_render_inline_marker() {
 # 已认证的 MR 参与者主动发评论（可见、可追溯），两害相权取轻，并由调用方打警告提示配置。
 # 状态过滤在脚本侧做：接口只实测过 comment_type 过滤（P1-06），state 参数名未实测，
 # 凭记忆传一个可能 400 的参数会让整条去重通路挂掉。
+# 状态判定用**黑名单**（排除 DELETED 与 DRAFT）而不是白名单（只认 OPENED）：实测只见过这三个取值，
+# 万一 Codeup 对「已被开发者解决」的行内评论返回别的状态（如 RESOLVED），白名单会漏收它的指纹，
+# 于是每次重跑都在同一行上再发一条（违反 I6 幂等）。与 review_select_prior_comment 的判定一致。
+# out_dated 的评论一律**不算**已发出：它绑的是被取代的旧版本，Codeup 会把它折叠/隐藏在 diff 视图里。
+# 把它算作已发出，就等于汇总里那句「已标注在「文件改动」对应行」在说谎——读者在当前 diff 上看不到它。
+# 重跑（没有新推送）时 out_dated 为 false，去重照常生效，A3「重跑不重复」不受影响。
 # 字段类型守卫与 review_select_prior_comment 同理：任何一条评论字段不合形都不能废掉整批。
 review_inline_existing_fingerprints() {
   local bot="${1-}"
@@ -575,8 +593,9 @@ review_inline_existing_fingerprints() {
     | (if type == "array" then . else [] end)
     | map(select(type == "object"))
     | map(select(str(.comment_type) == "" or str(.comment_type) == "INLINE_COMMENT"))
-    | map(select((str(.state) | ascii_upcase) == "OPENED"))
+    | map(select((str(.state) | ascii_upcase) as $s | $s != "DELETED" and $s != "DRAFT"))
     | map(select((.draft == true) | not))
+    | map(select((.out_dated == true) | not))
     | map(select(if $bot == "" then true else author_name == $bot end))
     | .[] | str(.content) | split("\n")[] | match($re) | .captures[0].string' 2>/dev/null \
     | LC_ALL=C sort -u
@@ -906,23 +925,50 @@ _review_render_header() {
 #   - 档位桶在 quiet 下就是 P2（渲染成 `#### P2 建议（n）`，与 spec 模板一致），
 #     但在 critical 下还包含 P1——写死「P2 建议」会把 P1 问题标成 P2，那是改写评审员的判级。
 #   - 超限桶在 quiet 下是 P0/P1（与 spec 模板一致），balanced 下可能含 P2。
-# _review_render_fold_section <计划文件> <桶名> <标题> <是否未定位桶 0|1>
+# _review_render_fold_section <计划文件> <标题模板> <桶名> <是否未定位桶 0|1>
+# 标题模板里的 `{levels}` 会替换成该桶里实际出现的级别列表（`P0/P1`）。替换刻意放在
+# 「桶为空就直接返回」之后：空桶时那个标题根本不会渲染，先算它等于白跑一个 jq。
 _review_render_fold_section() {
-  local plan="$1" bucket="$2" title="$3" unloc="${4:-0}" n
+  local plan="$1" title="$2" bucket="$3" unloc="${4:-0}" n
   n=$(jq -r --arg b "$bucket" '(.folded[$b] // []) | length' "$plan")
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || return 0
+  if [[ "$title" == *'{levels}'* ]]; then
+    title="${title//\{levels\}/$(_review_fold_levels "$plan" "$bucket")}"
+  fi
   echo ""
   printf '#### %s（%s）\n' "$title" "$n"
   echo ""
-  # body 首句：取第一个非空行，句号处截断，再按 120 字符封顶。
+  # body 首句：取第一个「非空且不是代码围栏」的行，句号处截断，再按 120 字符封顶。
   # 折叠区是「一眼扫过去」的清单，整段 body（可能带代码块）会把折叠区撑成第二份报告。
+  # 跳过围栏行是必需的：评审员的 body 很常以 ```python 开头，取到那一行的话这个条目
+  # 就只剩一串反引号、什么信息都没有。
+  # 反引号还要再处理两道，否则这一行会把后面的条目一起吞掉：
+  #   ① 连续 2 个以上的反引号折叠成 1 个——`​``​` 这种 3 连是 Markdown 的行内代码定界符，
+  #      它会一直找下一个 3 连来配对，于是两个条目之间的定位串与标题全被吃进代码span；
+  #   ② 折叠后若反引号个数为奇数（120 字符封顶很容易切在代码span中间），末尾补一个闭合。
   jq -r --arg b "$bucket" --arg unloc "$unloc" '
+    def _lines: (. // "") | split("\n");
+    # 整段代码围栏（含围栏内的代码行）都不算「说明」：取到围栏内的第一行代码同样什么都说明不了
+    def _outside_fence:
+      _lines
+      | reduce .[] as $l ({fence: false, out: []};
+          if ($l | test("^[[:space:]]{0,3}(```|~~~)")) then {fence: (.fence | not), out: .out}
+          elif .fence then .
+          else {fence: .fence, out: (.out + [$l])} end)
+      | .out;
     def firstsent:
-      ((. // "") | split("\n") | map(select(test("[^[:space:]]"))) | (.[0] // "")) as $l
+      (_outside_fence | map(select(test("[^[:space:]]"))) | (.[0] // "")) as $outside
+      # 整段 body 就是一个代码块时退回「围栏外没有、就取围栏内第一行」，总比留一个空说明好
+      | (if ($outside | length) > 0 then $outside
+         else (_lines
+               | map(select(test("[^[:space:]]") and (test("^[[:space:]]{0,3}(```|~~~)") | not)))
+               | (.[0] // "")) end) as $l
       | ($l | sub("^[[:space:]]+"; "")) as $t
       | ($t | index("。")) as $i
-      | (if $i != null then $t[0:$i + 1] else $t end) as $s
-      | if ($s | length) > 120 then $s[0:120] + "…" else $s end;
+      | (if $i != null then $t[0:$i + 1] else $t end) as $s0
+      | (if ($s0 | length) > 120 then $s0[0:120] + "…" else $s0 end) as $s1
+      | ($s1 | gsub("`{2,}"; "`")) as $s
+      | if ((($s | split("`") | length) - 1) % 2) == 1 then $s + "`" else $s end;
     def loc:
       if .file == null then "（未定位）"
       elif $unloc == "1" then "`\(.file)`（无法定位到变更行）"
@@ -946,10 +992,10 @@ _review_render_folded() {
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || return 0
   echo ""
   printf '<details><summary>折叠区：未展开的问题（%s）</summary>\n' "$n"
-  _review_render_fold_section "$plan" profile   "$(_review_fold_levels "$plan" profile) 建议" 0
-  _review_render_fold_section "$plan" overflow  "超出行内上限的 $(_review_fold_levels "$plan" overflow)" 0
-  _review_render_fold_section "$plan" unlocated "未定位问题" 1
-  _review_render_fold_section "$plan" failed    "行内发布失败" 0
+  _review_render_fold_section "$plan" '{levels} 建议'          profile   0
+  _review_render_fold_section "$plan" '超出行内上限的 {levels}' overflow  0
+  _review_render_fold_section "$plan" '未定位问题'              unlocated 1
+  _review_render_fold_section "$plan" '行内发布失败'            failed    0
   echo "</details>"
 }
 
@@ -1120,11 +1166,15 @@ review_render_summary() {
 # 放在库里而不是内联在 kiro-review.sh：这段逻辑的正确性取决于「切在哪个字节上」，
 # 只有能在库层面对几十个截断窗口做扫描式回归，才谈得上验证过（见 tests/test-review-render.sh）。
 review_truncate_comment() {
-  local file="$1" max="$2" size dir
+  local file="$1" max="$2" size dir had_marker
   [[ -r "$file" ]] || { echo "review_truncate_comment: 文件不可读：${file}" >&2; return 2; }
   [[ "$max" =~ ^[0-9]+$ && "$max" -ge 1 ]] || { echo "review_truncate_comment: 字节上限必须是 ≥1 的整数（实际：${max}）" >&2; return 2; }
   size=$(wc -c < "$file" | tr -d ' ')
   [[ "$size" -gt "$max" ]] || return 1
+  # 截断前记下有没有评审标记：截断是从尾部砍的，标记在开头，正常情况一定保得住；
+  # 但上限小到连头部都放不下时会截出一份没有标记的残片，而调用方随后会把它 PUT 到上一条汇总上。
+  had_marker=0
+  grep -qE "$REVIEW_MARKER_LINE_RE" "$file" && had_marker=1
   dir=$(mktemp -d)
   head -c "$max" "$file" > "$dir/cut"
   # **先退到最后一个完整行**（丢掉那半行），再做任何补齐：
@@ -1173,6 +1223,15 @@ review_truncate_comment() {
     echo ""
     echo "> ⚠️ 报告超长已截断（上限 ${max} 字节），完整内容见流水线日志。"
   } >> "$dir/out"
+  # 硬守卫：截断结果里必须还留着评审标记。丢了标记的残片一旦被 PUT 上去，
+  #   ① 上一次的完整报告与隐藏的历次记录当场不可恢复地消失；
+  #   ② 下一次评审再也定位不到这条评论，会在 MR 上新建第二条汇总（违反 I4）。
+  # 宁可让截断失败（调用方回写失败评论，形态完整、历史仍在），也不发这种残片。
+  if [[ "$had_marker" == "1" ]] && ! grep -qE "$REVIEW_MARKER_LINE_RE" "$dir/out"; then
+    echo "review_truncate_comment: 上限 ${max} 字节太小，截断后连评审标记都没了——拒绝截断（那份残片会覆盖掉上一条汇总的全部内容与历次记录）。请调大 MAX_COMMENT_BYTES" >&2
+    rm -rf "$dir"
+    return 3
+  fi
   cp "$dir/out" "$file"
   rm -rf "$dir"
   return 0

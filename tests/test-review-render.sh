@@ -909,6 +909,25 @@ rc=0; review_truncate_comment "$tmp/nottrunc.md" abc >/dev/null 2>&1 || rc=$?
 assert_rc "$rc" 2 "R4：上限不是整数 → rc 2"
 rc=0; review_truncate_comment "$tmp/does-not-exist.md" 100 >/dev/null 2>&1 || rc=$?
 assert_rc "$rc" 2 "R4：文件不可读 → rc 2"
+# 上限小到连评审标记都截掉时必须**拒绝截断**：那份残片会被 PUT 到上一条汇总上，
+# 把上一次的完整报告与全部历次记录不可恢复地覆盖掉，而且下一次评审再也定位不到这条评论
+# （没有标记 → 新建第二条汇总，违反 I4）。
+cp "$GOLDEN_FULL" "$tmp/tiny.md"
+rc=0; err=$(review_truncate_comment "$tmp/tiny.md" 20 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 3 "R4：上限小到丢掉评审标记 → rc 3（拒绝截断）"
+assert_contains "$err" "拒绝截断" "R4：报错说明为什么拒绝"
+assert_eq "$(cmp -s "$GOLDEN_FULL" "$tmp/tiny.md" && echo same || echo differ)" "same" "R4：拒绝截断时原文件逐字节不变（绝不产出残片）"
+assert_eq "$(grep -cE '^<!-- kiro-review:' "$tmp/tiny.md")" "1" "R4：评审标记仍在"
+# 正常上限下标记必须仍在（这是上面那道守卫的正控：守卫不能把正常截断也拦掉）
+cp "$GOLDEN_FULL" "$tmp/normaltrunc.md"
+rc=0; review_truncate_comment "$tmp/normaltrunc.md" 1700 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 0 "R4：正常上限下截断照常成功"
+assert_eq "$(grep -cE '^<!-- kiro-review:' "$tmp/normaltrunc.md")" "1" "R4：正常截断后评审标记仍在"
+assert_eq "$(grep -c '^<!-- kiro-history:' "$tmp/normaltrunc.md")" "1" "R4：正常截断后历史标记仍在"
+# 本来就没有标记的正文（不是汇总评论）不受这道守卫影响
+printf '第一行\n第二行\n第三行\n第四行\n第五行\n' > "$tmp/nomarker-trunc.md"
+rc=0; review_truncate_comment "$tmp/nomarker-trunc.md" 12 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 0 "R4：输入本来就没有评审标记时不受守卫影响"
 # 输入本身含非法 UTF-8 字节时，iconv 兜底必须真的生效。
 # 这条是 `|| [[ -s … ]]` 那一半的正控：iconv -c 丢弃了字符就以 1 退出，只看退出码的话
 # 清理结果会被丢掉、非法字节原样留在评论里（而 Codeup 的 content 是 JSON 字符串，jq 会因此报错）。
@@ -1018,12 +1037,33 @@ assert_eq "$(jq -r .inline_count "$tmp/plan-applied.json")" "2" "apply：inline_
 assert_eq "$(jq -r .folded_count "$tmp/plan-applied.json")" "6" "apply：folded_count 重算（5 + 1）"
 assert_eq "$(jq -r '[.inline[].id] + [.folded.profile[].id] + [.folded.overflow[].id] + [.folded.unlocated[].id] + [.folded.failed[].id] | sort | join(",")' "$tmp/plan-applied.json")" \
   "F1,F2,F3,F4,F5,F6,F7,F8" "apply：回填后每条问题仍恰好出现一次"
-# 空结果 = 全部按 created 处理（调用方漏记只会让计数偏乐观，不会让问题消失）
-review_plan_apply_outcomes "$tmp/plan-quiet.json" <(echo '[]') > "$tmp/plan-applied0.json" 2>/dev/null \
-  || jq -n '[]' > "$tmp/empty-oc.json"
-[[ -s "$tmp/plan-applied0.json" ]] || { jq -n '[]' > "$tmp/empty-oc.json"; review_plan_apply_outcomes "$tmp/plan-quiet.json" "$tmp/empty-oc.json" > "$tmp/plan-applied0.json"; }
-assert_eq "$(ids "$tmp/plan-applied0.json" inline)" "F1,F7,F2" "apply：空结果时行内不变"
-assert_eq "$(ids "$tmp/plan-applied0.json" failed)" "" "apply：空结果时 failed 为空"
+# 缺失结果一律按 failed（fail-closed）。调用方给每一条 inline 项都会记结果，所以「查不到结果」
+# 只有一种含义：结果文件坏了。此时按 created 兜底会把一条根本没发出去的 P0 算成「已标注在对应行」，
+# 而 INLINE_COMMENT=1 的汇总不展开问题清单 → 那条 P0 在 MR 上彻底消失。按 failed 兜底最坏只是
+# 让一条已经发出去的评论在折叠区里重复一次。
+jq -n '[]' > "$tmp/empty-oc.json"
+review_plan_apply_outcomes "$tmp/plan-quiet.json" "$tmp/empty-oc.json" > "$tmp/plan-applied0.json"
+assert_eq "$(ids "$tmp/plan-applied0.json" inline)" "" "apply：结果为空时不认为有任何一条发出去了（fail-closed）"
+assert_eq "$(ids "$tmp/plan-applied0.json" failed)" "F1,F7,F2" "apply：结果为空时三条都进折叠区（宁可重复，绝不藏问题）"
+assert_eq "$(jq -r .inline_count "$tmp/plan-applied0.json")" "0" "apply：结果为空时行内计数为 0"
+# 部分缺失同理：只有明确记了结果的才算发出去
+jq -n '[{idx:0,outcome:"created"}]' > "$tmp/partial-oc.json"
+review_plan_apply_outcomes "$tmp/plan-quiet.json" "$tmp/partial-oc.json" > "$tmp/plan-partial.json"
+assert_eq "$(ids "$tmp/plan-partial.json" inline)" "F1" "apply：只有记了结果的那条算发出去"
+assert_eq "$(ids "$tmp/plan-partial.json" failed)" "F7,F2" "apply：没记结果的两条进折叠区"
+# outcome 字段缺失（结果项形态不对）同样按 failed
+jq -n '[{idx:0},{idx:6,outcome:"created"},{idx:1,outcome:"existing"}]' > "$tmp/nooutcome-oc.json"
+review_plan_apply_outcomes "$tmp/plan-quiet.json" "$tmp/nooutcome-oc.json" > "$tmp/plan-nooutcome.json"
+assert_eq "$(ids "$tmp/plan-nooutcome.json" failed)" "F1" "apply：结果项缺 outcome 字段时按 failed"
+
+# ---- 档位/上限被回落时的说明必须能传到汇总评论（I10：流水线日志阿里云侧看不到）----
+assert_eq "$(jq -r '.config_notice' "$tmp/plan-quiet.json")" "" "plan：取值合法时 config_notice 为空串"
+assert_contains "$(jq -r '.config_notice' "$tmp/plan-badprofile.json")" "INLINE_PROFILE=严格" "plan：非法档位写进 config_notice"
+assert_contains "$(jq -r '.config_notice' "$tmp/plan-badmax.json")" "MAX_INLINE_COMMENTS=十条" "plan：非法上限写进 config_notice"
+review_plan_inline --json "$tmp/inline-validated.json" --changed-lines "$CL" --profile 严格 --max 十条 \
+  > "$tmp/plan-bothbad.json" 2>/dev/null
+assert_contains "$(jq -r '.config_notice' "$tmp/plan-bothbad.json")" "INLINE_PROFILE" "plan：两个都非法时 config_notice 都提到"
+assert_contains "$(jq -r '.config_notice' "$tmp/plan-bothbad.json")" "MAX_INLINE_COMMENTS" "plan：两个都非法时第二条也在"
 
 # ---- 指纹 ----
 fp1=$(review_fingerprint "src/app.py" 30 "用户输入直接拼接进 SQL")
@@ -1073,6 +1113,31 @@ assert_eq "$(review_inline_existing_fingerprints "$TEST_BOT_USERNAME" < <(echo '
   "去重：响应不是合法 JSON → 空列表（不报错）"
 assert_eq "$(jq -c '{result: .}' "$tmp/inline-list.json" | review_inline_existing_fingerprints "$TEST_BOT_USERNAME")" "$fpA" \
   "去重：{result:[…]} 形态兼容"
+
+# 状态判定必须是黑名单（排除 DELETED/DRAFT）而不是白名单（只认 OPENED）：
+# 实测只见过三个取值，Codeup 对「已被开发者解决」的行内评论若返回别的状态（如 RESOLVED），
+# 白名单会漏收它的指纹，于是每次重跑都在同一行上再发一条（违反 I6 幂等）。
+fpR2=$(review_fingerprint "src/x.py" 5 "已被解决的问题")
+jq -n --arg fp "$fpR2" --arg bot "$TEST_BOT_USERNAME" '[
+  {comment_biz_id:"r1", comment_type:"INLINE_COMMENT", state:"RESOLVED", draft:false,
+   content:("### P1 · 已被解决的问题\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}}]' \
+  > "$tmp/resolved-list.json"
+assert_eq "$(review_inline_existing_fingerprints "$TEST_BOT_USERNAME" < "$tmp/resolved-list.json")" "$fpR2" \
+  "去重：未见过的状态（RESOLVED）也算已发出，不会每次重跑都重发"
+
+# out_dated 的评论一律不算已发出：它绑在被取代的旧版本上，Codeup 会把它折叠/隐藏在 diff 视图里。
+# 算作已发出就等于汇总里那句「已标注在「文件改动」对应行」在说谎。
+fpO=$(review_fingerprint "src/x.py" 7 "绑在旧版本上的问题")
+jq -n --arg fp "$fpO" --arg bot "$TEST_BOT_USERNAME" '[
+  {comment_biz_id:"o1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false, out_dated:true,
+   content:("### P0 · 绑在旧版本上的问题\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}}]' \
+  > "$tmp/outdated-list.json"
+assert_eq "$(review_inline_existing_fingerprints "$TEST_BOT_USERNAME" < "$tmp/outdated-list.json")" "" \
+  "去重：out_dated 的评论不算已发出（会按当前版本重发一条，让「已标注」这句话为真）"
+assert_eq "$(jq -c 'map(.out_dated = false)' "$tmp/outdated-list.json" | review_inline_existing_fingerprints "$TEST_BOT_USERNAME")" "$fpO" \
+  "去重：out_dated=false（重跑而没有新推送）时照常去重，A3 不受影响"
+assert_eq "$(jq -c 'map(del(.out_dated))' "$tmp/outdated-list.json" | review_inline_existing_fingerprints "$TEST_BOT_USERNAME")" "$fpO" \
+  "去重：没有 out_dated 字段时按未过期处理"
 
 # ---- 行内评论正文（golden）----
 jq -c '.inline[0]' "$tmp/plan-quiet.json" > "$tmp/item-range.json"
@@ -1194,6 +1259,34 @@ review_render_summary --json "$tmp/plan-quiet.json" --inline-comment 0 \
 assert_contains "$(cat "$tmp/plan-as-inline0.md")" "### 问题清单" "渲染：计划文件按 0 渲染时回到展开清单"
 assert_contains "$(cat "$tmp/plan-as-inline0.md")" "用户输入直接拼接进 SQL" "渲染：回落路径里问题明细仍在汇总里"
 assert_not_contains "$(cat "$tmp/plan-as-inline0.md")" "已标注在" "渲染：回落路径不提行内计数"
+
+# ---- 折叠区条目：body 以代码围栏开头时不能只剩一串反引号，也不能吞掉后面的条目 ----
+# 评审员的 body 很常以 ```python 开头。取到那一行的话条目里什么信息都没有；更糟的是那 3 个
+# 连续反引号是 Markdown 的行内代码定界符，它会一直找下一个 3 连来配对，把两个条目之间的
+# 定位串与标题全吃进代码 span。
+cat > "$tmp/fencebody.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
+ {"id":"H1","severity":"P2","category":"style","title":"围栏开头一","file":"docs/readme.md","line_start":3,"line_end":3,
+  "body":"```python\nbad_code()\n```\n这一句才是真正的说明。","fix":""},
+ {"id":"H2","severity":"P2","category":"style","title":"围栏开头二","file":"unknown/file.py","line_start":1,"line_end":1,
+  "body":"~~~\nalso bad\n~~~\n第二条的说明。","fix":""},
+ {"id":"H3","severity":"P2","category":"style","title":"反引号数为奇数","file":"unknown/other.py","line_start":2,"line_end":2,
+  "body":"这里有一个没配对的 `反引号 在句子里。","fix":""}]}
+JSON
+review_validate < "$tmp/fencebody.json" > "$tmp/fencebody-validated.json"
+review_plan_inline --json "$tmp/fencebody-validated.json" --changed-lines "$CL" --profile quiet > "$tmp/plan-fence.json"
+render_inline "$tmp/plan-fence.json" "$tmp/summary-fence.md"
+body=$(cat "$tmp/summary-fence.md")
+assert_contains "$body" "**围栏开头一** — 这一句才是真正的说明。" '折叠区：跳过 ``` 围栏行，取到真正的说明'
+assert_contains "$body" "**围栏开头二** — 第二条的说明。" '折叠区：~~~ 围栏行同样跳过'
+assert_not_contains "$body" '— ```python' "折叠区：条目里不会只剩一串反引号"
+# 每个条目都必须自成一行、以 `- ` 开头（被代码 span 吞掉的话会粘到上一行里）
+assert_eq "$(printf '%s\n' "$body" | grep -c '^- ')" "3" "折叠区：三个条目各占一行，没有被反引号吞掉"
+# 反引号在每个条目内部成对（奇数时补一个闭合）
+while IFS= read -r line; do
+  bt=$(printf '%s' "$line" | tr -cd '`' | wc -c | tr -d ' ')
+  assert_eq "$(( bt % 2 ))" "0" "折叠区：条目内反引号成对（这一行 ${bt} 个）：${line:0:40}"
+done < <(printf '%s\n' "$body" | grep '^- ')
 
 # ---- --notice：行内评论发不出去时，汇总里必须说得出原因（I10 失败可见）----
 review_render_summary --json "$tmp/plan-quiet.json" --inline-comment 0 \

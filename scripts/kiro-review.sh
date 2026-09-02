@@ -22,7 +22,15 @@ source "${SCRIPT_DIR}/lib/kiro-agent.sh"
 source "${SCRIPT_DIR}/lib/review-render.sh"
 
 KIRO_TIMEOUT="${KIRO_TIMEOUT:-900}"
-MAX_COMMENT_BYTES="${MAX_COMMENT_BYTES:-60000}"
+# 评论字节上限。必须校验：非整数会让下面的 `-gt` 比较在 set -e 下直接崩掉，而 0 会让每条评论
+# 都被截成残片。真正的兜底在 review_truncate_comment 里——截断后如果连评审标记都没了就拒绝截断，
+# 因为那份残片会被 PUT 到上一条汇总上，把上一次的完整报告与全部历次记录不可恢复地覆盖掉。
+MAX_COMMENT_BYTES_DEFAULT=60000
+MAX_COMMENT_BYTES="${MAX_COMMENT_BYTES:-$MAX_COMMENT_BYTES_DEFAULT}"
+if ! [[ "$MAX_COMMENT_BYTES" =~ ^[0-9]+$ ]] || [[ "$MAX_COMMENT_BYTES" -lt 1 ]]; then
+  echo "[kiro-review] 警告：MAX_COMMENT_BYTES=${MAX_COMMENT_BYTES} 不是 ≥1 的整数，按默认 ${MAX_COMMENT_BYTES_DEFAULT} 处理" >&2
+  MAX_COMMENT_BYTES="$MAX_COMMENT_BYTES_DEFAULT"
+fi
 # 行内评论开关（spec §4.6）。
 #   0（默认）：MR 上只有一条汇总评论，内含按 P0→P1→P2 分组的完整问题清单（I7 观感不变）。
 #   1：可定位的问题按档位发成行内评论，汇总退化为状态面板 + 折叠区（spec §4.3、§4.5）。
@@ -102,14 +110,25 @@ die_review() {
     if [[ ! -s "$f" ]]; then
       local mh
       mh=$(mktemp)
-      review_history_append - "$REVIEW_RUN" "${SHORT_SHA:-unknown}" "" failed - - - > "$mh" 2>/dev/null || true
+      # 先带上读回来的历次记录再退化：这条最小评论同样会被 PUT 到上一条汇总上，
+      # 直接用 `-`（空历史）会把累积的 20 行 run/sha/结论/计数一次性抹掉。
+      review_history_append "${PRIOR_HISTORY_FILE:--}" "$REVIEW_RUN" "${SHORT_SHA:-unknown}" "" failed - - - \
+        > "$mh" 2>/dev/null || true
+      _review_history_ok "$mh" die_review 2>/dev/null \
+        || review_history_append - "$REVIEW_RUN" "${SHORT_SHA:-unknown}" "" failed - - - > "$mh" 2>/dev/null || true
       _review_history_ok "$mh" die_review 2>/dev/null || printf '[]\n' > "$mh"
       {
         echo "## 🤖 Kiro 代码评审 · ⚠️ 评审未完成"
         echo "<!-- kiro-review:${SHORT_SHA:-unknown} run:${REVIEW_RUN} -->"
         review_render_history_marker "$mh"
         echo ""
-        echo "⚠️ 评审未完成（失败评论渲染异常，只保留最小信息）：$*"
+        # 失败原因可能带来自事件流的取值（不受信，例如 runFinished.status）。不清洗的话，
+        # 一个含 `<!-- kiro-review:… -->` 的取值就能让这条评论带上第二个评审标记 →
+        # 下一次评审判它「标记不唯一」而不作为候选 → MR 上多出一条汇总（违反 I4）；
+        # 含 `-->` 的取值还会把上面那行隐藏历史提前闭合、把 JSON 露成正文。
+        printf '⚠️ 评审未完成（失败评论渲染异常，只保留最小信息）：'
+        printf '%s' "$*" | review_sanitize_md
+        echo ""
         echo ""
         echo "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。"
         echo ""
@@ -134,18 +153,37 @@ die_review() {
 # 所以每一步都显式判退出码，绝不依赖 set -e。
 publish_inline_comments() {
   local validated="$1"
-  local pair from_ps to_ps to_commit head_full existing_fp
-  local item idx file ls title fp cid n_created=0 n_existing=0 n_failed=0 submitted=0
+  local pair from_ps to_ps to_commit head_full existing_fp config_notice
+  local item idx file ls title fp cid crc n_created=0 n_existing=0 n_failed=0 submitted=0
+
+  # 2/3/4. 变更行集合 → 可定位判定 → 排序与档位 → 上限截取。
+  # 排在版本对之前：规划完全是本地计算，而「没有任何要发的行内评论」时（干净的 MR、
+  # 或者所有问题都不可定位）根本不该去调那两个接口，更不该因为接口失败而在一条
+  # 「未发现明显问题」的汇总上挂一句「下面是完整问题清单」。
+  if ! review_plan_inline --json "$validated" --changed-lines "$WORK/changed-lines.json" \
+         --profile "$INLINE_PROFILE" --max "$MAX_INLINE_COMMENTS" > "$WORK/plan.json"; then
+    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论未发出：生成行内发布计划失败，下面是完整问题清单。"
+    log "警告：生成行内发布计划失败"
+    return 1
+  fi
+  # 档位/上限被回落时的说明要上到汇总评论：流水线日志阿里云侧看不到（I10）
+  config_notice=$(jq -r '.config_notice // ""' "$WORK/plan.json")
+  [[ -n "$config_notice" ]] && INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }${config_notice}"
+  if [[ "$(jq -r '.inline | length' "$WORK/plan.json")" == "0" ]]; then
+    log "行内评论：本次没有可发的行内评论（可定位且档位覆盖的问题为 0），跳过版本查询与发布；折叠区 $(jq -r '.folded_count' "$WORK/plan.json") 条"
+    INLINE_ACTIVE=1
+    return 0
+  fi
 
   # 1. 版本对（spec §4.5 第 1 步、Q6）
   if ! codeup_list_patchsets "$LOCAL_ID" > "$WORK/patchsets.json"; then
-    INLINE_NOTICE="行内评论未发出：查询 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}），下面是完整问题清单。"
-    log "警告：${INLINE_NOTICE}"
+    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论未发出：查询 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}），下面是完整问题清单。"
+    log "警告：查询 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}）"
     return 1
   fi
   if ! pair=$(codeup_select_patchset_pair < "$WORK/patchsets.json"); then
-    INLINE_NOTICE="行内评论未发出：MR 版本列表里选不出「最新合并目标版本 + 最新合并源版本」这一对，下面是完整问题清单。"
-    log "警告：${INLINE_NOTICE}"
+    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论未发出：MR 版本列表里选不出「最新合并目标版本 + 最新合并源版本」这一对，下面是完整问题清单。"
+    log "警告：选不出行内评论要用的版本对"
     return 1
   fi
   from_ps=$(printf '%s' "$pair" | cut -f1)
@@ -157,14 +195,6 @@ publish_inline_comments() {
   # 但必须留痕——此时行号是按本次评审的 diff 算的，可能与那个版本对不上。
   if [[ -n "$to_commit" && "$to_commit" != "$head_full" ]]; then
     log "警告：最新合并源版本的提交（${to_commit:0:12}）与当前 HEAD（${head_full:0:12}）不一致——仍以 API 给的版本为准（Codeup 侧真值），但行号可能对不上这次评审的 diff"
-  fi
-
-  # 2/3/4. 变更行集合 → 可定位判定 → 排序与档位 → 上限截取
-  if ! review_plan_inline --json "$validated" --changed-lines "$WORK/changed-lines.json" \
-         --profile "$INLINE_PROFILE" --max "$MAX_INLINE_COMMENTS" > "$WORK/plan.json"; then
-    INLINE_NOTICE="行内评论未发出：生成行内发布计划失败，下面是完整问题清单。"
-    log "警告：${INLINE_NOTICE}"
-    return 1
   fi
 
   # 5. 去重：拉现有行内评论，按正文里的指纹标记跳过
@@ -218,7 +248,15 @@ publish_inline_comments() {
         printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"; n_failed=$((n_failed + 1))
       fi
     else
-      log "警告：问题 #${idx} 的行内评论草稿创建失败（HTTP ${CODEUP_HTTP_CODE}），转入折叠区"
+      # rc 2 = 本地前置校验拒绝（正文为空、行号不合法……），一个请求都没发过，此时
+      # CODEUP_HTTP_CODE 是上一次别的请求留下的旧值（通常 200）。把它当成 HTTP 结果打出来，
+      # 会让运维照着一个不存在的接口问题去排查。
+      crc=$?
+      if [[ "$crc" == "2" ]]; then
+        log "警告：问题 #${idx} 的行内评论被本地前置校验拒绝（参数不合规，原因见上一行；未发出任何请求），转入折叠区"
+      else
+        log "警告：问题 #${idx} 的行内评论草稿创建失败（HTTP ${CODEUP_HTTP_CODE}），转入折叠区"
+      fi
       printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"; n_failed=$((n_failed + 1))
     fi
   done < <(jq -c '.inline[]' "$WORK/plan.json")
@@ -234,7 +272,7 @@ publish_inline_comments() {
       # 与一条正式评论，而下一次评审看到的是同一个指纹，两条都不会被清理
       while IFS=$'\t' read -r idx cid; do
         codeup_delete_comment "$LOCAL_ID" "$cid" \
-          || log "警告：删除草稿 ${cid} 失败（HTTP ${CODEUP_HTTP_CODE}），需人工清理该草稿"
+          || log "警告：删除草稿 ${cid} 失败（rc=$?，HTTP ${CODEUP_HTTP_CODE}），需人工清理该草稿"
       done < "$WORK/drafted.tsv"
       while IFS=$'\t' read -r idx cid; do
         file=$(jq -r '.file' "$WORK/item-${idx}.json")
@@ -243,7 +281,12 @@ publish_inline_comments() {
              "$from_ps" "$to_ps" false "$WORK/created.json"; then
           n_created=$((n_created + 1)); printf '%s\tcreated\n' "$idx" >> "$WORK/outcomes.tsv"
         else
-          log "警告：问题 #${idx} 的非草稿回退发布也失败（HTTP ${CODEUP_HTTP_CODE}），转入折叠区"
+          crc=$?
+          if [[ "$crc" == "2" ]]; then
+            log "警告：问题 #${idx} 的非草稿回退发布被本地前置校验拒绝（未发出任何请求），转入折叠区"
+          else
+            log "警告：问题 #${idx} 的非草稿回退发布也失败（HTTP ${CODEUP_HTTP_CODE}），转入折叠区"
+          fi
           n_failed=$((n_failed + 1)); printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"
         fi
       done < "$WORK/drafted.tsv"
@@ -256,14 +299,20 @@ publish_inline_comments() {
   fi
 
   # 发布结果回填：发失败的问题必须落到折叠区，否则它在 MR 上一条都看不到
-  jq -Rs --arg sep "$(printf '\t')" '
-    split("\n") | map(select(length > 0) | split($sep) | {idx: (.[0] | tonumber), outcome: .[1]})' \
-    "$WORK/outcomes.tsv" > "$WORK/outcomes.json" 2>/dev/null || printf '[]\n' > "$WORK/outcomes.json"
+  # 转换失败绝不能兜底成 `[]`：那会让每一条 inline 项都查不到结果，回填按 fail-closed
+  # 一律记成「发布失败」，于是三条真的发出去的评论又在折叠区重复一遍。宁可回落成完整清单。
+  if ! jq -Rs --arg sep "$(printf '\t')" '
+         split("\n") | map(select(length > 0) | split($sep) | {idx: (.[0] | tonumber), outcome: .[1]})' \
+         "$WORK/outcomes.tsv" > "$WORK/outcomes.json"; then
+    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论已发出，但发布结果的统计口径算不出来，因此下面仍给出完整问题清单（可能与行内评论重复）。"
+    log "警告：发布结果文件解析失败，回落成完整问题清单"
+    return 1
+  fi
   if ! review_plan_apply_outcomes "$WORK/plan.json" "$WORK/outcomes.json" > "$WORK/plan.final.json"; then
     # 回填算不出来时不能拿未回填的计划去渲染：那会把发失败的问题算成「已标注在对应行」而彻底藏起来。
     # 回落到完整清单：已经发出去的行内评论会与清单里的条目重复一次，但没有任何问题被藏起来。
-    INLINE_NOTICE="行内评论已发出，但统计口径回填失败，因此下面仍给出完整问题清单（可能与行内评论重复）。"
-    log "警告：${INLINE_NOTICE}"
+    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论已发出，但统计口径回填失败，因此下面仍给出完整问题清单（可能与行内评论重复）。"
+    log "警告：发布结果回填失败，回落成完整问题清单"
     return 1
   fi
   mv "$WORK/plan.final.json" "$WORK/plan.json"
@@ -409,15 +458,30 @@ log "diff 已生成：$(wc -c < "$WORK/review.diff" | tr -d ' ') 字节（merge-
 # 放在这里而不是发布前：读的是 git 对象（与评审输入同源），且必须在隔离步骤删工作树文件之前
 # 就算出来，才能保证「行内评论的行号」与「喂给评审员的 diff」出自同一次比较。
 # 零上下文（-U0）：只要新增/修改行，不要上下文行——上下文行没改过，把评论挂上去是噪音。
-# core.quotePath=false：非 ASCII 路径不被转义，键名就是真实路径。
+# 解析器认死了 git 默认的 patch 形态，所以凡是能改这个形态的配置都在命令行上钉住，不看构建机的
+# 全局 gitconfig：
+#   --no-ext-diff                 外置 diff 驱动（diff.external / GIT_EXTERNAL_DIFF）会输出完全
+#                                 另一种格式，解析结果是空集合 → 所有问题变成「未定位」
+#   -c diff.external=             同上，覆盖仓库/全局配置里的驱动
+#   -c core.quotePath=false       非 ASCII 路径不被转义，键名就是真实路径
+#   -c diff.noprefix=false        去掉 a/ b/ 前缀后，一个真名以 `b/` 开头的文件会被剥错
+#   -c diff.mnemonicPrefix=false  前缀会变成 c/ i/ w/ o/，`b/` 就剥不掉了
 if [[ "$INLINE_COMMENT" == "1" ]]; then
-  git -c core.quotePath=false diff --no-renames -U0 "$BASE" HEAD > "$WORK/inline.diff" \
+  git -c core.quotePath=false -c diff.external= -c diff.noprefix=false -c diff.mnemonicPrefix=false \
+    diff --no-ext-diff --no-renames -U0 "$BASE" HEAD > "$WORK/inline.diff" \
     || die_review "生成零上下文 diff 失败（行内评论要靠它算变更行集合）"
   review_changed_lines < "$WORK/inline.diff" > "$WORK/changed-lines.json" \
     || die_review "解析变更行集合失败"
   jq -e 'type == "object"' "$WORK/changed-lines.json" >/dev/null 2>&1 \
     || die_review "变更行集合不是合法 JSON 对象（行号校验完全依赖它，宁可失败也不能把评论发到错的行上）"
   log "变更行集合：$(jq -r 'length' "$WORK/changed-lines.json") 个文件、$(jq -r '[.[][] | (.[1] - .[0] + 1)] | add // 0' "$WORK/changed-lines.json") 行可定位"
+  # diff 非空却一个可定位行都没算出来：正常改动不会这样（纯删除的 MR 会，但那时也确实无处可挂）。
+  # 更常见的成因是构建机上还有别的 diff 配置改了输出形态。此时所有问题都会落进「未定位」，
+  # 而阿里云侧开发者看不到上面那行日志，所以必须在汇总评论里说明（I10）。
+  if [[ -s "$WORK/inline.diff" && "$(jq -r 'length' "$WORK/changed-lines.json")" == "0" ]]; then
+    INLINE_NOTICE="本次没能从 diff 里算出任何可定位的新增/修改行，因此全部问题都归入「未定位问题」。若本次改动确有新增行，请检查构建机的 git diff 配置。"
+    log "警告：${INLINE_NOTICE}"
+  fi
 fi
 
 # --- 5. 组装评审输入 ---
