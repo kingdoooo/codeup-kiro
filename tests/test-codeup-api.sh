@@ -203,6 +203,167 @@ assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "R3：待写入正文�
 assert_contains "$err" "覆盖成空白" "R3：报错说明为什么拒绝"
 assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN PUT')" "0" "R3：空正文时一个请求都不发"
 rm -f "$empty" "$md"
+
+# ============ 票 04：行内评论相关接口 ============
+# 路径、字段与响应形态一律以 scripts/probe/probe-codeup-inline.sh 的实测为准（spec §4.7.1）。
+IFX=fixtures/inline
+
+# ---- route 名：按「方法 + 路径 + body 里的评论类型」区分 ----
+# 行内评论的列表/创建与汇总评论走同一组路径，只有 body 里的 comment_type 不同；
+# 不区分的话 DRY_RUN 下没法给两者喂不同的 fixture，整条行内通路就只能上真实 Codeup 验证。
+assert_eq "$(_codeup_route_name POST /a/changeRequests/7/comments/list '{"comment_type":"GLOBAL_COMMENT"}')" "list-comments" "route: 汇总评论列表"
+assert_eq "$(_codeup_route_name POST /a/changeRequests/7/comments/list '{"comment_type":"INLINE_COMMENT"}')" "list-comments-inline" "route: 行内评论列表"
+assert_eq "$(_codeup_route_name POST /a/changeRequests/7/comments '{"comment_type":"INLINE_COMMENT","content":"x"}')" "create-comment-inline" "route: 新建行内评论"
+assert_eq "$(_codeup_route_name POST /a/changeRequests/7/comments '{"comment_type":"GLOBAL_COMMENT","content":"x"}')" "create-comment" "route: 新建汇总评论"
+assert_eq "$(_codeup_route_name POST /a/changeRequests/7/review '{"submitDraftCommentIds":["x"]}')" "submit-review" "route: 一次提交草稿"
+# body 由 jq 生成，带不带 -c 决定 `:` 后有没有空格；只认一种形态的话换个调用方式就会静默判错 route
+assert_eq "$(_codeup_route_name POST /a/changeRequests/7/comments '{
+  "comment_type": "INLINE_COMMENT",
+  "content": "x"
+}')" "create-comment-inline" "route: 非紧凑 body 同样认得出行内评论"
+# 不传 body 时（票 01–03 的调用形式）行为不变
+assert_eq "$(_codeup_route_name POST /a/changeRequests/7/comments/list)" "list-comments" "route: 不传 body 仍按汇总评论列表（向后兼容）"
+assert_eq "$(_codeup_route_name POST /a/changeRequests/7/comments)" "create-comment" "route: 不传 body 仍按新建汇总评论（向后兼容）"
+# 汇总评论的正文里出现「comment_type":"INLINE_COMMENT」字样时不能被误判：
+# 正文是 JSON 字符串，里面的引号已被转义成 \" ，与 body 里真正的字段不同形
+md=$(mktemp); printf '本条评论提到 API 字段 comment_type=INLINE_COMMENT 与 "comment_type":"INLINE_COMMENT"。\n' > "$md"
+body=$(jq -n --rawfile content "$md" '{comment_type: "GLOBAL_COMMENT", content: $content, draft: false, resolved: false}')
+assert_eq "$(_codeup_route_name POST /a/changeRequests/7/comments "$body")" "create-comment" "route: 汇总评论正文里提到行内评论类型时不被误判"
+rm -f "$md"
+
+# ---- DRY_RUN fixture 序列：同一 route 多次调用时依次取 <route>.<n>.json ----
+seqdir=$(mktemp -d)
+jq -n '{comment_biz_id:"draft-1"}' > "$seqdir/create-comment-inline.1.json"
+jq -n '{comment_biz_id:"draft-2"}' > "$seqdir/create-comment-inline.2.json"
+jq -n '{comment_biz_id:"draft-fallback"}' > "$seqdir/create-comment-inline.json"
+ibody='{"comment_type":"INLINE_COMMENT","content":"x"}'
+# 必须把响应写进文件：`$(...)` 在子 shell 里跑，序号计数器（与 CODEUP_HTTP_CODE 一样）传不回来。
+# 这条约定写在库注释里，生产侧的 codeup_create_inline_comment 也是文件式接口。
+export DRY_RUN_FIXTURE_DIR="$seqdir"
+_codeup_dry_seq_reset
+_codeup_request POST /a/changeRequests/7/comments "$ibody" > "$seqdir/r1" 2>/dev/null
+_codeup_request POST /a/changeRequests/7/comments "$ibody" > "$seqdir/r2" 2>/dev/null
+_codeup_request POST /a/changeRequests/7/comments "$ibody" > "$seqdir/r3" 2>/dev/null
+assert_eq "$(jq -r .comment_biz_id "$seqdir/r1")" "draft-1" "dry_run 序列: 第 1 次取 .1.json"
+assert_eq "$(jq -r .comment_biz_id "$seqdir/r2")" "draft-2" "dry_run 序列: 第 2 次取 .2.json"
+assert_eq "$(jq -r .comment_biz_id "$seqdir/r3")" "draft-fallback" "dry_run 序列: 序号用尽后退回 <route>.json"
+# 别的 route 的调用不影响本 route 的序号
+_codeup_request POST /a/changeRequests/7/comments/list '{"comment_type":"GLOBAL_COMMENT"}' >/dev/null 2>&1
+_codeup_request POST /a/changeRequests/7/comments "$ibody" > "$seqdir/r4" 2>/dev/null
+assert_eq "$(jq -r .comment_biz_id "$seqdir/r4")" "draft-fallback" "dry_run 序列: 每个 route 各自计数"
+# 重试（失败注入）不消耗序号：否则一次 5xx 就会把后面的 fixture 顺序全错开
+DRY_RUN_FAIL_ROUTES="create-comment-inline:500" _codeup_request POST /a/changeRequests/7/comments "$ibody" >/dev/null 2>&1
+unset DRY_RUN_FIXTURE_DIR
+seqdir2=$(mktemp -d)
+_codeup_dry_seq_reset
+jq -n '{comment_biz_id:"only-1"}' > "$seqdir2/create-comment-inline.1.json"
+DRY_RUN_FIXTURE_DIR="$seqdir2" DRY_RUN_FAIL_ROUTES="create-comment-inline:500" \
+  _codeup_request POST /a/changeRequests/7/comments "$ibody" >/dev/null 2>&1
+DRY_RUN_FIXTURE_DIR="$seqdir2" _codeup_request POST /a/changeRequests/7/comments "$ibody" > "$seqdir2/r1" 2>/dev/null
+assert_eq "$(jq -r .comment_biz_id "$seqdir2/r1")" "only-1" "dry_run 序列: 注入失败的那次不消耗序号"
+rm -rf "$seqdir" "$seqdir2"
+
+# ---- 版本列表（ListChangeRequestPatchSets）----
+rc=0; err=$(DRY_RUN_FIXTURE_DIR="$IFX/normal" codeup_list_patchsets 7 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "list_patchsets: DRY_RUN 成功"
+assert_contains "$err" "changeRequests/7/diffs/patches" "list_patchsets: URL 路径（实测 GET diffs/patches）"
+out=$(DRY_RUN_FIXTURE_DIR="$IFX/normal" codeup_list_patchsets 7 2>/dev/null)
+assert_eq "$(printf '%s' "$out" | jq -r 'length')" "4" "list_patchsets: 返回 fixture 内容"
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 DRY_RUN_FAIL_ROUTES="list-patchsets:500" codeup_list_patchsets 7 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "list_patchsets: 5xx 重试后仍失败"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN GET')" "3" "list_patchsets: 5xx 共尝试 3 次（与其它封装同一策略）"
+
+# ---- 选版本对：from = 最新 MERGE_TARGET，to = 最新 MERGE_SOURCE（按 versionNo）----
+out=$(codeup_select_patchset_pair < "$IFX/normal/list-patchsets.json")
+assert_eq "$out" "$(printf 'tgt-v1\tsrc-v6\td97b8017eeee')" "select_patchset_pair: 取 versionNo 最大的一对，并带上 to 的 commitId"
+# versionNo 乱序、类型不合形都不能选错
+out=$(codeup_select_patchset_pair < "$IFX/shuffled/list-patchsets.json")
+assert_eq "$(printf '%s' "$out" | cut -f2)" "src-v6" "select_patchset_pair: 顺序打乱后仍取 versionNo 最大的合并源版本"
+assert_eq "$(printf '%s' "$out" | cut -f1)" "tgt-v2" "select_patchset_pair: 合并目标版本同样取最新"
+# 缺一侧 → rc 1（调用方回落 INLINE_COMMENT=0 渲染）
+rc=0; err=$(codeup_select_patchset_pair < "$IFX/no-target/list-patchsets.json" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 1 "select_patchset_pair: 没有 MERGE_TARGET → rc 1"
+assert_contains "$err" "MERGE_TARGET" "select_patchset_pair: 报错点名缺哪一侧"
+rc=0; codeup_select_patchset_pair < /dev/null >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "select_patchset_pair: 空响应 → rc 1"
+rc=0; printf 'not json' | codeup_select_patchset_pair >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "select_patchset_pair: 非法 JSON → rc 1（不报 jq 错）"
+# {result:[…]} 形态兼容
+out=$(jq -c '{result: .}' "$IFX/normal/list-patchsets.json" | codeup_select_patchset_pair)
+assert_eq "$(printf '%s' "$out" | cut -f2)" "src-v6" "select_patchset_pair: {result:[…]} 形态兼容"
+
+# ---- 创建行内评论：三个版本字段必传（P1-03 实测缺一即 400）----
+imd=$(mktemp); printf '### P0 · 硬编码凭证\n\n改用环境变量。\n' > "$imd"
+resp=$(mktemp)
+rc=0; err=$(codeup_create_inline_comment 7 "$imd" "src/app.py" 30 from-1 to-2 true "$resp" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "create_inline: DRY_RUN 成功"
+assert_contains "$err" "changeRequests/7/comments" "create_inline: URL"
+assert_contains "$err" '"comment_type":"INLINE_COMMENT"' "create_inline: 评论类型"
+assert_contains "$err" '"file_path":"src/app.py"' "create_inline: 带文件路径"
+assert_contains "$err" '"line_number":30' "create_inline: 行号是数字（新文件侧，P1-02 实测）"
+assert_contains "$err" '"patchset_biz_id":"to-2"' "create_inline: patchset_biz_id = to"
+assert_contains "$err" '"from_patchset_biz_id":"from-1"' "create_inline: from 版本"
+assert_contains "$err" '"to_patchset_biz_id":"to-2"' "create_inline: to 版本"
+assert_contains "$err" '"draft":true' "create_inline: 草稿"
+assert_contains "$err" '"resolved":false' "create_inline: resolved 必填（中心站缺它报 400）"
+# 非草稿（提交失败后的逐条回退）
+err=$(codeup_create_inline_comment 7 "$imd" "src/app.py" 30 from-1 to-2 false "$resp" 2>&1 >/dev/null)
+assert_contains "$err" '"draft":false' "create_inline: draft=false 走非草稿发布"
+# 响应写进指定文件（不能用 $(...) 取：那样 DRY_RUN 的 fixture 序号与 CODEUP_HTTP_CODE 都传不回来）
+DRY_RUN_FIXTURE_DIR="$IFX/normal" codeup_create_inline_comment 7 "$imd" a.py 1 f t true "$resp" 2>/dev/null
+assert_eq "$(jq -r '.comment_biz_id' "$resp")" "20497727aaaa" "create_inline: 响应体写入指定文件"
+# 参数校验：空正文绝不发（一条空的行内评论挂在代码上没法解释，也没法按指纹去重）
+emptymd=$(mktemp); : > "$emptymd"
+rc=0; err=$(codeup_create_inline_comment 7 "$emptymd" a.py 1 f t true "$resp" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "create_inline: 正文为空 → 拒绝"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST')" "0" "create_inline: 正文为空时一个请求都不发"
+for bad_line in 0 -1 abc ""; do
+  rc=0; err=$(codeup_create_inline_comment 7 "$imd" a.py "$bad_line" f t true "$resp" 2>&1 >/dev/null) || rc=$?
+  assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "create_inline: 行号 [${bad_line}] 非法 → 拒绝"
+  assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST')" "0" "create_inline: 行号 [${bad_line}] 非法时不发请求"
+done
+rc=0; err=$(codeup_create_inline_comment 7 "$imd" a.py 1 "" t true "$resp" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "create_inline: 缺 from 版本 → 拒绝（P1-03 实测缺一即 400，本地先拦）"
+rc=0; err=$(codeup_create_inline_comment 7 "$imd" "" 1 f t true "$resp" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "create_inline: 缺文件路径 → 拒绝"
+# 4xx 不重试
+rc=0; err=$(DRY_RUN_FAIL_ROUTES="create-comment-inline:400" codeup_create_inline_comment 7 "$imd" a.py 1 f t true "$resp" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "create_inline: 400 → 失败"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST')" "1" "create_inline: 400 不重试"
+
+# ---- 一次提交草稿（ReviewChangeRequest，不带 reviewOpinion）----
+ids=$(mktemp); printf 'id-a\nid-b\n' > "$ids"
+rc=0; err=$(codeup_submit_drafts 7 "$ids" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "submit_drafts: DRY_RUN 成功"
+assert_contains "$err" "changeRequests/7/review" "submit_drafts: URL（实测 POST review）"
+assert_contains "$err" '"submitDraftCommentIds":["id-a","id-b"]' "submit_drafts: 一次提交全部草稿 id"
+assert_not_contains "$err" "reviewOpinion" "submit_drafts: 不带 reviewOpinion（不卡合并，spec 非目标）"
+rc=0; err=$(codeup_submit_drafts 7 /dev/null 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "submit_drafts: 没有草稿 id → 拒绝（不发一个空提交）"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST')" "0" "submit_drafts: 没有 id 时不发请求"
+rc=0; err=$(DRY_RUN_FAIL_ROUTES="submit-review:400" codeup_submit_drafts 7 "$ids" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "submit_drafts: 400 → 失败（调用方退回逐条非草稿发布）"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST')" "1" "submit_drafts: 400 不重试"
+
+# ---- 行内评论列表（去重用）----
+rc=0; err=$(DRY_RUN_FIXTURE_DIR="$IFX/normal" codeup_list_inline_comments 7 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "list_inline_comments: DRY_RUN 成功"
+assert_contains "$err" "changeRequests/7/comments/list" "list_inline_comments: URL"
+assert_contains "$err" '"comment_type":"INLINE_COMMENT"' "list_inline_comments: 只要行内评论类型"
+# state 过滤刻意不进 body：探测只验证过 comment_type 过滤，state 参数名未实测
+assert_not_contains "$err" '"state"' "list_inline_comments: 不凭记忆传未实测的 state 参数"
+out=$(DRY_RUN_FIXTURE_DIR="$IFX/normal" codeup_list_inline_comments 7 2>/dev/null)
+assert_eq "$(printf '%s' "$out" | jq -r 'length')" "2" "list_inline_comments: 取到行内评论 fixture（与汇总评论列表分开）"
+
+# ---- 删除评论（草稿提交失败后清理，避免同一条问题既留草稿又发正式评论）----
+rc=0; err=$(codeup_delete_comment 7 draft-x 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "delete_comment: DRY_RUN 成功"
+assert_contains "$err" "DRY_RUN DELETE" "delete_comment: 用 DELETE"
+assert_contains "$err" "changeRequests/7/comments/draft-x" "delete_comment: URL 带评论 biz_id"
+rc=0; err=$(DRY_RUN_FAIL_ROUTES="delete-comment:404" codeup_delete_comment 7 draft-x 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "delete_comment: 404 → 失败（调用方只打警告，不中断评审）"
+rm -f "$imd" "$emptymd" "$resp" "$ids"
+
 unset DRY_RUN
 
 report

@@ -41,6 +41,16 @@ req_count() {
   printf '%s\n' "$1" | grep -cE -- "$pat" || true
 }
 
+# DRY_RUN 下本次「创建行内评论」请求的 body（每条一行 compact JSON）。
+# 用法：inline_bodies "$OUT"
+# 必须按 file_path 过滤：查现有行内评论那次请求的 body 也是 {"comment_type":"INLINE_COMMENT"}，
+# 只按类型抓会多算一条。端到端与变异测试都要用它判断「到底发了几条行内评论、发到哪一行」，
+# 所以实现只能有一份——过滤条件一变，两处拷贝里没改的那一处会静静地数错。
+inline_bodies() {
+  printf '%s\n' "$1" | grep -F 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"' | sed 's/^DRY_RUN body: //' \
+    | jq -c 'select(has("file_path"))'
+}
+
 # 端到端 fixture 里机器人账号的用户名（取自 spec §4.7.1 P1-00 实测值）
 TEST_BOT_USERNAME='aliyun:kingdooo_hvFXC'
 

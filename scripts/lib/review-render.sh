@@ -314,6 +314,319 @@ review_validate() {
         delocated_findings: ([$kept[] | select(.delocated)] | length) }'
 }
 
+# ============================================================================
+# 票 04：行内评论管线（spec §4.5 第 2–7 步）
+# ============================================================================
+#
+#   review_changed_lines        零上下文 diff → 每个文件「新文件侧」的变更行区间集合
+#   review_plan_inline          规范化契约 + 变更行集合 + 档位 + 上限 → 本次的行内发布计划
+#   review_fingerprint          行内评论去重指纹 sha1(file + line + title)
+#   review_render_inline_marker / review_inline_existing_fingerprints
+#                               指纹在评论正文里的隐藏标记；从 MR 现有行内评论里读回指纹
+#   review_render_inline_body   一条行内评论的正文（spec §4.4）
+#   review_plan_apply_outcomes  发布结果回填计划（发失败的问题必须落到折叠区，不能凭空消失）
+#
+# 为什么行号集合必须自己算而不是信模型：`line_start` 完全由模型给出，而 Codeup 只接受
+# **新文件侧**的行号（spec §4.7.1 P1-02 实测），挂到未改动行上的评论对读者是噪音。
+# 集合来自 git 对象（`git diff --no-renames -U0 BASE HEAD`），与评审输入同源。
+
+# --- 零上下文 diff → 变更行集合（stdin = diff 文本 → stdout = JSON）---
+# 输出形态：{"src/app.py":[[30,31],[45,45]], "docs/x.md":[]}
+#   - 键 = 本次变更中**新文件侧存在**的文件路径（相对仓库根）
+#   - 值 = 该文件新增/修改行的行号区间（闭区间，升序按 diff 出现次序）
+#   - 值为 `[]`：文件确实变了但没有新文件侧的新增行（纯删除行的改动）→ 无处可挂行内评论
+#   - 被删除的文件、二进制文件不出现在键里：新文件侧没有可评论的行
+#     （P1-02 实测「只能对新文件侧的行评论」，被删除行的问题只能进折叠区）
+#
+# 解析要点（都是 git 真实输出里存在、且容易解析错的形态）：
+#   ① 正文行可能与文件头逐字节同形：新文件里一行 `++ b/evil.py` 在 diff 里就是 `+++ b/evil.py`。
+#      因此「一个文件段内出现第一个 @@ 之后不再认 ---/+++ 头」，段边界用 `^diff --git ` 判定
+#      （正文行永远带 +/-/空格前缀，不可能顶到行首的 `diff --git `、`@@ `）。
+#   ② 路径含空格/引号/控制字符时 git 用 C 风格转义并整体加引号（`+++ "b/q\"uote.py"`），必须还原；
+#      非 ASCII 由调用方的 `-c core.quotePath=false` 保证不转义，八进制转义仍作兜底还原。
+#   ③ `@@ -1,2 +3,4 @@` 的新侧计数为 0（`+0,0` / `+4,0`）表示纯删除 hunk，不贡献任何行号。
+#      省略计数（`@@ -5 +5 @@`）等价于计数 1。
+#   ④ `\ No newline at end of file` 行既不是头也不是 hunk，天然被忽略。
+# LC_ALL=C：按字节处理，diff 里的无效 UTF-8 字节不会让 awk 罢工（与 review_clean_text 同理）。
+review_changed_lines() {
+  local sep
+  sep=$(printf '\037')
+  LC_ALL=C awk -v SEP="$sep" '
+    # C 风格转义还原（git 对含特殊字符的路径会整体加引号）
+    function unquote(s,   body, out, i, c, n, oct, v) {
+      body = substr(s, 2, length(s) - 2)
+      out = ""; i = 1
+      while (i <= length(body)) {
+        c = substr(body, i, 1)
+        if (c != "\\") { out = out c; i++; continue }
+        n = substr(body, i + 1, 1)
+        if (n == "n")       { out = out "\n"; i += 2 }
+        else if (n == "t")  { out = out "\t"; i += 2 }
+        else if (n == "r")  { out = out "\r"; i += 2 }
+        else if (n == "\"") { out = out "\""; i += 2 }
+        else if (n == "\\") { out = out "\\"; i += 2 }
+        else if (n >= "0" && n <= "7") {
+          oct = substr(body, i + 1, 3)
+          v = (substr(oct, 1, 1) + 0) * 64 + (substr(oct, 2, 1) + 0) * 8 + (substr(oct, 3, 1) + 0)
+          out = out sprintf("%c", v); i += 4
+        }
+        else { out = out n; i += 2 }
+      }
+      return out
+    }
+    # `+++ ` 之后那一段 → 真实路径（去掉 b/ 前缀）
+    function newpath(raw,   p, t) {
+      p = raw
+      if (substr(p, 1, 1) == "\"") p = unquote(p)
+      else { t = index(p, "\t"); if (t > 0) p = substr(p, 1, t - 1) }
+      if (substr(p, 1, 2) == "b/") p = substr(p, 3)
+      return p
+    }
+    BEGIN { cur = ""; in_hunks = 0 }
+    /^diff --git / { cur = ""; in_hunks = 0; next }
+    !in_hunks && /^\+\+\+ / {
+      raw = substr($0, 5)
+      if (raw == "/dev/null") { cur = ""; next }
+      cur = newpath(raw)
+      if (cur != "") print cur SEP 0 SEP 0     # 文件出现过（即使没有可定位行）
+      next
+    }
+    /^@@ / {
+      in_hunks = 1
+      if (cur == "") next
+      if (match($0, /\+[0-9]+(,[0-9]+)?/) == 0) next
+      spec = substr($0, RSTART + 1, RLENGTH - 1)
+      ci = index(spec, ",")
+      if (ci > 0) { start = substr(spec, 1, ci - 1) + 0; cnt = substr(spec, ci + 1) + 0 }
+      else        { start = spec + 0; cnt = 1 }
+      if (start < 1 || cnt < 1) next
+      print cur SEP start SEP (start + cnt - 1)
+      next
+    }
+  ' | jq -Rs --arg sep "$sep" '
+      split("\n") | map(select(length > 0))
+      | reduce .[] as $line ({};
+          ($line | split($sep)) as $f
+          | (if ($f | length) == 3 then $f[0] else "" end) as $p
+          | if $p == "" then .
+            else ($f[1] | tonumber) as $s | ($f[2] | tonumber) as $e
+                 | .[$p] = ((.[$p] // []) + (if $s >= 1 and $e >= $s then [[$s, $e]] else [] end))
+            end)'
+}
+
+# --- 行内档位（CONTEXT.md「行内档位」）---
+# quiet=P0+P1（默认）· balanced=全部 · critical=仅 P0。
+# 非法取值由 review_plan_inline 回落 quiet 并记 warning（配错开关不该让评审失败，但必须留痕）。
+REVIEW_INLINE_PROFILE_DEFAULT=quiet
+REVIEW_MAX_INLINE_DEFAULT=10
+_review_profile_levels() {
+  case "$1" in
+    quiet)    echo "P0 P1" ;;
+    balanced) echo "P0 P1 P2" ;;
+    critical) echo "P0" ;;
+    *)        return 1 ;;
+  esac
+}
+
+# --- 行内发布计划 ---
+# 用法：review_plan_inline --json <review_validate 的输出> --changed-lines <review_changed_lines 的输出>
+#                          [--profile quiet] [--max 10]
+# stdout = 在输入 JSON 上追加以下字段：
+#   inline_profile / max_inline            实际生效的档位与上限（非法取值已回落）
+#   inline: [问题…]                        本次要发成行内评论的问题（已排序、已截取）
+#   folded: {profile,overflow,unlocated,failed}
+#       profile   = 可定位但档位不覆盖其级别（quiet 下就是 P2）
+#       overflow  = 可定位、档位覆盖，但超出 max_inline
+#       unlocated = 不可定位（无 file/行号，或行号不在该文件的变更行集合内）
+#       failed    = 行内发布失败（由 review_plan_apply_outcomes 回填）
+#   inline_count / folded_count
+# 每个问题都带 `idx`（在 findings 里的原始下标）：发布结果靠它回填，不靠内容比对。
+# 排序：P0→P1→P2，同级按文件路径升序、再按起始行、再按原始次序（`idx` 兜底，保证逐字节确定）。
+# rc 2 = 参数错误（缺参数 / 文件不可读）——绝不静默按默认值规划，那会让开关看起来生效了。
+review_plan_inline() {
+  local json="" changed="" profile="${REVIEW_INLINE_PROFILE_DEFAULT}" max="${REVIEW_MAX_INLINE_DEFAULT}" levels
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json|--changed-lines|--profile|--max)
+        [[ $# -ge 2 ]] || { echo "review_plan_inline: 参数 $1 缺少取值" >&2; return 2; }
+        case "$1" in
+          --json) json="$2" ;;
+          --changed-lines) changed="$2" ;;
+          --profile) profile="$2" ;;
+          --max) max="$2" ;;
+        esac
+        shift 2 ;;
+      *) echo "review_plan_inline: 未知参数：$1" >&2; return 2 ;;
+    esac
+  done
+  [[ -n "$json" && -r "$json" ]] || { echo "review_plan_inline: --json 不可读：${json:-<未提供>}" >&2; return 2; }
+  [[ -n "$changed" && -r "$changed" ]] || { echo "review_plan_inline: --changed-lines 不可读：${changed:-<未提供>}" >&2; return 2; }
+  # 档位与上限来自流水线变量，配错不该让评审失败，但必须回落到默认值并留痕
+  if ! levels=$(_review_profile_levels "$profile"); then
+    echo "review_plan_inline: INLINE_PROFILE=${profile} 不是 quiet/balanced/critical，按默认 ${REVIEW_INLINE_PROFILE_DEFAULT} 处理" >&2
+    profile="$REVIEW_INLINE_PROFILE_DEFAULT"
+    levels=$(_review_profile_levels "$profile")
+  fi
+  if ! [[ "$max" =~ ^[0-9]+$ ]]; then
+    echo "review_plan_inline: MAX_INLINE_COMMENTS=${max} 不是非负整数，按默认 ${REVIEW_MAX_INLINE_DEFAULT} 处理" >&2
+    max="$REVIEW_MAX_INLINE_DEFAULT"
+  fi
+  jq -c --slurpfile changed "$changed" --argjson max "$max" \
+        --arg profile "$profile" --arg levels "$levels" '
+    def sevrank: {"P0":0,"P1":1,"P2":2}[.] // 3;
+    def ordered: sort_by([(.severity | sevrank), (.file // ""), (.line_start // 0), .idx]);
+    ($changed[0] // {}) as $cl
+    | ($levels | split(" ")) as $elig
+    | . as $root
+    | [ ($root.findings // []) | to_entries[] | (.value + {idx: .key}) ] as $all
+    | [ $all[]
+        | . as $f
+        | $f + { located:
+            ( if ($f.file == null or $f.line_start == null) then false
+              else (($cl[$f.file] // []) | any(.[0] <= $f.line_start and $f.line_start <= .[1]))
+              end ) } ] as $ann
+    # 注意 index() 里的 `.` 是 $elig 本身，所以级别必须先绑成变量再查（否则是「用字符串索引数组」）
+    | def eligible: (.severity) as $s | (($elig | index($s)) != null);
+      [ $ann[] | select(.located and eligible) | del(.located) ] as $cand0
+    | ($cand0 | ordered) as $cand
+    | ($cand[0:$max]) as $inline
+    | ($cand[$max:]) as $overflow
+    | [ $ann[] | select(.located and (eligible | not)) | del(.located) ] as $prof
+    | [ $ann[] | select(.located | not) | del(.located) ] as $unloc
+    | $root + {
+        inline_profile: $profile,
+        max_inline: $max,
+        inline: $inline,
+        folded: { profile: ($prof | ordered), overflow: $overflow,
+                  unlocated: ($unloc | ordered), failed: [] },
+        inline_count: ($inline | length),
+        folded_count: (($prof | length) + ($overflow | length) + ($unloc | length))
+      }' "$json"
+}
+
+# --- 发布结果回填 ---
+# 用法：review_plan_apply_outcomes <计划 JSON> <结果 JSON>
+#   结果 JSON = [{"idx":0,"outcome":"created"|"existing"|"failed"}, …]
+#   created  = 本次新发出的行内评论
+#   existing = 指纹命中、MR 上已有同一条 → 仍算「已标注在对应行」（spec §4.5 第 5 步「跳过并计数」）
+#   failed   = 没发出去 → 必须移进折叠区，否则这条问题在 MR 上一条都看不到（违反 I4「同一问题只出现一次」）
+# 未在结果里出现的项按 created 处理（调用方漏记只会让计数偏乐观，不会让问题消失）。
+review_plan_apply_outcomes() {
+  local plan="$1" outcomes="$2"
+  [[ -r "$plan" ]] || { echo "review_plan_apply_outcomes: 计划文件不可读：${plan}" >&2; return 2; }
+  [[ -r "$outcomes" ]] || { echo "review_plan_apply_outcomes: 结果文件不可读：${outcomes}" >&2; return 2; }
+  jq -c --slurpfile oc "$outcomes" '
+    (($oc[0] // []) | map(select(type == "object" and (.idx | type) == "number"))
+                    | map({key: (.idx | tostring), value: (.outcome // "created")}) | from_entries) as $o
+    | def status(f): ($o[(f.idx | tostring)] // "created");
+      (.inline // []) as $in
+    | [ $in[] | select(status(.) != "failed") ] as $kept
+    | [ $in[] | select(status(.) == "failed") ] as $failed
+    | .inline = $kept
+    | .folded.failed = $failed
+    | .inline_count = ($kept | length)
+    | .folded_count = (((.folded.profile // []) | length) + ((.folded.overflow // []) | length)
+                       + ((.folded.unlocated // []) | length) + ($failed | length))' "$plan"
+}
+
+# --- 去重指纹（spec §4.5 第 5 步）---
+# 指纹 = sha1(file + line + title)。三段之间插 \x1f 分隔符：不分隔时
+# ("a.py", 1, "2x") 与 ("a.py", 12, "x") 会撞成同一个指纹，两条不同的问题互相顶掉。
+# sha1sum（GNU）与 shasum（macOS）二选一；两者都没有时 rc 1——调用方必须把它当硬依赖，
+# 因为拿不到指纹就没法去重，重跑会在同一行上堆重复评论（违反 I6 幂等）。
+review_fingerprint() {
+  local payload
+  payload=$(printf '%s\037%s\037%s' "${1-}" "${2-}" "${3-}")
+  if command -v sha1sum >/dev/null 2>&1; then
+    printf '%s' "$payload" | sha1sum | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$payload" | shasum -a 1 | cut -d' ' -f1
+  else
+    echo "review_fingerprint: 缺少 sha1sum/shasum，算不出行内评论指纹" >&2
+    return 1
+  fi
+}
+
+# --- 指纹在行内评论正文里的隐藏标记 ---
+# 为什么要写进正文而不是「从正文里反解 ### P0 · 标题 再算指纹」：反解要依赖渲染格式，
+# 任何模板微调都会让去重静默失效、在同一行上堆重复评论。标记是稳定的解析契约（与汇总评论的
+# kiro-history 同一思路）。模型文本里的 `<!--` 已被 _sanitize_md 转义，伪造不出这一行。
+REVIEW_INLINE_MARKER_PREFIX="<!-- kiro-inline:"
+REVIEW_INLINE_MARKER_SUFFIX=" -->"
+REVIEW_INLINE_MARKER_RE='^<!-- kiro-inline:([0-9a-f]{40}) -->[[:space:]]*$'
+review_render_inline_marker() {
+  printf '%s%s%s\n' "$REVIEW_INLINE_MARKER_PREFIX" "$1" "$REVIEW_INLINE_MARKER_SUFFIX"
+}
+
+# --- 从 MR 现有行内评论里读回指纹（stdin = ListMergeRequestComments 响应）---
+# 用法：review_inline_existing_fingerprints <机器人账号用户名或空串> → stdout 每行一个指纹
+# 作者过滤：给了用户名就只认本机器人发的（别人复制一条带标记的评论不能压掉本评审员的问题）；
+# 用户名未知时退化为「只按标记去重」——重跑重复是必然会发生的伤害，而伪造标记需要一个
+# 已认证的 MR 参与者主动发评论（可见、可追溯），两害相权取轻，并由调用方打警告提示配置。
+# 状态过滤在脚本侧做：接口只实测过 comment_type 过滤（P1-06），state 参数名未实测，
+# 凭记忆传一个可能 400 的参数会让整条去重通路挂掉。
+# 字段类型守卫与 review_select_prior_comment 同理：任何一条评论字段不合形都不能废掉整批。
+review_inline_existing_fingerprints() {
+  local bot="${1-}"
+  jq -r --arg bot "$bot" --arg re "$REVIEW_INLINE_MARKER_RE" '
+    def str(v): if (v | type) == "string" then v else "" end;
+    def author_name: if (.author | type) == "object" then str(.author.username) else "" end;
+    (if type == "object" then (.result // []) else . end)
+    | (if type == "array" then . else [] end)
+    | map(select(type == "object"))
+    | map(select(str(.comment_type) == "" or str(.comment_type) == "INLINE_COMMENT"))
+    | map(select((str(.state) | ascii_upcase) == "OPENED"))
+    | map(select((.draft == true) | not))
+    | map(select(if $bot == "" then true else author_name == $bot end))
+    | .[] | str(.content) | split("\n")[] | match($re) | .captures[0].string' 2>/dev/null \
+    | LC_ALL=C sort -u
+}
+
+# --- 一条行内评论的正文（spec §4.4）---
+# 用法：review_render_inline_body <单条问题的 JSON 文件> <短 sha> <指纹>
+# 模板：
+#   ### {P0} · {title}[（L{起}–L{止}）]
+#   <!-- kiro-inline:{指纹} -->
+#
+#   {body}
+#
+#   **修复建议**
+#
+#   {fix}
+#
+#   — Kiro 评审 · 提交 `{sha}`
+# 多行区间在标题后附 `（L起–L止）`，锚点仍取 line_start（Codeup 的行内评论只能锚一行）。
+# body/fix 已在 review_validate 里过 _sanitize_md：这里不再二次转义（会把代码块弄坏）。
+review_render_inline_body() {
+  local item="$1" sha="$2" fp="$3" sev title body fix ls le
+  [[ -r "$item" ]] || { echo "review_render_inline_body: 问题 JSON 不可读：${item}" >&2; return 2; }
+  [[ -n "$sha" ]] || { echo "review_render_inline_body: 缺少短 sha" >&2; return 2; }
+  [[ "$fp" =~ ^[0-9a-f]{40}$ ]] || { echo "review_render_inline_body: 指纹不是 40 位十六进制：${fp}" >&2; return 2; }
+  jq -e 'type == "object" and (.severity | type) == "string" and (.title | type) == "string"' "$item" >/dev/null 2>&1 \
+    || { echo "review_render_inline_body: 问题 JSON 缺 severity/title：${item}" >&2; return 2; }
+  sev=$(jq -r '.severity' "$item")
+  title=$(jq -r '.title' "$item")
+  body=$(jq -r '.body // ""' "$item")
+  fix=$(jq -r '.fix // ""' "$item")
+  ls=$(jq -r '.line_start // ""' "$item")
+  le=$(jq -r '.line_end // ""' "$item")
+  if [[ -n "$ls" && -n "$le" && "$le" != "$ls" ]]; then
+    title="${title}（L${ls}–L${le}）"
+  fi
+  printf '### %s · %s\n' "$sev" "$title"
+  review_render_inline_marker "$fp"
+  echo ""
+  if [[ -n "$body" ]]; then printf '%s\n' "$body"; else echo "（评审员未给出说明）"; fi
+  if [[ -n "$fix" ]]; then
+    echo ""
+    echo "**修复建议**"
+    echo ""
+    printf '%s\n' "$fix"
+  fi
+  echo ""
+  printf -- '— Kiro 评审 · 提交 `%s`\n' "$sha"
+}
+
 # --- 评审标记（原地更新的定位依据）---
 # 形态必须与 _review_render_header 渲染出的那一行严格一致：
 #   <!-- kiro-review:{sha} run:{n} -->
@@ -487,9 +800,10 @@ _review_verdict_cn() {
 _review_parse_render_args() {
   _RR_JSON=""; _RR_TEXT=""; _RR_SHA=""; _RR_SRC=""; _RR_DST=""; _RR_TS=""
   _RR_DIFF_NOTE=""; _RR_RUN=1; _RR_INLINE=0; _RR_REASON=""; _RR_HISTORY=""; _RR_LOG_HINT=""
+  _RR_NOTICE=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --json|--text|--sha|--src|--dst|--ts|--diff-note|--run|--inline-comment|--reason|--history|--log-hint)
+      --json|--text|--sha|--src|--dst|--ts|--diff-note|--run|--inline-comment|--reason|--history|--log-hint|--notice)
         [[ $# -ge 2 ]] || { echo "review 渲染：参数 $1 缺少取值" >&2; return 2; }
         case "$1" in
           --json) _RR_JSON="$2" ;;
@@ -504,6 +818,7 @@ _review_parse_render_args() {
           --reason) _RR_REASON="$2" ;;
           --history) _RR_HISTORY="$2" ;;
           --log-hint) _RR_LOG_HINT="$2" ;;
+          --notice) _RR_NOTICE="$2" ;;
         esac
         shift 2 ;;
       *) echo "review 渲染：未知参数：$1" >&2; return 2 ;;
@@ -586,18 +901,76 @@ _review_render_header() {
   echo "| \`${_RR_SHA}\` | \`${_RR_SRC}\` → \`${_RR_DST}\` | ${_RR_TS} | ${_RR_DIFF_NOTE} |"
 }
 
-# --- 汇总评论（INLINE_COMMENT=0）---
-# 用法：review_render_summary --json <规范化后的契约 JSON 文件> --sha X --src A --dst B \
-#                            --ts "YYYY-mm-dd HH:MM:SS" --diff-note N [--run 1] [--inline-comment 0]
-# INLINE_COMMENT=0 的形态（spec §4.3 的 0 变体）：问题清单**完整展开**、不用折叠区、不提行内计数，
-# 观感对齐 v1。--inline-comment 1 的渲染（折叠区、行内计数、历次评审表）属票 04，这里显式拒绝，
-# 避免把 1 静默当 0 渲染、让开关看起来生效了。
+# --- 折叠区（INLINE_COMMENT=1；spec §4.3）---
+# 小节标题里的级别列表按实际内容生成，而不是写死 spec 模板里的字面量：
+#   - 档位桶在 quiet 下就是 P2（渲染成 `#### P2 建议（n）`，与 spec 模板一致），
+#     但在 critical 下还包含 P1——写死「P2 建议」会把 P1 问题标成 P2，那是改写评审员的判级。
+#   - 超限桶在 quiet 下是 P0/P1（与 spec 模板一致），balanced 下可能含 P2。
+# _review_render_fold_section <计划文件> <桶名> <标题> <是否未定位桶 0|1>
+_review_render_fold_section() {
+  local plan="$1" bucket="$2" title="$3" unloc="${4:-0}" n
+  n=$(jq -r --arg b "$bucket" '(.folded[$b] // []) | length' "$plan")
+  [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || return 0
+  echo ""
+  printf '#### %s（%s）\n' "$title" "$n"
+  echo ""
+  # body 首句：取第一个非空行，句号处截断，再按 120 字符封顶。
+  # 折叠区是「一眼扫过去」的清单，整段 body（可能带代码块）会把折叠区撑成第二份报告。
+  jq -r --arg b "$bucket" --arg unloc "$unloc" '
+    def firstsent:
+      ((. // "") | split("\n") | map(select(test("[^[:space:]]"))) | (.[0] // "")) as $l
+      | ($l | sub("^[[:space:]]+"; "")) as $t
+      | ($t | index("。")) as $i
+      | (if $i != null then $t[0:$i + 1] else $t end) as $s
+      | if ($s | length) > 120 then $s[0:120] + "…" else $s end;
+    def loc:
+      if .file == null then "（未定位）"
+      elif $unloc == "1" then "`\(.file)`（无法定位到变更行）"
+      elif .line_start == null then "`\(.file)`"
+      elif (.line_end != null and .line_end > .line_start) then "`\(.file):\(.line_start)-\(.line_end)`"
+      else "`\(.file):\(.line_start)`" end;
+    (.folded[$b] // [])[]
+    | "- \(loc) **\(.title)** — \(.body | firstsent)"' "$plan"
+}
+
+# 档位桶/超限桶里实际出现的级别，升序连成 `P0/P1`
+_review_fold_levels() {
+  jq -r --arg b "$2" '[(.folded[$b] // [])[] | .severity] | unique
+                      | sort_by({"P0":0,"P1":1,"P2":2}[.] // 3) | join("/")' "$1"
+}
+
+# _review_render_folded <计划文件>：折叠区整块（为空时整体省略，不发一个空折叠块）
+_review_render_folded() {
+  local plan="$1" n
+  n=$(jq -r '.folded_count // 0' "$plan")
+  [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || return 0
+  echo ""
+  printf '<details><summary>折叠区：未展开的问题（%s）</summary>\n' "$n"
+  _review_render_fold_section "$plan" profile   "$(_review_fold_levels "$plan" profile) 建议" 0
+  _review_render_fold_section "$plan" overflow  "超出行内上限的 $(_review_fold_levels "$plan" overflow)" 0
+  _review_render_fold_section "$plan" unlocated "未定位问题" 1
+  _review_render_fold_section "$plan" failed    "行内发布失败" 0
+  echo "</details>"
+}
+
+# --- 汇总评论 ---
+# 用法：review_render_summary --json <契约 JSON 文件> --sha X --src A --dst B \
+#                            --ts "YYYY-mm-dd HH:MM:SS" --diff-note N [--run 1] \
+#                            [--inline-comment 0|1] [--history …] [--notice "一句话"]
+# INLINE_COMMENT=0（spec §4.3 的 0 变体）：问题清单**完整展开**、不用折叠区、不提行内计数，
+#   观感对齐 v1（I7：默认关闭 = 观感不变）。--json 收 review_validate 的输出。
+# INLINE_COMMENT=1（spec §4.3、§4.5 第 8 步）：明细已经作为行内评论挂在「文件改动」对应行上，
+#   汇总退化为状态面板——统计行注明已标注到行的条数，未发行内的问题进折叠区。
+#   --json 必须收 review_plan_inline（经 review_plan_apply_outcomes 回填）的输出：
+#   拿 review_validate 的输出硬渲染会得到一条「什么都没有折叠区、看不出行内发了几条」的评论。
+# --notice：一句话警告，渲染成统计行下方的引用块。行内评论整体发不出去时由调用方回落到
+#   INLINE_COMMENT=0 渲染并带上原因——阿里云侧开发者看不到流水线日志（I10 失败可见）。
 review_render_summary() {
   _review_parse_render_args "$@" || return $?
   [[ -n "$_RR_JSON" ]] || { echo "review_render_summary: 缺少必填参数 --json" >&2; return 2; }
   [[ -r "$_RR_JSON" ]] || { echo "review_render_summary: 契约 JSON 不可读：${_RR_JSON}" >&2; return 2; }
-  if [[ "$_RR_INLINE" != "0" ]]; then
-    echo "review_render_summary: --inline-comment=${_RR_INLINE} 的渲染（行内评论 + 折叠区）属票 04，本票只实现 0" >&2
+  if [[ "$_RR_INLINE" != "0" && "$_RR_INLINE" != "1" ]]; then
+    echo "review_render_summary: INLINE_COMMENT=${_RR_INLINE} 不是 0 或 1，拒绝渲染（静默按 0 渲染会让开关看起来生效了）" >&2
     return 3
   fi
 
@@ -609,6 +982,16 @@ review_render_summary() {
          and ((.delocated_findings | type) == "number")
          and ((.findings | type) == "array")' "$_RR_JSON" >/dev/null 2>&1 \
     || { echo "review_render_summary: --json 不是 review_validate 的输出（需要对象 + 数值 dropped_findings/delocated_findings + 数组 findings）：${_RR_JSON}" >&2; return 2; }
+  # INLINE_COMMENT=1 还需要发布计划的字段：缺了就说明调用方没走 review_plan_inline，
+  # 硬渲染只会得到一条没有折叠区、行内计数恒为 0 的评论——那比报错更难发现。
+  if [[ "$_RR_INLINE" == "1" ]]; then
+    jq -e '((.inline | type) == "array") and ((.folded | type) == "object")
+           and ((.folded.profile | type) == "array") and ((.folded.overflow | type) == "array")
+           and ((.folded.unlocated | type) == "array") and ((.folded.failed | type) == "array")
+           and ((.inline_count | type) == "number") and ((.folded_count | type) == "number")' \
+       "$_RR_JSON" >/dev/null 2>&1 \
+      || { echo "review_render_summary: --inline-comment 1 需要 review_plan_inline 的输出（缺 inline/folded/inline_count/folded_count 字段）：${_RR_JSON}" >&2; return 2; }
+  fi
 
   local summary verdict verdict_cn verdict_reason dropped delocated n0 n1 n2 total stat hist
   summary=$(jq -r '.summary // ""' "$_RR_JSON")
@@ -648,9 +1031,20 @@ review_render_summary() {
   echo "### 问题统计"
   echo ""
   stat="P0 ${n0} · P1 ${n1} · P2 ${n2}"
+  # INLINE_COMMENT=1：注明其中多少条已经作为行内评论挂在「文件改动」对应行上（spec §4.3）。
+  # 这个数只算「真的在那一行上」的：本次新发的 + 指纹命中已存在的；发布失败的不算（它们在折叠区）。
+  [[ "$_RR_INLINE" == "1" ]] \
+    && stat="${stat} —— 其中 $(jq -r '.inline_count' "$_RR_JSON") 条已标注在「文件改动」对应行"
   [[ "$dropped" -gt 0 ]] && stat="${stat}（另有 ${dropped} 条不合契约已丢弃）"
   [[ "$delocated" -gt 0 ]] && stat="${stat}（${delocated} 条的文件路径不合规，已按未定位处理）"
   echo "$stat"
+  if [[ -n "$_RR_NOTICE" ]]; then
+    echo ""
+    # 取值由脚本自己拼（可能带 HTTP 状态码之类），仍过一遍结构清洗：评论的结构只能来自渲染器
+    printf '> ⚠️ '
+    printf '%s' "$_RR_NOTICE" | review_sanitize_md
+    echo ""
+  fi
 
   # 重点关注文件：按 P0→P1→P2 计数降序、同计数按路径升序，最多 10 行；无可归属文件时整节省略。
   if [[ "$(jq -r '[.findings[] | select(.file != null)] | length' "$_RR_JSON")" -gt 0 ]]; then
@@ -669,6 +1063,21 @@ review_render_summary() {
       | sort_by(.file) | sort_by([-.p0, -.p1, -.p2])
       | .[0:10][]
       | "| `\(.file)` | \(.p0) | \(.p1) | \(.p2) |"' "$_RR_JSON"
+  fi
+
+  if [[ "$_RR_INLINE" == "1" ]]; then
+    # 明细由行内评论承载：汇总里不再展开问题清单，否则同一条问题在 MR 上出现两次（违反 I4）
+    if [[ "$total" == "0" ]]; then
+      echo ""
+      echo "未发现明显问题。"
+    fi
+    _review_render_folded "$_RR_JSON"
+    echo ""
+    review_render_history_table "$hist"
+    rm -f "$hist"
+    echo ""
+    review_render_footer "$_RR_RUN"
+    return 0
   fi
 
   echo ""

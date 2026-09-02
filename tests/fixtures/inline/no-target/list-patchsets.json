@@ -1,0 +1,26 @@
+[
+  {
+    "patchSetBizId": "src-v1",
+    "versionNo": 1,
+    "relatedMergeItemType": "MERGE_SOURCE",
+    "commitId": "1111111111111111111111111111111111111111",
+    "shortId": "11111111",
+    "createTime": "2026-09-01 10:00:01"
+  },
+  {
+    "patchSetBizId": "src-v5",
+    "versionNo": 5,
+    "relatedMergeItemType": "MERGE_SOURCE",
+    "commitId": "5555555555555555555555555555555555555555",
+    "shortId": "55555555",
+    "createTime": "2026-09-02 09:00:00"
+  },
+  {
+    "patchSetBizId": "src-v6",
+    "versionNo": 6,
+    "relatedMergeItemType": "MERGE_SOURCE",
+    "commitId": "d97b8017eeee",
+    "shortId": "d97b8017",
+    "createTime": "2026-09-02 17:30:00"
+  }
+]

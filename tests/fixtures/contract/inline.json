@@ -1,0 +1,96 @@
+{
+  "contract": "codeup-reviewer/1",
+  "summary": "为搜索接口新增了用户名模糊查询，并把结果直接拼进 SQL；同时调整了分页默认值。",
+  "verdict": "MERGE_AFTER_FIX",
+  "verdict_reason": "存在一处 SQL 注入，修复后可合并。",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "用户输入直接拼接进 SQL",
+      "file": "src/app.py",
+      "line_start": 30,
+      "line_end": 31,
+      "body": "`q` 取自 `request.args` 未做任何处理就拼进 SQL 字符串，攻击者可用 `' OR 1=1--` 读取整表。第二句说明影响面。",
+      "fix": "改用参数化查询：\n\n```python\ncur.execute(\"SELECT * FROM users WHERE name LIKE ?\", (f\"%{q}%\",))\n```"
+    },
+    {
+      "id": "F2",
+      "severity": "P1",
+      "category": "error-handling",
+      "title": "分页参数缺少上界校验",
+      "file": "src/app.py",
+      "line_start": 27,
+      "line_end": 27,
+      "body": "`per_page` 直接取自查询串，传入 100000 会一次性把整表读进内存。",
+      "fix": "限制 `per_page` 上界（如 100），超出时取上界值。"
+    },
+    {
+      "id": "F3",
+      "severity": "P2",
+      "category": "maintainability",
+      "title": "变量命名过于笼统",
+      "file": "src/db.py",
+      "line_start": 12,
+      "line_end": 12,
+      "body": "`data` 这个名字看不出装的是什么。",
+      "fix": ""
+    },
+    {
+      "id": "F4",
+      "severity": "P1",
+      "category": "performance",
+      "title": "循环内重复建立数据库连接",
+      "file": "src/db.py",
+      "line_start": 99,
+      "line_end": 99,
+      "body": "每次循环都调用 `connect()`，在 N 条记录时产生 N 次握手。",
+      "fix": "把连接提到循环外，或使用连接池。"
+    },
+    {
+      "id": "F5",
+      "severity": "P0",
+      "category": "security",
+      "title": "缺少统一的鉴权中间件",
+      "file": null,
+      "line_start": null,
+      "line_end": null,
+      "body": "本仓库没有任何统一鉴权入口，新增接口全靠各自记得校验。",
+      "fix": "引入一层鉴权中间件。"
+    },
+    {
+      "id": "F6",
+      "severity": "P2",
+      "category": "style",
+      "title": "文档里的示例命令已过期",
+      "file": "docs/readme.md",
+      "line_start": 3,
+      "line_end": 3,
+      "body": "示例里的启动命令与当前入口不一致。",
+      "fix": ""
+    },
+    {
+      "id": "F7",
+      "severity": "P0",
+      "category": "data",
+      "title": "查询结果未做数量上限",
+      "file": "src/app.py",
+      "line_start": 31,
+      "line_end": 31,
+      "body": "结果集没有 LIMIT，超大表会把内存打满。",
+      "fix": "加上 LIMIT 并分页返回。"
+    },
+    {
+      "id": "F8",
+      "severity": "P1",
+      "category": "logic",
+      "title": "指向本次未改动文件的问题",
+      "file": "unknown/file.py",
+      "line_start": 1,
+      "line_end": 1,
+      "body": "这个文件本次没有出现在 diff 里，行内评论无处可挂。",
+      "fix": ""
+    }
+  ]
+}

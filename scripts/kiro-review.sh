@@ -23,10 +23,18 @@ source "${SCRIPT_DIR}/lib/review-render.sh"
 
 KIRO_TIMEOUT="${KIRO_TIMEOUT:-900}"
 MAX_COMMENT_BYTES="${MAX_COMMENT_BYTES:-60000}"
-# 行内评论开关（spec §4.6）。本版本只实现 INLINE_COMMENT=0：MR 上仍然只有一条汇总评论，
-# 内含按 P0→P1→P2 分组的完整问题清单。1 的渲染与发布属后续票，这里显式拒绝而不是静默按 0 跑，
-# 否则开关看起来生效了、实际什么也没发生。
+# 行内评论开关（spec §4.6）。
+#   0（默认）：MR 上只有一条汇总评论，内含按 P0→P1→P2 分组的完整问题清单（I7 观感不变）。
+#   1：可定位的问题按档位发成行内评论，汇总退化为状态面板 + 折叠区（spec §4.3、§4.5）。
+# 取值只允许 0/1；别的取值一律拒绝运行，绝不静默按 0 跑（那样开关看起来生效了、实际什么也没发生）。
 INLINE_COMMENT="${INLINE_COMMENT:-0}"
+# 行内档位与单次上限（spec §4.6）。非法取值由 review_plan_inline 回落默认值并记 warning——
+# 配错档位不该让整次评审失败，但必须在日志里看得见。
+INLINE_PROFILE="${INLINE_PROFILE:-quiet}"
+MAX_INLINE_COMMENTS="${MAX_INLINE_COMMENTS:-10}"
+# 行内评论实际是否生效：版本对取不到时降为 0，并把原因写进汇总评论（INLINE_NOTICE）。
+INLINE_ACTIVE=0
+INLINE_NOTICE=""
 # 官方安装脚本 URL。来源：https://kiro.dev/docs/cli/installation/（页面命令
 # `curl -fsSL https://cli.kiro.dev/install | bash`；脚本本身支持 Linux/macOS，
 # Linux 下安装到 ~/.local/bin，含 glibc 检测与 musl 回退）。核实日期：2026-07-21。
@@ -114,6 +122,148 @@ die_review() {
     rm -f "$f"
   fi
   exit 1
+}
+
+# --- 行内评论管线（INLINE_COMMENT=1；spec §4.5 第 1–7 步）---
+# 入参 $1 = 规范化契约（review_validate 的输出）
+# 产出 $WORK/plan.json：已按发布结果回填，可直接交给 review_render_summary --inline-comment 1
+# rc 0 = 计划就绪（INLINE_ACTIVE=1）
+# rc 1 = 本次发不了行内评论，原因写进 INLINE_NOTICE；调用方回落 INLINE_COMMENT=0 渲染，
+#        让这条汇总带上完整问题清单——问题一条都不能因为「行内发不出去」而消失（I4/I10）。
+# 注意：本函数被写成 `if publish_inline_comments …`，`if` 会让整个函数体不受 errexit 约束，
+# 所以每一步都显式判退出码，绝不依赖 set -e。
+publish_inline_comments() {
+  local validated="$1"
+  local pair from_ps to_ps to_commit head_full existing_fp
+  local item idx file ls title fp cid n_created=0 n_existing=0 n_failed=0 submitted=0
+
+  # 1. 版本对（spec §4.5 第 1 步、Q6）
+  if ! codeup_list_patchsets "$LOCAL_ID" > "$WORK/patchsets.json"; then
+    INLINE_NOTICE="行内评论未发出：查询 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}），下面是完整问题清单。"
+    log "警告：${INLINE_NOTICE}"
+    return 1
+  fi
+  if ! pair=$(codeup_select_patchset_pair < "$WORK/patchsets.json"); then
+    INLINE_NOTICE="行内评论未发出：MR 版本列表里选不出「最新合并目标版本 + 最新合并源版本」这一对，下面是完整问题清单。"
+    log "警告：${INLINE_NOTICE}"
+    return 1
+  fi
+  from_ps=$(printf '%s' "$pair" | cut -f1)
+  to_ps=$(printf '%s' "$pair" | cut -f2)
+  to_commit=$(printf '%s' "$pair" | cut -f3)
+  log "行内评论版本对：from=${from_ps}（最新合并目标版本）→ to=${to_ps}（最新合并源版本，patchset_biz_id 用它）"
+  head_full=$(git rev-parse HEAD)
+  # 不一致的成因通常是「评审开始后又推了一次」：Codeup 侧的版本才是评论要绑的真值，所以不改用 HEAD，
+  # 但必须留痕——此时行号是按本次评审的 diff 算的，可能与那个版本对不上。
+  if [[ -n "$to_commit" && "$to_commit" != "$head_full" ]]; then
+    log "警告：最新合并源版本的提交（${to_commit:0:12}）与当前 HEAD（${head_full:0:12}）不一致——仍以 API 给的版本为准（Codeup 侧真值），但行号可能对不上这次评审的 diff"
+  fi
+
+  # 2/3/4. 变更行集合 → 可定位判定 → 排序与档位 → 上限截取
+  if ! review_plan_inline --json "$validated" --changed-lines "$WORK/changed-lines.json" \
+         --profile "$INLINE_PROFILE" --max "$MAX_INLINE_COMMENTS" > "$WORK/plan.json"; then
+    INLINE_NOTICE="行内评论未发出：生成行内发布计划失败，下面是完整问题清单。"
+    log "警告：${INLINE_NOTICE}"
+    return 1
+  fi
+
+  # 5. 去重：拉现有行内评论，按正文里的指纹标记跳过
+  existing_fp="$WORK/existing-fp.txt"
+  : > "$existing_fp"
+  if [[ -z "${BOT_USERNAME:-}" ]]; then
+    log "警告：未配置 CODEUP_BOT_USERNAME（令牌身份接口也不可用——P1-00 实测 403），行内评论去重无法按作者过滤，只能按评论正文里的指纹标记去重。重跑仍不会重复，但任何 MR 参与者发一条带同样指纹标记的评论就能让对应问题不再发出。建议配置该变量"
+  fi
+  if codeup_list_inline_comments "$LOCAL_ID" > "$WORK/inline-comments.json"; then
+    review_inline_existing_fingerprints "${BOT_USERNAME:-}" < "$WORK/inline-comments.json" > "$existing_fp" \
+      || : > "$existing_fp"
+    log "行内评论去重：MR 上已有 $(grep -c . "$existing_fp" || true) 条带指纹标记的行内评论"
+  else
+    log "警告：查询 MR 现有行内评论失败（HTTP ${CODEUP_HTTP_CODE}），本次跳过去重（重跑可能在同一行上留下重复评论）"
+  fi
+
+  # 6. 逐条创建草稿
+  : > "$WORK/draft-ids.txt"; : > "$WORK/drafted.tsv"; : > "$WORK/outcomes.tsv"
+  while IFS= read -r item; do
+    printf '%s' "$item" > "$WORK/item.json"
+    idx=$(jq -r '.idx' "$WORK/item.json")
+    file=$(jq -r '.file' "$WORK/item.json")
+    ls=$(jq -r '.line_start' "$WORK/item.json")
+    title=$(jq -r '.title' "$WORK/item.json")
+    if ! fp=$(review_fingerprint "$file" "$ls" "$title"); then
+      log "警告：算不出问题 #${idx} 的去重指纹，转入折叠区（宁可不发，也不发一条重跑会重复的评论）"
+      printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"; n_failed=$((n_failed + 1)); continue
+    fi
+    if grep -qxF "$fp" "$existing_fp"; then
+      # 已经挂在那一行上了：算「已标注」而不是折叠区，否则同一条问题在 MR 上出现两次（I4）
+      printf '%s\texisting\n' "$idx" >> "$WORK/outcomes.tsv"; n_existing=$((n_existing + 1)); continue
+    fi
+    if ! review_render_inline_body "$WORK/item.json" "$SHORT_SHA" "$fp" > "$WORK/body-${idx}.md"; then
+      log "警告：问题 #${idx} 的行内评论正文渲染失败，转入折叠区"
+      printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"; n_failed=$((n_failed + 1)); continue
+    fi
+    # 必须用文件式接口而不是 `cid=$(codeup_create_inline_comment …)`：命令替换在子 shell 里跑，
+    # CODEUP_HTTP_CODE 与 DRY_RUN 的 fixture 序号都传不回来（codeup-api.sh 里写明了这条约定）
+    if codeup_create_inline_comment "$LOCAL_ID" "$WORK/body-${idx}.md" "$file" "$ls" \
+         "$from_ps" "$to_ps" true "$WORK/created.json"; then
+      cid=$(codeup_comment_biz_id "$WORK/created.json")
+      if [[ -n "$cid" ]]; then
+        printf '%s\n' "$cid" >> "$WORK/draft-ids.txt"
+        printf '%s\t%s\t%s\t%s\n' "$idx" "$cid" "$file" "$ls" >> "$WORK/drafted.tsv"
+      else
+        log "警告：问题 #${idx} 的草稿建好了但响应里没有 comment_biz_id，无法纳入一次提交，转入折叠区（那条草稿只有机器人自己看得见，需人工清理）"
+        printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"; n_failed=$((n_failed + 1))
+      fi
+    else
+      log "警告：问题 #${idx} 的行内评论草稿创建失败（HTTP ${CODEUP_HTTP_CODE}），转入折叠区"
+      printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"; n_failed=$((n_failed + 1))
+    fi
+  done < <(jq -c '.inline[]' "$WORK/plan.json")
+
+  # 7. 一次提交（不带 reviewOpinion）；失败则退回逐条非草稿发布
+  if [[ -s "$WORK/draft-ids.txt" ]]; then
+    if codeup_submit_drafts "$LOCAL_ID" "$WORK/draft-ids.txt"; then
+      submitted=1
+      log "行内评论：$(grep -c . "$WORK/draft-ids.txt" || true) 条草稿已一次提交（不带评审意见，不卡合并）"
+    else
+      log "警告：草稿一次提交失败（HTTP ${CODEUP_HTTP_CODE}），退回逐条非草稿发布"
+      # 先删掉已建的草稿：不删的话同一条问题会同时留下一条草稿（只有机器人自己看得见）
+      # 与一条正式评论，而下一次评审看到的是同一个指纹，两条都不会被清理
+      while IFS=$'\t' read -r idx cid file ls; do
+        codeup_delete_comment "$LOCAL_ID" "$cid" \
+          || log "警告：删除草稿 ${cid} 失败（HTTP ${CODEUP_HTTP_CODE}），需人工清理该草稿"
+      done < "$WORK/drafted.tsv"
+      while IFS=$'\t' read -r idx cid file ls; do
+        if codeup_create_inline_comment "$LOCAL_ID" "$WORK/body-${idx}.md" "$file" "$ls" \
+             "$from_ps" "$to_ps" false "$WORK/created.json"; then
+          n_created=$((n_created + 1)); printf '%s\tcreated\n' "$idx" >> "$WORK/outcomes.tsv"
+        else
+          log "警告：问题 #${idx} 的非草稿回退发布也失败（HTTP ${CODEUP_HTTP_CODE}），转入折叠区"
+          n_failed=$((n_failed + 1)); printf '%s\tfailed\n' "$idx" >> "$WORK/outcomes.tsv"
+        fi
+      done < "$WORK/drafted.tsv"
+    fi
+  fi
+  if [[ "$submitted" == "1" ]]; then
+    while IFS=$'\t' read -r idx cid file ls; do
+      n_created=$((n_created + 1)); printf '%s\tcreated\n' "$idx" >> "$WORK/outcomes.tsv"
+    done < "$WORK/drafted.tsv"
+  fi
+
+  # 发布结果回填：发失败的问题必须落到折叠区，否则它在 MR 上一条都看不到
+  jq -Rs --arg sep "$(printf '\t')" '
+    split("\n") | map(select(length > 0) | split($sep) | {idx: (.[0] | tonumber), outcome: .[1]})' \
+    "$WORK/outcomes.tsv" > "$WORK/outcomes.json" 2>/dev/null || printf '[]\n' > "$WORK/outcomes.json"
+  if ! review_plan_apply_outcomes "$WORK/plan.json" "$WORK/outcomes.json" > "$WORK/plan.final.json"; then
+    # 回填算不出来时不能拿未回填的计划去渲染：那会把发失败的问题算成「已标注在对应行」而彻底藏起来。
+    # 回落到完整清单：已经发出去的行内评论会与清单里的条目重复一次，但没有任何问题被藏起来。
+    INLINE_NOTICE="行内评论已发出，但统计口径回填失败，因此下面仍给出完整问题清单（可能与行内评论重复）。"
+    log "警告：${INLINE_NOTICE}"
+    return 1
+  fi
+  mv "$WORK/plan.final.json" "$WORK/plan.json"
+  log "行内评论：新发 ${n_created} 条、已存在跳过 ${n_existing} 条、失败 ${n_failed} 条；折叠区 $(jq -r '.folded_count' "$WORK/plan.json") 条（档位 $(jq -r '.inline_profile' "$WORK/plan.json")，上限 $(jq -r '.max_inline' "$WORK/plan.json")）"
+  INLINE_ACTIVE=1
+  return 0
 }
 
 # --- 0. 依赖与必填变量检查（timeout 为强制依赖，不允许无超时运行）---
@@ -223,8 +373,14 @@ grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
 grep -q -- '--output-format' <<<"$KIRO_CHAT_HELP" \
   || die_review "kiro-cli chat 不支持 --output-format，无法取得结构化评审报告（契约在 runFinished.data.finalText 里），拒绝运行。请升级 kiro-cli（≥ 2.21）"
 # 开关校验放在 MR 定位之后：配错开关也要在 MR 上看得见，而不是只让流水线标红
-[[ "$INLINE_COMMENT" == "0" ]] \
-  || die_review "INLINE_COMMENT=${INLINE_COMMENT} 尚未实现（行内评论属后续票），当前版本只支持 INLINE_COMMENT=0。请把该流水线变量改回 0 或删除"
+[[ "$INLINE_COMMENT" == "0" || "$INLINE_COMMENT" == "1" ]] \
+  || die_review "INLINE_COMMENT=${INLINE_COMMENT} 不是 0 或 1。行内评论开关只接受这两个取值（静默按 0 跑会让开关看起来生效了）。请修正该流水线变量"
+# 去重指纹要 sha1：拿不到就没法去重，重跑会在同一行上堆重复评论（违反 I6 幂等）。
+# 与 timeout 同理列为硬依赖，而不是「取不到就不去重」。
+if [[ "$INLINE_COMMENT" == "1" ]]; then
+  command -v sha1sum >/dev/null || command -v shasum >/dev/null \
+    || die_review "INLINE_COMMENT=1 需要 sha1sum 或 shasum 计算行内评论去重指纹（缺了会在重跑时发重复评论）。请在构建机安装 coreutils 或 perl"
+fi
 
 # --- 4. 生成 diff（merge-base 三点比较；浅克隆自动加深）---
 git fetch -q origin "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}" \
@@ -242,6 +398,21 @@ if [[ ! -s "$WORK/review.diff" && ! -s "$WORK/omitted.txt" ]]; then
   exit 0
 fi
 log "diff 已生成：$(wc -c < "$WORK/review.diff" | tr -d ' ') 字节（merge-base ${BASE:0:12}..HEAD，$([[ "$truncated" == "10" ]] && echo 已按阈值截断 || echo 完整直传)）"
+
+# --- 4.5 变更行集合（spec §4.5 第 2 步）---
+# 放在这里而不是发布前：读的是 git 对象（与评审输入同源），且必须在隔离步骤删工作树文件之前
+# 就算出来，才能保证「行内评论的行号」与「喂给评审员的 diff」出自同一次比较。
+# 零上下文（-U0）：只要新增/修改行，不要上下文行——上下文行没改过，把评论挂上去是噪音。
+# core.quotePath=false：非 ASCII 路径不被转义，键名就是真实路径。
+if [[ "$INLINE_COMMENT" == "1" ]]; then
+  git -c core.quotePath=false diff --no-renames -U0 "$BASE" HEAD > "$WORK/inline.diff" \
+    || die_review "生成零上下文 diff 失败（行内评论要靠它算变更行集合）"
+  review_changed_lines < "$WORK/inline.diff" > "$WORK/changed-lines.json" \
+    || die_review "解析变更行集合失败"
+  jq -e 'type == "object"' "$WORK/changed-lines.json" >/dev/null 2>&1 \
+    || die_review "变更行集合不是合法 JSON 对象（行号校验完全依赖它，宁可失败也不能把评论发到错的行上）"
+  log "变更行集合：$(jq -r 'length' "$WORK/changed-lines.json") 个文件、$(jq -r '[.[][] | (.[1] - .[0] + 1)] | add // 0' "$WORK/changed-lines.json") 行可定位"
+fi
 
 # --- 5. 组装评审输入 ---
 {
@@ -392,7 +563,15 @@ else
   [[ "$delocated" == "0" ]] \
     || log "警告：${delocated} 条问题的 file 含换行/竖线/反引号，已按未定位处理（这类值会破坏表格与定位串）"
   log "评审报告：P0 $(jq -r '[.findings[] | select(.severity == "P0")] | length' "$WORK/validated.json") · P1 $(jq -r '[.findings[] | select(.severity == "P1")] | length' "$WORK/validated.json") · P2 $(jq -r '[.findings[] | select(.severity == "P2")] | length' "$WORK/validated.json")，结论 $(jq -r '.verdict' "$WORK/validated.json")，丢弃 ${dropped}"
-  review_render_summary --json "$WORK/validated.json" --inline-comment "$INLINE_COMMENT" "${render_args[@]}" \
+  # 行内评论必须在渲染汇总之前发（spec §4.5 把汇总排在第 8 步）：统计行里「其中 N 条已标注在
+  # 对应行」只能是真的发出去的条数，折叠区也只能在知道哪些发失败之后才算得准。
+  SUMMARY_JSON="$WORK/validated.json"
+  if [[ "$INLINE_COMMENT" == "1" ]] && publish_inline_comments "$WORK/validated.json"; then
+    SUMMARY_JSON="$WORK/plan.json"
+  fi
+  summary_args=(--inline-comment "$INLINE_ACTIVE")
+  [[ -n "$INLINE_NOTICE" ]] && summary_args+=(--notice "$INLINE_NOTICE")
+  review_render_summary --json "$SUMMARY_JSON" "${summary_args[@]}" "${render_args[@]}" \
     > "$WORK/comment.md" || die_review "汇总评论渲染失败"
 fi
 [[ -s "$WORK/comment.md" ]] || die_review "渲染后的评论为空"

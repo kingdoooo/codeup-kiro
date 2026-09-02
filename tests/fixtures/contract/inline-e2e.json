@@ -1,0 +1,74 @@
+{
+  "contract": "codeup-reviewer/1",
+  "summary": "在 src/app.py 中新增了一个硬编码的 SECRET_KEY，并加入若干注入面配置文件。",
+  "verdict": "DO_NOT_MERGE",
+  "verdict_reason": "硬编码凭证必须先移除。",
+  "findings": [
+    {
+      "id": "G1",
+      "severity": "P0",
+      "category": "security",
+      "title": "硬编码疑似应用密钥",
+      "file": "src/app.py",
+      "line_start": 2,
+      "line_end": 2,
+      "body": "`SECRET_KEY` 直接写入源码，疑似凭证为 `FAKE****0000`。硬编码模式会让真实密钥被提交、传播或误用于其他环境。",
+      "fix": "从环境变量或密钥管理服务读取，启动时校验非空。"
+    },
+    {
+      "id": "G2",
+      "severity": "P0",
+      "category": "security",
+      "title": "密钥可能已泄漏到提交历史",
+      "file": "src/app.py",
+      "line_start": 2,
+      "line_end": 3,
+      "body": "这一段一旦推送，值就进入了 git 历史，删除当前行不足以撤回。",
+      "fix": "立即轮换该凭证，并考虑清理历史。"
+    },
+    {
+      "id": "G3",
+      "severity": "P1",
+      "category": "error-handling",
+      "title": "缺少启动时的配置校验",
+      "file": "src/app.py",
+      "line_start": 2,
+      "line_end": 2,
+      "body": "改成读环境变量之后，缺失配置会以难以定位的方式失败。",
+      "fix": "启动时显式校验并抛出带上下文的异常。"
+    },
+    {
+      "id": "G4",
+      "severity": "P2",
+      "category": "maintainability",
+      "title": "常量缺少说明性注释",
+      "file": "src/app.py",
+      "line_start": 2,
+      "line_end": 2,
+      "body": "这个常量的用途看不出来。",
+      "fix": ""
+    },
+    {
+      "id": "G5",
+      "severity": "P1",
+      "category": "logic",
+      "title": "行号不在本次变更行集合内",
+      "file": "src/app.py",
+      "line_start": 99,
+      "line_end": 99,
+      "body": "第 99 行本次没有改动，行内评论无处可挂，只能进折叠区。",
+      "fix": ""
+    },
+    {
+      "id": "G6",
+      "severity": "P0",
+      "category": "security",
+      "title": "仓库级问题：没有统一的密钥管理",
+      "file": null,
+      "line_start": null,
+      "line_end": null,
+      "body": "本仓库没有任何密钥管理约定，新增配置全靠各自决定放哪里。",
+      "fix": "引入密钥管理服务并在 README 里写明约定。"
+    }
+  ]
+}

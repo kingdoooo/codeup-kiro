@@ -326,6 +326,100 @@ assert_contains "$comment" "<!-- kiro-review:" "M25 对照：最小失败评论�
 assert_contains "$comment" "<!-- kiro-history:" "M25 对照：仍带本次一行历史"
 assert_contains "$comment" "第 2 次评审" "M25 对照：仍带页脚"
 
+# ============ 票 04 的守卫（行内评论管线）============
+# 这一组里的 M26 就是票要求的「正控」：把可定位判定故意关掉，必须能观察到
+# 未定位问题被当成行内评论发出去——也就是端到端那条「行号都落在变更行集合内」的断言会失败。
+E2EC="$ROOT/tests/fixtures/contract/inline-e2e.json"
+IFX="$tmp/ifx"
+mkdir -p "$IFX"
+# 版本列表 fixture 的 commitId 刻意不等于 HEAD（这里只会多一条 warning，不影响本组要证明的东西）
+jq -n '[{patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:"aaaa1111"},
+        {patchSetBizId:"src-2", versionNo:2, relatedMergeItemType:"MERGE_SOURCE", commitId:"bbbb2222"}]' \
+  > "$IFX/list-patchsets.json"
+for n in 1 2 3 4 5 6; do
+  jq -n --arg id "draft-${n}" '{comment_biz_id:$id, comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true}' \
+    > "$IFX/create-comment-inline.${n}.json"
+done
+# 「重跑不重复」用的 fixture：把上一次发出去的三条指纹都摆进现有行内评论列表
+IFXR="$tmp/ifx-rerun"
+mkdir -p "$IFXR"
+cp "$IFX/list-patchsets.json" "$IFXR/"
+cp "$IFX"/create-comment-inline.*.json "$IFXR/"
+source "$ROOT/scripts/lib/review-render.sh"   # 只为 review_fingerprint：与生产同一份实现
+jq -n --arg bot "$BOT" \
+  --arg a "$(review_fingerprint src/app.py 2 硬编码疑似应用密钥)" \
+  --arg b "$(review_fingerprint src/app.py 2 密钥可能已泄漏到提交历史)" \
+  --arg c "$(review_fingerprint src/app.py 2 缺少启动时的配置校验)" '
+  [$a, $b, $c] | to_entries
+  | map({comment_biz_id:("old-" + (.key | tostring)), comment_type:"INLINE_COMMENT",
+         state:"OPENED", draft:false, filePath:"src/app.py", line_number:2,
+         author:{username:$bot},
+         content:("### P0 · 上一次发过的\n<!-- kiro-inline:" + .value + " -->\n")})' \
+  > "$IFXR/list-comments-inline.json"
+
+inline_case() { # <用例名> <集成包根> <fixture 目录> [VAR=值 …]
+  local name="$1" pkg="$2" fx="$3"; shift 3
+  run_case "$name" "$pkg" DRY_RUN_FIXTURE_DIR="$fx" CODEUP_BOT_USERNAME="$BOT" \
+    INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2EC" "$@"
+}
+
+# --- 对照：未变异实现上行内评论管线的四项可观测结果都成立 ---
+inline_case baseline-inline "$ROOT" "$IFX"
+assert_rc "$RC" 0 "对照：行内开启后评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "对照：quiet 下发 3 条"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.line_number' | sort -u | paste -sd, -)" "2" "对照：行号都落在变更行集合内"
+assert_contains "$(posted_comment "$OUT")" "其中 3 条已标注在「文件改动」对应行" "对照：统计行注明行内条数"
+assert_contains "$(posted_comment "$OUT")" "#### 未定位问题（2）" "对照：未定位问题在折叠区"
+inline_case baseline-rerun "$ROOT" "$IFXR"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：重跑时三条都被指纹去重，一条都不重发"
+
+# --- M26（票要求的正控）：把可定位判定改成恒真 → 未定位问题被当成行内评论发出 ---
+# 这条变异直接对准 spec I5「定位可信」：没有这道校验，模型给的任何行号都会被当成可评论的行，
+# Codeup 会把评论挂到没改过的行上（甚至挂到别的文件上）。
+# sed 的分隔符用 #：被替换的片段里本身带 jq 的 `|`，用 | 作分隔符会被当成分隔符解析
+pkg=$(make_mutant m26-locatable 's#any(\.\[0\] <= \$f\.line_start and \$f\.line_start <= \.\[1\])#true#' scripts/lib/review-render.sh)
+inline_case m26 "$pkg" "$IFX"
+assert_rc "$RC" 0 "M26：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "4" \
+  "M26：可定位判定恒真后多发了一条（G5，行号 99 不在变更行集合内）——端到端「quiet 下发 3 条」断言会失败"
+assert_contains "$(inline_bodies "$OUT" | jq -r '.line_number' | sort -u | paste -sd, -)" "99" \
+  "M26：行内评论被发到了本次没改过的第 99 行——端到端「行号都落在变更行集合内」断言会失败"
+assert_not_contains "$(posted_comment "$OUT")" "#### 未定位问题（2）" \
+  "M26：未定位小节只剩 1 条（没有 file 的那条）——端到端折叠区断言会失败"
+
+# --- M27：把指纹去重判定改成恒不成立 → 重跑在同一行上重复发 ---
+pkg=$(make_mutant m27-dedup 's|if grep -qxF "\$fp" "\$existing_fp"; then|if false; then|')
+inline_case m27 "$pkg" "$IFXR"
+assert_rc "$RC" 0 "M27：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
+  "M27：去重被拿掉后重跑又发了 3 条——端到端「重跑一条都不重发」断言会失败（违反 I6 幂等）"
+
+# --- M28：拿掉上限截取 → MAX_INLINE_COMMENTS 失效 ---
+pkg=$(make_mutant m28-max 's|(\$cand\[0:\$max\]) as \$inline|($cand) as $inline|' scripts/lib/review-render.sh)
+inline_case m28 "$pkg" "$IFX" MAX_INLINE_COMMENTS=1
+assert_rc "$RC" 0 "M28：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
+  "M28：上限 1 却发了 3 条——端到端「上限 1 只发 1 条」断言会失败"
+assert_contains "$(posted_comment "$OUT")" "其中 3 条已标注在「文件改动」对应行" \
+  "M28：统计行也跟着变成 3——端到端「上限 1 时行内计数为 1」断言会失败"
+# 截取被拿掉后 overflow 桶仍照原样算出来，于是同两条问题既发了行内评论、又出现在折叠区
+# （违反 I4「同一问题只出现一次」）——这是这条变异的第二个可观测后果
+assert_contains "$(posted_comment "$OUT")" "#### 超出行内上限的 P0/P1（2）" \
+  "M28：那两条问题同时出现在行内与折叠区（同一问题出现两次）"
+
+# --- M29：发布结果不回填 → 发失败的问题在 MR 上一条都看不到 ---
+# 这条对准 I4「同一问题只出现一次（行内或折叠区）」：不回填时那三条既没发出去，
+# 又被算成「已标注在对应行」而不进折叠区，等于评审报告悄悄少了三个问题。
+pkg=$(make_mutant m29-outcomes 's|^review_plan_apply_outcomes() {|review_plan_apply_outcomes() { cat "$1"; return 0;|' scripts/lib/review-render.sh)
+inline_case m29 "$pkg" "$IFX" DRY_RUN_FAIL_ROUTES="submit-review:400,create-comment-inline:400"
+assert_rc "$RC" 0 "M29：变异体仍能跑完"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "其中 3 条已标注在「文件改动」对应行" \
+  "M29：一条都没发出去却报「3 条已标注」——端到端「全部发布失败时行内计数为 0」断言会失败"
+assert_not_contains "$comment" "#### 行内发布失败" \
+  "M29：折叠区里没有「行内发布失败」小节——那三个问题在 MR 上彻底消失了"
+assert_not_contains "$comment" "硬编码疑似应用密钥" "M29：连问题标题都看不到了"
+
 # --- M3：删掉 settings 调用 → 继承未被禁用 ---
 pkg=$(make_mutant m3-settings '/chat.disableInheritingDefaultResources true/d')
 run_case m3 "$pkg"

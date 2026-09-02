@@ -1,0 +1,30 @@
+[
+  {
+    "comment_biz_id": "prev-1",
+    "comment_type": "INLINE_COMMENT",
+    "state": "OPENED",
+    "draft": false,
+    "filePath": "src/app.py",
+    "line_number": 30,
+    "out_dated": false,
+    "author": {
+      "username": "aliyun:kingdooo_hvFXC",
+      "name": "Kiro"
+    },
+    "content": "### P0 · 上一次发过的问题\n<!-- kiro-inline:0000000000000000000000000000000000000000 -->\n\n说明。\n\n— Kiro 评审 · 提交 `90fcb05`"
+  },
+  {
+    "comment_biz_id": "prev-2",
+    "comment_type": "INLINE_COMMENT",
+    "state": "OPENED",
+    "draft": false,
+    "filePath": "src/db.py",
+    "line_number": 12,
+    "out_dated": false,
+    "author": {
+      "username": "aliyun:human_dev",
+      "name": "张三"
+    },
+    "content": "这一行我也觉得要改。"
+  }
+]

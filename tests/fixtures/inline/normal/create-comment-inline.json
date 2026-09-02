@@ -1,0 +1,13 @@
+{
+  "comment_biz_id": "20497727aaaa",
+  "comment_type": "INLINE_COMMENT",
+  "state": "DRAFT",
+  "draft": true,
+  "filePath": "src/app.py",
+  "line_number": 30,
+  "out_dated": false,
+  "author": {
+    "username": "aliyun:kingdooo_hvFXC",
+    "name": "Kiro"
+  }
+}
