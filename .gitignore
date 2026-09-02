@@ -2,4 +2,11 @@
 .DS_Store
 
 /.superpowers/
-/docs/
+
+# 只在本地保留的文档：客户材料与设计过程记录。
+# docs/agents/ 与 docs/adr/ 需要进版本库，所以不整体忽略 /docs/。
+/docs/blog/
+/docs/superpowers/
+
+# 本地 markdown issue tracker（见 docs/agents/issue-tracker.md），不随公开仓库分发。
+/.scratch/
