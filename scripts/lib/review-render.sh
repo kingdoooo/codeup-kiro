@@ -321,9 +321,11 @@ review_validate() {
 #
 #   review_changed_lines        零上下文 diff → 每个文件「新文件侧」的变更行区间集合
 #   review_plan_inline          规范化契约 + 变更行集合 + 档位 + 上限 → 本次的行内发布计划
-#   review_fingerprint          行内评论去重指纹 sha1(file + line + title)
-#   review_render_inline_marker / review_inline_existing_fingerprints
-#                               指纹在评论正文里的隐藏标记；从 MR 现有行内评论里读回指纹
+#   review_fingerprint          行内评论指纹 sha1(file + line + title)（写进标记，仅作信息用途）
+#   review_render_inline_marker 行内评论正文里的隐藏标记：指纹 + 行区间 + 级别
+#   review_inline_existing_ranges / review_inline_draft_ranges
+#                               从 MR 现有行内评论 / 残留草稿里读回「文件 + 行区间 + 级别」
+#   review_inline_overlaps      去重判定：同文件、区间重叠或相距 ≤ 2 行、且已有评论级别不低于新问题 → 同一问题
 #   review_render_inline_body   一条行内评论的正文（spec §4.4）
 #   review_plan_apply_outcomes  发布结果回填计划（发失败的问题必须落到折叠区，不能凭空消失）
 #
@@ -518,7 +520,7 @@ review_plan_inline() {
 # 用法：review_plan_apply_outcomes <计划 JSON> <结果 JSON>
 #   结果 JSON = [{"idx":0,"outcome":"created"|"existing"|"failed"}, …]
 #   created  = 本次新发出的行内评论
-#   existing = 指纹命中、MR 上已有同一条 → 仍算「已标注在对应行」（spec §4.5 第 5 步「跳过并计数」）
+#   existing = 同一处已有本评审员的行内评论（区间去重命中）→ 仍算「已标注在对应行」（spec §4.5 第 5 步「跳过并计数」）
 #   failed   = 没发出去 → 必须移进折叠区，否则这条问题在 MR 上一条都看不到（违反 I4「同一问题只出现一次」）
 # **缺失的结果按 failed 处理**（fail-closed）。这里绝不能按 created 兜底：调用方给每一条 inline 项
 # 都会记一个结果，所以「查不到结果」只有一种含义——结果文件出了问题。此时按 created 兜底会把
@@ -542,11 +544,14 @@ review_plan_apply_outcomes() {
                        + ((.folded.unlocated // []) | length) + ($failed | length))' "$plan"
 }
 
-# --- 去重指纹（spec §4.5 第 5 步）---
+# --- 问题指纹（spec §4.5 第 5 步的原始设计；实测澄清后只作信息用途）---
 # 指纹 = sha1(file + line + title)。三段之间插 \x1f 分隔符：不分隔时
 # ("a.py", 1, "2x") 与 ("a.py", 12, "x") 会撞成同一个指纹，两条不同的问题互相顶掉。
-# sha1sum（GNU）与 shasum（macOS）二选一；两者都没有时 rc 1——调用方必须把它当硬依赖，
-# 因为拿不到指纹就没法去重，重跑会在同一行上堆重复评论（违反 I6 幂等）。
+# 2026-09-03 真实验收（demo-app MR #2 重跑）：模型第二次给的标题全部不同、行号漂移 1 行
+# （20→21、37→36）、一条问题拆成两条（L14 与 L22），指纹全部不命中，行内评论 4 → 9。
+# 去重判定因此改为 review_inline_overlaps 的区间匹配；指纹仍写进标记，方便人工核对，不再参与判定。
+# sha1sum（GNU）与 shasum（macOS）二选一；两者都没有时 rc 1——调用方仍把它当硬依赖：
+# 标记里没有指纹就没法把「本评审员发的」与人工评论区分开（标记的存在本身就是身份证据之一）。
 review_fingerprint() {
   local payload
   payload=$(printf '%s\037%s\037%s' "${1-}" "${2-}" "${3-}")
@@ -560,82 +565,183 @@ review_fingerprint() {
   fi
 }
 
-# --- 指纹在行内评论正文里的隐藏标记 ---
-# 为什么要写进正文而不是「从正文里反解 ### P0 · 标题 再算指纹」：反解要依赖渲染格式，
+# --- 行内评论正文里的隐藏标记 ---
+# 新格式：<!-- kiro-inline:<sha1> L<start>-<end> sev=<P0|P1|P2> -->
+# 旧格式：<!-- kiro-inline:<sha1> -->（票 04 首版发出的评论；只读兼容，见 review_inline_existing_ranges）
+# 为什么把区间写进标记而不是「从正文里反解 ### P0 · 标题（L起–L止）」：反解要依赖渲染格式，
 # 任何模板微调都会让去重静默失效、在同一行上堆重复评论。标记是稳定的解析契约（与汇总评论的
 # kiro-history 同一思路）。模型文本里的 `<!--` 已被 _sanitize_md 转义，伪造不出这一行。
+# 区间是去重的**主键**（旧格式退回 line_number + 标题区间），级别与指纹只作信息用途。
 REVIEW_INLINE_MARKER_PREFIX="<!-- kiro-inline:"
 REVIEW_INLINE_MARKER_SUFFIX=" -->"
-REVIEW_INLINE_MARKER_RE='^<!-- kiro-inline:([0-9a-f]{40}) -->[[:space:]]*$'
+# jq（Oniguruma）命名捕获；可选组缺席时 start/end/sev 为 null = 旧格式。
+# 行号位数限 1–7：行内评论在 Codeup 上是人可编辑的（与 REVIEW_MARKER_LINE_RE 限 run 位数同理），
+# 改成天文数字的标记宁可整条不认（重发一条）也不能让它压住整个文件。
+REVIEW_INLINE_MARKER_RE='^<!-- kiro-inline:(?<fp>[0-9a-f]{40})(?: L(?<start>[0-9]{1,7})-(?<end>[0-9]{1,7}) sev=(?<sev>P[0-2]))? -->[[:space:]]*$'
+# 旧格式评论只能从首行标题里的「（L起–L止）」还原结束行（review_render_inline_body 渲染的形态，破折号是 U+2013）
+REVIEW_INLINE_TITLE_RANGE_RE='（L(?<s>[0-9]{1,7})–L(?<e>[0-9]{1,7})）[[:space:]]*$'
+REVIEW_INLINE_TITLE_SEV_RE='^### (?<sev>P[0-2]) · '
+# 读回的区间宽度上限（行）。区间来自模型给的 line_end 或人可编辑的标记/标题：一条「（L1–L800）」
+# 不设上限就能把整个文件后续所有 P0/P1 都压掉。去重要找的是「同一处」，起点附近几十行足够；
+# 超出的部分截掉（end = start + 上限），起点不动。
+REVIEW_INLINE_MAX_RANGE_SPAN=50
+# 用法：review_render_inline_marker <指纹> <起始行> <结束行（可空/null → 同起始行）> <级别>
+# rc 2 = 参数不合形。行内评论必然有锚点行，所以起始行是必填：没有它标记就写不出区间，
+# 下一次评审只能退回 line_number 去猜——那正是这次要修掉的路径。
 review_render_inline_marker() {
-  printf '%s%s%s\n' "$REVIEW_INLINE_MARKER_PREFIX" "$1" "$REVIEW_INLINE_MARKER_SUFFIX"
+  local fp="${1-}" start="${2-}" end="${3-}" sev="${4-}" t
+  [[ "$fp" =~ ^[0-9a-f]{40}$ ]] || { echo "review_render_inline_marker: 指纹不是 40 位十六进制：${fp}" >&2; return 2; }
+  [[ "$start" =~ ^[0-9]+$ ]] || { echo "review_render_inline_marker: 起始行不是整数：${start:-<空>}" >&2; return 2; }
+  [[ -z "$end" || "$end" == "null" ]] && end="$start"
+  [[ "$end" =~ ^[0-9]+$ ]] || { echo "review_render_inline_marker: 结束行不是整数：${end}" >&2; return 2; }
+  [[ "$sev" =~ ^P[0-2]$ ]] || { echo "review_render_inline_marker: 级别不是 P0/P1/P2：${sev:-<空>}" >&2; return 2; }
+  if (( end < start )); then t="$start"; start="$end"; end="$t"; fi
+  printf '%s%s L%s-%s sev=%s%s\n' "$REVIEW_INLINE_MARKER_PREFIX" "$fp" "$start" "$end" "$sev" "$REVIEW_INLINE_MARKER_SUFFIX"
 }
 
-# --- 从 MR 现有行内评论里读回指纹（stdin = ListMergeRequestComments 响应）---
-# 用法：review_inline_existing_fingerprints <机器人账号用户名或空串> → stdout 每行一个指纹
+# --- 内部：把一条评论解析成 {id, file, start, end, sev, fp}（jq 片段）---
+# 区间来源，按优先级：
+#   ① 新格式标记里的 L<start>-<end>；
+#   ② 旧格式：line_number 作起点（数字或数字字符串都认——接口形态在不同接口间不一致），
+#      再尝试从首行标题解析「（L起–L止）」得到终点；解析不到就当单行；
+#   ③ 旧格式又没有 line_number：标题里有「（L起–L止）」就用它——那是我们自己的渲染器按 line_start/line_end
+#      写出来的，不是猜；连它也没有 → start/end 为 null（作为去重候选会被丢掉，作为草稿仍列出 id）。
+# 宽度超过 REVIEW_INLINE_MAX_RANGE_SPAN 的区间截到上限（起点不动）。
+# 文件路径：实测响应是 camelCase 的 filePath（P1-06），同时带一个恒为 null 的 file_path；两者都认。
+# 级别：新格式取标记里的 sev，旧格式从首行「### P0 · 」解析，都没有 → null。
+_REVIEW_JQ_INLINE_RANGE='
+  def str(v): if (v | type) == "string" then v else "" end;
+  def author_name: if (.author | type) == "object" then str(.author.username) else "" end;
+  def lnum(v): if (v | type) == "number" then (v | floor)
+               elif ((v | type) == "string") and (v | test("^[0-9]{1,7}$")) then (v | tonumber)
+               else null end;
+  def marker: [ str(.content) | split("\n")[] | capture($re) ] | (.[0] // null);
+  def first_line: (str(.content) | split("\n")[0]);
+  def title_range: (first_line | capture($tre) // null)
+                   | if . == null then null else {s: (.s | tonumber), e: (.e | tonumber)} end;
+  def title_sev: (first_line | capture($sre) // null) | if . == null then null else .sev end;
+  def file_of: (str(.filePath)) as $a | if $a != "" then $a else str(.file_path) end;
+  def as_range:
+    (marker) as $m
+    | select($m != null)
+    | (title_range) as $t
+    | (if $m.start != null then ($m.start | tonumber)
+       elif lnum(.line_number) != null then lnum(.line_number)
+       elif $t != null then $t.s
+       else null end) as $s0
+    | (if $m.end != null then ($m.end | tonumber)
+       elif $s0 == null then null
+       elif $t != null then $t.e
+       else $s0 end) as $e0
+    | (if ($s0 != null and $e0 != null and $e0 < $s0) then [$e0, $s0] else [$s0, $e0] end) as $se
+    | { id: str(.comment_biz_id),
+        file: (file_of | if . == "" then null else . end),
+        start: $se[0],
+        end: (if $se[1] == null then null elif ($se[1] - $se[0]) > $span then ($se[0] + $span) else $se[1] end),
+        sev: ($m.sev // title_sev),
+        fp: $m.fp };
+'
+
+# --- 内部：从 ListMergeRequestComments 响应里读回本评审员的行内评论（stdin）---
+# 用法：_review_inline_ranges <机器人账号用户名或空串> existing|draft → stdout 紧凑 JSON 数组
+#   [{id, file, start, end, sev, fp}, …]；任何解析失败都输出 `[]`（仍是合法 JSON，调用方直接 jq length）。
+# 两种模式共用同一套前置过滤（对象 / 行内类型 / 作者 / 带标记），只在状态与最终筛选上不同：
+#   existing：非 DELETED/DRAFT、非 draft:true、未过期，且必须还原得出「文件 + 区间」（参与去重）
+#   draft   ：draft:true 或 state=DRAFT，且有 biz_id（清理孤儿草稿 + 提交后回读；out_dated 不参与——草稿无论新旧都要清理）
 # 作者过滤：给了用户名就只认本机器人发的（别人复制一条带标记的评论不能压掉本评审员的问题）；
-# 用户名未知时退化为「只按标记去重」——重跑重复是必然会发生的伤害，而伪造标记需要一个
+# 用户名未知时退化为「只按标记」——重跑重复是必然会发生的伤害，而伪造标记需要一个
 # 已认证的 MR 参与者主动发评论（可见、可追溯），两害相权取轻，并由调用方打警告提示配置。
 # 状态过滤在脚本侧做：接口只实测过 comment_type 过滤（P1-06），state 参数名未实测，
 # 凭记忆传一个可能 400 的参数会让整条去重通路挂掉。
 # 状态判定用**排除清单**（排除 DELETED 与 DRAFT）而不是许可清单（只认 OPENED）：实测只见过这三个取值，
-# 万一 Codeup 对「已被开发者解决」的行内评论返回别的状态（如 RESOLVED），许可清单会漏收它的指纹，
+# 万一 Codeup 对「已被开发者解决」的行内评论返回别的状态（如 RESOLVED），许可清单会漏收它，
 # 于是每次重跑都在同一行上再发一条（违反 I6 幂等）。与 review_select_prior_comment 的判定一致。
 # out_dated 的评论一律**不算**已发出：它绑的是被取代的旧版本，Codeup 会把它折叠/隐藏在 diff 视图里。
 # 把它算作已发出，就等于汇总里那句「已标注在「文件改动」对应行」在说谎——读者在当前 diff 上看不到它。
 # 重跑（没有新推送）时 out_dated 为 false，去重照常生效，A3「重跑不重复」不受影响。
 # 字段类型守卫与 review_select_prior_comment 同理：任何一条评论字段不合形都不能废掉整批。
-review_inline_existing_fingerprints() {
-  local bot="${1-}"
-  jq -r --arg bot "$bot" --arg re "$REVIEW_INLINE_MARKER_RE" '
-    def str(v): if (v | type) == "string" then v else "" end;
-    def author_name: if (.author | type) == "object" then str(.author.username) else "" end;
+_review_inline_ranges() {
+  local bot="${1-}" mode="${2-}" out
+  case "$mode" in
+    existing|draft) ;;
+    *) echo "_review_inline_ranges: 模式必须是 existing 或 draft：${mode:-<空>}" >&2; echo '[]'; return 2 ;;
+  esac
+  out=$(jq -c --arg bot "$bot" --arg mode "$mode" --arg re "$REVIEW_INLINE_MARKER_RE" \
+           --arg tre "$REVIEW_INLINE_TITLE_RANGE_RE" --arg sre "$REVIEW_INLINE_TITLE_SEV_RE" \
+           --argjson span "$REVIEW_INLINE_MAX_RANGE_SPAN" \
+           "${_REVIEW_JQ_INLINE_RANGE}"'
     (if type == "object" then (.result // []) else . end)
     | (if type == "array" then . else [] end)
     | map(select(type == "object"))
     | map(select(str(.comment_type) == "" or str(.comment_type) == "INLINE_COMMENT"))
-    | map(select((str(.state) | ascii_upcase) as $s | $s != "DELETED" and $s != "DRAFT"))
-    | map(select((.draft == true) | not))
-    | map(select((.out_dated == true) | not))
+    | (if $mode == "existing" then
+         map(select((str(.state) | ascii_upcase) as $s | $s != "DELETED" and $s != "DRAFT"))
+         | map(select((.draft == true) | not))
+         | map(select((.out_dated == true) | not))
+       else
+         map(select(.draft == true or (str(.state) | ascii_upcase) == "DRAFT"))
+       end)
     | map(select(if $bot == "" then true else author_name == $bot end))
-    | .[] | str(.content) | split("\n")[] | match($re) | .captures[0].string' 2>/dev/null \
-    | LC_ALL=C sort -u
+    | [ .[] | as_range
+        | select(if $mode == "existing" then (.file != null and .start != null and .end != null)
+                 else ((.id | length) > 0) end) ]' 2>/dev/null) \
+    || out=""
+  [[ -n "$out" ]] && printf '%s\n' "$out" || echo '[]'
 }
 
-# --- 本评审员留在 MR 上的行内评论**草稿**（stdin = ListMergeRequestComments 响应）---
-# 用法：review_inline_draft_fingerprints <机器人账号用户名或空串> → stdout 每行 `指纹<TAB>comment_biz_id`
+# --- 从 MR 现有行内评论里读回「文件 + 行区间」（去重候选）---
+# 用法：review_inline_existing_ranges <机器人账号用户名或空串> < 列表响应 → JSON 数组
+review_inline_existing_ranges() { _review_inline_ranges "${1-}" existing; }
+
+# --- 本评审员留在 MR 上的行内评论**草稿** ---
+# 用法：review_inline_draft_ranges <机器人账号用户名或空串> < 列表响应 → JSON 数组（含 fp，孤儿草稿按指纹精确匹配）
 # 草稿只有机器人自己看得见，正常流程里不会留下——留下就说明上一次运行在「建好草稿」与
-# 「一次提交」之间断了（提交请求丢了、进程被杀、或者提交被服务端部分拒掉）。
-# 两处要用它：
-#   ① 发布前清理孤儿草稿：同一条问题的草稿已经在那里时，直接再建一条会在同一行上留两份，
-#      而旧那条的 id 我们早就没有了，永远提交不了也删不掉；
-#   ② 一次提交之后回读：2xx 只说明请求被受理，不保证每个 id 都真的转成了 OPENED
-#      （版本过期、超上限都可能让服务端拒掉其中一个），仍是草稿的必须按发布失败处理。
-# 判定与 review_inline_existing_fingerprints 对称：作者匹配（用户名已知时）+ 带指纹标记 +
-# 状态是草稿。out_dated 不参与判定——草稿无论新旧都要清理。
-review_inline_draft_fingerprints() {
-  local bot="${1-}"
-  jq -r --arg bot "$bot" --arg re "$REVIEW_INLINE_MARKER_RE" '
-    def str(v): if (v | type) == "string" then v else "" end;
-    def author_name: if (.author | type) == "object" then str(.author.username) else "" end;
-    (if type == "object" then (.result // []) else . end)
-    | (if type == "array" then . else [] end)
-    | map(select(type == "object"))
-    | map(select(str(.comment_type) == "" or str(.comment_type) == "INLINE_COMMENT"))
-    | map(select(.draft == true or (str(.state) | ascii_upcase) == "DRAFT"))
-    | map(select(if $bot == "" then true else author_name == $bot end))
+# 「一次提交」之间断了。两处要用它：① 发布前按**指纹精确匹配**清理孤儿草稿（刻意不用区间匹配：
+# 同一 MR 上可能有另一次运行正在进行中，按区间会把它刚建好的草稿删掉；按指纹只在同一模型输出重放时命中，
+# 命不中的孤儿草稿只有机器人自己看得见，无害）；② 一次提交之后回读，仍是草稿的按发布失败处理，只看 id。
+review_inline_draft_ranges() { _review_inline_ranges "${1-}" draft; }
+
+# --- 去重判定：区间匹配（协调者裁决 2026-09-03，取代 spec Q8 的「文件+行+内容指纹」）---
+# 同一文件、且 [start, end] 与某条已有评论的区间重叠，或两区间相距 ≤ REVIEW_INLINE_DEDUP_TOLERANCE 行
+# → 视为同一问题。容差 2 行来自实测漂移幅度（1 行）留一倍余量；标题不参与判定（模型每次措辞都不同）。
+# 级别门槛：已有评论只压制**级别不高于它**的新问题（P0 压 P0/P1/P2，P1 压 P1/P2，P2 只压 P2）——
+# 否则同一处一条旧 P2 就能让重跑时新出现的 P0 从 MR 上消失（outcome=existing 留在 inline，而
+# INLINE_COMMENT=1 的汇总不展开 inline）。已有评论解析不出级别（旧格式且标题不合形）→ 不设门槛；
+# 调用方不给新问题级别 → 也不设门槛。
+# 代价是同一处相邻两行上的两条**不同**、级别相同的问题在重跑时会被并成一条——接受：MR 上已经有一条
+# 指着那里，读者能看到；反过来不并的话，每次重跑都在同一处多出一组措辞不同的重复评论（真实验收 4 → 9）。
+# 用法：review_inline_overlaps <区间 JSON 文件> <文件路径> <起始行> [结束行] [新问题级别 P0|P1|P2]
+#   stdout = 命中的已有评论 id（每行一个，缺 id 打 `?`）；rc 0 命中 / rc 1 未命中 / rc 2 参数错误。
+# rc 2 与 rc 1 必须分开：调用方对 rc 2 只打警告并照常发出（宁可重复，绝不因为一个坏文件吞掉一条 P0）。
+REVIEW_INLINE_DEDUP_TOLERANCE=2
+review_inline_overlaps() {
+  local ranges="${1-}" file="${2-}" start="${3-}" end="${4-}" sev="${5-}" hits t
+  [[ -n "$ranges" && -r "$ranges" ]] || { echo "review_inline_overlaps: 区间文件不可读：${ranges:-<空>}" >&2; return 2; }
+  [[ -n "$file" ]] || { echo "review_inline_overlaps: 文件路径为空" >&2; return 2; }
+  [[ "$start" =~ ^[0-9]+$ ]] || { echo "review_inline_overlaps: 起始行不是整数：${start:-<空>}" >&2; return 2; }
+  [[ -z "$end" || "$end" == "null" ]] && end="$start"
+  [[ "$end" =~ ^[0-9]+$ ]] || { echo "review_inline_overlaps: 结束行不是整数：${end}" >&2; return 2; }
+  [[ -z "$sev" || "$sev" =~ ^P[0-2]$ ]] || { echo "review_inline_overlaps: 级别不是 P0/P1/P2：${sev}" >&2; return 2; }
+  if (( end < start )); then t="$start"; start="$end"; end="$t"; fi
+  hits=$(jq -r --arg f "$file" --argjson s "$start" --argjson e "$end" --arg sev "$sev" \
+            --argjson tol "$REVIEW_INLINE_DEDUP_TOLERANCE" '
+    def rank: {"P0": 0, "P1": 1, "P2": 2}[.] // null;
+    (if type == "array" then . else [] end)
     | .[]
-    | (str(.comment_biz_id)) as $id
-    | select(($id | length) > 0)
-    | (str(.content) | split("\n")[] | match($re) | .captures[0].string) as $fp
-    | "\($fp)\t\($id)"' 2>/dev/null | LC_ALL=C sort -u
+    | select(type == "object" and .file == $f and (.start | type) == "number" and (.end | type) == "number")
+    | select(($s - .end) <= $tol and (.start - $e) <= $tol)
+    | select($sev == "" or (.sev | type) != "string" or ((.sev | rank) == null) or ((.sev | rank) <= ($sev | rank)))
+    | (.id // "") | if (type == "string" and length > 0) then . else "?" end' "$ranges" 2>/dev/null) \
+    || { echo "review_inline_overlaps: 区间文件不是合法 JSON：${ranges}" >&2; return 2; }
+  [[ -n "$hits" ]] || return 1
+  printf '%s\n' "$hits"
 }
 
 # --- 一条行内评论的正文（spec §4.4）---
 # 用法：review_render_inline_body <单条问题的 JSON 文件> <短 sha> <指纹>
 # 模板：
 #   ### {P0} · {title}[（L{起}–L{止}）]
-#   <!-- kiro-inline:{指纹} -->
+#   <!-- kiro-inline:{指纹} L{起}-{止} sev={P0} -->
 #
 #   {body}
 #
@@ -653,6 +759,10 @@ review_render_inline_body() {
   [[ "$fp" =~ ^[0-9a-f]{40}$ ]] || { echo "review_render_inline_body: 指纹不是 40 位十六进制：${fp}" >&2; return 2; }
   jq -e 'type == "object" and (.severity | type) == "string" and (.title | type) == "string"' "$item" >/dev/null 2>&1 \
     || { echo "review_render_inline_body: 问题 JSON 缺 severity/title：${item}" >&2; return 2; }
+  # 行内评论必然有锚点行：没有 line_start 的问题是未定位问题，根本不该走到这里；
+  # 而标记里写不出区间，下一次评审就只能退回 line_number 去猜。
+  jq -e '(.line_start | type) == "number"' "$item" >/dev/null 2>&1 \
+    || { echo "review_render_inline_body: 问题 JSON 缺 line_start（行内评论必然有锚点行）：${item}" >&2; return 2; }
   sev=$(jq -r '.severity' "$item")
   title=$(jq -r '.title' "$item")
   body=$(jq -r '.body // ""' "$item")
@@ -663,7 +773,7 @@ review_render_inline_body() {
     title="${title}（L${ls}–L${le}）"
   fi
   printf '### %s · %s\n' "$sev" "$title"
-  review_render_inline_marker "$fp"
+  review_render_inline_marker "$fp" "$ls" "$le" "$sev" || return 2
   echo ""
   if [[ -n "$body" ]]; then printf '%s\n' "$body"; else echo "（评审员未给出说明）"; fi
   if [[ -n "$fix" ]]; then
@@ -1166,7 +1276,8 @@ review_render_summary() {
   echo ""
   stat="P0 ${n0} · P1 ${n1} · P2 ${n2}"
   # INLINE_COMMENT=1：注明其中多少条已经作为行内评论挂在「文件改动」对应行上（spec §4.3）。
-  # 这个数只算「真的在那一行上」的：本次新发的 + 指纹命中已存在的；发布失败的不算（它们在折叠区）。
+  # 这个数只算「真的在那一处有评论」的问题：本次新发的 + 因同一处已有评论而跳过的；发布失败的不算（它们在折叠区）。
+  # 口径是「问题条数」而不是「评论条数」：多条问题并到同一条已有评论上时，计数仍按问题算（协调者 R3）。
   [[ "$_RR_INLINE" == "1" ]] \
     && stat="${stat} —— 其中 $(jq -r '.inline_count' "$_RR_JSON") 条已标注在「文件改动」对应行"
   [[ "$dropped" -gt 0 ]] && stat="${stat}（另有 ${dropped} 条不合契约已丢弃）"

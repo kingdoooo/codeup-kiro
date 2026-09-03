@@ -153,8 +153,8 @@ die_review() {
 # 所以每一步都显式判退出码，绝不依赖 set -e。
 publish_inline_comments() {
   local validated="$1"
-  local pair from_ps to_ps to_commit from_commit head_full existing_fp draft_fp config_notice
-  local item idx file ls title fp cid crc ofp ocid n_created=0 n_existing=0 n_failed=0 submitted=0
+  local pair from_ps to_ps to_commit from_commit head_full existing_rg draft_rg config_notice
+  local item idx file ls le title fp cid crc ocid hits hrc n_created=0 n_existing=0 n_failed=0 submitted=0
 
   # 2/3/4. 变更行集合 → 可定位判定 → 排序与档位 → 上限截取。
   # 排在版本对之前：规划完全是本地计算，而「没有任何要发的行内评论」时（干净的 MR、
@@ -217,25 +217,31 @@ publish_inline_comments() {
     INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }注意：行内评论的行号可能有偏移——${causes}。"
   fi
 
-  # 5. 去重：拉现有行内评论，按正文里的指纹标记跳过
-  existing_fp="$WORK/existing-fp.txt"
-  draft_fp="$WORK/draft-fp.tsv"
-  : > "$existing_fp"; : > "$draft_fp"
+  # 5. 去重：拉现有行内评论，按「同文件、行区间重叠或相邻」跳过（实测澄清 2026-09-03）
+  #    spec Q8 的「文件+行+标题」指纹在真实重跑里全部不命中（标题措辞全变、行号漂移 1 行、一条拆成两条），
+  #    行内评论 4 → 9。改为区间匹配：候选 = 本机器人、未过期、非草稿/删除的行内评论；
+  #    命中 = 同一文件且区间重叠或相距 ≤ REVIEW_INLINE_DEDUP_TOLERANCE 行，且已有评论的级别不低于新问题
+  #    （一条旧 P2 不能压掉重跑时新出现的 P0）。标题不再参与判定。
+  existing_rg="$WORK/existing-ranges.json"
+  draft_rg="$WORK/draft-ranges.json"
+  echo '[]' > "$existing_rg"; echo '[]' > "$draft_rg"
   if [[ -z "${BOT_USERNAME:-}" ]]; then
-    log "警告：未配置 CODEUP_BOT_USERNAME（令牌身份接口也不可用——P1-00 实测 403），行内评论去重无法按作者过滤，只能按评论正文里的指纹标记去重。重跑仍不会重复，**但任何 MR 参与者只要复制一条带同样指纹标记的评论，就能压制掉对应那条问题（连 P0 也发不出去）**。强烈建议配置该变量"
+    log "警告：未配置 CODEUP_BOT_USERNAME（令牌身份接口也不可用——P1-00 实测 403），行内评论去重无法按作者过滤，只能按评论正文里的隐藏标记识别本评审员的评论。重跑仍不会重复，**但任何 MR 参与者只要在同一处贴一条带同样标记的评论，就能压制掉对应那条问题（连 P0 也发不出去）**。强烈建议配置该变量"
   fi
   if codeup_list_inline_comments "$LOCAL_ID" > "$WORK/inline-comments.json"; then
-    review_inline_existing_fingerprints "${BOT_USERNAME:-}" < "$WORK/inline-comments.json" > "$existing_fp" \
-      || : > "$existing_fp"
-    review_inline_draft_fingerprints "${BOT_USERNAME:-}" < "$WORK/inline-comments.json" > "$draft_fp" \
-      || : > "$draft_fp"
-    log "行内评论去重：MR 上已有 $(grep -c . "$existing_fp" || true) 条带指纹标记的行内评论、$(grep -c . "$draft_fp" || true) 条残留草稿"
+    review_inline_existing_ranges "${BOT_USERNAME:-}" < "$WORK/inline-comments.json" > "$existing_rg" \
+      || echo '[]' > "$existing_rg"
+    review_inline_draft_ranges "${BOT_USERNAME:-}" < "$WORK/inline-comments.json" > "$draft_rg" \
+      || echo '[]' > "$draft_rg"
+    log "行内评论去重：MR 上已有 $(jq -r 'length' "$existing_rg" 2>/dev/null || echo 0) 条本评审员的未过期行内评论、$(jq -r 'length' "$draft_rg" 2>/dev/null || echo 0) 条残留草稿；判定 = 同文件且行区间重叠或相距 ≤ ${REVIEW_INLINE_DEDUP_TOLERANCE} 行、已有评论级别不低于新问题"
   else
     log "警告：查询 MR 现有行内评论失败（HTTP ${CODEUP_HTTP_CODE}），本次跳过去重（重跑可能在同一行上留下重复评论）"
   fi
 
   # 6.0 先把每条问题的指纹算出来（一条 jq 取三个字段，用换行分隔——file 与 title 都不可能含换行：
-  #     review_validate 拒掉了 file 里的换行，title 又被折叠成单行）
+  #     review_validate 拒掉了 file 里的换行，title 又被折叠成单行）。
+  #     指纹不再参与去重判定，只写进标记供人工核对；算不出来仍按失败处理——标记没有指纹就
+  #     没法把「本评审员发的」与人工评论区分开。
   : > "$WORK/fps.tsv"; : > "$WORK/outcomes.jsonl"
   while IFS= read -r item; do
     idx=$(printf '%s' "$item" | jq -r '.idx')
@@ -245,7 +251,7 @@ publish_inline_comments() {
     printf '%s' "$item" > "$WORK/item-${idx}.json"
     { read -r ls; read -r file; read -r title; } < <(jq -r '.line_start, .file, .title' "$WORK/item-${idx}.json")
     if ! fp=$(review_fingerprint "$file" "$ls" "$title"); then
-      log "警告：算不出问题 #${idx} 的去重指纹，转入折叠区（宁可不发，也不发一条重跑会重复的评论）"
+      log "警告：算不出问题 #${idx} 的指纹，转入折叠区（标记里没有指纹，下次评审无法把它认成本评审员发的）"
       printf '{"idx":%s,"outcome":"failed"}\n' "$idx" >> "$WORK/outcomes.jsonl"; n_failed=$((n_failed + 1)); continue
     fi
     printf '%s\t%s\n' "$idx" "$fp" >> "$WORK/fps.tsv"
@@ -254,24 +260,32 @@ publish_inline_comments() {
   # 6.1 清理孤儿草稿：本次要发的问题里，如果某条的草稿还留在 MR 上（上一次运行断在了
   #     「建好草稿」与「一次提交」之间），必须先删掉再建。不删就会在同一行上留两份，
   #     而旧那条的 id 我们早就没有了——永远提交不了，也永远删不掉。
-  #     只删指纹对得上的那些，不动别的草稿（同一 MR 上可能有另一次运行正在进行中）。
-  if [[ -s "$draft_fp" ]]; then
-    while IFS=$'\t' read -r ofp ocid; do
-      if cut -f2 "$WORK/fps.tsv" | grep -qxF "$ofp"; then
-        log "清理：MR 上有一条本次要发的问题的残留草稿（${ocid}，上次运行未完成提交），先删除再重发"
+  #     刻意按**指纹精确匹配**而不是按区间：同一 MR 上可能有另一次运行正在进行中，按区间会把它
+  #     刚建好的草稿删掉、让它那条问题被迫进折叠区；按指纹只在同一模型输出重放时命中，命不中的
+  #     孤儿草稿只有机器人自己看得见、无害。只删对得上的那些，不动别的草稿。
+  if [[ "$(jq -r 'length' "$draft_rg" 2>/dev/null || echo 0)" != "0" ]]; then
+    while IFS=$'\t' read -r idx fp; do
+      while IFS= read -r ocid; do
+        [[ -n "$ocid" ]] || continue
+        log "清理：MR 上有一条本次要发的问题 #${idx} 的残留草稿（${ocid}，上次运行未完成提交），先删除再重发"
         codeup_delete_comment "$LOCAL_ID" "$ocid" \
           || log "警告：删除残留草稿 ${ocid} 失败（HTTP ${CODEUP_HTTP_CODE}），本次仍会新建一条，那条残留需人工清理"
-      fi
-    done < "$draft_fp"
+      done < <(jq -r --arg fp "$fp" '.[] | select(.fp == $fp) | .id' "$draft_rg" 2>/dev/null || true)
+    done < "$WORK/fps.tsv"
   fi
 
   # 6.2 逐条创建草稿
   : > "$WORK/draft-ids.txt"; : > "$WORK/drafted.tsv"
   while IFS=$'\t' read -r idx fp; do
-    { read -r ls; read -r file; } < <(jq -r '.line_start, .file' "$WORK/item-${idx}.json")
-    if grep -qxF "$fp" "$existing_fp"; then
-      # 已经挂在那一行上了：算「已标注」而不是折叠区，否则同一条问题在 MR 上出现两次（I4）
+    { read -r ls; read -r le; read -r file; read -r sev; } < <(jq -r '.line_start, .line_end, .file, .severity' "$WORK/item-${idx}.json")
+    # 去重判定：rc 0 命中 → 同一处已有一条级别不低于它的评论，算「已标注」而不是折叠区（否则同一条问题在 MR 上出现两次，I4）；
+    # rc 1 未命中 → 照常发；rc 2 参数/文件错误 → 打警告后照常发（宁可重复，绝不因为一个坏文件吞掉一条 P0）
+    hrc=0; hits=$(review_inline_overlaps "$existing_rg" "$file" "$ls" "$le" "$sev") || hrc=$?
+    if [[ "$hrc" == "0" ]]; then
+      log "去重：问题 #${idx}（${sev} ${file} L${ls}$([[ "$le" =~ ^[0-9]+$ && "$le" != "$ls" ]] && printf -- '–L%s' "$le")）与已有行内评论 $(printf '%s' "$hits" | tr '\n' ',') 同文件且行区间重叠/相邻、级别不低于它，视为同一问题，跳过"
       printf '{"idx":%s,"outcome":"existing"}\n' "$idx" >> "$WORK/outcomes.jsonl"; n_existing=$((n_existing + 1)); continue
+    elif [[ "$hrc" != "1" ]]; then
+      log "警告：问题 #${idx} 的去重判定出错（rc=${hrc}），本条按未重复处理照常发出（可能与已有评论重复）"
     fi
     if ! review_render_inline_body "$WORK/item-${idx}.json" "$SHORT_SHA" "$fp" > "$WORK/body-${idx}.md"; then
       log "警告：问题 #${idx} 的行内评论正文渲染失败，转入折叠区"
@@ -312,7 +326,7 @@ publish_inline_comments() {
     else
       log "警告：草稿一次提交失败（HTTP ${CODEUP_HTTP_CODE}），退回逐条非草稿发布"
       # 先删掉已建的草稿：不删的话同一条问题会同时留下一条草稿（只有机器人自己看得见）
-      # 与一条正式评论，而下一次评审看到的是同一个指纹，两条都不会被清理
+      # 与一条正式评论，而下一次评审会把公开那条认成「已存在」跳过，草稿则再也没人清理
       while IFS=$'\t' read -r idx cid; do
         codeup_delete_comment "$LOCAL_ID" "$cid" \
           || log "警告：删除草稿 ${cid} 失败（rc=$?，HTTP ${CODEUP_HTTP_CODE}），需人工清理该草稿"
@@ -340,7 +354,7 @@ publish_inline_comments() {
   # 与 review_plan_apply_outcomes 的兜底方向一致）：宁可在折叠区重复一次，绝不藏起一条 P0。
   if [[ "$submitted" == "1" ]]; then
     if codeup_list_inline_comments "$LOCAL_ID" > "$WORK/inline-after.json"; then
-      review_inline_draft_fingerprints "${BOT_USERNAME:-}" < "$WORK/inline-after.json" | cut -f2 \
+      review_inline_draft_ranges "${BOT_USERNAME:-}" < "$WORK/inline-after.json" | jq -r '.[].id' \
         > "$WORK/still-draft.txt" || : > "$WORK/still-draft.txt"
       while IFS=$'\t' read -r idx cid; do
         if grep -qxF "$cid" "$WORK/still-draft.txt"; then
@@ -381,7 +395,7 @@ publish_inline_comments() {
     log "警告：回填后的计划文件落盘失败，回落成完整问题清单"
     return 1
   fi
-  log "行内评论：新发 ${n_created} 条、已存在跳过 ${n_existing} 条、失败 ${n_failed} 条；折叠区 $(jq -r '.folded_count' "$WORK/plan.json") 条（档位 $(jq -r '.inline_profile' "$WORK/plan.json")，上限 $(jq -r '.max_inline' "$WORK/plan.json")）"
+  log "行内评论：新发 ${n_created} 条、已存在跳过 ${n_existing} 条（同一处已有本评审员的行内评论，计入「已标注」）、失败 ${n_failed} 条；折叠区 $(jq -r '.folded_count' "$WORK/plan.json") 条（档位 $(jq -r '.inline_profile' "$WORK/plan.json")，上限 $(jq -r '.max_inline' "$WORK/plan.json")）"
   INLINE_ACTIVE=1
   return 0
 }
@@ -517,11 +531,11 @@ grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
 # 不支持该参数的版本会先把额度烧掉、再以 clap 退出码 2 失败，MR 上只剩「退出码 2」这种不可行动的信息。
 grep -q -- '--output-format' <<<"$KIRO_CHAT_HELP" \
   || die_review "kiro-cli chat 不支持 --output-format，无法取得结构化评审报告（契约在 runFinished.data.finalText 里），拒绝运行。请升级 kiro-cli（≥ 2.21）"
-# 去重指纹要 sha1：拿不到就没法去重，重跑会在同一行上堆重复评论（违反 I6 幂等）。
-# 与 timeout 同理列为硬依赖，而不是「取不到就不去重」。
+# 行内评论标记里的指纹要 sha1：标记是把「本评审员发的」与人工评论区分开的依据，没有它下一次评审
+# 认不出自己的评论、重跑会在同一行上堆重复评论（违反 I6 幂等）。与 timeout 同理列为硬依赖。
 if [[ "$INLINE_COMMENT" == "1" ]]; then
   command -v sha1sum >/dev/null || command -v shasum >/dev/null \
-    || die_review "INLINE_COMMENT=1 需要 sha1sum 或 shasum 计算行内评论去重指纹（缺了会在重跑时发重复评论）。请在构建机安装 coreutils 或 perl"
+    || die_review "INLINE_COMMENT=1 需要 sha1sum 或 shasum 计算行内评论标记里的指纹（缺了下次评审认不出自己的评论，重跑会发重复评论）。请在构建机安装 coreutils 或 perl"
 fi
 
 # --- 4. 生成 diff（merge-base 三点比较；浅克隆自动加深）---

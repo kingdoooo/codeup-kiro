@@ -77,7 +77,7 @@
 |---|---|
 | `scripts/kiro-review.sh` | 主编排脚本：依赖检测、MR 定位、diff 生成、隔离、执行 Kiro 评审、发布行内评论与汇总评论 |
 | `scripts/lib/codeup-api.sh` | Codeup OpenAPI 薄封装：MR 反查、评论增删改查、版本列表、草稿一次提交；HTTP 状态码判成败，仅网络/429/5xx 重试（创建行内评论只重试 429，因为创建不幂等） |
-| `scripts/lib/review-render.sh` | 契约提取与校验、变更行集合、行内发布计划与去重指纹、汇总/行内/降级/失败四类评论的渲染、超长截断 |
+| `scripts/lib/review-render.sh` | 契约提取与校验、变更行集合、行内发布计划与区间去重、汇总/行内/降级/失败四类评论的渲染、超长截断 |
 | `scripts/lib/diff-compress.sh` | diff 超限压缩：按优先级取舍文件，省略文件落盘为 diff 片段并输出索引清单 |
 | `scripts/lib/kiro-agent.sh` | 受信 agent 安装：按 `name` 落盘、改写相对 `file://` 提示词引用、清理同名旧文件 |
 | `scripts/probe/` | 环境探测脚本（真实 Codeup / 真实 kiro-cli），见下节与 `scripts/probe/README.md` |
@@ -145,9 +145,9 @@
     bash tests/run-tests.sh
 
 全程无网络依赖（DRY_RUN + mock kiro-cli），覆盖渲染 golden file、变更行解析、排序与上限、
-指纹去重、原地更新、降级与截断，以及一批变异测试（故意破坏守卫，证明它们真的会失败）。
+区间去重、原地更新、降级与截断，以及一批变异测试（故意破坏守卫，证明它们真的会失败）。
 
 `kiro-review.sh` 把 `timeout`/`gtimeout` 作为强制依赖（无超时能力时拒绝运行），
 Linux 自带。macOS 需要 `brew install coreutils` 提供 `gtimeout`，否则
 `tests/test-kiro-review.sh` 会整体跳过并打印 SKIP。
-开启行内评论还需要 `sha1sum` 或 `shasum`（算去重指纹）。
+开启行内评论还需要 `sha1sum` 或 `shasum`（算行内评论隐藏标记里的指纹）。

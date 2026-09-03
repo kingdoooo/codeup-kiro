@@ -743,24 +743,125 @@ run_inline_case badmax ifx-badmax MAX_INLINE_COMMENTS=很多
 assert_contains "$OUT" "不是非负整数" "非法上限：日志告警"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "非法上限：按默认 10 处理"
 
-# ---- 去重：MR 上已有同指纹的行内评论 → 跳过并计数，不重复发 ----
+# ---- 去重：MR 上同一处已有本评审员的行内评论 → 跳过并计数，不重复发 ----
+# 判定是「同文件、行区间重叠或相距 ≤ 2 行、且已有评论级别不低于新问题」（实测澄清 2026-09-03），标题不参与。
+# fixture 里三条可定位问题都锚在 src/app.py 第 2 行：G1/G2 是 P0、G3 是 P1；旧评论是一条 P1 →
+# 两条 P0 不被压（否则重跑时新出现的 P0 会从 MR 上消失），P1 那条被压。
 IFX_DIR="$tmp/ifx-dedup"; mkdir -p "$IFX_DIR"
 fp_dup=$(review_fingerprint "src/app.py" 2 "硬编码疑似应用密钥")
 jq -n --arg fp "$fp_dup" --arg bot "$BOT" '[
   {comment_biz_id:"old-1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
    filePath:"src/app.py", line_number:2, author:{username:$bot},
-   content:("### P0 · 硬编码疑似应用密钥\n<!-- kiro-inline:" + $fp + " -->\n\n上一次发的。\n")}
+   content:("### P1 · 上一次的措辞完全不同\n<!-- kiro-inline:" + $fp + " -->\n\n上一次发的。\n")}
 ]' > "$IFX_DIR/list-comments-inline.json"
 CASE_TWEAK=mk_inline_fixture run_case dedup DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
   CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
 assert_rc "$RC" 0 "去重：退出码 0"
 assert_contains "$OUT" "changeRequests/7/comments/list" "去重：发布前先查现有行内评论"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "2" "去重：已存在的那条不再发（3 → 2）"
-assert_not_contains "$(inline_bodies "$OUT" | jq -r '.content')" "硬编码疑似应用密钥" "去重：跳过的正是指纹命中那条"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "2" "去重：同一处已有一条 P1 → 两条 P0 照发、P1 那条被压（3 → 2）"
+assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" "硬编码疑似应用密钥" "去重：新出现的 P0 不被旧 P1 压掉"
+assert_not_contains "$(inline_bodies "$OUT" | jq -r '.content')" "缺少启动时的配置校验" "去重：被压的正是同级别（P1）那条，标题不同也算同一问题"
 assert_contains "$OUT" "已存在跳过 1 条" "去重：日志计数"
+assert_contains "$OUT" "去重：问题 #2（P1 src/app.py L2）与已有行内评论 old-1 同文件且行区间重叠/相邻、级别不低于它，视为同一问题，跳过" "去重：日志指得出是和哪条算同一问题"
+assert_contains "$OUT" "判定 = 同文件且行区间重叠或相距 ≤ 2 行、已有评论级别不低于新问题" "去重：日志说明判定口径"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "其中 3 条已标注在「文件改动」对应行" "去重：跳过的那条仍算「已标注在对应行」（它就在那一行上）"
-assert_not_contains "$comment" "硬编码疑似应用密钥" "去重：跳过的那条不该又出现在折叠区（否则同一问题出现两次）"
+assert_contains "$comment" "其中 3 条已标注在「文件改动」对应行" "去重：跳过的仍算「已标注在对应行」（那一处确实有评论）"
+assert_not_contains "$comment" "缺少启动时的配置校验" "去重：跳过的不该又出现在折叠区（否则同一问题出现两次）"
+
+# 同一处旧评论是 P0 → 三条全压（级别门槛只挡「旧的比新的低」）
+IFX_DIR="$tmp/ifx-dedup-p0"; mkdir -p "$IFX_DIR"
+jq 'map(.content |= sub("### P1 · "; "### P0 · "))' "$tmp/ifx-dedup/list-comments-inline.json" > "$IFX_DIR/list-comments-inline.json"
+CASE_TWEAK=mk_inline_fixture run_case dedupp0 DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "去重：同一处已有一条 P0 → 三条（P0/P0/P1）全部跳过"
+assert_contains "$OUT" "已存在跳过 3 条" "去重：日志计数 3"
+assert_contains "$(posted_comment "$OUT")" "其中 3 条已标注在「文件改动」对应行" "去重：3 条问题并到同一条已有评论上，计数按问题算"
+
+# ---- 真实验收暴露的缺陷（2026-09-03，demo-app MR #2 重跑 4 → 9）----
+# fixture = 真实回读的第一次运行的 4 条行内评论（旧格式标记）；契约 = 第二次运行的形态：
+# 标题全变、行号漂移 1 行（20→21、37→36）、一条问题拆成两条（L14 与 L22）。期望：0 条新建、跳过 5 条。
+REAL_LIST="$ROOT/tests/fixtures/inline/real-rerun/list-comments-inline.json"
+REAL_CONTRACT="$ROOT/tests/fixtures/contract/inline-rerun-real.json"
+# 业务库里得有 app/download.py 且这些行都是本次新增的（新文件 → 全部行可定位）
+mk_real_repo() {
+  mkdir -p app
+  for i in $(seq 1 50); do echo "line_${i} = ${i}"; done > app/download.py
+  git add app/download.py && git commit -qm "add download endpoint" 
+  mk_inline_fixture
+  cp "$REAL_LIST" "$IFX_DIR/list-comments-inline.json"
+}
+IFX_DIR="$tmp/ifx-real"; mkdir -p "$IFX_DIR"
+CASE_TWEAK=mk_real_repo run_case realrerun DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$REAL_CONTRACT"
+assert_rc "$RC" 0 "真实重跑：退出码 0"
+assert_contains "$OUT" "MR 上已有 4 条本评审员的未过期行内评论" "真实重跑：4 条旧格式评论都被认出（区间从 line_number + 标题区间还原）"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "真实重跑：0 条新建（标题全变、行号漂移、一条拆两条都算同一问题）"
+assert_contains "$OUT" "已存在跳过 5 条" "真实重跑：跳过 5 条"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "真实重跑：没有新草稿就不调提交接口"
+assert_contains "$OUT" "P0 app/download.py L36）与已有行内评论 115adf34175b4c0eaf33b39c3a07f631 同文件" "真实重跑：36 与 37–38 相邻 → 命中那条 pickle 评论"
+assert_contains "$OUT" "app/download.py L21–L23）与已有行内评论 39410c6f45434235bf87f60304d9d682,30ed01ac16ae406a898c6dd8791073c3 同文件" \
+  "真实重跑：21–23 与 20–23 重叠（也与 14–22 重叠）→ 两条命中的 id 都列出"
+assert_contains "$OUT" "app/download.py L22）与已有行内评论 39410c6f45434235bf87f60304d9d682,30ed01ac16ae406a898c6dd8791073c3 同文件" \
+  "真实重跑：拆出来的 L22 落在 14–22 内（也与 20–23 重叠）"
+assert_contains "$OUT" "app/download.py L14）与已有行内评论 39410c6f45434235bf87f60304d9d682 同文件" "真实重跑：拆出来的 L14 只命中 14–22 那条"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "P0 5 · P1 0 · P2 0 —— 其中 5 条已标注在「文件改动」对应行" "真实重跑：跳过的 5 条都算「已标注」（MR 上确实存在）"
+assert_not_contains "$comment" "签名密钥被硬编码" "真实重跑：跳过的问题不进折叠区"
+assert_not_contains "$comment" "折叠区" "真实重跑：没有任何未展开的问题"
+
+# 负向：相距 ≥ 3 行的新问题仍会新建（容差不是「同文件就算重复」）
+jq '.findings += [
+  {id:"F6", severity:"P0", category:"security", title:"41 行与 37–38 相距 3 行", file:"app/download.py",
+   line_start:41, line_end:41, body:"容差边界之外。", fix:""},
+  {id:"F7", severity:"P1", category:"logic", title:"45 行离所有旧评论都很远", file:"app/download.py",
+   line_start:45, line_end:46, body:"新问题。", fix:""}]' "$REAL_CONTRACT" > "$tmp/real-plus.json"
+IFX_DIR="$tmp/ifx-real-far"; mkdir -p "$IFX_DIR"
+CASE_TWEAK=mk_real_repo run_case realfar DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$tmp/real-plus.json"
+assert_rc "$RC" 0 "真实重跑 + 新问题：退出码 0"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.line_number' | sort -n | paste -sd, -)" "41,45" "真实重跑 + 新问题：只有相距 ≥ 3 行的两条新建"
+assert_contains "$OUT" "已存在跳过 5 条" "真实重跑 + 新问题：原来 5 条仍跳过"
+assert_contains "$OUT" "新发 2 条" "真实重跑 + 新问题：新发 2 条"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "1" "真实重跑 + 新问题：新草稿一次提交"
+assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" " L45-46 sev=P1 -->" "真实重跑 + 新问题：新发的评论带新格式标记（区间 + 级别）"
+assert_contains "$(posted_comment "$OUT")" "其中 7 条已标注在「文件改动」对应行" "真实重跑 + 新问题：已标注 = 新发 2 + 跳过 5"
+
+# 第三次运行：MR 上是本次修复之后发出的新格式标记 → 区间直接从标记里读，line_number 不参与
+mk_real_repo_newmarker() {
+  mk_real_repo
+  jq --arg bot "$BOT" '[
+    {comment_biz_id:"nm-1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false, out_dated:false,
+     filePath:"app/download.py", line_number:null, author:{username:$bot},
+     content:"### P0 · 密钥被硬编码并写入日志（L14–L22）\n<!-- kiro-inline:554053a282e7d7519bced6cc3131edbdc3134c57 L14-22 sev=P0 -->\n\n说明。\n"},
+    {comment_biz_id:"nm-2", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false, out_dated:false,
+     filePath:"app/download.py", line_number:20, author:{username:$bot},
+     content:"### P0 · 下载接口存在目录穿越（L20–L23）\n<!-- kiro-inline:f0951a07e682f7957218dbe407fa46d154e76750 L20-23 sev=P0 -->\n"},
+    {comment_biz_id:"nm-3", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false, out_dated:false,
+     filePath:"app/download.py", line_number:29, author:{username:$bot},
+     content:"### P0 · 远程抓取接口可被用于 SSRF（L29–L30）\n<!-- kiro-inline:169e03b5565fc921ea6f9dfff3690711b7abc2ab L29-30 sev=P0 -->\n"},
+    {comment_biz_id:"nm-4", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false, out_dated:false,
+     filePath:"app/download.py", line_number:37, author:{username:$bot},
+     content:"### P0 · 请求体反序列化可执行任意代码（L37–L38）\n<!-- kiro-inline:ad63f7d922057542ad5363d2a0e61e307e95ea1d L37-38 sev=P0 -->\n"}
+  ]' -n > "$IFX_DIR/list-comments-inline.json"
+}
+IFX_DIR="$tmp/ifx-real-newmarker"; mkdir -p "$IFX_DIR"
+CASE_TWEAK=mk_real_repo_newmarker run_case realnewmarker DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$REAL_CONTRACT"
+assert_rc "$RC" 0 "新格式标记：退出码 0"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "新格式标记：区间从标记里读（nm-1 连 line_number 都没有），5 条全部跳过"
+assert_contains "$OUT" "已存在跳过 5 条" "新格式标记：跳过 5 条"
+assert_contains "$OUT" "app/download.py L14）与已有行内评论 nm-1 同文件" "新格式标记：line_number 为 null 的那条靠标记区间命中"
+
+# out_dated 的旧评论在区间去重下同样不算：推了新提交后同一处会按当前版本重发
+mk_real_repo_outdated() {
+  mk_real_repo
+  jq 'map(.out_dated = true)' "$REAL_LIST" > "$IFX_DIR/list-comments-inline.json"
+}
+IFX_DIR="$tmp/ifx-real-outdated"; mkdir -p "$IFX_DIR"
+CASE_TWEAK=mk_real_repo_outdated run_case realoutdated DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$REAL_CONTRACT"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "5" "真实重跑 + 全部过期：旧评论绑在被取代的版本上，5 条全部按当前版本重发"
+assert_contains "$OUT" "MR 上已有 0 条本评审员的未过期行内评论" "真实重跑 + 全部过期：候选集为空"
 
 # ---- 重跑不重复：把上一次发出去的三条都当作 MR 上已有 → 一条都不再发 ----
 IFX_DIR="$tmp/ifx-rerun"; mkdir -p "$IFX_DIR"

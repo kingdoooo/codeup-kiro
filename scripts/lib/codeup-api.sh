@@ -452,7 +452,7 @@ codeup_submit_drafts() {
 # body 只带 comment_type（P1-06 实测支持该过滤，返回含 author.username / state / filePath / line_number）。
 # **刻意不带 state 过滤**：探测只验证过 comment_type，state 参数名未实测；凭记忆传一个可能 400 的
 # 参数会让整条去重通路挂掉，而去重挂掉的后果是重跑在同一行上堆重复评论。状态在脚本侧按 .state 过滤
-# （review_inline_existing_fingerprints）。分页告警与汇总评论列表同理。
+# （review_inline_existing_ranges）。分页告警与汇总评论列表同理。
 # $1=localId → stdout=响应体；rc 1=失败
 codeup_list_inline_comments() {
   _codeup_list_comments "$1" INLINE_COMMENT codeup_list_inline_comments \
@@ -462,7 +462,7 @@ codeup_list_inline_comments() {
 # --- 删除一条评论（DeleteChangeRequestComment）---
 # 只用在一处：草稿一次提交失败、要退回逐条非草稿发布之前，先把已经建好的草稿删掉。
 # 不删的话同一条问题会在 MR 上同时留下一条草稿（只有机器人自己看得见）和一条正式评论，
-# 而下一次评审读到那条草稿的指纹（若把草稿也算作已发出）就再也不会重发了。
+# 而下一次评审读到那条草稿的区间（若把草稿也算作已发出）就再也不会重发了。
 # $1=localId $2=comment_biz_id。失败由调用方降级为警告，绝不因此中断评审。
 codeup_delete_comment() {
   local local_id="$1" biz_id="$2"

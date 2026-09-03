@@ -1,0 +1,63 @@
+{
+  "contract": "codeup-reviewer/1",
+  "summary": "新增 app/download.py：文件下载、远程抓取与请求体反序列化三个接口，并把会话签名密钥写在源码里。",
+  "verdict": "DO_NOT_MERGE",
+  "verdict_reason": "存在多处可被远程利用的安全缺陷，必须修复后再合并。",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "category": "security",
+      "title": "日志输出完整签名密钥",
+      "file": "app/download.py",
+      "line_start": 22,
+      "line_end": 22,
+      "body": "每次下载请求都会把完整签名密钥写入 DEBUG 日志。日志通常被集中采集且访问范围较广，这会进一步扩大密钥泄露范围。",
+      "fix": "日志中彻底移除密钥及其他认证材料，只记录经过安全处理的文件标识、请求 ID 和必要状态；同时清理已有日志并轮换已暴露密钥。"
+    },
+    {
+      "id": "F2",
+      "severity": "P0",
+      "category": "security",
+      "title": "远程抓取接口存在 SSRF",
+      "file": "app/download.py",
+      "line_start": 29,
+      "line_end": 29,
+      "body": "接口直接打开用户提供的 URL，未限制协议、目标主机、重定向或内网地址。攻击者可访问本机及内网服务。",
+      "fix": "仅允许明确的 HTTP/HTTPS 目标白名单；解析并校验 DNS 结果，拒绝环回、链路本地、私网和保留地址。"
+    },
+    {
+      "id": "F3",
+      "severity": "P0",
+      "category": "security",
+      "title": "反序列化请求体可执行任意代码",
+      "file": "app/download.py",
+      "line_start": 36,
+      "line_end": 36,
+      "body": "`pickle.loads` 会执行载荷中指定的对象构造逻辑。该载荷直接来自未受信的 HTTP 请求体。",
+      "fix": "禁止对外部输入使用 pickle，改用 JSON 等不具备代码执行能力的格式。"
+    },
+    {
+      "id": "F4",
+      "severity": "P0",
+      "category": "security",
+      "title": "签名密钥被硬编码",
+      "file": "app/download.py",
+      "line_start": 14,
+      "line_end": 14,
+      "body": "会话签名密钥直接提交在源码中，并用于生成对外返回的 token。任何能读取代码的人都能获得该密钥。",
+      "fix": "立即撤销并轮换该密钥，从部署环境的密钥管理服务或环境变量注入。"
+    },
+    {
+      "id": "F5",
+      "severity": "P0",
+      "category": "security",
+      "title": "下载路径可逃逸基础目录",
+      "file": "app/download.py",
+      "line_start": 21,
+      "line_end": 23,
+      "body": "`name` 完全由请求参数控制，`os.path.join` 不会阻止 `../` 路径穿越，且绝对路径会直接覆盖 `BASE_DIR`。",
+      "fix": "先拒绝绝对路径，将候选路径规范化并通过 `os.path.commonpath` 验证其仍位于 `BASE_DIR` 内。"
+    }
+  ]
+}

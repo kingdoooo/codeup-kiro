@@ -1,5 +1,5 @@
 ### P1 · 分页参数缺少上界校验
-<!-- kiro-inline:675a2c999a6399d51eeec48bea7242ea83f6c300 -->
+<!-- kiro-inline:675a2c999a6399d51eeec48bea7242ea83f6c300 L27-27 sev=P1 -->
 
 `per_page` 直接取自查询串，传入 100000 会一次性把整表读进内存。
 

@@ -32,10 +32,13 @@ make_mutant() {
 }
 # $1=用例名 $2=集成包根目录 → 新建 fixture 并运行；结果写入全局 CASE(目录) / RC / OUT
 # 用法：run_case <用例名> <集成包根目录> [VAR=值 ...]（额外的 VAR=值 只作用于这一次调用）
+# 可选：MUT_TWEAK=<函数名> 在运行前于 checkout 目录内执行，用来改造 fixture（与 test-kiro-review.sh 的 CASE_TWEAK 同义）。
 run_case() {
   local name="$1" pkg="$2"; shift 2
   CASE="$tmp/case-$name"; mkdir -p "$CASE"
   make_fixture_repo "$CASE"
+  if [[ -n "${MUT_TWEAK:-}" ]]; then (cd "$CASE/work" && "$MUT_TWEAK"); fi
+  MUT_TWEAK=""
   export HOME="$CASE/home"; mkdir -p "$HOME"
   export REVIEW_REPO_DIR="$CASE/work" MOCK_ARGS_FILE="$CASE/args" MOCK_STDIN_FILE="$CASE/stdin" \
          MOCK_SETTINGS_FILE="$CASE/settings" MOCK_CWD_SCAN_FILE="$CASE/cwdscan" MOCK_CALLS_FILE="$CASE/calls"
@@ -340,7 +343,8 @@ for n in 1 2 3 4 5 6; do
   jq -n --arg id "draft-${n}" '{comment_biz_id:$id, comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true}' \
     > "$IFX/create-comment-inline.${n}.json"
 done
-# 「重跑不重复」用的 fixture：把上一次发出去的三条指纹都摆进现有行内评论列表
+# 「重跑不重复」用的 fixture：把上一次发出去的三条（旧格式标记、锚在第 2 行）摆进现有行内评论列表。
+# 去重判定是区间匹配（同文件、重叠或相距 ≤ 2 行），指纹只写进标记作信息用途。
 IFXR="$tmp/ifx-rerun"
 mkdir -p "$IFXR"
 cp "$IFX/list-patchsets.json" "$IFXR/"
@@ -371,7 +375,7 @@ assert_eq "$(inline_bodies "$OUT" | jq -r '.line_number' | sort -u | paste -sd, 
 assert_contains "$(posted_comment "$OUT")" "其中 3 条已标注在「文件改动」对应行" "对照：统计行注明行内条数"
 assert_contains "$(posted_comment "$OUT")" "#### 未定位问题（2）" "对照：未定位问题在折叠区"
 inline_case baseline-rerun "$ROOT" "$IFXR"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：重跑时三条都被指纹去重，一条都不重发"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：重跑时三条都被区间去重，一条都不重发"
 
 # --- M26（票要求的正控）：把可定位判定改成恒真 → 未定位问题被当成行内评论发出 ---
 # 这条变异直接对准 spec I5「定位可信」：没有这道校验，模型给的任何行号都会被当成可评论的行，
@@ -387,12 +391,65 @@ assert_contains "$(inline_bodies "$OUT" | jq -r '.line_number' | sort -u | paste
 assert_not_contains "$(posted_comment "$OUT")" "#### 未定位问题（2）" \
   "M26：未定位小节只剩 1 条（没有 file 的那条）——端到端折叠区断言会失败"
 
-# --- M27：把指纹去重判定改成恒不成立 → 重跑在同一行上重复发 ---
-pkg=$(make_mutant m27-dedup 's|if grep -qxF "\$fp" "\$existing_fp"; then|if false; then|')
+# --- M27：把去重判定改成恒「未命中」→ 重跑在同一行上重复发 ---
+pkg=$(make_mutant m27-dedup 's#hrc=0; hits=$(review_inline_overlaps "$existing_rg" "$file" "$ls" "$le" "$sev") || hrc=$?#hrc=1#')
 inline_case m27 "$pkg" "$IFXR"
 assert_rc "$RC" 0 "M27：变异体仍能跑完"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
   "M27：去重被拿掉后重跑又发了 3 条——端到端「重跑一条都不重发」断言会失败（违反 I6 幂等）"
+
+# --- M32 / M33：区间匹配的容差与重叠判定（真实验收 2026-09-03 暴露的缺陷）---
+# fixture = 真实回读的第一次运行的 4 条行内评论（旧格式标记：app/download.py 14–22 / 20–23 / 29–30 / 37–38）；
+# 契约 = 第二次运行的形态：标题全变、行号漂移（20→21、37→36）、一条拆成两条（14 与 22）。
+# 未变异实现必须 0 条新建；把容差改回精确匹配后，漂移的那几条会被重新发出——端到端「0 条新建、跳过 5 条」断言会失败。
+REALC="$ROOT/tests/fixtures/contract/inline-rerun-real.json"
+IFXREAL="$tmp/ifx-real"
+mkdir -p "$IFXREAL"
+cp "$IFX/list-patchsets.json" "$IFXREAL/"
+cp "$IFX"/create-comment-inline.*.json "$IFXREAL/"
+cp "$ROOT/tests/fixtures/inline/real-rerun/list-comments-inline.json" "$IFXREAL/"
+mk_real_repo() {  # 业务库里得有 app/download.py 且这些行都是本次新增的
+  mkdir -p app
+  for i in $(seq 1 50); do echo "line_${i} = ${i}"; done > app/download.py
+  git add app/download.py && git commit -qm "add download endpoint"
+}
+MUT_TWEAK=mk_real_repo inline_case baseline-real "$ROOT" "$IFXREAL" MOCK_KIRO_CONTRACT="$REALC"
+assert_rc "$RC" 0 "对照：真实重跑 fixture 上评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：真实重跑 0 条新建"
+assert_contains "$OUT" "已存在跳过 5 条" "对照：真实重跑跳过 5 条"
+# M32：容差 2 → 0（只认重叠，不认相邻）→ 37→36 那条相距 1 行、被重新发出
+pkg=$(make_mutant m32-tolerance 's#^REVIEW_INLINE_DEDUP_TOLERANCE=2$#REVIEW_INLINE_DEDUP_TOLERANCE=0#' scripts/lib/review-render.sh)
+MUT_TWEAK=mk_real_repo inline_case m32 "$pkg" "$IFXREAL" MOCK_KIRO_CONTRACT="$REALC"
+assert_rc "$RC" 0 "M32：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.line_number' | sort -n | paste -sd, -)" "36" \
+  "M32：容差归零后 36 行（与 37–38 相邻）被重新发出——端到端「0 条新建」断言会失败"
+assert_contains "$OUT" "已存在跳过 4 条" "M32：只剩 4 条靠重叠命中"
+# M33：把「重叠或相邻」改回精确匹配起始行 → 漂移与拆分的那几条全部重发
+pkg=$(make_mutant m33-exact 's#select(($s - .end) <= $tol and (.start - $e) <= $tol)#select(.start == $s)#' scripts/lib/review-render.sh)
+MUT_TWEAK=mk_real_repo inline_case m33 "$pkg" "$IFXREAL" MOCK_KIRO_CONTRACT="$REALC"
+assert_rc "$RC" 0 "M33：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.line_number' | sort -n | paste -sd, -)" "21,22,36" \
+  "M33：精确匹配下漂移的 21、36 与拆出来的 22 都被重新发出（只有 14、29 恰好同起点）——端到端「0 条新建、跳过 5 条」断言会失败"
+assert_contains "$OUT" "已存在跳过 2 条" "M33：只剩起点恰好相同的 2 条被跳过"
+
+# --- M34：拿掉级别门槛 → 同一处一条旧 P1 就能压掉重跑时新出现的 P0（那条 P0 在 MR 上彻底消失）---
+IFXSEV="$tmp/ifx-sev"
+mkdir -p "$IFXSEV"
+cp "$IFX/list-patchsets.json" "$IFXSEV/"
+cp "$IFX"/create-comment-inline.*.json "$IFXSEV/"
+jq -n --arg bot "$BOT" --arg fp "$(review_fingerprint src/app.py 2 上一次)" '[
+  {comment_biz_id:"old-p1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:2, author:{username:$bot},
+   content:("### P1 · 上一次\n<!-- kiro-inline:" + $fp + " -->\n")}]' > "$IFXSEV/list-comments-inline.json"
+inline_case baseline-sev "$ROOT" "$IFXSEV"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "2" "对照：同一处旧 P1 只压掉 P1 那条，两条 P0 照发"
+assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" "硬编码疑似应用密钥" "对照：P0 仍在 MR 上"
+pkg=$(make_mutant m34-sevgate 's#select($sev == "" or (.sev | type) != "string" or ((.sev | rank) == null) or ((.sev | rank) <= ($sev | rank)))#select(true)#' scripts/lib/review-render.sh)
+inline_case m34 "$pkg" "$IFXSEV"
+assert_rc "$RC" 0 "M34：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" \
+  "M34：没有级别门槛时两条 P0 也被旧 P1 压掉——端到端「两条 P0 照发」断言会失败"
+assert_not_contains "$(posted_comment "$OUT")" "硬编码疑似应用密钥" "M34：那条 P0 既不在行内也不在折叠区——从 MR 上彻底消失（这正是门槛要防的）"
 
 # --- M28：拿掉上限截取 → MAX_INLINE_COMMENTS 失效 ---
 pkg=$(make_mutant m28-max 's|(\$cand\[0:\$max\]) as \$inline|($cand) as $inline|' scripts/lib/review-render.sh)

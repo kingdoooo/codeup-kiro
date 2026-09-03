@@ -1082,104 +1082,270 @@ assert_eq "$([[ "$(review_fingerprint "src/app.py" 30 "别的标题")" != "$fp1"
 assert_eq "$([[ "$(review_fingerprint a.py 1 2x)" != "$(review_fingerprint a.py 12 x)" ]] && echo differ)" "differ" \
   "指纹：三段之间有分隔符（拼接歧义不会撞指纹）"
 
-# ---- 从现有行内评论里读回指纹（去重依据）----
-fpA=$(review_fingerprint "src/app.py" 30 "已经发过的问题")
-fpB=$(review_fingerprint "src/db.py" 12 "别人复制的问题")
-jq -n --arg a "$fpA" --arg b "$fpB" --arg bot "$TEST_BOT_USERNAME" '[
+# ---- 行内评论的隐藏标记：新格式带区间与级别，旧格式只有指纹（向后兼容只读）----
+# 实测（2026-09-03，demo-app MR #2 重跑）：模型第二次给的标题全变、行号漂移 1 行、一条拆成两条，
+# 「文件+行+标题」指纹全部不命中，行内评论 4 → 9。去重改按「同文件、区间重叠或相距 ≤2 行」，
+# 标记因此要把区间写进去；旧格式的评论只能靠 line_number + 标题里的「（L起–L止）」还原区间。
+FP40=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+assert_eq "$(review_render_inline_marker "$FP40" 21 23 P0)" "<!-- kiro-inline:${FP40} L21-23 sev=P0 -->" \
+  "标记：新格式 = 指纹 + L起-止 + 级别"
+assert_eq "$(review_render_inline_marker "$FP40" 21 "" P1)" "<!-- kiro-inline:${FP40} L21-21 sev=P1 -->" \
+  "标记：end 缺失时按单行（end = start）"
+assert_eq "$(review_render_inline_marker "$FP40" 21 null P2)" "<!-- kiro-inline:${FP40} L21-21 sev=P2 -->" \
+  "标记：end 为 null 同样按单行"
+assert_eq "$(review_render_inline_marker "$FP40" 23 21 P0)" "<!-- kiro-inline:${FP40} L21-23 sev=P0 -->" \
+  "标记：起止倒置时归一化（起 ≤ 止）"
+rc=0; review_render_inline_marker "$FP40" "" "" P0 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "标记：没有起始行 → rc 2（行内评论必然有锚点行）"
+rc=0; review_render_inline_marker "$FP40" 21 23 P9 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "标记：级别不是 P0/P1/P2 → rc 2"
+rc=0; review_render_inline_marker nothex 21 23 P0 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "标记：指纹不是 40 位十六进制 → rc 2"
+
+# ---- 从现有行内评论里读回区间（去重依据）：真实回读的 fixture ----
+REAL_RERUN="$ROOT/tests/fixtures/inline/real-rerun/list-comments-inline.json"
+out=$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < "$REAL_RERUN")
+assert_eq "$(printf '%s' "$out" | jq -r 'sort_by(.start) | map("\(.file):\(.start)-\(.end)") | join(",")')" \
+  "app/download.py:14-22,app/download.py:20-23,app/download.py:29-30,app/download.py:37-38" \
+  "区间：真实回读的 4 条旧格式评论 → 起点取 line_number、终点从标题「（L起–L止）」解析"
+assert_eq "$(printf '%s' "$out" | jq -r 'map(.sev) | unique | join(",")')" "P0" "区间：旧格式的级别从标题行 ### P0 · 解析"
+assert_eq "$(printf '%s' "$out" | jq -r 'map(.fp | length) | unique | join(",")')" "40" "区间：指纹仍读回（仅作信息用途）"
+assert_eq "$(printf '%s' "$out" | jq -r 'map(.id) | sort | join(",")')" \
+  "115adf34175b4c0eaf33b39c3a07f631,30ed01ac16ae406a898c6dd8791073c3,39410c6f45434235bf87f60304d9d682,83e466f0a1504e8680f1691688524fad" \
+  "区间：带上评论 biz_id（日志里指得出是哪条）"
+printf '%s' "$out" > "$tmp/real-ranges.json"
+
+# 新旧格式混合、以及各种残缺形态
+jq -n --arg fp "$FP40" --arg bot "$TEST_BOT_USERNAME" '[
+  {comment_biz_id:"n1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:99,
+   content:("### P1 · 新格式（L21–L23）\n<!-- kiro-inline:" + $fp + " L21-23 sev=P1 -->\n"), author:{username:$bot}},
+  {comment_biz_id:"o1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:30,
+   content:("### P0 · 旧格式单行\n<!-- kiro-inline:" + $fp + " -->\n\n说明。\n"), author:{username:$bot}},
+  {comment_biz_id:"o2", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py",
+   content:("### P0 · 旧格式且没有 line_number（L5–L6）\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
+  {comment_biz_id:"o3", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:"12",
+   content:("### P0 · line_number 是字符串\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
+  {comment_biz_id:"o4", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   line_number:7,
+   content:("### P0 · 没有文件路径\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
+  {comment_biz_id:"o5", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   file_path:"src/snake.py", line_number:8,
+   content:("### P2 · 只有 snake_case 的 file_path\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
+  {comment_biz_id:"h1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:30,
+   content:"### P0 · 没有标记的评论\n\n人工写的行内评论。\n", author:{username:$bot}}
+]' > "$tmp/mixed-list.json"
+out=$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < "$tmp/mixed-list.json")
+rng() { printf '%s' "$out" | jq -r --arg id "$1" '.[] | select(.id == $id) | "\(.file):\(.start)-\(.end):\(.sev)"'; }
+assert_eq "$(rng n1)" "src/app.py:21-23:P1" "区间：新格式以标记里的区间与级别为准（line_number 99 不参与）"
+assert_eq "$(rng o1)" "src/app.py:30-30:P0" "区间：旧格式、标题无区间 → 单行"
+assert_eq "$(rng o2)" "src/app.py:5-6:P0" "区间：旧格式又没有 line_number → 退回标题里的「（L起–L止）」（那是我们自己的渲染器按 line_start/line_end 写的，不是猜）"
+assert_eq "$(rng o3)" "src/app.py:12-12:P0" "区间：line_number 是数字字符串也认（接口形态在不同接口间不一致）"
+assert_eq "$(rng o4)" "" "区间：没有文件路径的评论无法参与「同文件」判定，跳过"
+assert_eq "$(rng o5)" "src/snake.py:8-8:P2" "区间：filePath 缺失时退回 snake_case 的 file_path"
+assert_eq "$(rng h1)" "" "区间：没有标记的评论不是本评审员发的，不算"
+assert_eq "$(printf '%s' "$out" | jq -r 'length')" "5" "区间：恰好 5 条可用（n1/o1/o2/o3/o5）"
+# 旧格式、没有 line_number、标题也没有区间 → 什么都还原不出来，才跳过
+assert_eq "$(jq -c '[.[] | select(type == "object" and .comment_biz_id == "o2") | .content |= sub("（L5–L6）"; "")]' "$tmp/mixed-list.json" \
+  | review_inline_existing_ranges "$TEST_BOT_USERNAME" | jq -r 'length')" "0" "区间：旧格式、无 line_number、标题无区间 → 跳过"
+
+# ---- 区间宽度上限：标记与标题都是人可编辑/模型给的，一条「（L1–L800）」不能压住整个文件 ----
+assert_eq "$REVIEW_INLINE_MAX_RANGE_SPAN" "50" "区间上限常量 = 50 行"
+jq -n --arg fp "$FP40" --arg bot "$TEST_BOT_USERNAME" '[
+  {comment_biz_id:"w1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/big.py", line_number:3,
+   content:("### P2 · 建议整体重构这个模块（L1–L800）\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
+  {comment_biz_id:"w2", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/big.py", line_number:200,
+   content:("### P0 · 标记被人改成天文数字\n<!-- kiro-inline:" + $fp + " L1-999999 sev=P0 -->\n"), author:{username:$bot}},
+  {comment_biz_id:"w3", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/big.py", line_number:900,
+   content:("### P0 · 8 位行号的标记整条不认\n<!-- kiro-inline:" + $fp + " L900-12345678 sev=P0 -->\n"), author:{username:$bot}}
+]' > "$tmp/wide-list.json"
+out=$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < "$tmp/wide-list.json")
+assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.id == "w1") | "\(.start)-\(.end)"')" "3-53" "区间上限：旧格式标题「（L1–L800）」→ 起点仍是 line_number 3，终点截到 3+50"
+assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.id == "w2") | "\(.start)-\(.end)"')" "1-51" "区间上限：新格式 L1-999999 → 截到 1+50"
+assert_eq "$(printf '%s' "$out" | jq -r 'map(.id) | sort | join(",")')" "w1,w2" "区间上限：8 位行号的标记不合形，整条不认（宁可重发一条，不能压住整个文件）"
+printf '%s' "$out" > "$tmp/wide-ranges.json"
+rc=0; review_inline_overlaps "$tmp/wide-ranges.json" src/big.py 400 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "区间上限：第 400 行不再被「（L1–L800）」压住"
+rc=0; review_inline_overlaps "$tmp/wide-ranges.json" src/big.py 800 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "区间上限：第 800 行也不被压住"
+assert_eq "$(review_inline_overlaps "$tmp/wide-ranges.json" src/big.py 55)" "w1" "区间上限：截断后的终点 53 + 容差 2 = 55 仍命中 w1（w2 到 51+2=53 不命中）"
+rc=0; review_inline_overlaps "$tmp/wide-ranges.json" src/big.py 56 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "区间上限：第 56 行相距 3 → 不命中"
+rc=0; _review_inline_ranges "$TEST_BOT_USERNAME" bogus < "$tmp/wide-list.json" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "区间读回：内部函数拒绝未知模式（rc 2）"
+
+# 作者 / 状态 / 草稿 / out_dated 的过滤与旧实现完全一致
+jq -n --arg fp "$FP40" --arg bot "$TEST_BOT_USERNAME" '[
   {comment_biz_id:"i1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
    filePath:"src/app.py", line_number:30,
-   content:("### P0 · 已经发过的问题\n<!-- kiro-inline:" + $a + " -->\n\n说明。\n"),
-   author:{username:$bot}},
+   content:("### P0 · 已经发过的问题\n<!-- kiro-inline:" + $fp + " -->\n\n说明。\n"), author:{username:$bot}},
   {comment_biz_id:"i2", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
-   content:("### P2 · 别人复制的问题\n<!-- kiro-inline:" + $b + " -->\n"),
-   author:{username:"aliyun:human_dev"}},
+   filePath:"src/db.py", line_number:12,
+   content:("### P2 · 别人复制的问题\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:"aliyun:human_dev"}},
   {comment_biz_id:"i3", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
-   content:"### P0 · 还是草稿\n<!-- kiro-inline:cccccccccccccccccccccccccccccccccccccccc -->\n",
-   author:{username:$bot}},
+   filePath:"src/app.py", line_number:40,
+   content:("### P0 · 还是草稿\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
   {comment_biz_id:"i4", comment_type:"INLINE_COMMENT", state:"DELETED", draft:false,
-   content:"### P0 · 已删除\n<!-- kiro-inline:dddddddddddddddddddddddddddddddddddddddd -->\n",
-   author:{username:$bot}},
-  {comment_biz_id:"i5", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
-   content:"### P0 · 没有标记的评论\n\n人工写的行内评论。\n", author:{username:$bot}},
+   filePath:"src/app.py", line_number:50,
+   content:("### P0 · 已删除\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
+  {comment_biz_id:"i5", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false, out_dated:true,
+   filePath:"src/app.py", line_number:60,
+   content:("### P0 · 绑在旧版本上\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
+  {comment_biz_id:"i6", comment_type:"INLINE_COMMENT", state:"RESOLVED", draft:false,
+   filePath:"src/app.py", line_number:70,
+   content:("### P1 · 已被解决\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
   "这一项根本不是对象",
-  {comment_biz_id:"i6", comment_type:"INLINE_COMMENT", state:123, draft:0, content:null, author:"字符串作者"}
+  {comment_biz_id:"i7", comment_type:"INLINE_COMMENT", state:123, draft:0, content:null, author:"字符串作者"}
 ]' > "$tmp/inline-list.json"
-out=$(review_inline_existing_fingerprints "$TEST_BOT_USERNAME" < "$tmp/inline-list.json")
-assert_eq "$out" "$fpA" "去重：只取本机器人、OPENED、带标记的那条指纹"
-assert_not_contains "$out" "$fpB" "去重：别人发的评论不算「我发过了」（否则他能压掉本评审员的问题）"
-assert_not_contains "$out" "cccccccccccccccccccccccccccccccccccccccc" "去重：草稿不算已发出"
-assert_not_contains "$out" "dddddddddddddddddddddddddddddddddddddddd" "去重：已删除的不算已发出"
-# 用户名未知 → 退化为只按标记去重（重跑不重复优先；风险由调用方打警告提示）
-out=$(review_inline_existing_fingerprints "" < "$tmp/inline-list.json")
-assert_contains "$out" "$fpA" "去重：用户名未知时仍按标记去重"
-assert_contains "$out" "$fpB" "去重：用户名未知时无法按作者过滤（这正是要配 CODEUP_BOT_USERNAME 的原因）"
-# 字段不合形的项不能废掉整批（与 review_select_prior_comment 同一原则）
-assert_eq "$(printf '%s\n' "$out" | grep -c .)" "2" "去重：不合形的项被跳过，其余照常解析"
-assert_eq "$(review_inline_existing_fingerprints "$TEST_BOT_USERNAME" < <(echo 'not json') | wc -l | tr -d ' ')" "0" \
-  "去重：响应不是合法 JSON → 空列表（不报错）"
-assert_eq "$(jq -c '{result: .}' "$tmp/inline-list.json" | review_inline_existing_fingerprints "$TEST_BOT_USERNAME")" "$fpA" \
-  "去重：{result:[…]} 形态兼容"
+out=$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < "$tmp/inline-list.json")
+assert_eq "$(printf '%s' "$out" | jq -r 'map(.id) | sort | join(",")')" "i1,i6" \
+  "去重候选：只取本机器人、非草稿、非删除、未过期的（i1）；未见过的状态 RESOLVED 也算已发出（i6）"
+assert_not_contains "$(printf '%s' "$out" | jq -r 'map(.id) | join(",")')" "i2" "去重候选：别人发的不算「我发过了」（否则他能压掉本评审员的问题）"
+assert_not_contains "$(printf '%s' "$out" | jq -r 'map(.id) | join(",")')" "i3" "去重候选：草稿不算已发出"
+assert_not_contains "$(printf '%s' "$out" | jq -r 'map(.id) | join(",")')" "i4" "去重候选：已删除的不算"
+assert_not_contains "$(printf '%s' "$out" | jq -r 'map(.id) | join(",")')" "i5" \
+  "去重候选：out_dated 的不算（绑在被取代的旧版本上，会按当前版本重发一条，让「已标注」这句话为真）"
+assert_eq "$(jq -c 'map(if type == "object" and .comment_biz_id == "i5" then (.out_dated = false) else . end)' "$tmp/inline-list.json" \
+  | review_inline_existing_ranges "$TEST_BOT_USERNAME" | jq -r 'map(.id) | sort | join(",")')" "i1,i5,i6" \
+  "去重候选：out_dated=false（重跑而没有新推送）时照常计入，A3 不受影响"
+assert_eq "$(jq -c 'map(if type == "object" then del(.out_dated) else . end)' "$tmp/inline-list.json" \
+  | review_inline_existing_ranges "$TEST_BOT_USERNAME" | jq -r 'map(.id) | sort | join(",")')" "i1,i5,i6" \
+  "去重候选：没有 out_dated 字段时按未过期处理"
+# 用户名未知 → 退化为只按标记（重跑不重复优先；风险由调用方打警告提示）
+out=$(review_inline_existing_ranges "" < "$tmp/inline-list.json")
+assert_eq "$(printf '%s' "$out" | jq -r 'map(.id) | sort | join(",")')" "i1,i2,i6" \
+  "去重候选：用户名未知时无法按作者过滤，别人带标记的评论也算（这正是要配 CODEUP_BOT_USERNAME 的原因）"
+assert_eq "$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < <(echo 'not json'))" "[]" \
+  "去重候选：响应不是合法 JSON → 空数组（不报错、仍是合法 JSON）"
+assert_eq "$(jq -c '{result: .}' "$tmp/inline-list.json" | review_inline_existing_ranges "$TEST_BOT_USERNAME" | jq -r 'map(.id) | sort | join(",")')" "i1,i6" \
+  "去重候选：{result:[…]} 形态兼容"
 
-# 状态判定必须是排除清单（排除 DELETED/DRAFT）而不是许可清单（只认 OPENED）：
-# 实测只见过三个取值，Codeup 对「已被开发者解决」的行内评论若返回别的状态（如 RESOLVED），
-# 许可清单会漏收它的指纹，于是每次重跑都在同一行上再发一条（违反 I6 幂等）。
-fpR2=$(review_fingerprint "src/x.py" 5 "已被解决的问题")
-jq -n --arg fp "$fpR2" --arg bot "$TEST_BOT_USERNAME" '[
-  {comment_biz_id:"r1", comment_type:"INLINE_COMMENT", state:"RESOLVED", draft:false,
-   content:("### P1 · 已被解决的问题\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}}]' \
-  > "$tmp/resolved-list.json"
-assert_eq "$(review_inline_existing_fingerprints "$TEST_BOT_USERNAME" < "$tmp/resolved-list.json")" "$fpR2" \
-  "去重：未见过的状态（RESOLVED）也算已发出，不会每次重跑都重发"
+# ---- 区间匹配（协调者裁决 2026-09-03：同文件、重叠或相距 ≤ 2 行 → 同一问题）----
+assert_eq "$REVIEW_INLINE_DEDUP_TOLERANCE" "2" "容差常量 = 2 行"
+ov() { if review_inline_overlaps "$tmp/real-ranges.json" "$@" >/dev/null 2>&1; then echo hit; else echo "miss:$?"; fi; }
+# 真实重跑里的四种漂移形态，全部要命中
+assert_eq "$(ov app/download.py 21 23)" hit "重叠：21–23 与 20–23（行号漂移 1 行：20→21）"
+assert_eq "$(ov app/download.py 36 36)" hit "相邻：36 与 37–38 相距 1 行（37→36）"
+assert_eq "$(ov app/download.py 14 14)" hit "包含：14 落在 14–22 内（一条拆成两条之一）"
+assert_eq "$(ov app/download.py 22 22)" hit "包含：22 落在 14–22 内（拆成两条之二）"
+assert_eq "$(ov app/download.py 29)" hit "省略 end：按单行处理，29 与 29–30 重叠"
+# 容差边界（两侧）
+assert_eq "$(ov app/download.py 40 40)" hit "容差边界：40 与 37–38 相距 2 行 → 命中"
+assert_eq "$(ov app/download.py 41 41)" "miss:1" "容差边界：41 与 37–38 相距 3 行 → 不命中（新问题照发）"
+assert_eq "$(ov app/download.py 12 12)" hit "容差边界（向前）：12 与 14–22 相距 2 行 → 命中"
+assert_eq "$(ov app/download.py 11 11)" "miss:1" "容差边界（向前）：11 与 14–22 相距 3 行 → 不命中"
+assert_eq "$(ov app/download.py 10 12)" hit "区间 10–12 与 14–22 相距 2 行 → 命中"
+assert_eq "$(ov app/download.py 9 11)" "miss:1" "区间 9–11 与 14–22 相距 3 行 → 不命中"
+assert_eq "$(ov app/download.py 1 100)" hit "大区间包住所有已有评论 → 命中"
+assert_eq "$(ov app/other.py 21 23)" "miss:1" "不同文件同行号 → 不命中"
+assert_eq "$(ov app/download.py 23 21)" hit "起止倒置时归一化后再比"
+# 命中时打印被命中评论的 biz_id（日志里指得出「和哪条算同一问题」）
+assert_eq "$(review_inline_overlaps "$tmp/real-ranges.json" app/download.py 38 38)" "115adf34175b4c0eaf33b39c3a07f631" "命中：打印被命中评论的 biz_id"
+assert_eq "$(review_inline_overlaps "$tmp/real-ranges.json" app/download.py 21 23 | sort | paste -sd, -)" \
+  "30ed01ac16ae406a898c6dd8791073c3,39410c6f45434235bf87f60304d9d682" "命中：21–23 同时与 14–22、20–23 重叠 → 两个 id 都列出"
+assert_eq "$(review_inline_overlaps "$tmp/real-ranges.json" app/download.py 22 22 | sort | paste -sd, -)" \
+  "30ed01ac16ae406a898c6dd8791073c3,39410c6f45434235bf87f60304d9d682" "命中：22 同时落在 14–22 与 20–23 → 两个 id 都列出"
+# 参数错误必须与「未命中」区分开（rc 2 vs rc 1）：调用方对 rc 2 只打警告并照常发出，绝不因此把一条问题吞掉
+rc=0; review_inline_overlaps "$tmp/real-ranges.json" app/download.py abc >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "起始行不是整数 → rc 2"
+rc=0; review_inline_overlaps "$tmp/real-ranges.json" app/download.py 21 x >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "结束行不是整数 → rc 2"
+rc=0; review_inline_overlaps /nonexistent app/download.py 1 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "区间文件不可读 → rc 2"
+rc=0; review_inline_overlaps "$tmp/real-ranges.json" "" 1 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "文件路径为空 → rc 2"
+echo '[]' > "$tmp/empty-ranges.json"
+rc=0; review_inline_overlaps "$tmp/empty-ranges.json" app/download.py 21 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "没有任何已有评论 → rc 1（未命中）"
+echo 'not json' > "$tmp/bad-ranges.json"
+rc=0; review_inline_overlaps "$tmp/bad-ranges.json" app/download.py 21 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "区间文件不是 JSON → rc 2"
+# 区间文件里的坏项不废掉整批
+jq -c '. + [{id:"bad", file:"app/download.py", start:"x", end:null}, "不是对象"]' "$tmp/real-ranges.json" > "$tmp/dirty-ranges.json"
+assert_eq "$(review_inline_overlaps "$tmp/dirty-ranges.json" app/download.py 38 38)" "115adf34175b4c0eaf33b39c3a07f631" "区间文件里的坏项被跳过，其余照常匹配"
 
-# out_dated 的评论一律不算已发出：它绑在被取代的旧版本上，Codeup 会把它折叠/隐藏在 diff 视图里。
-# 算作已发出就等于汇总里那句「已标注在「文件改动」对应行」在说谎。
-fpO=$(review_fingerprint "src/x.py" 7 "绑在旧版本上的问题")
-jq -n --arg fp "$fpO" --arg bot "$TEST_BOT_USERNAME" '[
-  {comment_biz_id:"o1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false, out_dated:true,
-   content:("### P0 · 绑在旧版本上的问题\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}}]' \
-  > "$tmp/outdated-list.json"
-assert_eq "$(review_inline_existing_fingerprints "$TEST_BOT_USERNAME" < "$tmp/outdated-list.json")" "" \
-  "去重：out_dated 的评论不算已发出（会按当前版本重发一条，让「已标注」这句话为真）"
-assert_eq "$(jq -c 'map(.out_dated = false)' "$tmp/outdated-list.json" | review_inline_existing_fingerprints "$TEST_BOT_USERNAME")" "$fpO" \
-  "去重：out_dated=false（重跑而没有新推送）时照常去重，A3 不受影响"
-assert_eq "$(jq -c 'map(del(.out_dated))' "$tmp/outdated-list.json" | review_inline_existing_fingerprints "$TEST_BOT_USERNAME")" "$fpO" \
-  "去重：没有 out_dated 字段时按未过期处理"
+# ---- 级别门槛：已有评论只压制级别不高于它的新问题（一条旧 P2 不能让重跑时新出现的 P0 消失）----
+# 真实 fixture 里 4 条都是 P0 → 任何级别的新问题都被压制
+assert_eq "$(ov app/download.py 36 36 P0)" hit "级别门槛：旧 P0 压新 P0"
+assert_eq "$(ov app/download.py 36 36 P1)" hit "级别门槛：旧 P0 压新 P1"
+assert_eq "$(ov app/download.py 36 36 P2)" hit "级别门槛：旧 P0 压新 P2"
+jq -n --arg fp "$FP40" '[
+  {id:"p2", file:"a.py", start:10, end:10, sev:"P2", fp:$fp},
+  {id:"p1", file:"a.py", start:20, end:20, sev:"P1", fp:$fp},
+  {id:"nosev", file:"a.py", start:30, end:30, sev:null, fp:$fp}
+]' > "$tmp/sev-ranges.json"
+ovs() { if review_inline_overlaps "$tmp/sev-ranges.json" "$@" >/dev/null 2>&1; then echo hit; else echo "miss:$?"; fi; }
+assert_eq "$(ovs a.py 10 10 P0)" "miss:1" "级别门槛：旧 P2 不压新 P0（否则那条 P0 在 MR 上彻底消失）"
+assert_eq "$(ovs a.py 10 10 P1)" "miss:1" "级别门槛：旧 P2 不压新 P1"
+assert_eq "$(ovs a.py 10 10 P2)" hit "级别门槛：旧 P2 压新 P2"
+assert_eq "$(ovs a.py 20 20 P0)" "miss:1" "级别门槛：旧 P1 不压新 P0"
+assert_eq "$(ovs a.py 20 20 P1)" hit "级别门槛：旧 P1 压新 P1"
+assert_eq "$(ovs a.py 20 20 P2)" hit "级别门槛：旧 P1 压新 P2"
+assert_eq "$(ovs a.py 30 30 P0)" hit "级别门槛：旧评论解析不出级别 → 不设门槛，按原裁决压制"
+assert_eq "$(ovs a.py 10 10)" hit "级别门槛：调用方不给新问题级别 → 不设门槛"
+assert_eq "$(ovs a.py 10 10 "")" hit "级别门槛：级别为空串 → 不设门槛"
+rc=0; review_inline_overlaps "$tmp/sev-ranges.json" a.py 10 10 P9 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "级别门槛：级别不是 P0/P1/P2 → rc 2"
 
-# ---- 残留草稿的指纹 → biz_id（发布前清理孤儿草稿 + 提交后回读都用它）----
-fpD=$(review_fingerprint "src/app.py" 30 "上次没提交成功的问题")
-jq -n --arg fp "$fpD" --arg bot "$TEST_BOT_USERNAME" '[
+# ---- 残留草稿的区间 → biz_id（发布前清理孤儿草稿 + 提交后回读都用它）----
+jq -n --arg fp "$FP40" --arg bot "$TEST_BOT_USERNAME" '[
   {comment_biz_id:"d1", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
-   content:("### P0 · 上次没提交成功的问题\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
+   filePath:"src/app.py", line_number:30,
+   content:("### P0 · 上次没提交成功的问题（L30–L31）\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
   {comment_biz_id:"d2", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
-   content:("### P0 · 已经公开的问题\n<!-- kiro-inline:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->\n"), author:{username:$bot}},
+   filePath:"src/app.py", line_number:30,
+   content:("### P0 · 已经公开的问题\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
   {comment_biz_id:"d3", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
-   content:("### P0 · 别人的草稿\n<!-- kiro-inline:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->\n"), author:{username:"aliyun:human_dev"}},
+   filePath:"src/app.py", line_number:30,
+   content:("### P0 · 别人的草稿\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:"aliyun:human_dev"}},
   {comment_biz_id:"d4", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
+   filePath:"src/app.py", line_number:30,
    content:"### P0 · 没有指纹标记的草稿\n", author:{username:$bot}},
   {comment_biz_id:"", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
-   content:("### P0 · 没有 biz_id\n<!-- kiro-inline:cccccccccccccccccccccccccccccccccccccccc -->\n"), author:{username:$bot}},
+   filePath:"src/app.py", line_number:30,
+   content:("### P0 · 没有 biz_id\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
+  {comment_biz_id:"d5", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true, out_dated:true,
+   filePath:"src/app.py", line_number:30,
+   content:("### P0 · 过期的草稿也要清理\n<!-- kiro-inline:" + $fp + " L30-30 sev=P0 -->\n"), author:{username:$bot}},
+  {comment_biz_id:"d6", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
+   content:("### P0 · 没有位置的草稿\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
   "这一项不是对象"
 ]' > "$tmp/draft-list.json"
-out=$(review_inline_draft_fingerprints "$TEST_BOT_USERNAME" < "$tmp/draft-list.json")
-assert_eq "$out" "$(printf '%s\td1' "$fpD")" "草稿：只取本机器人、仍是草稿、带指纹标记、且有 biz_id 的那条"
-# 断言只看 biz_id 那一列：指纹是 40 位十六进制，"d2"/"d3"/"d4" 这种短串很容易在里面撞上
-ids=$(printf '%s\n' "$out" | cut -f2 | paste -sd, -)
-assert_eq "$ids" "d1" "草稿：选出的 biz_id 恰好只有 d1（d2 已公开、d3 是别人的、d4 没有指纹标记、空 biz_id 被跳过）"
-assert_eq "$(printf '%s\n' "$out" | cut -f1 | paste -sd, -)" "$fpD" "草稿：指纹列就是那条问题的指纹"
+out=$(review_inline_draft_ranges "$TEST_BOT_USERNAME" < "$tmp/draft-list.json")
+assert_eq "$(printf '%s' "$out" | jq -r 'map(.id) | sort | join(",")')" "d1,d5,d6" \
+  "草稿：只取本机器人、仍是草稿、带指纹标记、且有 biz_id 的（d2 已公开、d3 是别人的、d4 没有标记、空 biz_id 被跳过）"
+assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.id == "d1") | "\(.file):\(.start)-\(.end)"')" "src/app.py:30-31" \
+  "草稿：区间照样从 line_number + 标题还原（清理孤儿草稿也按区间匹配）"
+assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.id == "d6") | "\(.file):\(.start)-\(.end)"')" "null:null-null" \
+  "草稿：没有位置的草稿仍列出 id（提交后回读只看 id；只是匹配不到任何问题）"
+assert_eq "$(printf '%s' "$out" | jq -r '.[] | select(.id == "d5") | .id')" "d5" "草稿：out_dated 不参与判定——草稿无论新旧都要清理"
 # state 缺失但 draft:true 同样算草稿（两个字段任一为真即可）
 assert_contains "$(jq -c 'map(if type == "object" and .comment_biz_id == "d1" then del(.state) else . end)' "$tmp/draft-list.json" \
-  | review_inline_draft_fingerprints "$TEST_BOT_USERNAME")" "d1" "草稿：只有 draft:true 也认"
+  | review_inline_draft_ranges "$TEST_BOT_USERNAME" | jq -r 'map(.id) | join(",")')" "d1" "草稿：只有 draft:true 也认"
 assert_contains "$(jq -c 'map(if type == "object" and .comment_biz_id == "d1" then (.draft = false) else . end)' "$tmp/draft-list.json" \
-  | review_inline_draft_fingerprints "$TEST_BOT_USERNAME")" "d1" "草稿：只有 state=DRAFT 也认"
-assert_eq "$(review_inline_draft_fingerprints "" < "$tmp/draft-list.json" | wc -l | tr -d ' ')" "2" \
+  | review_inline_draft_ranges "$TEST_BOT_USERNAME" | jq -r 'map(.id) | join(",")')" "d1" "草稿：只有 state=DRAFT 也认"
+assert_eq "$(review_inline_draft_ranges "" < "$tmp/draft-list.json" | jq -r 'map(.id) | sort | join(",")')" "d1,d3,d5,d6" \
   "草稿：用户名未知时无法按作者过滤（与去重同一处降级）"
-assert_eq "$(review_inline_draft_fingerprints "$TEST_BOT_USERNAME" < <(echo 'not json') | wc -l | tr -d ' ')" "0" \
-  "草稿：响应非法 JSON → 空列表（不报错）"
-assert_eq "$(jq -c '{result: .}' "$tmp/draft-list.json" | review_inline_draft_fingerprints "$TEST_BOT_USERNAME")" \
-  "$(printf '%s\td1' "$fpD")" "草稿：{result:[…]} 形态兼容"
+assert_eq "$(review_inline_draft_ranges "$TEST_BOT_USERNAME" < <(echo 'not json'))" "[]" \
+  "草稿：响应非法 JSON → 空数组（不报错、仍是合法 JSON）"
+assert_eq "$(jq -c '{result: .}' "$tmp/draft-list.json" | review_inline_draft_ranges "$TEST_BOT_USERNAME" | jq -r 'map(.id) | sort | join(",")')" \
+  "d1,d5,d6" "草稿：{result:[…]} 形态兼容"
 # 同一条既在 existing 又在 draft 里是不可能的（状态互斥），两个函数的判定必须一致
-assert_eq "$(review_inline_existing_fingerprints "$TEST_BOT_USERNAME" < "$tmp/draft-list.json")" \
-  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "草稿：草稿的指纹不会被 existing 收进去（两处判定互斥）"
+assert_eq "$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < "$tmp/draft-list.json" | jq -r 'map(.id) | join(",")')" "d2" \
+  "草稿：草稿不会被 existing 收进去（两处判定互斥）"
+# 孤儿草稿的匹配走同一个区间匹配器
+printf '%s' "$out" > "$tmp/draft-ranges.json"
+assert_eq "$(review_inline_overlaps "$tmp/draft-ranges.json" src/app.py 32 32 | sort | paste -sd, -)" "d1,d5" \
+  "草稿匹配：32 与 30–31（d1，旧格式）相邻、与 30–30（d5，新格式）相距 2 行 → 都命中（不靠指纹）"
+rc=0; review_inline_overlaps "$tmp/draft-ranges.json" src/app.py 40 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "草稿匹配：40 与 30–31 相距 9 行 → 不命中"
 
 # ---- 行内评论正文（golden）----
 jq -c '.inline[0]' "$tmp/plan-quiet.json" > "$tmp/item-range.json"
@@ -1188,7 +1354,7 @@ review_render_inline_body "$tmp/item-range.json" 90fcb05 "$fpR" > "$tmp/inline-r
 assert_golden "$tmp/inline-range.md" inline-range.md "行内正文：多行区间"
 body=$(cat "$tmp/inline-range.md")
 assert_contains "$body" "### P0 · 用户输入直接拼接进 SQL（L30–L31）" "行内正文：多行区间在标题后附 L 起–L 止"
-assert_contains "$body" "<!-- kiro-inline:${fpR} -->" "行内正文：带指纹隐藏标记（去重靠它，不靠反解标题）"
+assert_contains "$body" "<!-- kiro-inline:${fpR} L30-31 sev=P0 -->" "行内正文：隐藏标记带指纹、行区间与级别（去重按区间，不靠反解标题）"
 assert_contains "$body" "**修复建议**" "行内正文：含修复建议小节"
 assert_contains "$body" '— Kiro 评审 · 提交 `90fcb05`' "行内正文：落款含评审员与提交"
 assert_contains "$body" '```python' "行内正文：修复建议里的代码块原样保留"
@@ -1199,6 +1365,7 @@ review_render_inline_body "$tmp/item-single.json" 90fcb05 "$fpS" > "$tmp/inline-
 assert_golden "$tmp/inline-single.md" inline-single.md "行内正文：单行"
 assert_contains "$(cat "$tmp/inline-single.md")" "### P1 · 分页参数缺少上界校验" "行内正文：单行不附 L 区间"
 assert_not_contains "$(cat "$tmp/inline-single.md")" "（L27" "行内正文：单行问题标题里没有区间后缀"
+assert_contains "$(cat "$tmp/inline-single.md")" "<!-- kiro-inline:${fpS} L27-27 sev=P1 -->" "行内正文：单行问题的标记区间为 L27-27"
 
 # fix 为空 → 省略修复建议小节
 jq -n '{id:"X",severity:"P2",title:"缺少模块级说明",file:"a.py",line_start:1,line_end:1,body:"说明。",fix:""}' > "$tmp/item-nofix.json"
@@ -1213,6 +1380,10 @@ rc=0; review_render_inline_body /nonexistent abc1234 "$fpS" >/dev/null 2>&1 || r
 assert_rc "$rc" 2 "行内正文：问题 JSON 不可读 → rc 2"
 rc=0; review_render_inline_body "$tmp/item-nofix.json" "" "$fpS" >/dev/null 2>&1 || rc=$?
 assert_rc "$rc" 2 "行内正文：缺 sha → rc 2"
+# 行内评论必然有锚点行：没有 line_start 的问题根本不该走到渲染这一步（它是未定位问题）
+jq 'del(.line_start)' "$tmp/item-nofix.json" > "$tmp/item-noline.json"
+rc=0; review_render_inline_body "$tmp/item-noline.json" abc1234 "$fpS" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "行内正文：缺 line_start → rc 2（标记里写不出区间）"
 # 模型文本里的注入在 review_validate 阶段就被转义，行内正文里同样不成立
 jq -c '.findings[0]' "$tmp/inline-validated.json" >/dev/null   # 形态自检
 review_validate < "$tmp/inject.json" > "$tmp/inject-validated.json"
