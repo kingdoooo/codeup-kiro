@@ -48,7 +48,7 @@ stages:
             with:
               run: |
                 # 多代码源下无下标 CI_COMMIT_REF_NAME 取值不可预期（可能取到集成包分支）；
-                # 用带下标变量显式指定业务库源分支与 MR 目标分支（见 setup-guide §5、§12）。
+                # 用带下标变量显式指定业务库源分支与 MR 目标分支（见 setup-guide 第 5 节）。
                 # 首次接入务必用 `env | cut -d= -f1 | sort`（只打变量名）核对本组织的变量名。
                 export REVIEW_REPO_DIR="$PROJECT_DIR"
                 export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"
@@ -56,7 +56,10 @@ stages:
                 # business_repo 与 integration_repo 是兄弟目录，故用 ../ 定位集成包脚本
                 bash "$PROJECT_DIR/../integration_repo/scripts/kiro-review.sh"
 
-# UI 中需配置的变量（变量和缓存 → 字符变量）：
+# UI 中需配置的变量（变量和缓存 → 字符变量）。
+# 每个开关「关闭时 / 开启时各是什么行为、前提是什么」的完整矩阵见 setup-guide 第 11 节；
+# 默认全部关闭时每次评审在 MR 上发一条汇总评论（含完整问题清单）。
+# 「重跑原地更新同一条汇总」需要先配 CODEUP_BOT_USERNAME，不是默认行为。
 #   KIRO_API_KEY       （私密）Kiro API Key
 #   YUNXIAO_TOKEN      （私密）云效令牌，建议专用机器人账号（代码只读 + MR 读写）
 #   YUNXIAO_ORG_ID     云效组织 ID
@@ -64,10 +67,14 @@ stages:
 #   DIFF_SIZE_LIMIT    可选，默认 307200（300KB）
 #   KIRO_TIMEOUT       可选，默认 900（秒）
 #   MAX_COMMENT_BYTES  可选，默认 60000（字节）
-#   CODEUP_BOT_USERNAME 可选但强烈建议，机器人账号用户名（形如 aliyun:xxx）。汇总评论原地更新与
-#                      行内评论去重都靠它；首次运行后在日志里找「新建评论的作者用户名=…」照抄
-#   INLINE_COMMENT     可选，默认 0（关）。1 = 可定位的问题发成行内评论，见 setup-guide 第 11 节
-#   INLINE_PROFILE     可选，默认 quiet（P0+P1）；balanced=全部；critical=仅 P0
-#   MAX_INLINE_COMMENTS 可选，默认 10（单次行内评论上限，超出的进折叠区）
+#   CODEUP_BOT_USERNAME 可选但强烈建议，机器人账号在 Codeup 上的用户名。
+#                      未配置时汇总评论每次新建（不原地更新），行内评论去重也不校验作者；
+#                      取值照抄首次运行日志里「新建评论的作者用户名=…」那一行
+#   INLINE_COMMENT     可选，默认 0（关）。1 = 可定位的问题发成行内评论、汇总退化为状态面板 +
+#                      折叠区；其它取值拒绝运行。开启前提：构建机有 sha1sum 或 shasum
+#   INLINE_PROFILE     可选，默认 quiet（P0+P1 可发行内）；balanced=全部；critical=仅 P0。
+#                      非法取值回落 quiet 并在汇总评论里说明
+#   MAX_INLINE_COMMENTS 可选，默认 10（单次行内评论上限，超出的进折叠区；0 = 全部进折叠区）。
+#                      非法取值回落 10 并在汇总评论里说明
 #   MR_LOCAL_ID        可选，MR 编号（与 MR_TARGET_BRANCH 必须同时设置才生效；
 #   MR_TARGET_BRANCH   可选，目标分支  未设置时脚本按源分支反查 OpenAPI，见指南第 5 节）
