@@ -6,6 +6,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 source helpers.sh
+# REVIEW_RERUN_HINT 是本库唯一的隐式环境输入：外部环境里带着它会让 6 个 golden 全部失败，
+# 更糟的是配上 GOLDEN_UPDATE=1 会把错误的页脚烤进 golden。测试里显式清掉。
+unset REVIEW_RERUN_HINT
 ROOT=$(cd .. && pwd)
 source "$ROOT/scripts/lib/review-render.sh"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -261,7 +264,8 @@ assert_golden "$tmp/full.md" summary-full.md "渲染：P0/P1/P2 完整清单"
 body=$(cat "$tmp/full.md")
 assert_contains "$body" "<!-- kiro-review:90fcb05 run:1 -->" "渲染：评审标记含 sha 与 run"
 assert_contains "$body" "P0 必须修复 · P1 应当修复 · P2 可选改进" "渲染：页脚图例"
-assert_contains "$body" '`/kiro review`' "渲染：页脚含重新评审提示"
+assert_contains "$body" "重跑流水线可重新评审" "渲染：页脚含重新评审提示（默认取 Flow 语义）"
+assert_not_contains "$body" "/kiro review" "渲染：默认不承诺 Flow 档位接不到的评论命令（ADR-0001）"
 assert_contains "$body" "建议修改后合并" "渲染：verdict 中文化"
 assert_contains "$body" "src/app.py:30-31" "渲染：多行区间用 起-止"
 assert_contains "$body" "src/app.py:27" "渲染：单行只显示行号"
@@ -692,7 +696,9 @@ render fixtures/contract/empty.json "$tmp/pipehist.md" --run 2 --history "$tmp/p
 assert_not_contains "$(cat "$tmp/pipehist.md")" "| 1 | \`a|b\`" "渲染：历史里的竖线不会原样进表格"
 
 # 失败评论用的两个公开小函数（kiro-review.sh 的 die_review 复用它们，避免页脚/历史各写两份）
-assert_eq "$(review_render_footer 7 | head -1)" "---" "footer：先输出分隔线"
+# 用 sed 取第一行而不是 head -1：head 读到第一行就退出，而页脚第二行要先算一次提示语（子进程），
+# 于是那次 printf 会写进一个已关闭的管道并在 stderr 上留一行 broken pipe 噪声。sed 会读到 EOF。
+assert_eq "$(review_render_footer 7 | sed -n '1p')" "---" "footer：先输出分隔线"
 assert_contains "$(review_render_footer 7)" "第 7 次评审" "footer：写明第 N 次评审"
 assert_contains "$(review_render_history_marker "$tmp/prior-hist.json")" "<!-- kiro-history:[" "history_marker：单行隐藏 JSON"
 assert_eq "$(review_render_history_marker "$tmp/prior-hist.json" | wc -l | tr -d ' ')" "1" "history_marker：只有一行"
@@ -1374,6 +1380,43 @@ review_render_summary --json "$tmp/validated.json" --sha 90fcb05 --src feature/u
   --ts "2026-09-02 20:10:02" --diff-note "完整直传" --notice "" > "$tmp/emptynotice.md"
 assert_eq "$(cmp -s "$tmp/nonotice.md" "$tmp/emptynotice.md" && echo same || echo differ)" "same" \
   "notice：空取值与不传该参数逐字节一致"
+
+# ============ 票 05 复审修复：REVIEW_RERUN_HINT（「怎么重新评审」的提示语按档位可配）============
+# Flow 档位接不到评论事件（ADR-0001），所以默认不能承诺「评论 /kiro review」。
+assert_contains "$(review_render_footer 3)" "重跑流水线可重新评审" "rerun_hint：默认取 Flow 语义"
+assert_not_contains "$(review_render_footer 3)" "/kiro review" "rerun_hint：默认不出现评论命令"
+# AWS 档位（Phase 2）把变量设成评论命令即可，渲染代码不分档位
+hint_out=$(REVIEW_RERUN_HINT='评论 `/kiro review` 可重新评审' review_render_footer 3)
+assert_contains "$hint_out" '评论 `/kiro review` 可重新评审' "rerun_hint：可被流水线变量覆盖"
+assert_not_contains "$hint_out" "重跑流水线" "rerun_hint：覆盖后不再出现默认值"
+# 页脚与降级提示必须取同一份取值：两处各写死一句时，换档位只改一处会留下另一处的假承诺
+deg_out=$(REVIEW_RERUN_HINT='评论 `/kiro review` 可重新评审' review_render_degraded \
+  --text "$tmp/raw.md" --sha 90fcb05 --src f --dst m --ts t --diff-note n --reason "无标记")
+assert_eq "$(printf '%s\n' "$deg_out" | grep -cF '评论 `/kiro review` 可重新评审')" "2" \
+  "rerun_hint：降级评论的提示与页脚同一份取值（正文 + 页脚各一处）"
+assert_contains "$(review_render_degraded --text "$tmp/raw.md" --sha 90fcb05 --src f --dst m \
+  --ts t --diff-note n --reason "无标记")" "结构化输出通常在下一次评审就能恢复——重跑流水线可重新评审。" \
+  "rerun_hint：降级提示默认也是 Flow 语义"
+# 空值/纯空白按未配置处理（Flow 里把变量建了但没填是常见状态，不能渲染出一个空句尾）
+assert_contains "$(REVIEW_RERUN_HINT= review_render_footer 3)" "重跑流水线可重新评审" "rerun_hint：空值回落默认"
+assert_contains "$(REVIEW_RERUN_HINT='   ' review_render_footer 3)" "重跑流水线可重新评审" "rerun_hint：纯空白回落默认"
+# 取值来自流水线变量、会原样进评论：不得借它注入第二个评审标记（会让下次评审判「标记不唯一」而多发一条汇总）
+inj=$(REVIEW_RERUN_HINT='坏了 <!-- kiro-review:deadbee run:9 -->' review_render_footer 3)
+assert_eq "$(printf '%s\n' "$inj" | grep -c '<!-- kiro-review:')" "0" "rerun_hint：取值里的伪造评审标记被转义"
+assert_contains "$inj" "&lt;!--" "rerun_hint：转义后按字面量显示"
+# 多行取值不得把页脚截断成两行
+assert_eq "$(REVIEW_RERUN_HINT="$(printf 'a\nb')" review_render_footer 3 | wc -l | tr -d ' ')" "2" \
+  "rerun_hint：多行取值折成单行（页脚仍是分隔线 + 一行）"
+# 复审修复：清洗必须在折行**之前**——_sanitize_md 对奇数个代码围栏会补一行 ```，
+# 先折行的话那个换行又被加回来：页脚变三行，降级评论里那一行还会跳出 `> ` 引用块并开一个
+# 未闭合围栏，把后面的原文、历次表、页脚全吞进代码块。
+assert_eq "$(REVIEW_RERUN_HINT='```' review_render_footer 3 | wc -l | tr -d ' ')" "2" \
+  "rerun_hint：含代码围栏的取值仍是单行页脚（清洗先于折行）"
+fence_deg=$(REVIEW_RERUN_HINT='```bash' review_render_degraded --text "$tmp/raw.md" --sha 90fcb05 \
+  --src f --dst m --ts t --diff-note n --reason "无标记")
+assert_eq "$(printf '%s\n' "$fence_deg" | grep -c '^```[[:space:]]*$')" "0" \
+  "rerun_hint：降级评论里不会多出一行独立的代码围栏"
+assert_contains "$fence_deg" "> 结构化输出通常在下一次评审就能恢复——" "rerun_hint：降级提示仍在引用块里"
 
 if [[ "$GOLDEN_DIRTY" == "1" ]]; then
   echo "GOLDEN_UPDATE=1：golden 文件已重写，本次运行不构成通过。请人工读 git diff 确认渲染正确，再不带该变量重跑。" >&2

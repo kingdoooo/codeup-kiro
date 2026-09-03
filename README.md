@@ -50,7 +50,8 @@
   （见 [docs/adr/0004-pin-kiro-cli-v2-engine.md](docs/adr/0004-pin-kiro-cli-v2-engine.md)）。
 - 评审员输出必须带受信 agent 提示词才要求的契约标识，缺失即判定「受信 agent 未生效」，
   拒绝把该输出贴到 MR 上。
-- 数据出境与提示词注入残余风险见 [pipeline/setup-guide.md](pipeline/setup-guide.md) 第 1、12 节。
+- 哪些数据会离开客户网络（diff、评审员读取的上下文文件、MR 元信息）、哪些不会（令牌），
+  以及提示词注入的残余风险，见 [pipeline/setup-guide.md](pipeline/setup-guide.md) 第 1.2 节与第 12 节。
 
 ## 快速开始
 
@@ -58,14 +59,15 @@
 
 | 想做的事 | 去哪一节 |
 |---|---|
-| 前提条件、令牌与机器人账号、数据治理确认 | 第 1 节 |
+| 前提条件、令牌与机器人账号 | 第 1、1.1 节 |
+| 数据治理：哪些数据出境、需要客户确认什么 | 第 1.2 节 |
 | **信任边界：为什么必须把集成包放独立代码库** | 第 2 节（先读） |
-| 搭流水线、开 MR 触发、首次运行探测变量名 | 第 3–5 节 |
+| 搭流水线、开 MR 触发、首次运行探测变量名、多代码源的带下标变量 | 第 3–5 节 |
 | 构建机连通性验证、自建构建机 | 第 6–7 节 |
 | 首次联调核对（本地无法验证的点，按日志逐项确认） | 第 8 节 |
 | 端到端验收清单（含 canary 负向验收） | 第 9 节 |
 | 故障排查表、「行内评论未出现」的排查顺序 | 第 10 节 |
-| 变量与开关矩阵（默认 / 关 / 开 / 前提 / 适用档位） | 第 11 节 |
+| 变量与开关矩阵（默认 / 关 / 开 / 前提 / 适用档位）、测试变量 | 第 11 节 |
 | 安全隔离的作用与局限（kiro-cli 版本、v2 引擎、全局设置） | 第 12 节 |
 | 改集成包时的本地自测（含 macOS 需要 coreutils） | 第 13 节 |
 
@@ -89,8 +91,10 @@
 
 ## 环境变量
 
-完整矩阵（含每个开关关闭/开启时的行为与前提）见
-[pipeline/setup-guide.md 第 11 节](pipeline/setup-guide.md)。
+下表是生产会用到的变量；**每个开关关闭/开启时各是什么行为、前提是什么**见
+[pipeline/setup-guide.md 第 11.2 节](pipeline/setup-guide.md)，另有一节
+「测试/高级变量（生产流水线不要设）」（第 11.2.1 节）列出 `DRY_RUN*`、`PROMPT_FILE`、
+`CODEUP_RETRY_BACKOFF`、`CODEUP_COMMENT_PAGE_HINT`、`CODEUP_API_BASE` 等排障用变量及误配后果。
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
@@ -106,12 +110,11 @@
 | `MR_LOCAL_ID` | 否 | MR 编号；与 `MR_TARGET_BRANCH` 必须同时设置才生效，否则按源分支反查 |
 | `MR_TARGET_BRANCH` | 否 | 目标分支；与 `MR_LOCAL_ID` 成对设置 |
 | `CI_COMMIT_REF_NAME` | 否 | Flow 内置：运行分支（MR 触发=源分支）；缺省 `git rev-parse --abbrev-ref HEAD` |
-| `DIFF_SIZE_LIMIT` | 否 | diff 直传阈值字节数，默认 307200 |
-| `KIRO_TIMEOUT` | 否 | Kiro 超时秒数，默认 900 |
-| `MAX_COMMENT_BYTES` | 否 | 评论截断阈值字节数，默认 60000 |
+| `REVIEW_RERUN_HINT` | 否 | 页脚与降级提示里「怎么重新评审」那句话，默认 `重跑流水线可重新评审`。Flow 档位接不到 Codeup 的评论事件（ADR-0001），所以默认不承诺 `/kiro review`；AWS 档位（Phase 2）会把它设成评论命令 |
+| `DIFF_SIZE_LIMIT` | 否 | diff 直传阈值字节数，默认 307200。**必须是纯数字**（`300KB` 这类写法会被拒绝运行） |
+| `KIRO_TIMEOUT` | 否 | Kiro 超时秒数，默认 900。**必须是纯数字**（`15m` 这类写法会被拒绝运行） |
+| `MAX_COMMENT_BYTES` | 否 | 评论截断阈值字节数，默认 60000（非法取值回落默认并打日志） |
 | `KIRO_INSTALL_URL` | 否 | kiro-cli 安装脚本 URL，默认 `https://cli.kiro.dev/install` |
-| `DRY_RUN` | 否 | `1`=不实际发 OpenAPI 请求 |
-| `CODEUP_API_BASE` | 否 | 默认 `https://openapi-rdc.aliyuncs.com` |
 
 ## 探测脚本
 
@@ -119,8 +122,9 @@
 本地测试套件覆盖不到它们。**什么时候用**：
 
 - 接入一个新的 Codeup 组织/站点，想先确认行内评论相关接口的字段与响应形态；
-- 端到端验收要做 canary 负向验收（AGENTS.md 注入、敏感路径拒绝），
-  包括**正控**（`PROBE_NO_ISOLATION=1`，故意关掉隔离以证明 canary 真的会失败）；
+- 端到端验收要做 canary 负向验收：AGENTS.md 注入（含**正控** `PROBE_NO_ISOLATION=1`，
+  故意关掉隔离以证明 canary 真的会失败）、敏感路径拒绝（`PROBE_FORCE_READ=1`，
+  提示词只要求读 canary 文件，从而把「拒绝生效」与「模型压根没去读」区分开）；
 - 升级 kiro-cli 后核对事件流形态与引擎行为是否仍与实现一致。
 
 | 脚本 | 覆盖 | 需要 |

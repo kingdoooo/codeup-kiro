@@ -194,8 +194,13 @@ publish_inline_comments() {
   head_full=$(git rev-parse HEAD)
   # 不一致的成因通常是「评审开始后又推了一次」：Codeup 侧的版本才是评论要绑的真值，所以不改用 HEAD，
   # 但必须留痕——此时行号是按本次评审的 diff 算的，可能与那个版本对不上。
+  # 两个基准都可能与 Codeup 侧不一致，而后果是同一个（行号可能有偏移）。成因分别收集、
+  # 最后合成**一句**写进汇总评论：分成两句时读者会连着看到两遍「行号可能有偏移」。
+  local -a offset_causes=()
   if [[ -n "$to_commit" && "$to_commit" != "$head_full" ]]; then
     log "警告：最新合并源版本的提交（${to_commit:0:12}）与当前 HEAD（${head_full:0:12}）不一致——仍以 API 给的版本为准（Codeup 侧真值），但行号可能对不上这次评审的 diff"
+    # 阿里云侧开发者看不到流水线日志（I10），所以这条不确定性也必须进汇总评论
+    offset_causes+=("本次评审的提交（${head_full:0:12}）不是 Codeup 侧最新的合并源版本（${to_commit:0:12}，评审开始后可能又推送过）")
   fi
   # from 侧的基准核对（R8）：我们的变更行集合来自 `merge-base(origin/<目标分支>, HEAD)..HEAD`，
   # 而 from 取的是「最新 MERGE_TARGET 版本」。目标分支在 MR 分出之后又前进过时，那个版本很可能是
@@ -204,7 +209,12 @@ publish_inline_comments() {
   # 让读者知道「行内评论的位置可能有偏移」，而不是默默给出一个可能错位的行号。
   if [[ -n "$from_commit" && "$from_commit" != "$BASE" ]]; then
     log "警告：最新合并目标版本的提交（${from_commit:0:12}）不等于本地 merge-base（${BASE:0:12}）——两者算出的新文件侧行号可能不同（目标分支在 MR 分出后前进过？待探测项 P1-14）"
-    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }注意：Codeup 侧的比较基准（合并目标版本 ${from_commit:0:12}）与本次 diff 的基准（merge-base ${BASE:0:12}）不一致，行内评论的行号可能有偏移。"
+    offset_causes+=("Codeup 侧的比较基准（合并目标版本 ${from_commit:0:12}）与本次 diff 的基准（merge-base ${BASE:0:12}）不一致")
+  fi
+  if [[ "${#offset_causes[@]}" -gt 0 ]]; then
+    local causes
+    causes=$(printf '%s；' "${offset_causes[@]}"); causes="${causes%；}"
+    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }注意：行内评论的行号可能有偏移——${causes}。"
   fi
 
   # 5. 去重：拉现有行内评论，按正文里的指纹标记跳过
@@ -456,6 +466,31 @@ else
   log "警告：查询 MR 全局评论失败，本次按新建处理（可能在 MR 上留下第二条汇总）"
 fi
 
+# --- 1.6 流水线变量的取值校验（紧跟 MR 定位：失败要在 MR 上看得见，I10）---
+# 放在安装 kiro-cli **之前**：这些错都是一眼可辨的配置错误，不该先花最多 300 秒装 CLI、
+# 再花 60 秒跑一次 --help 才失败。
+[[ "$INLINE_COMMENT" == "0" || "$INLINE_COMMENT" == "1" ]] \
+  || die_review "INLINE_COMMENT=${INLINE_COMMENT} 不是 0 或 1。行内评论开关只接受这两个取值（静默按 0 跑会让开关看起来生效了）。请修正该流水线变量"
+# 两个「秒数/字节数」变量只接受纯数字。口径统一为纯数字的理由：
+#   DIFF_SIZE_LIMIT=300KB → 与字节数比较时是 bash 算术错误、取假，于是**整份 diff 都进省略清单**
+#                       （评审员只拿到一份索引），而评论里的说明还会写成「超出阈值（300KBB）」；
+#   KIRO_TIMEOUT=15m  → GNU timeout **本身认**这个后缀（15 分钟），所以它不会报错，但脚本的日志会
+#                       写成「超时 15ms」这种误导文案，而 `-k 30` 之外的语义也不再一眼可读。
+#                       与其让两个变量一个认后缀一个不认，统一只收秒数/字节数。
+#                       **这是行为变更**：之前 `KIRO_TIMEOUT=15m` 能跑通，升级后会被拒绝并要求改成 900。
+# 与 MAX_COMMENT_BYTES 的处理不同（那个回落默认值）：截断阈值配错只影响评论长度，而这两个直接
+# 决定「评审有没有真的看到代码」「会不会白跑一次额度」，宁可失败并说清楚。
+# 先按十进制归一化（`10#`）再比较：带前导零的 `0900` 是纯数字、意图明确，但直接拿去做 `-ge 1`
+# 会被 bash 当八进制解析并报「value too great for base」——那行报错既噪声又误导。
+for _v in KIRO_TIMEOUT DIFF_SIZE_LIMIT; do
+  [[ "${!_v}" =~ ^[0-9]+$ ]] \
+    || die_review "${_v}=${!_v} 不是纯数字（KIRO_TIMEOUT 单位是秒、DIFF_SIZE_LIMIT 单位是字节，例如 900 与 307200；不支持 15m / 300KB 这类带单位的写法）。请修正该流水线变量"
+  eval "${_v}=\$(( 10#\${${_v}} ))"
+  [[ "${!_v}" -ge 1 ]] \
+    || die_review "${_v}=0 不合法（必须 ≥1；0 会让超时形同不限时、让 diff 阈值变成「全部省略」）。请修正该流水线变量"
+done
+unset _v
+
 # --- 2. 安装/检测 kiro-cli（失败用 die_review：网络受限的构建机上这是最常见的失败，
 #        原来用 die 会让 MR 上什么都看不到、只有流水线标红，违反 I10）---
 if ! command -v kiro-cli >/dev/null; then
@@ -482,9 +517,6 @@ grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
 # 不支持该参数的版本会先把额度烧掉、再以 clap 退出码 2 失败，MR 上只剩「退出码 2」这种不可行动的信息。
 grep -q -- '--output-format' <<<"$KIRO_CHAT_HELP" \
   || die_review "kiro-cli chat 不支持 --output-format，无法取得结构化评审报告（契约在 runFinished.data.finalText 里），拒绝运行。请升级 kiro-cli（≥ 2.21）"
-# 开关校验放在 MR 定位之后：配错开关也要在 MR 上看得见，而不是只让流水线标红
-[[ "$INLINE_COMMENT" == "0" || "$INLINE_COMMENT" == "1" ]] \
-  || die_review "INLINE_COMMENT=${INLINE_COMMENT} 不是 0 或 1。行内评论开关只接受这两个取值（静默按 0 跑会让开关看起来生效了）。请修正该流水线变量"
 # 去重指纹要 sha1：拿不到就没法去重，重跑会在同一行上堆重复评论（违反 I6 幂等）。
 # 与 timeout 同理列为硬依赖，而不是「取不到就不去重」。
 if [[ "$INLINE_COMMENT" == "1" ]]; then

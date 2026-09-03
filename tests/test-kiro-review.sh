@@ -17,6 +17,9 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 # --- 公共环境 ---
 export PATH="$ROOT/tests/mockbin:$PATH"
+# REVIEW_RERUN_HINT 是渲染器唯一的隐式环境输入：开发者环境里导出了它，
+# 「默认取 Flow 语义」的断言与 golden 比对就会莫名失败（run_case 用 env 继承外部环境）。
+unset REVIEW_RERUN_HINT
 export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456
 export MR_LOCAL_ID=7 MR_TARGET_BRANCH=master CI_COMMIT_REF_NAME=feature/x
 
@@ -40,6 +43,9 @@ run_case() {
         MOCK_CWD_SCAN_FILE="$CASE/cwdscan" MOCK_CALLS_FILE="$CASE/calls" MOCK_HELP_CWD_FILE="$CASE/helpcwd" \
         "$@" "$ROOT/scripts/kiro-review.sh" 2>&1) || RC=$?
 }
+# 某个 kiro-cli 子命令被调用了几次。calls 文件在「脚本还没调过任何 kiro-cli 子命令」时
+# 根本不存在（例如变量校验在安装/能力检查之前就失败了），所以缺文件按 0 处理。
+call_count() { local f="$1" name="$2"; [[ -f "$f" ]] || { echo 0; return 0; }; grep -c "^${name}$" "$f" || true; }
 # 注入面文件是否还在（任意深度 AGENTS.md / 任意深度 .kiro / 根 lsp.json）
 leftovers() { (cd "$CASE/work" && { [[ -e lsp.json ]] && echo ./lsp.json; find . -not -path './.git/*' \( -iname AGENTS.md -not -type d \) -o \( -name .kiro -not -path './.git/*' \); } | sort | paste -sd' ' -); }
 
@@ -106,7 +112,8 @@ assert_contains "$out" "（未定位）" "评论标注未定位问题（file/lin
 assert_contains "$out" "修复建议" "评论含修复建议"
 assert_contains "$out" "P0 必须修复 · P1 应当修复 · P2 可选改进" "评论含页脚图例"
 assert_contains "$out" "第 1 次评审 · P0 必须修复" "页脚自报第 1 次评审"
-assert_contains "$out" "/kiro review" "评论含重新评审提示"
+assert_contains "$out" "重跑流水线可重新评审" "评论含重新评审提示（默认 Flow 语义）"
+assert_not_contains "$out" "/kiro review" "评论不承诺 Flow 档位接不到的评论命令（ADR-0001）"
 assert_not_contains "$out" "🔴" "评论不再出现红灯"
 assert_not_contains "$out" "🟡" "评论不再出现黄灯"
 assert_not_contains "$out" "🔵" "评论不再出现蓝灯"
@@ -861,6 +868,11 @@ assert_rc "$RC" 0 "版本提交与 HEAD 不一致：评审仍成功"
 assert_contains "$OUT" "与当前 HEAD" "版本提交与 HEAD 不一致：记 warning"
 assert_eq "$(inline_bodies "$OUT" | jq -r '.to_patchset_biz_id' | sort -u | paste -sd, -)" "src-9" \
   "版本提交与 HEAD 不一致：仍以 API 给的版本为准（Codeup 侧真值）"
+# 票 05 复审修复：这条不确定性也必须进汇总评论——阿里云侧开发者看不到流水线日志（I10）
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "不是 Codeup 侧最新的合并源版本" "版本提交与 HEAD 不一致：汇总评论里说明（I10）"
+assert_contains "$comment" "行号可能有偏移" "版本提交与 HEAD 不一致：说清后果"
+assert_contains "$comment" "已标注在「文件改动」对应行" "版本提交与 HEAD 不一致：不影响行内计数"
 
 # ---- 查现有行内评论失败 → 跳过去重但照常发布，并留痕 ----
 run_inline_case nodedup ifx-nodedup DRY_RUN_FAIL_ROUTES="list-comments-inline:500" CODEUP_RETRY_BACKOFF=0
@@ -1013,5 +1025,46 @@ assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "3" "行内 + 
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "run:2 -->" "行内 + 原地更新：run 递增"
 assert_contains "$comment" "<details><summary>历次评审（2）</summary>" "行内 + 原地更新：历次表两行"
+
+# ============================================================================
+# 票 05 复审修复
+# ============================================================================
+# ---- KIRO_TIMEOUT / DIFF_SIZE_LIMIT 必须是正整数：非法取值是「静默走偏」，必须硬失败 ----
+# KIRO_TIMEOUT=15m → timeout 会以 rc 125 退出，MR 上只剩「Kiro 评审失败（退出码 125）」
+run_case badtimeout KIRO_TIMEOUT=15m
+assert_rc "$RC" 1 "KIRO_TIMEOUT 非整数：拒绝运行"
+assert_contains "$OUT" "KIRO_TIMEOUT=15m 不是纯数字" "KIRO_TIMEOUT 非整数：报错点名变量与取值"
+assert_contains "$OUT" "不支持 15m / 300KB 这类带单位的写法" "KIRO_TIMEOUT 非整数：告诉运维正确写法"
+assert_eq "$(call_count "$CASE/calls" chat)" "0" "KIRO_TIMEOUT 非整数：没白跑 Kiro（不烧额度）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "⚠️ 评审未完成" "KIRO_TIMEOUT 非整数：MR 上看得见（I10）"
+assert_contains "$comment" "KIRO_TIMEOUT=15m" "KIRO_TIMEOUT 非整数：失败评论写明原因"
+# DIFF_SIZE_LIMIT=300KB → 与字节数比较时按 0 处理：整份 diff 进省略清单，说明还会写成「300KBB」
+run_case baddiffsize DIFF_SIZE_LIMIT=300KB
+assert_rc "$RC" 1 "DIFF_SIZE_LIMIT 非整数：拒绝运行"
+assert_contains "$OUT" "DIFF_SIZE_LIMIT=300KB 不是纯数字" "DIFF_SIZE_LIMIT 非整数：报错点名变量与取值"
+assert_eq "$(call_count "$CASE/calls" chat)" "0" "DIFF_SIZE_LIMIT 非整数：没白跑 Kiro"
+assert_not_contains "$(posted_comment "$OUT")" "300KBB" "DIFF_SIZE_LIMIT 非整数：不会渲染出 300KBB 这种说明"
+run_case zerotimeout KIRO_TIMEOUT=0
+assert_rc "$RC" 1 "KIRO_TIMEOUT=0：拒绝运行（0 会让 timeout 变成不限时）"
+assert_contains "$OUT" "KIRO_TIMEOUT=0 不合法" "KIRO_TIMEOUT=0：报错"
+# 带前导零的取值是纯数字、意图明确：必须按十进制归一化后接受，而不是让 bash 的八进制解析
+# 先漏一行 `value too great for base` 再判它「不是纯数字」
+run_case leadingzero KIRO_TIMEOUT=0900 DIFF_SIZE_LIMIT=0307200
+assert_rc "$RC" 0 "前导零取值：按十进制归一化后照常运行"
+assert_not_contains "$OUT" "value too great for base" "前导零取值：不漏 bash 算术报错"
+assert_contains "$OUT" "超时 900s" "前导零取值：日志里是归一化后的 900 秒"
+# 校验必须在装 kiro-cli 之前：一眼可辨的配置错误不该先花几分钟装 CLI 再失败
+assert_eq "$(call_count "$tmp/case-badtimeout/calls" help)" "0" "取值校验早于 kiro-cli 能力检查（没白跑 --help）"
+# 合法取值仍照常工作（正控：上面三条不是靠「任何取值都失败」蒙对的）
+run_case goodlimits KIRO_TIMEOUT=60 DIFF_SIZE_LIMIT=1000000
+assert_rc "$RC" 0 "合法的秒数/字节数：评审照常成功"
+
+# ---- REVIEW_RERUN_HINT：AWS 档位可把提示语换成评论命令（Flow 默认不承诺它）----
+run_case rerunhint REVIEW_RERUN_HINT='评论 `/kiro review` 可重新评审'
+assert_rc "$RC" 0 "REVIEW_RERUN_HINT：评审成功"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" '评论 `/kiro review` 可重新评审' "REVIEW_RERUN_HINT：页脚用配置的提示语"
+assert_not_contains "$comment" "重跑流水线可重新评审" "REVIEW_RERUN_HINT：不再出现默认提示语"
 
 report

@@ -73,4 +73,4 @@ cur.execute("SELECT * FROM users WHERE name LIKE ?", (f"%{q}%",))
 </details>
 
 ---
-第 1 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 `/kiro review` 可重新评审
+第 1 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · 重跑流水线可重新评审

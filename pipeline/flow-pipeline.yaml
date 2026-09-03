@@ -48,7 +48,7 @@ stages:
             with:
               run: |
                 # 多代码源下无下标 CI_COMMIT_REF_NAME 取值不可预期（可能取到集成包分支）；
-                # 用带下标变量显式指定业务库源分支与 MR 目标分支（见 setup-guide 第 5 节）。
+                # 用带下标变量显式指定业务库源分支与 MR 目标分支（约定见 setup-guide 第 5.1 节）。
                 # 首次接入务必用 `env | cut -d= -f1 | sort`（只打变量名）核对本组织的变量名。
                 export REVIEW_REPO_DIR="$PROJECT_DIR"
                 export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"
@@ -76,5 +76,12 @@ stages:
 #                      非法取值回落 quiet 并在汇总评论里说明
 #   MAX_INLINE_COMMENTS 可选，默认 10（单次行内评论上限，超出的进折叠区；0 = 全部进折叠区）。
 #                      非法取值回落 10 并在汇总评论里说明
+#   REVIEW_RERUN_HINT  可选，默认「重跑流水线可重新评审」。页脚与降级提示里「怎么重新评审」那句话；
+#                      Flow 档位接不到评论事件，所以默认不写 /kiro review（AWS 档位才设成评论命令）
 #   MR_LOCAL_ID        可选，MR 编号（与 MR_TARGET_BRANCH 必须同时设置才生效；
 #   MR_TARGET_BRANCH   可选，目标分支  未设置时脚本按源分支反查 OpenAPI，见指南第 5 节）
+#
+# 注意 KIRO_TIMEOUT 与 DIFF_SIZE_LIMIT 只接受纯数字（15m / 300KB 这类写法会被拒绝运行）。
+# 另有一组只给测试与排障用的变量（DRY_RUN、DRY_RUN_FIXTURE_DIR、DRY_RUN_FAIL_ROUTES、
+# PROMPT_FILE、CODEUP_RETRY_BACKOFF、CODEUP_COMMENT_PAGE_HINT、CODEUP_API_BASE）——
+# 生产流水线一个都不要配，逐条后果见 setup-guide 第 11.2.1 节。

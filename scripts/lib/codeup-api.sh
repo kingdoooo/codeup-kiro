@@ -245,7 +245,18 @@ codeup_post_comment() {
 # 因此这里不凭记忆往 body 里塞 page/perPage。取而代之的是：返回条数达到常见单页上限时打警告——
 # 旧汇总评论落在页外时脚本会误判「首次评审」而每次新建一条。补分页需要先做一次探测（见票 03 Comments）。
 # $1=localId → stdout=响应体；rc 1=失败（按既有重试策略重试后仍失败）
-CODEUP_COMMENT_PAGE_HINT="${CODEUP_COMMENT_PAGE_HINT:-100}"
+CODEUP_COMMENT_PAGE_HINT_DEFAULT=100
+CODEUP_COMMENT_PAGE_HINT="${CODEUP_COMMENT_PAGE_HINT:-$CODEUP_COMMENT_PAGE_HINT_DEFAULT}"
+# 取值校验放在**用的时候**（与 _codeup_retry_backoff 同一形态），不是 source 时：
+# 非整数取值会让下面那句 `-ge` 比较变成 bash 算术错误并恒取假，于是「返回 N 条评论，已达常见
+# 单页上限」这条告警**永久失效**——而它是「旧汇总落在页外 → 每次误判为首次评审 → MR 上堆出
+# 多条汇总」这个已知故障的唯一提示。回落默认值并留痕，不因此中断评审。
+_codeup_page_hint() {
+  local v="${CODEUP_COMMENT_PAGE_HINT-}"
+  if [[ "$v" =~ ^[0-9]+$ ]] && [[ "$((10#$v))" -ge 1 ]]; then printf '%s' "$((10#$v))"; return 0; fi
+  echo "codeup: CODEUP_COMMENT_PAGE_HINT=${v} 不是 ≥1 的整数，按默认 ${CODEUP_COMMENT_PAGE_HINT_DEFAULT} 处理" >&2
+  printf '%s' "$CODEUP_COMMENT_PAGE_HINT_DEFAULT"
+}
 # 内部实现：两种评论类型只差 body 里的 comment_type 与告警文案，共用一份请求/分页告警逻辑。
 # 用法：_codeup_list_comments <localId> <GLOBAL_COMMENT|INLINE_COMMENT> <日志前缀> <达上限时的后果说明>
 _codeup_list_comments() {
@@ -259,8 +270,10 @@ _codeup_list_comments() {
   if [[ "$rc" == "0" ]]; then
     cnt=$(jq -r 'if type == "array" then length elif type == "object" then ((.result // []) | length) else 0 end' \
             "$tmp" 2>/dev/null || echo 0)
-    if [[ "${cnt:-0}" =~ ^[0-9]+$ && "${cnt:-0}" -ge "$CODEUP_COMMENT_PAGE_HINT" ]]; then
-      echo "${prefix}: 返回 ${cnt} 条评论，已达常见单页上限（${CODEUP_COMMENT_PAGE_HINT}）→ ${consequence}" >&2
+    local hint
+    hint=$(_codeup_page_hint)
+    if [[ "${cnt:-0}" =~ ^[0-9]+$ && "${cnt:-0}" -ge "$hint" ]]; then
+      echo "${prefix}: 返回 ${cnt} 条评论，已达常见单页上限（${hint}）→ ${consequence}" >&2
     fi
     cat "$tmp"
   fi

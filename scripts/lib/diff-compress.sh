@@ -6,6 +6,8 @@
 # 删除文件更是已不存在）。路径处理用 git -z（NUL 分隔），支持含空格路径。
 # v1 为文件级分类：整文件删除=优先级 3；不做 hunk 级拆分。
 
+# 取值校验在调用方（kiro-review.sh 第 1.6 步）：非纯数字会让下面的 `-le` 比较报算术错误并取假，
+# 于是整份 diff 都进省略清单。校验必须在那里做，因为只有定位到 MR 之后才能把失败回写成 MR 评论（I10）。
 DIFF_SIZE_LIMIT="${DIFF_SIZE_LIMIT:-307200}"
 
 # --- 钉死 patch 形态的 git diff（与 review_changed_lines 的解析器成对）---

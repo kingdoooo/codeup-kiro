@@ -24,8 +24,9 @@
 #   runFinished  {data:{sessionId,status,stopReason,finalText,finalTextTruncated}}
 # finalText 就是完整最终消息，无需拼接 agent_message_chunk。
 #
-# 渲染是纯函数：sha / 分支 / 时间戳 / diff 说明 / 评审次数全部由参数传入，没有隐式输入
-# （不读 date、不读 git），因此可以用 golden file 逐字节比对（tests/test-review-render.sh）。
+# 渲染是纯函数：sha / 分支 / 时间戳 / diff 说明 / 评审次数全部由参数传入（不读 date、不读 git），
+# 因此可以用 golden file 逐字节比对（tests/test-review-render.sh）。唯一的隐式输入是
+# REVIEW_RERUN_HINT（档位相关的「怎么重新评审」提示语，见下），它有固定默认值，golden 仍然确定。
 
 # 严重级别的中文标签与排序权重。级别词汇以 CONTEXT.md 为准：P0 必须修复 / P1 应当修复 / P2 可选改进。
 REVIEW_SEVERITIES="P0 P1 P2"
@@ -929,11 +930,35 @@ review_render_history_table() {
   echo "</details>"
 }
 
+# --- 「怎么重新评审」的提示语（档位相关）---
+# 这句话会出现在页脚与降级评论里，读者会照着做，所以它必须描述**本档位真的可行**的操作。
+# Flow 档位接不到 Codeup 的评论事件（ADR-0001），「评论 `/kiro review`」在这里是假承诺；
+# 评论命令由 AWS 档位的调度器承担（spec Q2/Q11），那一档部署时把变量设成
+#   REVIEW_RERUN_HINT='评论 `/kiro review` 可重新评审'
+# 即可，渲染代码不必再分档位。默认值取 Flow 语义。
+REVIEW_RERUN_HINT_DEFAULT="重跑流水线可重新评审"
+# 取值来自流水线变量、会原样进入评论，所以先过一遍 Markdown 结构清洗（运维手抖写进一个
+# `<!-- kiro-review:… -->` 就会让评论带上第二个评审标记 → 下一次评审判它「标记不唯一」
+# 而新建第二条汇总，违反 I4），**再**折成单行。
+# 顺序不能反：_sanitize_md 在代码围栏数为奇数时会**追加一行** ```，先折行的话那个换行又被加回来——
+# 页脚会变成两行，而降级评论里那一行还会跳出 `> ` 引用块并开一个吞掉后文的未闭合围栏。
+# 全空白视为未配置。取值在一次评审里是常量，按原始取值缓存，避免降级路径重复起 jq。
+_review_rerun_hint() {
+  local raw="${REVIEW_RERUN_HINT-}" v
+  if [[ "${_RRH_RAW-$'\001'}" != "$raw" ]]; then
+    v="$raw"
+    [[ -n "${v//[[:space:]]/}" ]] || v="$REVIEW_RERUN_HINT_DEFAULT"
+    _RRH_VAL=$(printf '%s' "$v" | review_sanitize_md | LC_ALL=C tr '\n\r\t' '   ')
+    _RRH_RAW="$raw"
+  fi
+  printf '%s' "$_RRH_VAL"
+}
+
 # --- 页脚（第 N 次评审 + 图例 + 重新评审提示）---
 # 用法：review_render_footer <run>（公开：kiro-review.sh 的失败评论也要用同一份页脚）
 review_render_footer() {
   echo "---"
-  printf '第 %s 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · 评论 `/kiro review` 可重新评审\n' "$1"
+  printf '第 %s 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · %s\n' "$1" "$(_review_rerun_hint)"
 }
 
 # --- 内部：评论头（标题 + 评审标记 + 历史标记 + 元信息表）---
@@ -1453,7 +1478,8 @@ review_render_degraded() {
   echo "> ⚠️ 评审已完成，但输出不符合结构化契约（${_RR_REASON:-未说明原因}），无法给出分级问题清单与统计。"
   echo "> 下面是评审员输出的原文（已由脚本对疑似凭证再做一次掩码，并把其中的 Markdown 标题、分隔线与"
   echo "> HTML 注释降级为普通文本——评论的结构只能来自脚本，否则原文里可以伪造标题与评审标记）。"
-  echo "> 重跑评审（评论 \`/kiro review\`）通常可恢复结构化输出。"
+  # 「怎么重新评审」与页脚同一份取值：两处写死同一句话时，换档位只改一处会留下另一处的假承诺
+  echo "> 结构化输出通常在下一次评审就能恢复——$(_review_rerun_hint)。"
   echo ""
   echo "---"
   echo ""
