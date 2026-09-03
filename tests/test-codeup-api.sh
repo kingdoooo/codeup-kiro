@@ -275,7 +275,15 @@ assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN GET')" "3" "list_patchsets:
 
 # ---- 选版本对：from = 最新 MERGE_TARGET，to = 最新 MERGE_SOURCE（按 versionNo）----
 out=$(codeup_select_patchset_pair < "$IFX/normal/list-patchsets.json")
-assert_eq "$out" "$(printf 'tgt-v1\tsrc-v6\td97b8017eeee')" "select_patchset_pair: 取 versionNo 最大的一对，并带上 to 的 commitId"
+assert_eq "$out" "$(printf 'tgt-v1\tsrc-v6\td97b8017eeee\ta12311be11112222333344445555666677778888')" \
+  "select_patchset_pair: 取 versionNo 最大的一对，并带上 to 与 from 两侧的 commitId"
+# from 侧的 commitId 排在最后（追加而不是插入）：调用方 cut -f1..3 的老写法不受影响。
+# 它用来核对 Codeup 侧的比较基准与本地 merge-base 是否一致（R8 的告警）。
+assert_eq "$(printf '%s' "$out" | cut -f4)" "a12311be11112222333344445555666677778888" "select_patchset_pair: 第 4 列是 from 侧 commitId"
+assert_eq "$(printf '%s' "$out" | cut -f1,2,3)" "$(printf 'tgt-v1\tsrc-v6\td97b8017eeee')" "select_patchset_pair: 前三列语义不变"
+# 缺 commitId 时对应列为空串，不能整体选不出来
+assert_eq "$(jq -c 'map(if .relatedMergeItemType == "MERGE_TARGET" then del(.commitId) else . end)' "$IFX/normal/list-patchsets.json" \
+  | codeup_select_patchset_pair | cut -f4)" "" "select_patchset_pair: from 缺 commitId 时第 4 列为空串"
 # versionNo 乱序、类型不合形都不能选错
 out=$(codeup_select_patchset_pair < "$IFX/shuffled/list-patchsets.json")
 assert_eq "$(printf '%s' "$out" | cut -f2)" "src-v6" "select_patchset_pair: 顺序打乱后仍取 versionNo 最大的合并源版本"
@@ -326,10 +334,28 @@ rc=0; err=$(codeup_create_inline_comment 7 "$imd" a.py 1 "" t true "$resp" 2>&1 
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "create_inline: 缺 from 版本 → 拒绝（P1-03 实测缺一即 400，本地先拦）"
 rc=0; err=$(codeup_create_inline_comment 7 "$imd" "" 1 f t true "$resp" 2>&1 >/dev/null) || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "create_inline: 缺文件路径 → 拒绝"
-# 4xx 不重试
-rc=0; err=$(DRY_RUN_FAIL_ROUTES="create-comment-inline:400" codeup_create_inline_comment 7 "$imd" a.py 1 f t true "$resp" 2>&1 >/dev/null) || rc=$?
-assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "create_inline: 400 → 失败"
-assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST')" "1" "create_inline: 400 不重试"
+# ---- 重试策略：创建**不幂等**，只有 429 才重试 ----
+# 000（响应丢失）与 5xx 都可能发生在「服务端其实已经建好了」之后。重试的代价很具体：
+# 同一行上多出一条重复评论，而第一条的 comment_biz_id 我们从来没拿到过——它永远不会被纳入
+# 一次提交、永远不会被删除，之后的去重也看不到它（草稿被状态过滤掉）。
+assert_eq "$(_codeup_should_retry_create_inline 429 && echo y || echo n)" "y" "create_inline 重试策略: 429 重试（服务端明确没受理）"
+assert_eq "$(_codeup_should_retry_create_inline 000 && echo y || echo n)" "n" "create_inline 重试策略: 000 不重试（可能已经建好了）"
+assert_eq "$(_codeup_should_retry_create_inline 500 && echo y || echo n)" "n" "create_inline 重试策略: 5xx 不重试"
+assert_eq "$(_codeup_should_retry_create_inline 503 && echo y || echo n)" "n" "create_inline 重试策略: 503 不重试"
+assert_eq "$(_codeup_should_retry_create_inline 400 && echo y || echo n)" "n" "create_inline 重试策略: 4xx 不重试"
+for code in 400 000 500 502; do
+  rc=0; err=$(CODEUP_RETRY_BACKOFF=0 DRY_RUN_FAIL_ROUTES="create-comment-inline:${code}" \
+    codeup_create_inline_comment 7 "$imd" a.py 1 f t true "$resp" 2>&1 >/dev/null) || rc=$?
+  assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "create_inline: HTTP ${code} → 失败"
+  assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST')" "1" "create_inline: HTTP ${code} 只发一次请求（创建不幂等）"
+done
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 DRY_RUN_FAIL_ROUTES="create-comment-inline:429" \
+  codeup_create_inline_comment 7 "$imd" a.py 1 f t true "$resp" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "create_inline: 429 重试后仍失败"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST')" "3" "create_inline: 429 共尝试 3 次（服务端明确没受理，重试安全）"
+# 对照：别的接口仍按默认策略重试 000/5xx（这条策略只收紧了行内评论创建）
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 DRY_RUN_FAIL_ROUTES="list-comments-inline:500" codeup_list_inline_comments 7 2>&1 >/dev/null) || rc=$?
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST')" "3" "对照: 查询类接口（幂等）仍按默认策略重试 5xx"
 
 # ---- 一次提交草稿（ReviewChangeRequest，不带 reviewOpinion）----
 ids=$(mktemp); printf 'id-a\nid-b\n' > "$ids"

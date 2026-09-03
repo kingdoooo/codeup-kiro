@@ -146,11 +146,11 @@ assert_contains "$OUT" "KIRO_REVIEW_JSON" "M9：原文里的契约标记原样�
 assert_not_contains "$OUT" "P0 1 · P1 1 · P2 1" "M9：不再有分级统计——端到端成功路径断言会失败"
 assert_contains "$OUT" "changeRequests/7/comments" "M9：降级评论仍发到 MR"
 
-# --- M10：拿掉 severity 的 P0/P1/P2 白名单 → 非法级别不再被丢弃，丢弃计数变化 ---
+# --- M10：拿掉 severity 的 P0/P1/P2 许可清单 → 非法级别不再被丢弃，丢弃计数变化 ---
 pkg=$(make_mutant m10-sev-filter 's/| select(($sev == "P0" or $sev == "P1" or $sev == "P2")/| select((true)/' scripts/lib/review-render.sh)
 run_case m10 "$pkg" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/dirty.json"
 assert_rc "$RC" 0 "M10：变异体仍能跑完"
-assert_not_contains "$OUT" "7 条问题不符合输出契约已丢弃" "M10：级别白名单被拿掉后丢弃数不再是 7——端到端丢弃断言会失败"
+assert_not_contains "$OUT" "7 条问题不符合输出契约已丢弃" "M10：级别许可清单被拿掉后丢弃数不再是 7——端到端丢弃断言会失败"
 assert_contains "$OUT" "4 条问题不符合输出契约已丢弃" "M10：只剩缺 title/body 与非对象被丢弃（4 条）"
 
 # --- M11：删掉「标记必须唯一」这道检查 → 契约不再唯一可辨，降级断言失效 ---
@@ -419,6 +419,46 @@ assert_contains "$comment" "其中 3 条已标注在「文件改动」对应行"
 assert_not_contains "$comment" "#### 行内发布失败" \
   "M29：折叠区里没有「行内发布失败」小节——那三个问题在 MR 上彻底消失了"
 assert_not_contains "$comment" "硬编码疑似应用密钥" "M29：连问题标题都看不到了"
+
+# --- M30：把「行内评论创建只重试 429」改回默认策略 → 000/5xx 之后重复创建 ---
+# 创建评论不幂等：服务端已经建好、只是响应没回来时，重试会在同一行上多出一条，
+# 而第一条的 comment_biz_id 我们从来没拿到过——它永远提交不了、也永远删不掉，
+# 之后的去重还看不到它（草稿会被状态过滤掉）。
+pkg=$(make_mutant m30-create-retry \
+  's|_codeup_should_retry_create_inline() { \[\[ "\$1" == "429" \]\]; }|_codeup_should_retry_create_inline() { _codeup_should_retry "$1"; }|' \
+  scripts/lib/codeup-api.sh)
+inline_case m30 "$pkg" "$IFX" DRY_RUN_FAIL_ROUTES="create-comment-inline:500" CODEUP_RETRY_BACKOFF=0
+assert_rc "$RC" 0 "M30：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "9" \
+  "M30：三条问题各发了 3 次创建请求（共 9 次）——端到端「三条各只尝试一次」断言会失败，真实后果是同一行上留下重复评论"
+# 对照：未变异实现在同样注入下每条只发一次
+inline_case m30control "$ROOT" "$IFX" DRY_RUN_FAIL_ROUTES="create-comment-inline:500" CODEUP_RETRY_BACKOFF=0
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "M30 对照：未变异实现三条各只尝试一次"
+assert_contains "$(posted_comment "$OUT")" "#### 行内发布失败（3）" "M30 对照：不重试的代价只是进折叠区，下次评审重发"
+
+# --- M31：拿掉「一次提交后回读」→ 被服务端拒掉的草稿被当成已发布 ---
+# 提交返回 2xx 只说明请求被受理，不保证每个 id 都真的转成了 OPENED。
+IFXSD="$tmp/ifx-stilldraft"
+mkdir -p "$IFXSD"
+cp "$IFX/list-patchsets.json" "$IFXSD/"
+cp "$IFX"/create-comment-inline.*.json "$IFXSD/"
+jq -n '[]' > "$IFXSD/list-comments-inline.1.json"
+jq -n --arg bot "$BOT" '[
+  {comment_biz_id:"draft-1", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
+   filePath:"src/app.py", line_number:2, author:{username:$bot},
+   content:"### P0 · 被服务端拒掉的那条\n<!-- kiro-inline:1111111111111111111111111111111111111111 -->\n"}
+]' > "$IFXSD/list-comments-inline.2.json"
+inline_case baseline-readback "$ROOT" "$IFXSD"
+assert_eq "$(req_count "$OUT" DELETE 'comments/draft-1$')" "1" "对照：回读发现仍是草稿 → 删除"
+assert_contains "$(posted_comment "$OUT")" "#### 行内发布失败（1）" "对照：那条进折叠区"
+assert_contains "$(posted_comment "$OUT")" "其中 2 条已标注在「文件改动」对应行" "对照：行内计数为 2"
+pkg=$(make_mutant m31-no-readback 's|if codeup_list_inline_comments "\$LOCAL_ID" > "\$WORK/inline-after.json"; then|if false; then|')
+inline_case m31 "$pkg" "$IFXSD"
+assert_rc "$RC" 0 "M31：变异体仍能跑完"
+# 变异后走的是「回读失败」那条 fail-closed 分支：不会把被拒的草稿谎报成已发布
+assert_eq "$(req_count "$OUT" DELETE 'comments/draft-1$')" "0" "M31：不回读就发现不了那条仍是草稿，也就不会删除它"
+assert_contains "$(posted_comment "$OUT")" "#### 行内发布失败（3）" \
+  "M31：拿不到回读结果时三条全部按失败处理——端到端「行内发布失败（1）」与「已标注 2 条」断言都会失败"
 
 # --- M3：删掉 settings 调用 → 继承未被禁用 ---
 pkg=$(make_mutant m3-settings '/chat.disableInheritingDefaultResources true/d')

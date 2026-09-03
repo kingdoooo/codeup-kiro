@@ -46,9 +46,11 @@ req_count() {
 # 必须按 file_path 过滤：查现有行内评论那次请求的 body 也是 {"comment_type":"INLINE_COMMENT"}，
 # 只按类型抓会多算一条。端到端与变异测试都要用它判断「到底发了几条行内评论、发到哪一行」，
 # 所以实现只能有一份——过滤条件一变，两处拷贝里没改的那一处会静静地数错。
+# `|| true`：一条行内评论都没发时 grep 以 1 退出，而测试文件都开了 pipefail——
+# 没有这个兜底，「零条」这种完全正常的用例会让整个测试文件在此处无提示中止（与 req_count 同理）。
 inline_bodies() {
-  printf '%s\n' "$1" | grep -F 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"' | sed 's/^DRY_RUN body: //' \
-    | jq -c 'select(has("file_path"))'
+  { printf '%s\n' "$1" | grep -F 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"' || true; } \
+    | sed 's/^DRY_RUN body: //' | jq -c 'select(has("file_path"))'
 }
 
 # 端到端 fixture 里机器人账号的用户名（取自 spec §4.7.1 P1-00 实测值）

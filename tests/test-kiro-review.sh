@@ -640,11 +640,14 @@ IFX_DIR=""
 # 在 $CASE/work 里执行（CASE_TWEAK）：版本列表 fixture 必须带**真实 HEAD sha**，
 # 否则每个用例都会打「版本提交与 HEAD 不一致」的警告，那条警告本身就测不出来了。
 mk_inline_fixture() {
-  local head n
+  local head base n
   mkdir -p "$IFX_DIR"
   head=$(git rev-parse HEAD)
-  jq -n --arg sha "$head" '[
-    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:"aaaa1111bbbb2222"},
+  # MERGE_TARGET 的 commitId 必须就是本地 merge-base：不然每个用例都会打「比较基准不一致」的
+  # 警告并往汇总评论里塞一句 notice，那条警告本身就再也测不出来了（R8）
+  base=$(git merge-base origin/master HEAD)
+  jq -n --arg sha "$head" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
     {patchSetBizId:"src-1", versionNo:1, relatedMergeItemType:"MERGE_SOURCE", commitId:"0000111122223333"},
     {patchSetBizId:"src-2", versionNo:2, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
   ]' > "$IFX_DIR/list-patchsets.json"
@@ -808,6 +811,13 @@ assert_contains "$comment" "其中 0 条已标注在「文件改动」对应行"
 assert_contains "$comment" "#### 行内发布失败（3）" "全部发布失败：折叠区单独一节列出"
 assert_contains "$comment" "硬编码疑似应用密钥" "全部发布失败：问题本身仍然可见"
 assert_contains "$comment" "<details><summary>折叠区：未展开的问题（6）</summary>" "全部发布失败：折叠区 3 + 3"
+# R4：一条行内评论都没发出去时，说明与修复建议在 MR 上再没有别的落点（I10），必须完整渲染
+assert_contains "$comment" '##### 1. `src/app.py:2` — 硬编码疑似应用密钥' "R4：发布失败小节带编号与定位串"
+assert_contains "$comment" "硬编码模式会让真实密钥被提交、传播或误用于其他环境。" "R4：发布失败的问题说明完整可见（不只是首句）"
+assert_contains "$comment" "从环境变量或密钥管理服务读取，启动时校验非空。" "R4：发布失败的问题修复建议完整可见"
+assert_contains "$comment" "立即轮换该凭证，并考虑清理历史。" "R4：第二条失败问题的修复建议也在"
+# 创建被 400 拒掉时不重试（创建不幂等）：三条问题各自只发一次请求
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "R5：三条各只尝试创建一次（400 不重试）"
 
 # ---- 版本列表查不到 → 回落成「一条含完整问题清单的汇总」，并在评论里说明原因 ----
 IFX_DIR="$tmp/ifx-nops"; mkdir -p "$IFX_DIR"
@@ -911,6 +921,86 @@ assert_eq "$(printf '%s\n' "$ibody" | grep -c '^<!-- kiro-inline:')" "1" "行内
 assert_contains "$ibody" "&lt;!-- kiro-inline:1111" "行内正文注入：模型文本里的伪造指纹标记被转义"
 assert_contains "$ibody" "&lt;DETAILS>" "行内正文注入：折叠标签被转义"
 assert_eq "$(printf '%s\n' "$ibody" | grep -c '^## ')" "0" "行内正文注入：伪造标题不成立"
+
+# ---- R5：上次运行断在「建好草稿」与「一次提交」之间，残留草稿必须先删再重发 ----
+# 不删就会在同一行上留两份，而旧那条的 id 我们早就没有了——永远提交不了，也永远删不掉；
+# 去重也看不到它（草稿会被状态过滤掉）。
+IFX_DIR="$tmp/ifx-orphan"; mkdir -p "$IFX_DIR"
+jq -n --arg fp "$fp_dup" --arg bot "$BOT" '[
+  {comment_biz_id:"orphan-1", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
+   filePath:"src/app.py", line_number:2, author:{username:$bot},
+   content:("### P0 · 硬编码疑似应用密钥\n<!-- kiro-inline:" + $fp + " -->\n")},
+  {comment_biz_id:"orphan-other", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
+   filePath:"src/other.py", line_number:9, author:{username:$bot},
+   content:"### P2 · 与本次无关的残留草稿\n<!-- kiro-inline:9999999999999999999999999999999999999999 -->\n"}
+]' > "$IFX_DIR/list-comments-inline.json"
+CASE_TWEAK=mk_inline_fixture run_case orphan DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+assert_rc "$RC" 0 "R5 残留草稿：评审成功"
+assert_eq "$(req_count "$OUT" DELETE 'comments/orphan-1$')" "1" "R5 残留草稿：指纹对得上的那条先被删掉"
+assert_eq "$(req_count "$OUT" DELETE 'comments/orphan-other$')" "0" "R5 残留草稿：与本次无关的草稿不动（同一 MR 上可能有另一次运行在进行中）"
+assert_contains "$OUT" "残留草稿" "R5 残留草稿：日志说明清理动作"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "R5 残留草稿：草稿不算已发出，三条照常重发"
+assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" "硬编码疑似应用密钥" "R5 残留草稿：那条问题确实被重发"
+
+# ---- R6：一次提交返回 2xx，但回读发现某条仍是草稿 → 删除并记为发布失败 ----
+# 服务端可以受理请求却拒掉其中一个 id（版本过期、超上限）。不回读的话那条只有机器人自己看得见，
+# 汇总却报「已标注在对应行」，下次重跑还会再发一条。
+IFX_DIR="$tmp/ifx-stilldraft"; mkdir -p "$IFX_DIR"
+jq -n '[]' > "$IFX_DIR/list-comments-inline.1.json"
+jq -n --arg bot "$BOT" '[
+  {comment_biz_id:"draft-1", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
+   filePath:"src/app.py", line_number:2, author:{username:$bot},
+   content:"### P0 · 被服务端拒掉的那条\n<!-- kiro-inline:1111111111111111111111111111111111111111 -->\n"},
+  {comment_biz_id:"draft-2", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:2, author:{username:$bot},
+   content:"### P0 · 正常转公开的那条\n<!-- kiro-inline:2222222222222222222222222222222222222222 -->\n"}
+]' > "$IFX_DIR/list-comments-inline.2.json"
+CASE_TWEAK=mk_inline_fixture run_case stilldraft DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+assert_rc "$RC" 0 "R6 回读：评审成功"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "1" "R6 回读：提交本身成功（2xx）"
+assert_eq "$(printf '%s\n' "$OUT" | grep -cF 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}')" "2" "R6 回读：提交后又查了一次行内评论列表"
+assert_contains "$OUT" "仍是草稿" "R6 回读：日志点明那条没转成公开评论"
+assert_eq "$(req_count "$OUT" DELETE 'comments/draft-1$')" "1" "R6 回读：仍为草稿的那条被删除"
+assert_eq "$(req_count "$OUT" DELETE 'comments/draft-2$')" "0" "R6 回读：已转公开的那条不动"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "其中 2 条已标注在「文件改动」对应行" "R6 回读：行内计数只算真的转成公开评论的（3 → 2）"
+assert_contains "$comment" "#### 行内发布失败（1）" "R6 回读：被拒的那条进折叠区"
+assert_contains "$comment" "硬编码疑似应用密钥" "R6 回读：被拒那条的内容在折叠区完整可见"
+
+# ---- R6b：提交后回读失败 → 全部按发布失败处理（fail-closed）----
+run_inline_case readbackfail ifx-readbackfail DRY_RUN_FAIL_ROUTES="list-comments-inline:403"
+assert_rc "$RC" 0 "R6b 回读失败：评审仍成功"
+assert_contains "$OUT" "本次跳过去重" "R6b 回读失败：发布前那次查询也失败了（同一个 route）"
+assert_contains "$OUT" "全部按发布失败处理" "R6b 回读失败：日志说明 fail-closed"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "其中 0 条已标注在「文件改动」对应行" "R6b 回读失败：不谎报已标注条数"
+assert_contains "$comment" "#### 行内发布失败（3）" "R6b 回读失败：三条都在折叠区完整列出（宁可重复，绝不藏问题）"
+
+# ---- R8：Codeup 侧的比较基准与本地 merge-base 不一致 → 警告 + 汇总里说明 ----
+IFX_DIR="$tmp/ifx-basemismatch"; mkdir -p "$IFX_DIR"
+mk_basemismatch() {
+  local head
+  mkdir -p "$IFX_DIR"
+  head=$(git rev-parse HEAD)
+  # MERGE_TARGET 的 commitId 是目标分支顶端（不是 merge-base）——目标分支在 MR 分出后前进过
+  jq -n --arg sha "$head" '[
+    {patchSetBizId:"tgt-9", versionNo:9, relatedMergeItemType:"MERGE_TARGET", commitId:"feedfacefeedfacefeedfacefeedfacefeedface"},
+    {patchSetBizId:"src-2", versionNo:2, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFX_DIR/list-patchsets.json"
+  jq -n '{comment_biz_id:"draft-1"}' > "$IFX_DIR/create-comment-inline.json"
+}
+CASE_TWEAK=mk_basemismatch run_case basemismatch DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+assert_rc "$RC" 0 "R8 基准不一致：评审仍成功"
+assert_contains "$OUT" "不等于本地 merge-base" "R8 基准不一致：日志告警"
+assert_contains "$OUT" "P1-14" "R8 基准不一致：日志指向待探测项"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "R8 基准不一致：仍以 API 给的版本发出（不猜语义）"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.from_patchset_biz_id' | sort -u | paste -sd, -)" "tgt-9" "R8 基准不一致：from 仍用 API 的版本"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "行内评论的行号可能有偏移" "R8 基准不一致：汇总评论里说明不确定性（I10）"
+assert_contains "$comment" "其中 3 条已标注在「文件改动」对应行" "R8 基准不一致：不影响行内计数"
 
 # ---- 行内评论不影响汇总评论的原地更新（票 03 的不变量在开关打开后仍成立）----
 IFX_DIR="$tmp/ifx-update"; mkdir -p "$IFX_DIR"

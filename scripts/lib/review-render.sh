@@ -11,7 +11,7 @@
 # 汇总评论的原地更新（票 03）：
 #   review_select_prior_comment  从 MR 的全局评论里定位「本评审员上一次那条」（作者 + 评审标记）
 #   review_parse_history         从那条评论的隐藏 JSON 读回历次记录
-#   review_history_append        追加本次记录（并对所有字段做字符白名单过滤）
+#   review_history_append        追加本次记录（并对所有字段做字符许可清单过滤）
 #   review_render_history_marker / review_render_history_table / review_render_footer
 #                                隐藏 JSON、「历次评审」折叠表、含「第 N 次评审」的页脚
 #
@@ -577,8 +577,8 @@ review_render_inline_marker() {
 # 已认证的 MR 参与者主动发评论（可见、可追溯），两害相权取轻，并由调用方打警告提示配置。
 # 状态过滤在脚本侧做：接口只实测过 comment_type 过滤（P1-06），state 参数名未实测，
 # 凭记忆传一个可能 400 的参数会让整条去重通路挂掉。
-# 状态判定用**黑名单**（排除 DELETED 与 DRAFT）而不是白名单（只认 OPENED）：实测只见过这三个取值，
-# 万一 Codeup 对「已被开发者解决」的行内评论返回别的状态（如 RESOLVED），白名单会漏收它的指纹，
+# 状态判定用**排除清单**（排除 DELETED 与 DRAFT）而不是许可清单（只认 OPENED）：实测只见过这三个取值，
+# 万一 Codeup 对「已被开发者解决」的行内评论返回别的状态（如 RESOLVED），许可清单会漏收它的指纹，
 # 于是每次重跑都在同一行上再发一条（违反 I6 幂等）。与 review_select_prior_comment 的判定一致。
 # out_dated 的评论一律**不算**已发出：它绑的是被取代的旧版本，Codeup 会把它折叠/隐藏在 diff 视图里。
 # 把它算作已发出，就等于汇总里那句「已标注在「文件改动」对应行」在说谎——读者在当前 diff 上看不到它。
@@ -599,6 +599,35 @@ review_inline_existing_fingerprints() {
     | map(select(if $bot == "" then true else author_name == $bot end))
     | .[] | str(.content) | split("\n")[] | match($re) | .captures[0].string' 2>/dev/null \
     | LC_ALL=C sort -u
+}
+
+# --- 本评审员留在 MR 上的行内评论**草稿**（stdin = ListMergeRequestComments 响应）---
+# 用法：review_inline_draft_fingerprints <机器人账号用户名或空串> → stdout 每行 `指纹<TAB>comment_biz_id`
+# 草稿只有机器人自己看得见，正常流程里不会留下——留下就说明上一次运行在「建好草稿」与
+# 「一次提交」之间断了（提交请求丢了、进程被杀、或者提交被服务端部分拒掉）。
+# 两处要用它：
+#   ① 发布前清理孤儿草稿：同一条问题的草稿已经在那里时，直接再建一条会在同一行上留两份，
+#      而旧那条的 id 我们早就没有了，永远提交不了也删不掉；
+#   ② 一次提交之后回读：2xx 只说明请求被受理，不保证每个 id 都真的转成了 OPENED
+#      （版本过期、超上限都可能让服务端拒掉其中一个），仍是草稿的必须按发布失败处理。
+# 判定与 review_inline_existing_fingerprints 对称：作者匹配（用户名已知时）+ 带指纹标记 +
+# 状态是草稿。out_dated 不参与判定——草稿无论新旧都要清理。
+review_inline_draft_fingerprints() {
+  local bot="${1-}"
+  jq -r --arg bot "$bot" --arg re "$REVIEW_INLINE_MARKER_RE" '
+    def str(v): if (v | type) == "string" then v else "" end;
+    def author_name: if (.author | type) == "object" then str(.author.username) else "" end;
+    (if type == "object" then (.result // []) else . end)
+    | (if type == "array" then . else [] end)
+    | map(select(type == "object"))
+    | map(select(str(.comment_type) == "" or str(.comment_type) == "INLINE_COMMENT"))
+    | map(select(.draft == true or (str(.state) | ascii_upcase) == "DRAFT"))
+    | map(select(if $bot == "" then true else author_name == $bot end))
+    | .[]
+    | (str(.comment_biz_id)) as $id
+    | select(($id | length) > 0)
+    | (str(.content) | split("\n")[] | match($re) | .captures[0].string) as $fp
+    | "\($fp)\t\($id)"' 2>/dev/null | LC_ALL=C sort -u
 }
 
 # --- 一条行内评论的正文（spec §4.4）---
@@ -663,7 +692,7 @@ REVIEW_MARKER_LINE_RE='^<!-- kiro-review:[0-9a-zA-Z._-]+ run:([0-9]{1,9}) -->[[:
 # 为什么不反解表格：表格要把结论中文化、要把三个计数合成一列，反解需要一套反向映射，
 # 任何渲染微调都会让历史读不出来。隐藏 JSON 与渲染解耦，是稳定的解析契约。
 # status：""=正常评审；failed=评审未完成；degraded=结构化解析失败（此时计数为 null）。
-# 注入面：这一行会被下一次评审读回来，所以写入时对每个字符串字段做白名单过滤
+# 注入面：这一行会被下一次评审读回来，所以写入时对每个字符串字段做许可清单过滤
 # （review_history_append 的 safe()），保证正文里不可能出现 `-->` 而提前闭合注释。
 REVIEW_HISTORY_PREFIX="<!-- kiro-history:"
 REVIEW_HISTORY_SUFFIX=" -->"
@@ -717,7 +746,7 @@ review_history_append() {
     --arg p0 "$p0" --arg p1 "$p1" --arg p2 "$p2" '
     def num(v): if (v | test("^[0-9]+$")) then (v | tonumber) else null end;
     def numj(v): if (v | type) == "number" then (v | floor) else null end;
-    # 字符白名单：剔掉 < 与 >，过滤后的取值不可能构成 `-->`／`<!--`，隐藏注释不会被提前闭合；
+    # 字符许可清单：剔掉 < 与 >，过滤后的取值不可能构成 `-->`／`<!--`，隐藏注释不会被提前闭合；
     # 剔掉 | 与反引号，历次表的单元格不会被撑出幻影列、定位串的反引号不会失配；
     # 剔掉控制字符，历次表的行渲染用 \x1f 作字段分隔符，混进控制字符会错位。
     # 非 ASCII 一律保留（中文结论要能显示）。
@@ -925,11 +954,65 @@ _review_render_header() {
 #   - 档位桶在 quiet 下就是 P2（渲染成 `#### P2 建议（n）`，与 spec 模板一致），
 #     但在 critical 下还包含 P1——写死「P2 建议」会把 P1 问题标成 P2，那是改写评审员的判级。
 #   - 超限桶在 quiet 下是 P0/P1（与 spec 模板一致），balanced 下可能含 P2。
-# _review_render_fold_section <计划文件> <标题模板> <桶名> <是否未定位桶 0|1>
+# --- 共用 jq 片段：问题的定位串 ---
+# 两处渲染（折叠区条目、INLINE_COMMENT=0 的问题清单）必须给出同一种定位串，所以只留一份定义
+# （与 _REVIEW_JQ_SANITIZE 同一个做法）。
+# $unloc == "1"（折叠区的「未定位问题」小节）刻意只给文件、不给行号：那个行号恰恰是
+# 「不在变更行集合里」的，摆出来只会让读者按一个不可信的行号去找问题（spec §4.3 模板）。
+_REVIEW_JQ_LOC='
+  def _loc($unloc):
+    if .file == null then "（未定位）"
+    elif $unloc == "1" then "`\(.file)`（无法定位到变更行）"
+    elif .line_start == null then "`\(.file)`"
+    elif (.line_end != null and .line_end > .line_start) then "`\(.file):\(.line_start)-\(.line_end)`"
+    else "`\(.file):\(.line_start)`" end;
+'
+
+# --- 共用 jq 片段：body 的首句（折叠区条目用）---
+# 折叠区是「一眼扫过去」的清单，整段 body（可能带代码块）会把折叠区撑成第二份报告。
+# 取法：跳过整段代码围栏 → 取第一个非空行 → 截到第一个句号 → 按 120 字符封顶。
+# 三个坑：
+#   ① **句子边界必须用 split("。") 而不是 index("。")**：jq 的 index 对字符串返回**字节**偏移，
+#      而 `.[a:b]` 切片按**码点**。中文正文里两者差三倍（"第一句说明。第二句解释。" → index 15、
+#      length 12），切出来的既不是首句也不是完整字符。短句时字节偏移超过码点长度、被切片夹住
+#      而「恰好」返回整行，所以这个 bug 在单句 fixture 上完全看不出来。
+#   ② 跳过围栏行是必需的：评审员的 body 很常以 ```python 开头，取到那一行的话这个条目
+#      就只剩一串反引号、什么信息都没有；围栏**内**的代码行同样什么都说明不了，整段跳过。
+#   ③ 反引号还要再处理两道，否则这一行会把后面的条目一起吞掉：
+#      连续 2 个以上的反引号折叠成 1 个（3 连是 Markdown 行内代码定界符，会一直找下一个 3 连
+#      来配对，把两个条目之间的定位串与标题全吃进代码 span）；折叠后个数为奇数时补一个闭合
+#      （120 字符封顶很容易切在代码 span 中间）。
+_REVIEW_JQ_FIRSTSENT='
+  def _lines: (. // "") | split("\n");
+  def _outside_fence:
+    _lines
+    | reduce .[] as $l ({fence: false, out: []};
+        if ($l | test("^[[:space:]]{0,3}(```|~~~)")) then {fence: (.fence | not), out: .out}
+        elif .fence then .
+        else {fence: .fence, out: (.out + [$l])} end)
+    | .out;
+  def firstsent:
+    (_outside_fence | map(select(test("[^[:space:]]"))) | (.[0] // "")) as $outside
+    # 整段 body 就是一个代码块时退回「围栏外没有、就取围栏内第一行」，总比留一个空说明好
+    | (if ($outside | length) > 0 then $outside
+       else (_lines
+             | map(select(test("[^[:space:]]") and (test("^[[:space:]]{0,3}(```|~~~)") | not)))
+             | (.[0] // "")) end) as $l
+    | ($l | sub("^[[:space:]]+"; "")) as $t
+    | ($t | split("。")) as $parts
+    | (if ($parts | length) > 1 then ($parts[0] + "。") else $t end) as $s0
+    | (if ($s0 | length) > 120 then $s0[0:120] + "…" else $s0 end) as $s1
+    | ($s1 | gsub("`{2,}"; "`")) as $s
+    | if ((($s | split("`") | length) - 1) % 2) == 1 then $s + "`" else $s end;
+'
+
+# _review_render_fold_section <计划文件> <标题模板> <桶名> <是否未定位桶 0|1> [是否完整渲染 0|1]
 # 标题模板里的 `{levels}` 会替换成该桶里实际出现的级别列表（`P0/P1`）。替换刻意放在
 # 「桶为空就直接返回」之后：空桶时那个标题根本不会渲染，先算它等于白跑一个 jq。
+# 完整渲染（full=1）只给「行内发布失败」用：那些问题一条行内评论都没发出去，说明与修复建议
+# 在 MR 上再没有别的地方能看到（I10 失败可见），只给标题 + 首句等于把 P0 的内容丢了。
 _review_render_fold_section() {
-  local plan="$1" title="$2" bucket="$3" unloc="${4:-0}" n
+  local plan="$1" title="$2" bucket="$3" unloc="${4:-0}" full="${5:-0}" n
   n=$(jq -r --arg b "$bucket" '(.folded[$b] // []) | length' "$plan")
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || return 0
   if [[ "$title" == *'{levels}'* ]]; then
@@ -937,46 +1020,19 @@ _review_render_fold_section() {
   fi
   echo ""
   printf '#### %s（%s）\n' "$title" "$n"
+  if [[ "$full" == "1" ]]; then
+    # 与「问题清单」同款：编号 + 定位串 + 标题 + 说明 + 修复建议
+    jq -r --arg b "$bucket" --arg unloc "$unloc" "${_REVIEW_JQ_LOC}"'
+      (.folded[$b] // []) | to_entries[]
+      | .value as $f
+      | "\n##### \(.key + 1). \($f | _loc($unloc)) — \($f.title)\n\n\($f.body)"
+        + (if ($f.fix | length) > 0 then "\n\n**修复建议**\n\n\($f.fix)" else "" end)' "$plan"
+    return 0
+  fi
   echo ""
-  # body 首句：取第一个「非空且不是代码围栏」的行，句号处截断，再按 120 字符封顶。
-  # 折叠区是「一眼扫过去」的清单，整段 body（可能带代码块）会把折叠区撑成第二份报告。
-  # 跳过围栏行是必需的：评审员的 body 很常以 ```python 开头，取到那一行的话这个条目
-  # 就只剩一串反引号、什么信息都没有。
-  # 反引号还要再处理两道，否则这一行会把后面的条目一起吞掉：
-  #   ① 连续 2 个以上的反引号折叠成 1 个——`​``​` 这种 3 连是 Markdown 的行内代码定界符，
-  #      它会一直找下一个 3 连来配对，于是两个条目之间的定位串与标题全被吃进代码span；
-  #   ② 折叠后若反引号个数为奇数（120 字符封顶很容易切在代码span中间），末尾补一个闭合。
-  jq -r --arg b "$bucket" --arg unloc "$unloc" '
-    def _lines: (. // "") | split("\n");
-    # 整段代码围栏（含围栏内的代码行）都不算「说明」：取到围栏内的第一行代码同样什么都说明不了
-    def _outside_fence:
-      _lines
-      | reduce .[] as $l ({fence: false, out: []};
-          if ($l | test("^[[:space:]]{0,3}(```|~~~)")) then {fence: (.fence | not), out: .out}
-          elif .fence then .
-          else {fence: .fence, out: (.out + [$l])} end)
-      | .out;
-    def firstsent:
-      (_outside_fence | map(select(test("[^[:space:]]"))) | (.[0] // "")) as $outside
-      # 整段 body 就是一个代码块时退回「围栏外没有、就取围栏内第一行」，总比留一个空说明好
-      | (if ($outside | length) > 0 then $outside
-         else (_lines
-               | map(select(test("[^[:space:]]") and (test("^[[:space:]]{0,3}(```|~~~)") | not)))
-               | (.[0] // "")) end) as $l
-      | ($l | sub("^[[:space:]]+"; "")) as $t
-      | ($t | index("。")) as $i
-      | (if $i != null then $t[0:$i + 1] else $t end) as $s0
-      | (if ($s0 | length) > 120 then $s0[0:120] + "…" else $s0 end) as $s1
-      | ($s1 | gsub("`{2,}"; "`")) as $s
-      | if ((($s | split("`") | length) - 1) % 2) == 1 then $s + "`" else $s end;
-    def loc:
-      if .file == null then "（未定位）"
-      elif $unloc == "1" then "`\(.file)`（无法定位到变更行）"
-      elif .line_start == null then "`\(.file)`"
-      elif (.line_end != null and .line_end > .line_start) then "`\(.file):\(.line_start)-\(.line_end)`"
-      else "`\(.file):\(.line_start)`" end;
+  jq -r --arg b "$bucket" --arg unloc "$unloc" "${_REVIEW_JQ_LOC}${_REVIEW_JQ_FIRSTSENT}"'
     (.folded[$b] // [])[]
-    | "- \(loc) **\(.title)** — \(.body | firstsent)"' "$plan"
+    | "- \(_loc($unloc)) **\(.title)** — \(.body | firstsent)"' "$plan"
 }
 
 # 档位桶/超限桶里实际出现的级别，升序连成 `P0/P1`
@@ -995,7 +1051,8 @@ _review_render_folded() {
   _review_render_fold_section "$plan" '{levels} 建议'          profile   0
   _review_render_fold_section "$plan" '超出行内上限的 {levels}' overflow  0
   _review_render_fold_section "$plan" '未定位问题'              unlocated 1
-  _review_render_fold_section "$plan" '行内发布失败'            failed    0
+  # 发布失败的那些问题完整渲染：一条行内评论都没发出去，说明与修复建议在 MR 上没有第二个落点
+  _review_render_fold_section "$plan" '行内发布失败'            failed    0 1
   echo "</details>"
 }
 
@@ -1071,7 +1128,13 @@ review_render_summary() {
   # 但必须把矛盾摆在结论旁边——否则只看标题的人会合并一份自己都说有 P0 的代码。
   if [[ "$verdict" == "MERGE" && "$n0" -gt 0 ]]; then
     echo ""
-    echo "> ⚠️ 评审员给出「可合并」，但同时报了 ${n0} 条 P0（必须修复）。两者矛盾，请以下方 P0 清单为准。"
+    # 指向的必须是本次真的会渲染出来的地方：INLINE_COMMENT=1 时早返回、根本没有「问题清单」这一节，
+    # 明细都在行内评论与折叠区里，指过去会让读者去找一个不存在的章节。
+    if [[ "$_RR_INLINE" == "1" ]]; then
+      echo "> ⚠️ 评审员给出「可合并」，但同时报了 ${n0} 条 P0（必须修复）。两者矛盾，请以「文件改动」上的行内评论与下方折叠区为准。"
+    else
+      echo "> ⚠️ 评审员给出「可合并」，但同时报了 ${n0} 条 P0（必须修复）。两者矛盾，请以下方 P0 清单为准。"
+    fi
   fi
   echo ""
   echo "### 问题统计"
@@ -1134,12 +1197,7 @@ review_render_summary() {
   else
     # 分组与编号都在 jq 里做，保证同一输入逐字节一致：
     # 组内先按原始次序编号（to_entries 固定索引），再按 文件 → 起始行 → 原始次序 排序。
-    jq -r --arg sevs "$REVIEW_SEVERITIES" '
-      def loc:
-        if .file == null then "（未定位）"
-        elif .line_start == null then "`\(.file)`"
-        elif .line_end > .line_start then "`\(.file):\(.line_start)-\(.line_end)`"
-        else "`\(.file):\(.line_start)`" end;
+    jq -r --arg sevs "$REVIEW_SEVERITIES" "${_REVIEW_JQ_LOC}"'
       def sevlabel: { "P0": "P0 必须修复", "P1": "P1 应当修复", "P2": "P2 可选改进" }[.] // .;
       (.findings | to_entries | map(.value + {idx: .key})) as $all
       | ($sevs | split(" "))[] as $sev
@@ -1150,7 +1208,7 @@ review_render_summary() {
           | sort_by([(.file == null), (.file // ""), (.line_start // 0), .idx])
           | to_entries[]
           | .value as $f
-          | "\n##### \(.key + 1). \($f | loc) — \($f.title)\n\n\($f.body)"
+          | "\n##### \(.key + 1). \($f | _loc("0")) — \($f.title)\n\n\($f.body)"
             + (if ($f.fix | length) > 0 then "\n\n**修复建议**\n\n\($f.fix)" else "" end) )' "$_RR_JSON"
   fi
   echo ""
@@ -1248,11 +1306,11 @@ review_truncate_comment() {
 #   `private_key=/etc/ssl/private/server.key`
 # 一并掩成乱码——这些是表达式和路径，不是凭证，掩掉只会让人读不懂而毫无安全收益。
 # 所以 key=value 只对「看起来像字面量凭证」的取值生效：引号里的字符串，或不含调用/属性访问/
-# 路径特征的高熵 token。有明确前缀的形态（AWS/GitHub/Slack/JWT/PEM/Bearer/URL 内嵌凭证）另走白名单，
+# 路径特征的高熵 token。有明确前缀的形态（AWS/GitHub/Slack/JWT/PEM/Bearer/URL 内嵌凭证）另走许可清单，
 # 不受这条限制。
 review_redact_secrets() {
   LC_ALL=C awk '
-    # 注意：本函数整体在 LC_ALL=C 下运行（按字节），所以**所有取值的字符类都必须是显式 ASCII 白名单**，
+    # 注意：本函数整体在 LC_ALL=C 下运行（按字节），所以**所有取值的字符类都必须是显式 ASCII 许可清单**，
     # 不能用 [^…] 这种否定类——中文标点等高位字节不属于 [[:space:]]/[[:punct:]]，取值会一路吞进中文正文，
     # 掩码还会从多字节字符中间切断（输出 U+FFFD）。
     function mask(s) {

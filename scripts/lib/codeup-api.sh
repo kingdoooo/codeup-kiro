@@ -13,6 +13,18 @@ _codeup_http_ok() { [[ "$1" -ge 200 && "$1" -lt 300 ]]; }
 # 仅传输错误(000)/429/5xx 可重试；其余 4xx 是确定性失败（POST 非幂等，盲目重试会重复发评论）
 _codeup_should_retry() { [[ "$1" == "000" || "$1" == "429" || "$1" -ge 500 ]]; }
 
+# --- 创建行内评论专用的重试策略：只重试 429 ---
+# 000（响应丢失）与 5xx 都可能发生在「服务端其实已经建好了」之后。对**行内评论**重试的代价很具体：
+# 同一行上多出一条重复评论，而第一条的 comment_biz_id 我们从来没拿到过——它永远不会被纳入
+# 一次提交、永远不会被删除，之后的去重也看不到它（草稿会被状态过滤掉）。429 是服务端明确表示
+# 「没受理」，重试是安全的。
+# 不重试的代价小得多：这一条按发布失败处理，进汇总评论的折叠区「行内发布失败」（完整渲染，
+# 说明与修复建议都在），下次评审重发。
+# 刻意**不**把这条策略套到 codeup_post_comment（汇总评论）上：汇总评论是评审结果唯一的通道，
+# 一次传输抖动就丢掉整份报告违反 I10；而它重复的后果是 MR 上多一条汇总，下一次评审还能靠
+# 评审标记找到并原地更新其中一条。两者的取舍方向相反。
+_codeup_should_retry_create_inline() { [[ "$1" == "429" ]]; }
+
 # 退避秒数的基数。CODEUP_RETRY_BACKOFF=0 关掉睡眠，供测试真正跑一遍重试循环
 # （否则每条重试路径的负向测试都要等 15 秒，结果就是没人写这类测试）。
 # 必须校验：不带校验时 `five` 会被 $(( )) 当 0 用（退避被静默关掉，生产上把 429/5xx 变成三连击），
@@ -32,15 +44,17 @@ _codeup_retry_sleep() {
   return 0
 }
 
-# --- 带重试的请求（既有策略：000/429/5xx 重试至多 2 次，其余 4xx 确定性失败不重试）---
-# 用法：_codeup_request_retry <日志前缀> <响应体输出文件（可为 /dev/null）> <method> <path> [body]
+# --- 带重试的请求（默认策略：000/429/5xx 重试至多 2 次，其余 4xx 确定性失败不重试）---
+# 用法：_codeup_request_retry <日志前缀> <响应体输出文件（可为 /dev/null）> <method> <path> [body] [重试判定函数]
 #   rc 0 = HTTP 2xx（响应体已写入输出文件）；rc 1 = 失败
+# 第 6 个参数可换一个更严的重试判定（行内评论创建用 _codeup_should_retry_create_inline：
+# 只重试 429，因为创建不幂等）。
 # 这四个封装（post/list/update/bot_username）原先各抄了一份同样的循环，一处改动要同步四处，
 # 而 bot_username 那份当时干脆漏了重试：一次传输抖动（000）就让本次评审退化为新建，
 # 日志还把它写成「令牌未勾选平台用户权限」，把运维引向错误方向。
 # 不能用 $(...) 取响应：命令替换在子 shell 里跑，CODEUP_HTTP_CODE 传不回来。
 _codeup_request_retry() {
-  local prefix="$1" out="$2" method="$3" path="$4" body="${5:-}"
+  local prefix="$1" out="$2" method="$3" path="$4" body="${5:-}" pred="${6:-_codeup_should_retry}"
   local attempt tmp
   for attempt in 1 2 3; do
     tmp=$(mktemp)
@@ -49,7 +63,7 @@ _codeup_request_retry() {
       cat "$tmp" > "$out"; rm -f "$tmp"; return 0
     fi
     rm -f "$tmp"
-    if ! _codeup_should_retry "$CODEUP_HTTP_CODE"; then
+    if ! "$pred" "$CODEUP_HTTP_CODE"; then
       echo "${prefix}: HTTP ${CODEUP_HTTP_CODE}，确定性失败不重试" >&2
       return 1
     fi
@@ -232,23 +246,30 @@ codeup_post_comment() {
 # 旧汇总评论落在页外时脚本会误判「首次评审」而每次新建一条。补分页需要先做一次探测（见票 03 Comments）。
 # $1=localId → stdout=响应体；rc 1=失败（按既有重试策略重试后仍失败）
 CODEUP_COMMENT_PAGE_HINT="${CODEUP_COMMENT_PAGE_HINT:-100}"
-codeup_list_global_comments() {
-  local local_id="$1" tmp cnt rc=0
-  local body='{"comment_type":"GLOBAL_COMMENT"}'
+# 内部实现：两种评论类型只差 body 里的 comment_type 与告警文案，共用一份请求/分页告警逻辑。
+# 用法：_codeup_list_comments <localId> <GLOBAL_COMMENT|INLINE_COMMENT> <日志前缀> <达上限时的后果说明>
+_codeup_list_comments() {
+  local local_id="$1" ctype="$2" prefix="$3" consequence="$4" tmp cnt rc=0
+  local body
+  body=$(printf '{"comment_type":"%s"}' "$ctype")
   tmp=$(mktemp)
-  _codeup_request_retry codeup_list_global_comments "$tmp" POST \
+  _codeup_request_retry "$prefix" "$tmp" POST \
     "/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/repositories/${CODEUP_REPO_ID}/changeRequests/${local_id}/comments/list" \
     "$body" || rc=$?
   if [[ "$rc" == "0" ]]; then
     cnt=$(jq -r 'if type == "array" then length elif type == "object" then ((.result // []) | length) else 0 end' \
             "$tmp" 2>/dev/null || echo 0)
     if [[ "${cnt:-0}" =~ ^[0-9]+$ && "${cnt:-0}" -ge "$CODEUP_COMMENT_PAGE_HINT" ]]; then
-      echo "codeup_list_global_comments: 返回 ${cnt} 条评论，已达常见单页上限（${CODEUP_COMMENT_PAGE_HINT}），旧汇总评论可能不在本页内 → 可能误判为首次评审并多发一条汇总" >&2
+      echo "${prefix}: 返回 ${cnt} 条评论，已达常见单页上限（${CODEUP_COMMENT_PAGE_HINT}）→ ${consequence}" >&2
     fi
     cat "$tmp"
   fi
   rm -f "$tmp"
   return "$rc"
+}
+codeup_list_global_comments() {
+  _codeup_list_comments "$1" GLOBAL_COMMENT codeup_list_global_comments \
+    "旧汇总评论可能不在本页内，可能误判为首次评审并多发一条汇总"
 }
 
 # --- 原地更新一条评论（UpdateChangeRequestComment）---
@@ -318,7 +339,9 @@ codeup_list_patchsets() {
 # --- 选出行内评论要用的版本对（spec §4.5 第 1 步、Q6）---
 # from = 最新 MERGE_TARGET，to = 最新 MERGE_SOURCE（都按 versionNo 取最大），patchset_biz_id 用 to。
 # stdin = ListChangeRequestPatchSets 响应
-# stdout = "from_patchset_biz_id<TAB>to_patchset_biz_id<TAB>to_commit_id"
+# stdout = "from_patchset_biz_id<TAB>to_patchset_biz_id<TAB>to_commit_id<TAB>from_commit_id"
+# from_commit_id 排在最后（追加而不是插入）：调用方按 cut -f1..3 取值的写法不受影响。
+# 它用来核对「Codeup 侧的比较基准」与本地 merge-base 是否一致（见 kiro-review.sh 的 R8 告警）。
 # rc 1 = 选不出（响应不合法，或缺 MERGE_TARGET / MERGE_SOURCE 中的一侧）——调用方据此回落到
 #        「只发一条含完整问题清单的汇总评论」，绝不用猜出来的版本去发行内评论（会挂错行）。
 # 字段类型守卫与 review_select_prior_comment 同理：响应形态只在一次探测里见过，
@@ -340,7 +363,8 @@ codeup_select_patchset_pair() {
     | if $from == null then "missing:MERGE_TARGET"
       elif $to == null then "missing:MERGE_SOURCE"
       else [$from.patchSetBizId, $to.patchSetBizId,
-            (if ($to.commitId | type) == "string" then $to.commitId else "" end)] | @tsv
+            (if ($to.commitId | type) == "string" then $to.commitId else "" end),
+            (if ($from.commitId | type) == "string" then $from.commitId else "" end)] | @tsv
       end' 2>/dev/null) || out=""
   case "$out" in
     "")
@@ -379,9 +403,11 @@ codeup_create_inline_comment() {
     '{comment_type: "INLINE_COMMENT", content: $content, draft: $draft, resolved: false,
       file_path: $f, line_number: $l,
       patchset_biz_id: $to, from_patchset_biz_id: $from, to_patchset_biz_id: $to}')
+  # 只重试 429（见 _codeup_should_retry_create_inline）：创建不幂等，000/5xx 之后重试会在同一行上
+  # 留下一条我们永远拿不到 id 的重复评论
   _codeup_request_retry codeup_create_inline_comment "$out" POST \
     "/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/repositories/${CODEUP_REPO_ID}/changeRequests/${local_id}/comments" \
-    "$body" || rc=$?
+    "$body" _codeup_should_retry_create_inline || rc=$?
   return "$rc"
 }
 
@@ -416,22 +442,8 @@ codeup_submit_drafts() {
 # （review_inline_existing_fingerprints）。分页告警与汇总评论列表同理。
 # $1=localId → stdout=响应体；rc 1=失败
 codeup_list_inline_comments() {
-  local local_id="$1" tmp cnt rc=0
-  local body='{"comment_type":"INLINE_COMMENT"}'
-  tmp=$(mktemp)
-  _codeup_request_retry codeup_list_inline_comments "$tmp" POST \
-    "/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/repositories/${CODEUP_REPO_ID}/changeRequests/${local_id}/comments/list" \
-    "$body" || rc=$?
-  if [[ "$rc" == "0" ]]; then
-    cnt=$(jq -r 'if type == "array" then length elif type == "object" then ((.result // []) | length) else 0 end' \
-            "$tmp" 2>/dev/null || echo 0)
-    if [[ "${cnt:-0}" =~ ^[0-9]+$ && "${cnt:-0}" -ge "$CODEUP_COMMENT_PAGE_HINT" ]]; then
-      echo "codeup_list_inline_comments: 返回 ${cnt} 条行内评论，已达常见单页上限（${CODEUP_COMMENT_PAGE_HINT}），已有的行内评论可能不在本页内 → 去重可能漏判、重跑会重复发" >&2
-    fi
-    cat "$tmp"
-  fi
-  rm -f "$tmp"
-  return "$rc"
+  _codeup_list_comments "$1" INLINE_COMMENT codeup_list_inline_comments \
+    "已有的行内评论可能不在本页内，去重可能漏判、重跑会重复发"
 }
 
 # --- 删除一条评论（DeleteChangeRequestComment）---

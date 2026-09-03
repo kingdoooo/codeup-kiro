@@ -544,7 +544,7 @@ assert_contains "$out" "https://ci-bot:" "掩码：URL 里的用户名保留（�
 assert_contains "$out" "@codeup.aliyun.com/org/repo.git" "掩码：URL 其余部分不动"
 out=$(printf 'YUNXIAO_TOKEN=pt-abcdefghij0123456789xyz\n' | review_redact_secrets)
 assert_not_contains "$out" "pt-abcdefghij0123456789xyz" "掩码：YUNXIAO_TOKEN 赋值被掩掉"
-# 回归：掩码整体在 LC_ALL=C 下按字节跑，取值的字符类必须是显式 ASCII 白名单。用否定字符类时，
+# 回归：掩码整体在 LC_ALL=C 下按字节跑，取值的字符类必须是显式 ASCII 许可清单。用否定字符类时，
 # 中文标点不属于 [[:space:]]，取值会一路吞进中文正文，掩码还会从多字节字符中间切断（输出 U+FFFD）。
 out=$(printf 'P0：写死了 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY，还有别的问题。\n' | review_redact_secrets)
 assert_not_contains "$out" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" "掩码：中文正文里的凭证被掩掉"
@@ -577,7 +577,7 @@ assert_eq "$(review_parse_history "$tmp/histbad.md" 2>/dev/null)" "[]" "parse_hi
 printf '<!-- kiro-history:[{"run":1},{"noRun":2},"字符串"] -->\n' > "$tmp/histmixed.md"
 assert_eq "$(review_parse_history "$tmp/histmixed.md" 2>/dev/null | jq -r 'length')" "1" "parse_history：丢掉没有数值 run 的行"
 
-# review_history_append：追加一行并做字段白名单过滤
+# review_history_append：追加一行并做字段许可清单过滤
 h=$(review_history_append - 1 90fcb05 MERGE_AFTER_FIX "" 1 2 3)
 assert_eq "$(printf '%s' "$h" | jq -c '.[0]')" '{"run":1,"sha":"90fcb05","verdict":"MERGE_AFTER_FIX","status":"","p0":1,"p1":2,"p2":3}' "history_append：空历史 + 一行"
 printf '%s' "$h" > "$tmp/h1.json"
@@ -1114,9 +1114,9 @@ assert_eq "$(review_inline_existing_fingerprints "$TEST_BOT_USERNAME" < <(echo '
 assert_eq "$(jq -c '{result: .}' "$tmp/inline-list.json" | review_inline_existing_fingerprints "$TEST_BOT_USERNAME")" "$fpA" \
   "去重：{result:[…]} 形态兼容"
 
-# 状态判定必须是黑名单（排除 DELETED/DRAFT）而不是白名单（只认 OPENED）：
+# 状态判定必须是排除清单（排除 DELETED/DRAFT）而不是许可清单（只认 OPENED）：
 # 实测只见过三个取值，Codeup 对「已被开发者解决」的行内评论若返回别的状态（如 RESOLVED），
-# 白名单会漏收它的指纹，于是每次重跑都在同一行上再发一条（违反 I6 幂等）。
+# 许可清单会漏收它的指纹，于是每次重跑都在同一行上再发一条（违反 I6 幂等）。
 fpR2=$(review_fingerprint "src/x.py" 5 "已被解决的问题")
 jq -n --arg fp "$fpR2" --arg bot "$TEST_BOT_USERNAME" '[
   {comment_biz_id:"r1", comment_type:"INLINE_COMMENT", state:"RESOLVED", draft:false,
@@ -1138,6 +1138,42 @@ assert_eq "$(jq -c 'map(.out_dated = false)' "$tmp/outdated-list.json" | review_
   "去重：out_dated=false（重跑而没有新推送）时照常去重，A3 不受影响"
 assert_eq "$(jq -c 'map(del(.out_dated))' "$tmp/outdated-list.json" | review_inline_existing_fingerprints "$TEST_BOT_USERNAME")" "$fpO" \
   "去重：没有 out_dated 字段时按未过期处理"
+
+# ---- 残留草稿的指纹 → biz_id（发布前清理孤儿草稿 + 提交后回读都用它）----
+fpD=$(review_fingerprint "src/app.py" 30 "上次没提交成功的问题")
+jq -n --arg fp "$fpD" --arg bot "$TEST_BOT_USERNAME" '[
+  {comment_biz_id:"d1", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
+   content:("### P0 · 上次没提交成功的问题\n<!-- kiro-inline:" + $fp + " -->\n"), author:{username:$bot}},
+  {comment_biz_id:"d2", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   content:("### P0 · 已经公开的问题\n<!-- kiro-inline:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->\n"), author:{username:$bot}},
+  {comment_biz_id:"d3", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
+   content:("### P0 · 别人的草稿\n<!-- kiro-inline:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->\n"), author:{username:"aliyun:human_dev"}},
+  {comment_biz_id:"d4", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
+   content:"### P0 · 没有指纹标记的草稿\n", author:{username:$bot}},
+  {comment_biz_id:"", comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true,
+   content:("### P0 · 没有 biz_id\n<!-- kiro-inline:cccccccccccccccccccccccccccccccccccccccc -->\n"), author:{username:$bot}},
+  "这一项不是对象"
+]' > "$tmp/draft-list.json"
+out=$(review_inline_draft_fingerprints "$TEST_BOT_USERNAME" < "$tmp/draft-list.json")
+assert_eq "$out" "$(printf '%s\td1' "$fpD")" "草稿：只取本机器人、仍是草稿、带指纹标记、且有 biz_id 的那条"
+# 断言只看 biz_id 那一列：指纹是 40 位十六进制，"d2"/"d3"/"d4" 这种短串很容易在里面撞上
+ids=$(printf '%s\n' "$out" | cut -f2 | paste -sd, -)
+assert_eq "$ids" "d1" "草稿：选出的 biz_id 恰好只有 d1（d2 已公开、d3 是别人的、d4 没有指纹标记、空 biz_id 被跳过）"
+assert_eq "$(printf '%s\n' "$out" | cut -f1 | paste -sd, -)" "$fpD" "草稿：指纹列就是那条问题的指纹"
+# state 缺失但 draft:true 同样算草稿（两个字段任一为真即可）
+assert_contains "$(jq -c 'map(if type == "object" and .comment_biz_id == "d1" then del(.state) else . end)' "$tmp/draft-list.json" \
+  | review_inline_draft_fingerprints "$TEST_BOT_USERNAME")" "d1" "草稿：只有 draft:true 也认"
+assert_contains "$(jq -c 'map(if type == "object" and .comment_biz_id == "d1" then (.draft = false) else . end)' "$tmp/draft-list.json" \
+  | review_inline_draft_fingerprints "$TEST_BOT_USERNAME")" "d1" "草稿：只有 state=DRAFT 也认"
+assert_eq "$(review_inline_draft_fingerprints "" < "$tmp/draft-list.json" | wc -l | tr -d ' ')" "2" \
+  "草稿：用户名未知时无法按作者过滤（与去重同一处降级）"
+assert_eq "$(review_inline_draft_fingerprints "$TEST_BOT_USERNAME" < <(echo 'not json') | wc -l | tr -d ' ')" "0" \
+  "草稿：响应非法 JSON → 空列表（不报错）"
+assert_eq "$(jq -c '{result: .}' "$tmp/draft-list.json" | review_inline_draft_fingerprints "$TEST_BOT_USERNAME")" \
+  "$(printf '%s\td1' "$fpD")" "草稿：{result:[…]} 形态兼容"
+# 同一条既在 existing 又在 draft 里是不可能的（状态互斥），两个函数的判定必须一致
+assert_eq "$(review_inline_existing_fingerprints "$TEST_BOT_USERNAME" < "$tmp/draft-list.json")" \
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "草稿：草稿的指纹不会被 existing 收进去（两处判定互斥）"
 
 # ---- 行内评论正文（golden）----
 jq -c '.inline[0]' "$tmp/plan-quiet.json" > "$tmp/item-range.json"
@@ -1203,6 +1239,13 @@ assert_contains "$body" '- `src/db.py:12` **变量命名过于笼统** — `data
 assert_contains "$body" '- `src/db.py`（无法定位到变更行） **循环内重复建立数据库连接**' "渲染：未定位条目注明无法定位到变更行"
 assert_not_contains "$body" 'src/db.py:99' "渲染：未定位条目不摆出那个不可信的行号"
 assert_contains "$body" '- （未定位） **缺少统一的鉴权中间件**' "渲染：没有 file 的问题标注（未定位）"
+# R1：折叠区条目只取 body 的**第一句**。原来用 jq 的 index("。") 找句子边界，它返回的是**字节**偏移，
+# 而 `.[a:b]` 按**码点**切片——中文正文里两者差三倍，切出来既不是首句也不是完整字符。
+# 短句时字节偏移超过码点长度、被切片夹住而「恰好」返回整行，所以单句 fixture 完全测不出这个 bug。
+assert_contains "$body" '**缺少统一的鉴权中间件** — 本仓库没有任何统一鉴权入口，新增接口全靠各自记得校验。' \
+  "R1：多句正文只取到完整的第一句（不是按字节切出来的半截）"
+assert_not_contains "$body" "第二句解释影响面" "R1：第二句不进折叠区条目"
+assert_not_contains "$body" "第三句不应该出现" "R1：第三句同样不进"
 # 行内评论承载明细，汇总里不再展开问题清单（否则同一条问题出现两次，违反 I4）
 assert_not_contains "$body" "### 问题清单" "渲染：INLINE_COMMENT=1 不再有展开的问题清单"
 assert_not_contains "$body" "#### P0 必须修复（" "渲染：INLINE_COMMENT=1 不按级别展开分组清单"
@@ -1229,8 +1272,13 @@ assert_contains "$(cat "$tmp/summary-inline-critical.md")" "#### P1/P2 建议（
 render_inline "$tmp/plan-applied.json" "$tmp/summary-inline-failed.md"
 body=$(cat "$tmp/summary-inline-failed.md")
 assert_contains "$body" "#### 行内发布失败（1）" "渲染：发布失败的问题单独一节"
-assert_contains "$body" '- `src/app.py:27` **分页参数缺少上界校验**' "渲染：发布失败的问题正文可见"
 assert_contains "$body" "其中 2 条已标注在「文件改动」对应行" "渲染：行内计数只算真的发出去的"
+# R4：这些问题一条行内评论都没发出去，说明与修复建议在 MR 上再没有别的落点（I10 失败可见），
+# 所以这一节必须**完整**渲染（与「问题清单」同款），而不是只给标题 + 首句。
+assert_contains "$body" '##### 1. `src/app.py:27` — 分页参数缺少上界校验' "R4：发布失败小节按「编号 + 定位串 + 标题」渲染"
+assert_contains "$body" "\`per_page\` 直接取自查询串，传入 100000 会一次性把整表读进内存。" "R4：发布失败的问题说明完整可见"
+assert_contains "$body" "限制 \`per_page\` 上界（如 100），超出时取上界值。" "R4：发布失败的问题修复建议完整可见"
+assert_eq "$(printf '%s\n' "$body" | grep -c '^\*\*修复建议\*\*$')" "1" "R4：修复建议小节渲染成独立行"
 
 # 无问题：折叠区整体省略，并明确说明未发现问题
 review_validate < fixtures/contract/empty.json > "$tmp/empty-validated.json"
@@ -1287,6 +1335,27 @@ while IFS= read -r line; do
   bt=$(printf '%s' "$line" | tr -cd '`' | wc -c | tr -d ' ')
   assert_eq "$(( bt % 2 ))" "0" "折叠区：条目内反引号成对（这一行 ${bt} 个）：${line:0:40}"
 done < <(printf '%s\n' "$body" | grep '^- ')
+
+# ---- R3：「结论 MERGE 但有 P0」的矛盾提示必须指向本次真的渲染出来的地方 ----
+# INLINE_COMMENT=1 时早返回、根本没有「问题清单」这一节，指过去等于让读者去找一个不存在的章节。
+cat > "$tmp/mergep0-inline.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"看起来没问题","findings":[
+ {"id":"M1","severity":"P0","category":"security","title":"可定位的 P0","file":"src/app.py","line_start":30,"line_end":30,"body":"拼接 SQL。","fix":"参数化。"},
+ {"id":"M2","severity":"P0","category":"security","title":"未定位的 P0","file":null,"line_start":null,"line_end":null,"body":"仓库级问题。","fix":""}]}
+JSON
+review_validate < "$tmp/mergep0-inline.json" > "$tmp/mergep0-validated.json"
+review_plan_inline --json "$tmp/mergep0-validated.json" --changed-lines "$CL" > "$tmp/plan-mergep0.json"
+render_inline "$tmp/plan-mergep0.json" "$tmp/summary-mergep0.md"
+body=$(cat "$tmp/summary-mergep0.md")
+assert_contains "$body" "两者矛盾，请以「文件改动」上的行内评论与下方折叠区为准。" "R3：inline 模式指向行内评论与折叠区"
+assert_not_contains "$body" "请以下方 P0 清单为准" "R3：inline 模式不再指向不存在的「问题清单」"
+assert_contains "$body" "2 条 P0" "R3：矛盾提示仍带上 P0 条数"
+assert_not_contains "$body" "### 问题清单" "R3：前置——inline 模式确实没有「问题清单」这一节"
+# INLINE_COMMENT=0 的文案不变（那一节真的在下面）
+review_render_summary --json "$tmp/plan-mergep0.json" --inline-comment 0 \
+  --sha 90fcb05 --src f --dst m --ts t --diff-note n > "$tmp/summary-mergep0-0.md"
+assert_contains "$(cat "$tmp/summary-mergep0-0.md")" "请以下方 P0 清单为准" "R3：INLINE_COMMENT=0 的文案不变"
+assert_contains "$(cat "$tmp/summary-mergep0-0.md")" "### 问题清单" "R3：INLINE_COMMENT=0 下那一节确实在"
 
 # ---- --notice：行内评论发不出去时，汇总里必须说得出原因（I10 失败可见）----
 review_render_summary --json "$tmp/plan-quiet.json" --inline-comment 0 \

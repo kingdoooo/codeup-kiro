@@ -12,6 +12,8 @@ cd "$(dirname "$0")"
 source helpers.sh
 ROOT=$(cd .. && pwd)
 source "$ROOT/scripts/lib/review-render.sh"
+# _git_diff_pinned：解析器与「怎么产出 diff」是成对的，所以两边共用生产里的那一个封装
+source "$ROOT/scripts/lib/diff-compress.sh"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 # 建一个只有两次提交的仓库（BASE=HEAD~1，HEAD=第二次提交），stdout=仓库目录。
@@ -33,10 +35,11 @@ mk_repo() {
   )
   printf '%s' "$d"
 }
-# 在仓库里跑「生产用的那条 diff 命令」并解析。命令必须与 kiro-review.sh 里一致。
+# 在仓库里跑「生产用的那条 diff 命令」并解析。用的就是生产的 _git_diff_pinned，
+# 不是在测试里另抄一份参数——抄一份的话，生产漏钉某个配置时这里照样全绿。
 changed_json() {
   local d="$1"
-  (cd "$d" && git -c core.quotePath=false diff --no-renames -U0 HEAD~1 HEAD) | review_changed_lines
+  (cd "$d" && _git_diff_pinned --no-renames -U0 HEAD~1 HEAD) | review_changed_lines
 }
 lines_of() { # <json> <path> → "30,31" 形式的行号列表（展开区间，便于断言）
   printf '%s' "$1" | jq -r --arg p "$2" '
@@ -167,5 +170,41 @@ assert_eq "$(lines_of "$j" y.py)" "5,6" "两个文件段：第二个文件的行
 bad=$(printf 'diff --git a/z.py b/z.py\n--- a/z.py\n+++ b/z.py\n@@ 这不是 hunk 头 @@\n+a\n@@ -1,0 +0,0 @@\n@@ -1 +2 @@\n+b\n')
 j=$(printf '%s\n' "$bad" | review_changed_lines)
 assert_eq "$(lines_of "$j" z.py)" "2" "畸形 hunk 头被忽略，+0,0 不产生行号，合法的 @@ -1 +2 @@ 仍解析为第 2 行"
+
+# ============ 构建机的 git 配置不能改变解析结果（_git_diff_pinned 的职责）============
+# 这些配置都能悄悄改掉 patch 的形态，而改掉之后**不报错**：变更行集合会变成空集合或带前缀的键，
+# 于是所有问题都被判成「未定位」，一条行内评论都发不出，日志里也看不出是配置问题。
+m_first()  { printf 'l1\nl2\n' > cfg.py; }
+m_second() { printf 'l1\nl2\nl3\n' > cfg.py; }
+d=$(mk_repo gitconfig m_first m_second)
+assert_eq "$(lines_of "$(changed_json "$d")" cfg.py)" "3" "前置：默认配置下第 3 行可定位"
+# ① diff.dstPrefix / diff.srcPrefix：实测（git 2.50.1）会让输出变成 `+++ DST/cfg.py`，
+#    而 `-c diff.noprefix=false` 拦不住它——只有命令行的 --dst-prefix 能覆盖
+raw=$( (cd "$d" && git -c diff.dstPrefix=DST/ diff --no-ext-diff --no-renames -U0 HEAD~1 HEAD) )
+assert_contains "$raw" "+++ DST/cfg.py" "前置：diff.dstPrefix 确实会改掉 +++ 行的前缀"
+# GIT_CONFIG_COUNT/KEY/VALUE 模拟「构建机的 gitconfig 里就写着这些」，比 -c 更贴近真实场景
+for cfg in diff.dstPrefix=DST/ diff.srcPrefix=SRC/ diff.noprefix=true diff.mnemonicPrefix=true; do
+  j=$( (cd "$d" && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="${cfg%%=*}" GIT_CONFIG_VALUE_0="${cfg#*=}" \
+        _git_diff_pinned --no-renames -U0 HEAD~1 HEAD) | review_changed_lines )
+  assert_eq "$(printf '%s' "$j" | jq -r 'keys | join(",")')" "cfg.py" "钉死配置：${cfg} 下键名仍是裸路径"
+  assert_eq "$(lines_of "$j" cfg.py)" "3" "钉死配置：${cfg} 下行号仍解析正确"
+done
+# ② 外置 diff 驱动：输出完全另一种格式，不钉死的话集合直接为空
+cat > "$tmp/extdiff.sh" <<'SH'
+#!/usr/bin/env bash
+echo "external diff driver output for $1"
+SH
+chmod +x "$tmp/extdiff.sh"
+raw=$( (cd "$d" && GIT_EXTERNAL_DIFF="$tmp/extdiff.sh" git diff --no-renames -U0 HEAD~1 HEAD) )
+assert_contains "$raw" "external diff driver output" "前置：外置 diff 驱动确实会顶掉 patch 输出"
+j=$( (cd "$d" && GIT_EXTERNAL_DIFF="$tmp/extdiff.sh" _git_diff_pinned --no-renames -U0 HEAD~1 HEAD) | review_changed_lines )
+assert_eq "$(lines_of "$j" cfg.py)" "3" "钉死配置：GIT_EXTERNAL_DIFF 被 --no-ext-diff 挡住"
+j=$( (cd "$d" && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=diff.external GIT_CONFIG_VALUE_0="$tmp/extdiff.sh" _git_diff_pinned --no-renames -U0 HEAD~1 HEAD) | review_changed_lines )
+assert_eq "$(lines_of "$j" cfg.py)" "3" "钉死配置：diff.external 同样被挡住"
+# ③ 反向确认这些断言不是恒真的：不钉死时确实会解析错（否则上面全是空转）
+j=$( (cd "$d" && git -c diff.dstPrefix=DST/ diff --no-ext-diff --no-renames -U0 HEAD~1 HEAD) | review_changed_lines )
+assert_eq "$(printf '%s' "$j" | jq -r 'keys | join(",")')" "DST/cfg.py" "正控：不钉死 --dst-prefix 时键名带上了前缀（所有问题会变「未定位」）"
+j=$( (cd "$d" && GIT_EXTERNAL_DIFF="$tmp/extdiff.sh" git diff --no-renames -U0 HEAD~1 HEAD) | review_changed_lines )
+assert_eq "$j" "{}" "正控：不加 --no-ext-diff 时集合为空"
 
 report
