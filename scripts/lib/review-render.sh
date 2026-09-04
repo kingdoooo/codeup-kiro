@@ -1599,8 +1599,14 @@ review_redact_secrets() {
         seg = substr(line, RSTART, RLENGTH)
         out = out substr(line, 1, RSTART - 1)
         line = substr(line, RSTART + RLENGTH)
+        # 分隔符从**键之后向前**找第一个 `:`/`=`（与 redact_header 一致），不能从段末往回找：
+        # 取值字符类里也有 `=`（base64 补位），往回找会把补位的 `=` 当成分隔符，val 变成空串，
+        # looks_literal 判 0、整段原样输出——`api_key = "…c2VjcmV0=="` 这种最常见的形态全裸奔
+        # （实测 `AWS_SECRET_ACCESS_KEY=…KEY=` 同样裸奔，去掉补位就正常掩码）。
+        # 段首到分隔符之间是正则里的键名 `(secret|token|…)[a-z0-9_-]*`，不含 `:`/`=`，
+        # 所以段内第一个 `:`/`=` 一定是分隔符本身。
         vstart = 0
-        for (i = length(seg); i >= 1; i--) {
+        for (i = 1; i <= length(seg); i++) {
           ch = substr(seg, i, 1)
           if (ch == ":" || ch == "=") { vstart = i + 1; break }
         }
@@ -1660,6 +1666,31 @@ review_redact_secrets() {
       }
       return out line
     }
+    # 输出走缓冲（ob[1..oc]）而不是逐行 print：未闭合 PEM 的提示要写出「其后还剩多少行」，
+    # 而这个数只有读到 EOF 才知道；缓冲让提示能插回它该在的位置，而不是堆到评论最末尾。
+    # 缓冲量就是一条降级评论的正文，本来就要整段进 MR，内存上不是问题。
+    function emit(s) { ob[++oc] = s }
+    # 只有 RFC 1421 的这两个头属于 PEM 块内（加密私钥才有）。不放宽成「任意 Word: 值」：
+    # 那样模型写在起始行后面的 `Note: …` 一类正文也会被当成块内容静静丢掉。
+    function pem_is_hdr(l) { return tolower(l) ~ /^(proc-type|dek-info):[[:print:]]*$/ }
+    # base64 正文行（含补位）。行首行尾允许空白：模型引用私钥时常带缩进。
+    function pem_is_body(l) { return l ~ /^[[:space:]]*[A-Za-z0-9+\/=]+[[:space:]]*$/ }
+    # PEM 块未闭合：下一行明显不属于块内，说明模型只引用了起始行（或 finalText 被截断）。
+    # 原先只在 END 行清 inpem，于是起始行之后的所有行——包括真正的评审结论——被整段丢弃，
+    # 唯一的痕迹是那句「已屏蔽 PRIVATE KEY」，读者看不出正文缺失。
+    # 这里清状态、在恢复输出的第一行前排一条提示，并对其后的整行 base64 大块继续掩码：
+    # 恢复输出不能反过来变成「把私钥正文照抄出来」。
+    function pem_unclosed() {
+      inpem = 0; pem_hdr = 0; pem_body = 0
+      note_at[oc + 1] = 1
+      after_unclosed = 1
+    }
+    # 提示文案只写一处：两种措辞只在结尾不同，抄成两条整句时改一句会漏另一句。
+    function pem_note(k,   head) {
+      head = "> ⚠️ 上面的 PEM 块没有配对的 END 行（评审员只引用了起始行，或原文被截断）；"
+      if (k > 0) return head "其后 " k " 行按原文保留并继续掩码。"
+      return head "其后没有其他内容。"
+    }
     BEGIN {
       n = 0
       pat[++n] = "(AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}"   # AWS 访问密钥 ID
@@ -1672,16 +1703,57 @@ review_redact_secrets() {
       pat[++n] = "eyJ[0-9A-Za-z_-]{8,}\\.[0-9A-Za-z_-]{8,}\\.[0-9A-Za-z_-]{8,}" # JWT
     }
     # PEM 私钥整块屏蔽：这种内容没有「保留前 4 后 4」的意义
-    /-----BEGIN [A-Z ]*PRIVATE KEY-----/ { inpem = 1; print "**** （脚本已屏蔽一段 PRIVATE KEY 内容）"; next }
-    inpem && /-----END [A-Z ]*PRIVATE KEY-----/ { inpem = 0; next }
-    inpem { next }
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/ {
+      if (inpem) pem_unclosed()            # 上一块还没闭合又来一块起始行
+      inpem = 1; pem_hdr = 0; pem_body = 0
+      emit("**** （脚本已屏蔽一段 PRIVATE KEY 内容）")
+      next
+    }
+    inpem && /-----END [A-Z ]*PRIVATE KEY-----/ { inpem = 0; pem_hdr = 0; pem_body = 0; next }
+    # 判定过未闭合、随后又出现 END 行：那一整块引用到此结束，收起额外的 base64 掩码，
+    # 别把评论后半段正常的长哈希也掩掉。这一行本身不含密钥材料，原样留着（不吞正文）。
+    # 这不构成新的泄漏面：没有 BEGIN 行时那条额外掩码本来就不生效。
+    after_unclosed && /-----END [A-Z ]*PRIVATE KEY-----/ { after_unclosed = 0 }
+    # 块内只认三种行：base64 正文、Proc-Type/DEK-Info 头、头与正文之间的那一个空行。
+    # 其余任何行都判定为「块未闭合」，然后**不 next**，落到下面按普通行掩码并输出。
+    inpem {
+      if ($0 ~ /^[[:space:]]*$/) {
+        if (pem_hdr && !pem_body) next
+        pem_unclosed()
+      } else if (pem_is_body($0)) { pem_body = 1; next }
+      else if (pem_is_hdr($0) && !pem_body) { pem_hdr = 1; next }
+      else pem_unclosed()
+    }
     {
       line = $0
       for (i = 1; i <= n; i++) line = redact(line, pat[i])
       line = redact_url(line)
       line = redact_bearer(line)
       line = redact_header(line)
-      print redact_assign(line)
+      # 未闭合的 PEM 之后：base64 大块几乎只可能是刚才那把私钥的正文（模型常写「BEGIN 行 +
+      # 一句说明 + 正文」，说明行会触发未闭合判定，正文就落到这里）。掩掉它，别让「恢复输出」
+      # 反过来成为泄漏路径。两条阈值不同，为的是不误伤可读文本：
+      #   ① 整行只有 base64 → ≥20 字符就掩（评审正文里不会出现这种行）；
+      #   ② 夹在文字中间的连片 base64 → ≥40 字符才掩（否则 handleUserAuthentication
+      #      一类长标识符会被掩成乱码）。
+      # 两条都只在未闭合之后生效：正常评审正文里的长哈希与标识符完全不受影响。
+      # 残留（有意接受）：像 `MIIEvQIBADANBgkq...` 这种模型自己省略过的短前缀不掩——它已经
+      # 不是可用的密钥，而为它降阈值会把普通标识符一起掩掉。
+      if (after_unclosed) {
+        # 整行只有 base64：≥20 字符，或以补位 `=` 结尾（`short==` 这种短尾行也是私钥的最后一行），
+        # 都掩掉。不含补位的短行（`MERGE`、`TODO` 也落在 base64 字符集里）保持可读。
+        if (pem_is_body(line) && line ~ /([A-Za-z0-9+\/=]{20,}|=[[:space:]]*$)/) line = redact(line, "[A-Za-z0-9+/=]+")
+        line = redact(line, "[A-Za-z0-9+/]{40,}={0,2}")
+      }
+      emit(redact_assign(line))
+    }
+    END {
+      if (inpem) pem_unclosed()            # 起始行就是最后一行（finalText 被截断）：同样留痕
+      for (i = 1; i <= oc; i++) {
+        if (i in note_at) print pem_note(oc - i + 1)
+        print ob[i]
+      }
+      if ((oc + 1) in note_at) print pem_note(0)
     }'
 }
 

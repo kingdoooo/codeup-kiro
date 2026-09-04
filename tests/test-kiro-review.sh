@@ -400,6 +400,15 @@ assert_not_contains "$OUT" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" "原文含
 assert_not_contains "$OUT" "AKIAIOSFODNN7EXAMPLE" "原文含未掩码凭证：评论里不出现完整 AWS 访问密钥 ID"
 assert_contains "$OUT" "wJal****EKEY" "原文含未掩码凭证：脚本掩码后保留前 4 后 4"
 assert_contains "$OUT" "AKIA****MPLE" "原文含未掩码凭证：AWS 访问密钥 ID 同样掩码"
+# 票 10 ①：取值末尾带 base64 补位（值里含 `=`）的形态同样要掩掉
+assert_not_contains "$OUT" "dGhpcyBpcyBhIHNlY3JldA==" "原文含未掩码凭证：base64 补位结尾的取值不进评论"
+# DRY_RUN 打的是 JSON body，引号在里面是 \"，所以只断言取值本身（不带引号）
+assert_contains "$OUT" 'dGhp****dA==' "原文含未掩码凭证：补位形态也保留前 4 后 4"
+assert_contains "$OUT" 'api_key = ' "原文含未掩码凭证：键名保留"
+# 票 10 ②：只引用了 PEM 起始行时，其后的结论不能被吞掉，且要给出未闭合提示
+assert_not_contains "$OUT" "MIIEowIBAAKCAQEAfakekeymaterial0123456789" "原文含未掩码凭证：私钥正文不进评论"
+assert_contains "$OUT" "没有配对的 END 行" "原文含未掩码凭证：未闭合的 PEM 块给出提示"
+assert_contains "$OUT" "总体结论：不建议合并。" "原文含未掩码凭证：未闭合 PEM 之后的结论仍在评论里"
 
 # ============ 能力检查：kiro-cli 不支持 --output-format → 拒绝运行，不白烧额度 ============
 run_case nostreamflag MOCK_KIRO_NO_STREAM_FLAG=1

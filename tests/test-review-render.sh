@@ -587,6 +587,97 @@ assert_not_contains "$out" "$(printf '\357\277\275')" "掩码：不产生 U+FFFD
 out=$(printf 'Bearer abcdefghij0123456789KLMNOP，请轮换\n' | review_redact_secrets)
 assert_contains "$out" "，请轮换" "掩码：Bearer 之后的中文正文完整保留"
 
+# ============ 票 10 ①：取值里含 `=`（base64 补位）时仍要掩码 ============
+# 分隔符必须从键之后**向前**找第一个 `:`/`=`。往回找会把 base64 补位的 `=` 当成分隔符，
+# 取值变成空串、整段原样输出——而 base64 编码的凭证末尾带补位恰恰是最常见的形态。
+b64_pad='dGhpcyBpcyBhIHNlY3JldA=='
+out=$(printf 'api_key = "%s"\n' "$b64_pad" | review_redact_secrets)
+assert_not_contains "$out" "$b64_pad" "掩码①：base64 补位 == 结尾的取值被掩掉"
+assert_contains "$out" "dGhp****dA==" "掩码①：补位形态也保留前 4 后 4（补位本身不是秘密，原样留在尾部）"
+assert_contains "$out" 'api_key = "' "掩码①：键名与引号保留"
+aws_pad='wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY='
+out=$(printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$aws_pad" | review_redact_secrets)
+assert_not_contains "$out" "$aws_pad" "掩码①：单个 = 结尾的 AWS 密钥被掩掉"
+assert_contains "$out" "wJal****KEY=" "掩码①：掩码后仍保留前 4 后 4"
+mid_eq='YWJjZGVm=Z2hpamtsbW5v'
+out=$(printf 'secret=%s\n' "$mid_eq" | review_redact_secrets)
+assert_not_contains "$out" "$mid_eq" "掩码①：取值中间含 = 的凭证被掩掉"
+assert_contains "$out" "secret=YWJj****bW5v" "掩码①：中间含 = 时掩码从第一个分隔符之后开始"
+# 幂等：带补位的形态掩两次结果一致（掩码结果里的 * 不在取值字符类里，不会被二次切）
+once=$(printf 'api_key = "%s"\n' "$b64_pad" | review_redact_secrets)
+twice=$(printf 'api_key = "%s"\n' "$b64_pad" | review_redact_secrets | review_redact_secrets)
+assert_eq "$twice" "$once" "掩码①：带补位形态的掩码幂等"
+# 负向不回归：路径/表达式里的 = 仍不掩（取值不像字面量凭证）
+neg_in='private_key=/etc/ssl/private/server.key'
+assert_eq "$(printf '%s\n' "$neg_in" | review_redact_secrets)" "$neg_in" "掩码①：路径取值仍不掩（负向不回归）"
+
+# ============ 票 10 ②：PEM 起始行没有配对 END 时不能吞掉其后正文 ============
+# 状态机原先只在 END 行清 inpem：模型只引用起始行（或 finalText 被截断）时，
+# BEGIN 之后的所有行——包括真正的评审结论——都被丢弃，读者完全看不出正文缺失。
+d5="-----"
+unclosed=$(printf '## 结论：不可合并\n%sBEGIN RSA PRIVATE KEY%s\nMIIEowIBAAKCAQEAsecret\n\nP0：私钥写死在仓库里。\n位置 src/key.pem:1\n请立即轮换这把私钥。\n' "$d5" "$d5")
+printf '%s\n' "$unclosed" | review_redact_secrets > "$tmp/unclosed-pem.md"
+out=$(cat "$tmp/unclosed-pem.md")
+assert_contains "$out" "## 结论：不可合并" "掩码②：未闭合 PEM 之前的结论行保留"
+assert_contains "$out" "P0：私钥写死在仓库里。" "掩码②：未闭合 PEM 之后的问题行不再被吞掉"
+assert_contains "$out" "请立即轮换这把私钥。" "掩码②：未闭合 PEM 之后的最后一行也在"
+assert_contains "$out" "src/key.pem:1" "掩码②：其后的位置行保留"
+assert_not_contains "$out" "MIIEowIBAAKCAQEAsecret" "掩码②：私钥正文仍被屏蔽"
+assert_contains "$out" "PRIVATE KEY" "掩码②：仍说明屏蔽了私钥"
+assert_contains "$out" "没有配对的 END 行" "掩码②：给出「PEM 块未闭合」的提示"
+assert_contains "$out" "其后 4 行" "掩码②：提示里给出其后保留的行数"
+# 输入 7 行（含未配对的 BEGIN）→ 输出仍是 7 行：起始行换成屏蔽说明、私钥正文那一行换成提示行，
+# 其余每一行都原位保留。行数是这条修复最直接的可观测量（原先只剩 2 行）。
+assert_eq "$(wc -l < "$tmp/unclosed-pem.md" | tr -d ' ')" "7" "掩码②：7 行输入的输出仍是 7 行（正文没被吞）"
+assert_golden "$tmp/unclosed-pem.md" redact-unclosed-pem.md "掩码②：未闭合 PEM 的输出逐字节一致"
+# 闭合的 PEM 块不受影响（正控：不该出现未闭合提示）
+closed=$(printf '%sBEGIN RSA PRIVATE KEY%s\nMIIEowIBAAKCAQEAsecret\n%sEND RSA PRIVATE KEY%s\n结论在这里。\n' "$d5" "$d5" "$d5" "$d5")
+out=$(printf '%s\n' "$closed" | review_redact_secrets)
+assert_not_contains "$out" "没有配对的 END 行" "掩码②：闭合的 PEM 块不加未闭合提示（正控）"
+assert_contains "$out" "结论在这里。" "掩码②：闭合块之后的正文保留"
+# 加密私钥的 RFC 1421 头与头/正文之间的空行仍属于块内：不能因为「空行就重置」把密钥正文放出来
+enc_body="MIIEowIBAAKCAQEAencrypted""material"
+enc=$(printf '%sBEGIN RSA PRIVATE KEY%s\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n%s\n%sEND RSA PRIVATE KEY%s\n结论在这里。\n' "$d5" "$d5" "$enc_body" "$d5" "$d5")
+out=$(printf '%s\n' "$enc" | review_redact_secrets)
+assert_not_contains "$out" "$enc_body" "掩码②：加密私钥的正文仍整块屏蔽（空行是头/正文分隔，不算未闭合）"
+assert_not_contains "$out" "0123456789ABCDEF" "掩码②：DEK-Info 的 IV 也不外泄"
+assert_not_contains "$out" "没有配对的 END 行" "掩码②：加密私钥块不误判为未闭合"
+assert_contains "$out" "结论在这里。" "掩码②：加密私钥块之后的正文保留"
+# 未闭合之后紧跟的整行 base64 大块仍要掩码：恢复输出不能变成「把密钥正文照抄出来」
+blob="MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCblob0123456789"
+out=$(printf '%sBEGIN PRIVATE KEY%s\n（下面是私钥内容）\n%s\n结论在这里。\n' "$d5" "$d5" "$blob" | review_redact_secrets)
+assert_contains "$out" "没有配对的 END 行" "掩码②：中文说明行触发未闭合判定"
+assert_not_contains "$out" "$blob" "掩码②：未闭合之后的整行 base64 大块被掩码，不照抄"
+assert_contains "$out" "结论在这里。" "掩码②：base64 大块之后的结论仍在"
+# 未闭合之后的「整行 base64」阈值更低（≥20）：模型把正文分成短行时也不能漏
+short_lines="MIIEowIBAAKCAQEAsecre""tmaterial01"
+out=$(printf '%sBEGIN PRIVATE KEY%s\n（下面是私钥内容）\n%s\n结论在这里。\n' "$d5" "$d5" "$short_lines" | review_redact_secrets)
+assert_not_contains "$out" "$short_lines" "掩码②：未闭合之后的整行 base64（30 字符）也被掩掉"
+assert_contains "$out" "结论在这里。" "掩码②：短 base64 行之后的结论仍在"
+# 负向：普通长标识符不因为「在未闭合之后」被掩（阈值只对整行 base64 与 40+ 连片生效）
+out=$(printf '%sBEGIN PRIVATE KEY%s\n（下面是私钥内容）\n改用 handleUserAuthentication 里的读取方式。\n' "$d5" "$d5" | review_redact_secrets)
+assert_contains "$out" "handleUserAuthentication" "掩码②：未闭合之后的长标识符仍可读（负向）"
+
+# 引用式 PEM（正文被模型的说明行打断）：判定未闭合之后，剩下的正文行仍要掩码，
+# 连「以补位 = 结尾的短尾行」也要掩；END 行之后额外掩码收起，普通短词保持可读。
+tail_line="shor""t=="
+long_line="AoGBAKlong01""23456789abcdefgh"
+out=$(printf '%sBEGIN PRIVATE KEY%s\n（中间省略若干行）\n%s\n%s\n%sEND PRIVATE KEY%s\nMERGE\n结论在这里。\n' \
+        "$d5" "$d5" "$long_line" "$tail_line" "$d5" "$d5" | review_redact_secrets)
+assert_not_contains "$out" "$long_line" "掩码②：未闭合之后的长 base64 行被掩掉"
+assert_not_contains "$out" "$tail_line" "掩码②：以补位 = 结尾的短尾行也被掩掉"
+assert_contains "$out" "MERGE" "掩码②：END 行之后的普通短词保持可读（额外掩码已收起）"
+assert_contains "$out" "结论在这里。" "掩码②：引用式 PEM 之后的结论仍在"
+
+# 只有起始行、其后没有内容（finalText 被截断）：仍给提示，且不报错
+out=$(printf '评审开始。\n%sBEGIN PRIVATE KEY%s\n' "$d5" "$d5" | review_redact_secrets)
+assert_contains "$out" "评审开始。" "掩码②：截断在起始行时前文保留"
+assert_contains "$out" "没有配对的 END 行" "掩码②：起始行即结尾也给出未闭合提示"
+assert_contains "$out" "其后没有其他内容" "掩码②：其后无内容时提示措辞对应"
+# 幂等：未闭合样例掩两次结果一致（提示行本身不该被再改写）
+twice=$(printf '%s\n' "$unclosed" | review_redact_secrets | review_redact_secrets)
+assert_eq "$twice" "$(cat "$tmp/unclosed-pem.md")" "掩码②：未闭合样例的掩码幂等"
+
 # ============ 票 03：历次记录的解析与追加 ============
 # 隐藏的 kiro-history JSON 是「历次评审」表的机器可读来源：下一次评审从它读回历史，
 # 表格只是它的人类可读投影（不反解表格——表格要中文化结论、要合并计数列，反解会被任何渲染微调打断）。

@@ -136,8 +136,15 @@ elif [[ "${MOCK_KIRO_TRUNCATED:-0}" == "1" ]]; then
   # jq --arg 会直接失败，替身的行为就变得看运气。
   FINAL=$(printf '评审完成。\n\n%s\n{"contract":"codeup-reviewer/1","summary":"这段契约被 kiro-cli 自己截掉了尾巴","verdict":"MERGE_AFTER' "$MS")
 elif [[ "${MOCK_KIRO_LEAK_SECRET:-0}" == "1" ]]; then
-  # 不守契约（无标记）**并且**没按掩码规则脱敏：降级路径必须由脚本再掩一次
-  FINAL=$(printf '# 代码评审报告\n\nP0：src/app.py 里写死了凭证 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY，还有 AKIAIOSFODNN7EXAMPLE。\n\n总体结论：不建议合并。\n')
+  # 不守契约（无标记）**并且**没按掩码规则脱敏：降级路径必须由脚本再掩一次。
+  # 三种形态都放进来：裸值、base64 补位（值里含 `=`）、只引用起始行的 PEM 块。
+  # 后两种在票 10 之前都会失效——补位形态整段裸奔，未配对的 BEGIN 会把它之后的结论全吞掉。
+  # PEM 与 base64 值都由片段拼出来，不在仓库里留下完整的凭证形态字面量（与单测同一理由）。
+  D5="-----"
+  PADDED="dGhpcyBpcyBh""IHNlY3JldA=="
+  PEM_BODY="MIIEowIBAAKCAQEA""fakekeymaterial0123456789"
+  FINAL=$(printf '# 代码评审报告\n\nP0：src/app.py 里写死了凭证 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY，还有 AKIAIOSFODNN7EXAMPLE。\nP0：src/conf.py 里 api_key = "%s" 也是明文。\nP0：仓库里还提交了私钥：\n%sBEGIN RSA PRIVATE KEY%s\n%s\n\n总体结论：不建议合并。\n' \
+          "$PADDED" "$D5" "$D5" "$PEM_BODY")
 elif [[ "${MOCK_KIRO_BAD_JSON:-0}" == "1" ]]; then
   # 标记在、内容不是合法 JSON（模型把 JSON 写坏 / 输出被截断）
   FINAL=$(printf '好的，评审完成。\n\n%s\n{"contract": "codeup-reviewer/1", "summary": "缺右括号", "findings": [\n%s\n' "$MS" "$ME")
