@@ -590,12 +590,12 @@ assert_contains "$out" "，请轮换" "掩码：Bearer 之后的中文正文完�
 # ============ 票 10 ①：取值里含 `=`（base64 补位）时仍要掩码 ============
 # 分隔符必须从键之后**向前**找第一个 `:`/`=`。往回找会把 base64 补位的 `=` 当成分隔符，
 # 取值变成空串、整段原样输出——而 base64 编码的凭证末尾带补位恰恰是最常见的形态。
-b64_pad='dGhpcyBpcyBhIHNlY3JldA=='
+b64_pad="dGhpcyBpcyBh""IHNlY3JldA=="
 out=$(printf 'api_key = "%s"\n' "$b64_pad" | review_redact_secrets)
 assert_not_contains "$out" "$b64_pad" "掩码①：base64 补位 == 结尾的取值被掩掉"
 assert_contains "$out" "dGhp****dA==" "掩码①：补位形态也保留前 4 后 4（补位本身不是秘密，原样留在尾部）"
 assert_contains "$out" 'api_key = "' "掩码①：键名与引号保留"
-aws_pad='wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY='
+aws_pad="wJalrXUtnFEMIK7MDENG""bPxRfiCYEXAMPLEKEY="
 out=$(printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$aws_pad" | review_redact_secrets)
 assert_not_contains "$out" "$aws_pad" "掩码①：单个 = 结尾的 AWS 密钥被掩掉"
 assert_contains "$out" "wJal****KEY=" "掩码①：掩码后仍保留前 4 后 4"
@@ -615,14 +615,15 @@ assert_eq "$(printf '%s\n' "$neg_in" | review_redact_secrets)" "$neg_in" "掩码
 # 状态机原先只在 END 行清 inpem：模型只引用起始行（或 finalText 被截断）时，
 # BEGIN 之后的所有行——包括真正的评审结论——都被丢弃，读者完全看不出正文缺失。
 d5="-----"
-unclosed=$(printf '## 结论：不可合并\n%sBEGIN RSA PRIVATE KEY%s\nMIIEowIBAAKCAQEAsecret\n\nP0：私钥写死在仓库里。\n位置 src/key.pem:1\n请立即轮换这把私钥。\n' "$d5" "$d5")
+pem_head="MIIEowIBAAKCAQEA""secret"
+unclosed=$(printf '## 结论：不可合并\n%sBEGIN RSA PRIVATE KEY%s\n%s\n\nP0：私钥写死在仓库里。\n位置 src/key.pem:1\n请立即轮换这把私钥。\n' "$d5" "$d5" "$pem_head")
 printf '%s\n' "$unclosed" | review_redact_secrets > "$tmp/unclosed-pem.md"
 out=$(cat "$tmp/unclosed-pem.md")
 assert_contains "$out" "## 结论：不可合并" "掩码②：未闭合 PEM 之前的结论行保留"
 assert_contains "$out" "P0：私钥写死在仓库里。" "掩码②：未闭合 PEM 之后的问题行不再被吞掉"
 assert_contains "$out" "请立即轮换这把私钥。" "掩码②：未闭合 PEM 之后的最后一行也在"
 assert_contains "$out" "src/key.pem:1" "掩码②：其后的位置行保留"
-assert_not_contains "$out" "MIIEowIBAAKCAQEAsecret" "掩码②：私钥正文仍被屏蔽"
+assert_not_contains "$out" "$pem_head" "掩码②：私钥正文仍被屏蔽"
 assert_contains "$out" "PRIVATE KEY" "掩码②：仍说明屏蔽了私钥"
 assert_contains "$out" "没有配对的 END 行" "掩码②：给出「PEM 块未闭合」的提示"
 assert_contains "$out" "其后 4 行" "掩码②：提示里给出其后保留的行数"
@@ -631,7 +632,7 @@ assert_contains "$out" "其后 4 行" "掩码②：提示里给出其后保留�
 assert_eq "$(wc -l < "$tmp/unclosed-pem.md" | tr -d ' ')" "7" "掩码②：7 行输入的输出仍是 7 行（正文没被吞）"
 assert_golden "$tmp/unclosed-pem.md" redact-unclosed-pem.md "掩码②：未闭合 PEM 的输出逐字节一致"
 # 闭合的 PEM 块不受影响（正控：不该出现未闭合提示）
-closed=$(printf '%sBEGIN RSA PRIVATE KEY%s\nMIIEowIBAAKCAQEAsecret\n%sEND RSA PRIVATE KEY%s\n结论在这里。\n' "$d5" "$d5" "$d5" "$d5")
+closed=$(printf '%sBEGIN RSA PRIVATE KEY%s\n%s\n%sEND RSA PRIVATE KEY%s\n结论在这里。\n' "$d5" "$d5" "$pem_head" "$d5" "$d5")
 out=$(printf '%s\n' "$closed" | review_redact_secrets)
 assert_not_contains "$out" "没有配对的 END 行" "掩码②：闭合的 PEM 块不加未闭合提示（正控）"
 assert_contains "$out" "结论在这里。" "掩码②：闭合块之后的正文保留"
@@ -644,7 +645,7 @@ assert_not_contains "$out" "0123456789ABCDEF" "掩码②：DEK-Info 的 IV 也�
 assert_not_contains "$out" "没有配对的 END 行" "掩码②：加密私钥块不误判为未闭合"
 assert_contains "$out" "结论在这里。" "掩码②：加密私钥块之后的正文保留"
 # 未闭合之后紧跟的整行 base64 大块仍要掩码：恢复输出不能变成「把密钥正文照抄出来」
-blob="MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCblob0123456789"
+blob="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCblob0123456789"
 out=$(printf '%sBEGIN PRIVATE KEY%s\n（下面是私钥内容）\n%s\n结论在这里。\n' "$d5" "$d5" "$blob" | review_redact_secrets)
 assert_contains "$out" "没有配对的 END 行" "掩码②：中文说明行触发未闭合判定"
 assert_not_contains "$out" "$blob" "掩码②：未闭合之后的整行 base64 大块被掩码，不照抄"
@@ -658,16 +659,50 @@ assert_contains "$out" "结论在这里。" "掩码②：短 base64 行之后的
 out=$(printf '%sBEGIN PRIVATE KEY%s\n（下面是私钥内容）\n改用 handleUserAuthentication 里的读取方式。\n' "$d5" "$d5" | review_redact_secrets)
 assert_contains "$out" "handleUserAuthentication" "掩码②：未闭合之后的长标识符仍可读（负向）"
 
-# 引用式 PEM（正文被模型的说明行打断）：判定未闭合之后，剩下的正文行仍要掩码，
-# 连「以补位 = 结尾的短尾行」也要掩；END 行之后额外掩码收起，普通短词保持可读。
+# 引用式 PEM（正文被模型的说明行打断，但 END 行还在）：起始行到 END 行之间整块丢弃——
+# 说明行、正文行、以补位 = 结尾的短尾行一个都不放出；END 之后的普通短词保持可读。
 tail_line="shor""t=="
 long_line="AoGBAKlong01""23456789abcdefgh"
 out=$(printf '%sBEGIN PRIVATE KEY%s\n（中间省略若干行）\n%s\n%s\n%sEND PRIVATE KEY%s\nMERGE\n结论在这里。\n' \
         "$d5" "$d5" "$long_line" "$tail_line" "$d5" "$d5" | review_redact_secrets)
-assert_not_contains "$out" "$long_line" "掩码②：未闭合之后的长 base64 行被掩掉"
-assert_not_contains "$out" "$tail_line" "掩码②：以补位 = 结尾的短尾行也被掩掉"
-assert_contains "$out" "MERGE" "掩码②：END 行之后的普通短词保持可读（额外掩码已收起）"
+assert_not_contains "$out" "$long_line" "掩码②：有 END 时块内的长 base64 行整行丢弃"
+assert_not_contains "$out" "$tail_line" "掩码②：有 END 时块内的短尾行也丢弃"
+assert_contains "$out" "MERGE" "掩码②：END 行之后的普通短词保持可读"
 assert_contains "$out" "结论在这里。" "掩码②：引用式 PEM 之后的结论仍在"
+assert_not_contains "$out" "没有配对的 END 行" "掩码②：END 行在时不打未闭合提示（正控）"
+
+# 复审 c1：带 diff 前缀（`-`/`+`）或引用前缀（`> `）的正文行不像 base64，第一版实现遇到就退出块、
+# 把随后的密钥正文按普通行放出来（每行漏前 4 后 4），而块尾的 END 行明明还在。现在判定推迟到
+# END/EOF：有 END 就整块丢弃，与修复前逐字节一致、零泄漏，也不打「未闭合」的假提示。
+body64="MIIEowIBAAKCAQEAsecretmaterial""0123456789abcdefghijklmnopqrstuvwxyz"
+out=$(printf -- '-%sBEGIN RSA PRIVATE KEY%s\n-%s\n-%s\n-%sEND RSA PRIVATE KEY%s\n结论在这里。\n' "$d5" "$d5" "$body64" "$body64" "$d5" "$d5" | review_redact_secrets)
+assert_not_contains "$out" "$body64" "掩码②：diff 前缀的正文行整块丢弃（不放出）"
+assert_not_contains "$out" "MIIE****" "掩码②：diff 前缀的正文行连前 4 后 4 都不漏"
+assert_not_contains "$out" "没有配对的 END 行" "掩码②：有 END 时不打未闭合提示（前缀不影响 END 识别）"
+assert_contains "$out" "结论在这里。" "掩码②：diff 前缀块之后的结论仍在"
+out=$(printf '> %sBEGIN RSA PRIVATE KEY%s\n> %s\n> %sEND RSA PRIVATE KEY%s\n结论在这里。\n' "$d5" "$d5" "$body64" "$d5" "$d5" | review_redact_secrets)
+assert_not_contains "$out" "$body64" "掩码②：引用块前缀的正文行整块丢弃"
+assert_contains "$out" "结论在这里。" "掩码②：引用块之后的结论仍在"
+# 复审 c2：`DONOTMERGE`、`P0`、`MERGE` 都落在 base64 字符集里，第一版把它们当成块内正文吞掉，
+# 提示还说「其后没有其他内容」。现在「像正文」要求 ≥20 字符 / 补位结尾 / 数字+大小写混合。
+out=$(printf '%sBEGIN RSA PRIVATE KEY%s\n%s\nDONOTMERGE\nP0\n' "$d5" "$d5" "$body64" | review_redact_secrets)
+assert_not_contains "$out" "$body64" "掩码②：紧跟起始行的正文仍丢弃"
+assert_contains "$out" "DONOTMERGE" "掩码②：base64 字符集里的普通词不被当成正文吞掉"
+assert_contains "$out" "P0" "掩码②：短结论行保留"
+assert_contains "$out" "其后 2 行" "掩码②：提示的行数不把丢弃的正文算进去"
+# 复审（标准 2）：未闭合之后的 40 位提交 SHA 是纯十六进制，不是 base64 大块，必须原样保留；
+# 同一行里 ≥40 的非十六进制 base64 连片则掩掉——这条负向断言与正控放在同一行，任一失效都能抓到。
+sha40="3f2a1b9c4d5e6f708192a3b4c5d6e7f8091a2b3c"
+out=$(printf '%sBEGIN RSA PRIVATE KEY%s\n说明\n提交 %s 已修，正文 %s 泄漏\n' "$d5" "$d5" "$sha40" "$body64" | review_redact_secrets)
+assert_contains "$out" "提交 $sha40 已修" "掩码②：未闭合之后的 40 位提交 SHA 原样保留（纯十六进制不算 base64 大块）"
+assert_not_contains "$out" "$body64" "掩码②：同一行的非十六进制 base64 连片被掩掉（正控）"
+assert_contains "$out" "MIIE****wxyz" "掩码②：连片掩码保留前 4 后 4"
+# 复审（标准 2 反例）：不足 40 的 base64 连片不掩（长标识符可读），恰好 40 的非十六进制连片掩
+run39="AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abc"
+run40="${run39}d"
+out=$(printf '%sBEGIN RSA PRIVATE KEY%s\n说明\n%s 与 %s\n' "$d5" "$d5" "$run39" "$run40" | review_redact_secrets)
+assert_contains "$out" "$run39" "掩码②：39 字符的连片不掩（阈值边界之下）"
+assert_not_contains "$out" "$run40" "掩码②：40 字符的非十六进制连片掩掉（阈值边界之上）"
 
 # 只有起始行、其后没有内容（finalText 被截断）：仍给提示，且不报错
 out=$(printf '评审开始。\n%sBEGIN PRIVATE KEY%s\n' "$d5" "$d5" | review_redact_secrets)

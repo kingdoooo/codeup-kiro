@@ -401,12 +401,18 @@ assert_not_contains "$OUT" "AKIAIOSFODNN7EXAMPLE" "原文含未掩码凭证：�
 assert_contains "$OUT" "wJal****EKEY" "原文含未掩码凭证：脚本掩码后保留前 4 后 4"
 assert_contains "$OUT" "AKIA****MPLE" "原文含未掩码凭证：AWS 访问密钥 ID 同样掩码"
 # 票 10 ①：取值末尾带 base64 补位（值里含 `=`）的形态同样要掩掉
-assert_not_contains "$OUT" "dGhpcyBpcyBhIHNlY3JldA==" "原文含未掩码凭证：base64 补位结尾的取值不进评论"
+assert_not_contains "$OUT" "dGhpcyBpcyBh""IHNlY3JldA==" "原文含未掩码凭证：base64 补位结尾的取值不进评论"
 # DRY_RUN 打的是 JSON body，引号在里面是 \"，所以只断言取值本身（不带引号）
 assert_contains "$OUT" 'dGhp****dA==' "原文含未掩码凭证：补位形态也保留前 4 后 4"
 assert_contains "$OUT" 'api_key = ' "原文含未掩码凭证：键名保留"
 # 票 10 ②：只引用了 PEM 起始行时，其后的结论不能被吞掉，且要给出未闭合提示
-assert_not_contains "$OUT" "MIIEowIBAAKCAQEAfakekeymaterial0123456789" "原文含未掩码凭证：私钥正文不进评论"
+pem_body="MIIEowIBAAKCAQEA""fakekey0123456"
+pem_body2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02"
+assert_not_contains "$OUT" "$pem_body" "原文含未掩码凭证：说明行之后的整行私钥正文不进评论"
+assert_contains "$OUT" "MIIE****3456" "原文含未掩码凭证：整行正文掩成前 4 后 4"
+assert_not_contains "$OUT" "$pem_body2" "原文含未掩码凭证：夹在句子里的正文片段不进评论"
+assert_contains "$OUT" "正文片段 MIIE****ke02 出现在 app/key.pem" "原文含未掩码凭证：片段掩码后句子其余部分完整"
+assert_contains "$OUT" "（下面是私钥内容，节选）" "原文含未掩码凭证：起始行后的说明行放出来（不被吞）"
 assert_contains "$OUT" "没有配对的 END 行" "原文含未掩码凭证：未闭合的 PEM 块给出提示"
 assert_contains "$OUT" "总体结论：不建议合并。" "原文含未掩码凭证：未闭合 PEM 之后的结论仍在评论里"
 

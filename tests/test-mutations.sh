@@ -620,27 +620,42 @@ assert_eq "$(mut_meta_row "$ROOT" "$nl_branch" | tr -cd '|' | wc -c | tr -d ' ')
 assert_eq "$(sha_row_pipes "$(mut_render "$ROOT" "$nl_branch")")" "5" \
   "M38 对照：未变异实现里前半截就是完整那一行"
 
-# --- M39：把 PEM 状态机还原成「块内一律丢弃、只有 END 行才退出」→ 未配对的 BEGIN 吞掉其后全部正文 ---
-# 变异两处判定（空行分支 + 兜底分支），等价于票 10 之前的 `inpem { next }`：
-# 模型只引用起始行时，评论上只剩那句「已屏蔽 PRIVATE KEY」，真正的结论一个字都到不了 MR。
-pkg=$(make_mutant m39-pem-unclosed \
-  's|if (pem_hdr \&\& !pem_body) next|next|; s|else pem_unclosed()|else next|' scripts/lib/review-render.sh)
+# --- M39：让 EOF 时的放出失效 → 未配对的 BEGIN 之后暂存的全部正文一起消失 ---
+# 等价于票 10 之前的「块内一律丢弃、只有 END 行才退出」：模型只引用起始行时，评论上只剩那句
+# 「已屏蔽 PRIVATE KEY」，真正的结论一个字都到不了 MR，也没有任何提示。
+pkg=$(make_mutant m39-pem-unclosed 's|    END { if (inpem) pem_flush() }|    END { }|' scripts/lib/review-render.sh)
 run_case m39 "$pkg" MOCK_KIRO_LEAK_SECRET=1
 assert_rc "$RC" 0 "M39：变异体仍能跑完"
-assert_not_contains "$OUT" "总体结论：不建议合并。"   "M39：未配对 BEGIN 之后的结论被整段吞掉——端到端「结论仍在」断言会失败"
-# 变异体在 EOF 时仍会留下一条未闭合提示（END 块里的那次 pem_unclosed），但提示救不回被吞掉的
-# 正文——所以这条变异的判定必须写在「正文是否还在」上，写在提示上会漏掉它。
-assert_contains "$OUT" "没有配对的 END 行" "M39 说明：变异体仍打提示，但正文已经没了（提示不等于正文）"
+assert_not_contains "$OUT" "总体结论：不建议合并。" \
+  "M39：未配对 BEGIN 之后的结论被整段吞掉——端到端「结论仍在」断言会失败"
+assert_not_contains "$OUT" "没有配对的 END 行" "M39：也没有任何未闭合提示，读者看不出正文缺失"
 
-# --- M40：只掐掉未闭合提示（正文照样保留）→ 读者不知道刚才那段被吞的是什么 ---
-# 与 M39 分开：M39 一次杀掉「保住正文 + 给提示」两件事，只留它会让「提示」这一半没人测。
+# --- M40：只掐掉未闭合提示（正文照样放出）→ 读者不知道刚才那段被吞的是什么 ---
+# 与 M39 分开：M39 一次杀掉「放出正文 + 给提示」两件事，只留它会让「提示」这一半没人测。
 # 变异体要保持是**合法 awk**（这段 awk 程序在 bash 里只是个字符串，make_mutant 的 bash -n 查不出
 # awk 语法错误；写成 `:` 会让整个掩码管道运行时失败，那测的就不是「少了提示」而是「掩码崩了」）。
-pkg=$(make_mutant m40-pem-note 's|      note_at\[oc + 1\] = 1|      inpem = inpem  # 变异：不排未闭合提示|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m40-pem-note 's|      print pem_note(held_n - first + 1)|      held_n = held_n  # 变异：不打未闭合提示|' scripts/lib/review-render.sh)
 run_case m40 "$pkg" MOCK_KIRO_LEAK_SECRET=1
 assert_rc "$RC" 0 "M40：变异体仍能跑完"
 assert_contains "$OUT" "总体结论：不建议合并。" "M40：正文仍在（变异只影响提示）"
 assert_not_contains "$OUT" "没有配对的 END 行" "M40：未闭合提示消失——端到端提示断言会失败"
+
+# --- M42：放出时不再掩夹在句子里的 base64 连片 → 私钥正文片段完整进评论 ---
+pkg=$(make_mutant m42-b64-runs \
+  's|out = out substr(line, 1, RSTART - 1) (is_hex(m) ? m : mask(m))|out = out substr(line, 1, RSTART - 1) m|' scripts/lib/review-render.sh)
+run_case m42 "$pkg" MOCK_KIRO_LEAK_SECRET=1
+assert_rc "$RC" 0 "M42：变异体仍能跑完"
+assert_contains "$OUT" "MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02" \
+  "M42：句子里的私钥正文片段完整进了评论——端到端「片段不进评论」断言会失败"
+assert_not_contains "$OUT" "MIIEowIBAAKCAQEA""fakekey0123456" "M42 对照：整行正文仍被掩（另一条规则）"
+
+# --- M43：放出时不再掩整行 base64 → 说明行之后的整行私钥正文完整进评论 ---
+pkg=$(make_mutant m43-b64-line 's|        if (pem_body_like(l)) l = redact(l, "\[A-Za-z0-9+/=\]+")|        l = l  # 变异：整行 base64 不掩|' scripts/lib/review-render.sh)
+run_case m43 "$pkg" MOCK_KIRO_LEAK_SECRET=1
+assert_rc "$RC" 0 "M43：变异体仍能跑完"
+assert_contains "$OUT" "MIIEowIBAAKCAQEA""fakekey0123456" \
+  "M43：整行私钥正文完整进了评论——端到端「整行正文不进评论」断言会失败"
+assert_not_contains "$OUT" "MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02" "M43 对照：句子里的片段仍被掩（另一条规则）"
 
 # --- M41：把 key=value 的分隔符扫描改回「从段末往回找」→ base64 补位的取值整段裸奔 ---
 # 取值字符类里也有 `=`，往回找会把补位的 `=` 当成分隔符，取值变成空串、整段原样输出。
@@ -648,7 +663,7 @@ pkg=$(make_mutant m41-assign-sep \
   's|for (i = 1; i <= length(seg); i++) {|for (i = length(seg); i >= 1; i--) {|' scripts/lib/review-render.sh)
 run_case m41 "$pkg" MOCK_KIRO_LEAK_SECRET=1
 assert_rc "$RC" 0 "M41：变异体仍能跑完"
-assert_contains "$OUT" "dGhpcyBpcyBhIHNlY3JldA=="   "M41：带 base64 补位的凭证完整进了评论——端到端「补位形态被掩掉」断言会失败"
+assert_contains "$OUT" "dGhpcyBpcyBh""IHNlY3JldA=="   "M41：带 base64 补位的凭证完整进了评论——端到端「补位形态被掩掉」断言会失败"
 assert_not_contains "$OUT" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"   "M41 对照：不含 = 的取值仍被掩掉（隔离出「值里含 = 」才是触发条件）"
 
 report

@@ -142,9 +142,13 @@ elif [[ "${MOCK_KIRO_LEAK_SECRET:-0}" == "1" ]]; then
   # PEM 与 base64 值都由片段拼出来，不在仓库里留下完整的凭证形态字面量（与单测同一理由）。
   D5="-----"
   PADDED="dGhpcyBpcyBh""IHNlY3JldA=="
-  PEM_BODY="MIIEowIBAAKCAQEA""fakekeymaterial0123456789"
-  FINAL=$(printf '# 代码评审报告\n\nP0：src/app.py 里写死了凭证 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY，还有 AKIAIOSFODNN7EXAMPLE。\nP0：src/conf.py 里 api_key = "%s" 也是明文。\nP0：仓库里还提交了私钥：\n%sBEGIN RSA PRIVATE KEY%s\n%s\n\n总体结论：不建议合并。\n' \
-          "$PADDED" "$D5" "$D5" "$PEM_BODY")
+  # 整行正文刻意只有 30 字符：≥20 走「整行 base64」规则，但不到 40、不会被「连片 base64」规则顺手掩掉——
+  # 否则 M43 变异（关掉整行规则）观察不到任何变化（2026-09-05 实测踩过）。
+  PEM_BODY="MIIEowIBAAKCAQEA""fakekey0123456"
+  PEM_BODY2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02"
+  # 起始行后先来一句说明，再是整行正文与夹在句子里的正文片段：三种形态都要在放出时被掩掉
+  FINAL=$(printf '# 代码评审报告\n\nP0：src/app.py 里写死了凭证 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY，还有 AKIAIOSFODNN7EXAMPLE。\nP0：src/conf.py 里 api_key = "%s" 也是明文。\nP0：仓库里还提交了私钥：\n%sBEGIN RSA PRIVATE KEY%s\n（下面是私钥内容，节选）\n%s\n正文片段 %s 出现在 app/key.pem\n\n总体结论：不建议合并。\n' \
+          "$PADDED" "$D5" "$D5" "$PEM_BODY" "$PEM_BODY2")
 elif [[ "${MOCK_KIRO_BAD_JSON:-0}" == "1" ]]; then
   # 标记在、内容不是合法 JSON（模型把 JSON 写坏 / 输出被截断）
   FINAL=$(printf '好的，评审完成。\n\n%s\n{"contract": "codeup-reviewer/1", "summary": "缺右括号", "findings": [\n%s\n' "$MS" "$ME")
