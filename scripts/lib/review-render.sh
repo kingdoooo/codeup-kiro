@@ -31,6 +31,12 @@
 # 严重级别的中文标签与排序权重。级别词汇以 CONTEXT.md 为准：P0 必须修复 / P1 应当修复 / P2 可选改进。
 REVIEW_SEVERITIES="P0 P1 P2"
 
+# 汇总评论的标题（成功 / 降级 / 失败三条同形）。一级标题、不带图标（用户要求，2026-09-04）。
+# kiro-review.sh 的最小失败评论也用 REVIEW_TITLE_FAILED，不要再手写第二份字面量。
+REVIEW_TITLE="# Kiro 代码评审"
+REVIEW_TITLE_DEGRADED="${REVIEW_TITLE} · ⚠️ 结构化解析失败"
+REVIEW_TITLE_FAILED="${REVIEW_TITLE} · ⚠️ 评审未完成"
+
 # --- 文本清洗：剥离 ANSI 控制序列（stdin → stdout）---
 # stream-json 的 stdout 实测不含 ANSI，但降级路径要贴的是模型原文，且纯文本回退路径仍需清洗，
 # 所以清洗放在公共函数里，两条路径都过一遍。
@@ -47,7 +53,7 @@ review_clean_text() {
 # 威胁：summary / verdict_reason / title / body / fix 与降级原文全部来自模型，而模型按 agent 提示词
 # 会把业务库里的注入内容作为 P0 原文引用出来。业务库因此可以往这些槽位里塞：
 #   ① 第二个评审标记 `<!-- kiro-review:deadbee run:1 -->`——后续票「按标记找自己那条评论」会被打乱；
-#   ② 伪造的 `## 🤖 Kiro 代码评审` / `### 结论：可合并` 标题与 `---` 页脚分隔线——读者看到的结构
+#   ② 伪造的 `# Kiro 代码评审` / `## 结论：可合并` 标题与 `---` 页脚分隔线——读者看到的结构
 #      就不再是脚本渲染的结构（降级路径尤其严重，那里贴的是整段原文）。
 # 因此：评论里的结构（评审标记、标题层级、页脚分隔线）只能来自脚本，模型文本一律降级为普通文本。
 # 做法（jq 实现，避免同一套转义规则出现两份）：
@@ -60,8 +66,18 @@ review_clean_text() {
 #     用带捕获的单条 gsub 保留原始大小写（转义后的字面量按原样显示，便于读者看出模型引用了什么）。
 #   - 代码围栏外，行首的 `#{1,6}` 标题与 `---`/`***`/`___`/`===` 分隔线前加反斜杠转义（渲染成字面量）。
 #     围栏内不动：那里的 `#` 是代码注释，转义会破坏代码，而围栏内的 `#` 本来也不会渲染成标题。
+#   - 代码围栏外，**整行只是一个加粗**（`**…**` / `__…__`）的行：首尾定界符各加反斜杠转义成字面量。
+#     2026-09-04 起问题分组、每条问题、折叠区小节与行内评论首行都是整行加粗（Codeup 不渲染 `###` 以下
+#     标题），模型文本里的整行加粗能逐字节冒充这些结构行。行内加粗（`**影响**：…`）不动——真实评审里
+#     模型从没写过整行加粗（acceptance 留档的 13 处整行加粗全是脚本自己的「修复建议」）。
 #   - 围栏数为奇数时补一个闭合围栏：否则模型开一个不闭合的围栏就能把后面脚本渲染的章节与页脚一起吞掉。
 _REVIEW_JQ_SANITIZE='
+  def _is_bold_line: (test("^[[:space:]]{0,3}\\*\\*[^[:space:]*].*\\*\\*[[:space:]]*$")
+                      or test("^[[:space:]]{0,3}__[^[:space:]_].*__[[:space:]]*$"));
+  def _escape_bold_line: sub("^(?<sp>[[:space:]]{0,3})\\*\\*"; .sp + "\\*\\*")
+                         | sub("\\*\\*(?<ws>[[:space:]]*)$"; "\\*\\*" + .ws)
+                         | sub("^(?<sp>[[:space:]]{0,3})__"; .sp + "\\_\\_")
+                         | sub("__(?<ws>[[:space:]]*)$"; "\\_\\_" + .ws);
   def _sanitize_md:
     if type != "string" then "" else
     (gsub("<!--"; "&lt;!--") | gsub("-->"; "--&gt;")
@@ -76,6 +92,8 @@ _REVIEW_JQ_SANITIZE='
           {fence: .fence, out: (.out + [($l | sub("^(?<sp>[[:space:]]{0,3})(?<h>#{1,6})"; .sp + "\\" + .h))])}
         elif ($l | test("^[[:space:]]{0,3}[-*_=]{3,}[[:space:]]*$")) then
           {fence: .fence, out: (.out + [($l | sub("^(?<sp>[[:space:]]{0,3})"; .sp + "\\"))])}
+        elif ($l | _is_bold_line) then
+          {fence: .fence, out: (.out + [($l | _escape_bold_line)])}
         else
           {fence: .fence, out: (.out + [$l])}
         end)
@@ -258,7 +276,7 @@ REVIEW_CONTRACT_ID="codeup-reviewer/1"
 #     换行更是直接把表格截断、给攻击者一个塞伪造章节的位置。这类路径本来也不可能是真实文件名。
 #   - line_start/line_end 不是 ≥1 的整数 → null；file 为 null 时行号一并置 null
 # 文本清洗：summary / verdict_reason / title / body / fix 全部过 _sanitize_md（见 R1 说明）；
-#   title 与 verdict 额外把空白折叠成单空格——它们要渲染进单行（`##### …` 标题行与 `### 结论：…`），
+#   title 与 verdict 额外把空白折叠成单空格——它们要渲染进单行（`**n. … — 标题**` 加粗行与 `## 结论：…`），
 #   带换行就会把标题行截断。
 # body/fix 不做 trim：它们是 Markdown，可能以缩进代码块开头，裁掉缩进会破坏渲染。
 # dropped_findings 直接写进输出 JSON 而不是回传全局变量：调用方普遍用 $(…) 取结果，
@@ -282,6 +300,10 @@ review_validate() {
                else "" end;
     # 单行槽位：折叠所有空白（含换行）为单空格，再做 Markdown 结构清洗
     def oneline(v): (tr(v) | gsub("[[:space:]]+"; " ") | _sanitize_md);
+    # 加粗槽位：title 会被脚本包进 `**…**`（问题标题行、折叠区条目、行内评论首行）。先把 `*` 转义成 `\*`，
+    # 否则标题里的 `**kwargs` 会提前闭合脚本的加粗、把级别前缀变回普通文字。先转义再清洗：转义后的
+    # 字符串以反斜杠开头，不会再被 _sanitize_md 的整行加粗规则二次转义。
+    def boldsafe(v): (tr(v) | gsub("[[:space:]]+"; " ") | gsub("\\*"; "\\*") | _sanitize_md);
     def lineno(v): if (v | type) == "number" and (v | floor) == v and v >= 1 then (v | floor) else null end;
     # 文件路径：非空字符串，且不含换行/回车/`|`/反引号（否则按未定位处理）
     def fpath(v): (tr(v)) as $t
@@ -293,7 +315,7 @@ review_validate() {
     | [ (.findings // [])[]
         | select(type == "object")
         | (tr(.severity) | ascii_upcase) as $sev
-        | (oneline(.title)) as $title
+        | (boldsafe(.title)) as $title
         | select(($sev == "P0" or $sev == "P1" or $sev == "P2")
                  and ($title | length) > 0
                  and ((tr(.body)) | length) > 0)
@@ -568,7 +590,7 @@ review_fingerprint() {
 # --- 行内评论正文里的隐藏标记 ---
 # 新格式：<!-- kiro-inline:<sha1> L<start>-<end> sev=<P0|P1|P2> -->
 # 旧格式：<!-- kiro-inline:<sha1> -->（票 04 首版发出的评论；只读兼容，见 review_inline_existing_ranges）
-# 为什么把区间写进标记而不是「从正文里反解 ### P0 · 标题（L起–L止）」：反解要依赖渲染格式，
+# 为什么把区间写进标记而不是「从正文里反解首行的 P0 · 标题（L起–L止）」：反解要依赖渲染格式，
 # 任何模板微调都会让去重静默失效、在同一行上堆重复评论。标记是稳定的解析契约（与汇总评论的
 # kiro-history 同一思路）。模型文本里的 `<!--` 已被 _sanitize_md 转义，伪造不出这一行。
 # 区间是去重的**主键**（旧格式退回 line_number + 标题区间），级别与指纹只作信息用途。
@@ -740,7 +762,7 @@ review_inline_overlaps() {
 # --- 一条行内评论的正文（spec §4.4）---
 # 用法：review_render_inline_body <单条问题的 JSON 文件> <短 sha> <指纹>
 # 模板：
-#   ### {P0} · {title}[（L{起}–L{止}）]
+#   **{P0} · {title}[（L{起}–L{止}）]**
 #   <!-- kiro-inline:{指纹} L{起}-{止} sev={P0} -->
 #
 #   {body}
@@ -751,6 +773,7 @@ review_inline_overlaps() {
 #
 #   — Kiro 评审 · 提交 `{sha}`
 # 多行区间在标题后附 `（L起–L止）`，锚点仍取 line_start（Codeup 的行内评论只能锚一行）。
+# 首行用加粗而不是标题：Codeup 不渲染 `###`，而行内评论卡片很窄，标题级别本来也没有意义。
 # body/fix 已在 review_validate 里过 _sanitize_md：这里不再二次转义（会把代码块弄坏）。
 review_render_inline_body() {
   local item="$1" sha="$2" fp="$3" sev title body fix ls le
@@ -772,7 +795,7 @@ review_render_inline_body() {
   if [[ -n "$ls" && -n "$le" && "$le" != "$ls" ]]; then
     title="${title}（L${ls}–L${le}）"
   fi
-  printf '### %s · %s\n' "$sev" "$title"
+  printf '**%s · %s**\n' "$sev" "$title"
   review_render_inline_marker "$fp" "$ls" "$le" "$sev" || return 2
   echo ""
   if [[ -n "$body" ]]; then printf '%s\n' "$body"; else echo "（评审员未给出说明）"; fi
@@ -1071,6 +1094,15 @@ review_render_footer() {
   printf '第 %s 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · %s\n' "$1" "$(_review_rerun_hint)"
 }
 
+# --- 标题层级（2026-09-04 真实验收）---
+# Codeup 合并请求评论的 Markdown 只把 `#` 与 `##` 渲染成标题，`###` 及以下按普通段落文字显示
+# （加粗、表格、<details>、代码块、引用、`---` 都正常）。所以评论只用两级标题：评论标题 `#`、
+# 五个章节（变更摘要/结论/问题统计/重点关注文件/问题清单）`##`；问题分组 `**P0 必须修复（n）**`、
+# 每条问题 `**1. `file:line` — 标题**`、折叠区小节 `**P2 建议（n）**` 与行内评论首行 `**P0 · 标题**`
+# 一律用加粗行。_sanitize_md 对模型文本行首 `#{1,6}` 的转义不变：模型文本冒充 `#`/`##` 仍要挡，
+# `###` 以下虽不再渲染成标题，转义成字面量也不损失什么。这条只约束脚本自己发出的行：模型文本
+# 代码围栏内的 `###` 是代码，原样保留（所以「评论里没有 ### 行」不是全局不变量，测试只对无围栏 fixture 断言）。
+
 # --- 内部：评论头（标题 + 评审标记 + 历史标记 + 元信息表）---
 # $2 = 历史 JSON 文件（已含本次那一行）
 _review_render_header() {
@@ -1086,7 +1118,7 @@ _review_render_header() {
 
 # --- 折叠区（INLINE_COMMENT=1；spec §4.3）---
 # 小节标题里的级别列表按实际内容生成，而不是写死 spec 模板里的字面量：
-#   - 档位桶在 quiet 下就是 P2（渲染成 `#### P2 建议（n）`，与 spec 模板一致），
+#   - 档位桶在 quiet 下就是 P2（渲染成 `**P2 建议（n）**`；spec §4.3 模板写的 `#### P2 建议` 按 2026-09-04 实测澄清映射为加粗行），
 #     但在 critical 下还包含 P1——写死「P2 建议」会把 P1 问题标成 P2，那是改写评审员的判级。
 #   - 超限桶在 quiet 下是 P0/P1（与 spec 模板一致），balanced 下可能含 P2。
 # --- 共用 jq 片段：问题的定位串 ---
@@ -1154,13 +1186,13 @@ _review_render_fold_section() {
     title="${title//\{levels\}/$(_review_fold_levels "$plan" "$bucket")}"
   fi
   echo ""
-  printf '#### %s（%s）\n' "$title" "$n"
+  printf '**%s（%s）**\n' "$title" "$n"
   if [[ "$full" == "1" ]]; then
     # 与「问题清单」同款：编号 + 定位串 + 标题 + 说明 + 修复建议
     jq -r --arg b "$bucket" --arg unloc "$unloc" "${_REVIEW_JQ_LOC}"'
       (.folded[$b] // []) | to_entries[]
       | .value as $f
-      | "\n##### \(.key + 1). \($f | _loc($unloc)) — \($f.title)\n\n\($f.body)"
+      | "\n**\(.key + 1). \($f | _loc($unloc)) — \($f.title)**\n\n\($f.body)"
         + (if ($f.fix | length) > 0 then "\n\n**修复建议**\n\n\($f.fix)" else "" end)' "$plan"
     return 0
   fi
@@ -1249,14 +1281,14 @@ review_render_summary() {
   review_history_append "${_RR_HISTORY:--}" "$_RR_RUN" "$_RR_SHA" "$verdict" "" "$n0" "$n1" "$n2" > "$hist"
   _review_history_ok "$hist" review_render_summary || { rm -f "$hist"; return 2; }
 
-  _review_render_header "## 🤖 Kiro 代码评审" "$hist"
+  _review_render_header "$REVIEW_TITLE" "$hist"
   echo ""
-  echo "### 变更摘要"
+  echo "## 变更摘要"
   echo ""
   # 模型给的字符串一律用 printf：值恰好是 -n / -e / -E 时 echo 会当成选项吃掉，正文直接消失
   if [[ -n "$summary" ]]; then printf '%s\n' "$summary"; else echo "（评审员未给出变更摘要）"; fi
   echo ""
-  echo "### 结论：${verdict_cn}"
+  echo "## 结论：${verdict_cn}"
   echo ""
   if [[ -n "$verdict_reason" ]]; then printf '%s\n' "$verdict_reason"; else echo "（评审员未给出结论理由）"; fi
   # 契约要求「有 P0 时不要给 MERGE」。模型违约时不改写它的结论（那是评审员的判断），
@@ -1272,7 +1304,7 @@ review_render_summary() {
     fi
   fi
   echo ""
-  echo "### 问题统计"
+  echo "## 问题统计"
   echo ""
   stat="P0 ${n0} · P1 ${n1} · P2 ${n2}"
   # INLINE_COMMENT=1：注明其中多少条已经作为行内评论挂在「文件改动」对应行上（spec §4.3）。
@@ -1294,7 +1326,7 @@ review_render_summary() {
   # 重点关注文件：按 P0→P1→P2 计数降序、同计数按路径升序，最多 10 行；无可归属文件时整节省略。
   if [[ "$(jq -r '[.findings[] | select(.file != null)] | length' "$_RR_JSON")" -gt 0 ]]; then
     echo ""
-    echo "### 重点关注文件"
+    echo "## 重点关注文件"
     echo ""
     echo "| 文件 | P0 | P1 | P2 |"
     echo "|---|---|---|---|"
@@ -1326,7 +1358,7 @@ review_render_summary() {
   fi
 
   echo ""
-  echo "### 问题清单"
+  echo "## 问题清单"
   if [[ "$total" == "0" ]]; then
     echo ""
     echo "未发现明显问题。"
@@ -1339,12 +1371,12 @@ review_render_summary() {
       | ($sevs | split(" "))[] as $sev
       | [$all[] | select(.severity == $sev)] as $grp
       | select(($grp | length) > 0)
-      | "\n#### \($sev | sevlabel)（\($grp | length)）",
+      | "\n**\($sev | sevlabel)（\($grp | length)）**",
         ( $grp
           | sort_by([(.file == null), (.file // ""), (.line_start // 0), .idx])
           | to_entries[]
           | .value as $f
-          | "\n##### \(.key + 1). \($f | _loc("0")) — \($f.title)\n\n\($f.body)"
+          | "\n**\(.key + 1). \($f | _loc("0")) — \($f.title)**\n\n\($f.body)"
             + (if ($f.fix | length) > 0 then "\n\n**修复建议**\n\n\($f.fix)" else "" end) )' "$_RR_JSON"
   fi
   echo ""
@@ -1584,7 +1616,7 @@ review_render_degraded() {
   hist=$(mktemp)
   review_history_append "${_RR_HISTORY:--}" "$_RR_RUN" "$_RR_SHA" "" degraded - - - > "$hist"
   _review_history_ok "$hist" review_render_degraded || { rm -f "$hist"; return 2; }
-  _review_render_header "## 🤖 Kiro 代码评审 · ⚠️ 结构化解析失败" "$hist"
+  _review_render_header "$REVIEW_TITLE_DEGRADED" "$hist"
   echo ""
   echo "> ⚠️ 评审已完成，但输出不符合结构化契约（${_RR_REASON:-未说明原因}），无法给出分级问题清单与统计。"
   echo "> 下面是评审员输出的原文（已由脚本对疑似凭证再做一次掩码，并把其中的 Markdown 标题、分隔线与"
@@ -1620,7 +1652,7 @@ review_render_failure() {
   _review_history_ok "$hist" review_render_failure \
     || review_history_append - "$_RR_RUN" "$_RR_SHA" "" failed - - - > "$hist" 2>/dev/null || true
   _review_history_ok "$hist" review_render_failure || printf '[]\n' > "$hist"
-  _review_render_header "## 🤖 Kiro 代码评审 · ⚠️ 评审未完成" "$hist"
+  _review_render_header "$REVIEW_TITLE_FAILED" "$hist"
   echo ""
   printf '⚠️ 评审未完成：'
   printf '%s' "$_RR_REASON" | review_sanitize_md

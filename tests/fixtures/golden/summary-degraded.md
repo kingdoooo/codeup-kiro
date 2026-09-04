@@ -1,4 +1,4 @@
-## 🤖 Kiro 代码评审 · ⚠️ 结构化解析失败
+# Kiro 代码评审 · ⚠️ 结构化解析失败
 <!-- kiro-review:90fcb05 run:1 -->
 <!-- kiro-history:[{"run":1,"sha":"90fcb05","verdict":"","status":"degraded","p0":null,"p1":null,"p2":null}] -->
 

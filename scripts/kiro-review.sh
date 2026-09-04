@@ -118,7 +118,7 @@ die_review() {
         || review_history_append - "$REVIEW_RUN" "${SHORT_SHA:-unknown}" "" failed - - - > "$mh" 2>/dev/null || true
       _review_history_ok "$mh" die_review 2>/dev/null || printf '[]\n' > "$mh"
       {
-        echo "## 🤖 Kiro 代码评审 · ⚠️ 评审未完成"
+        echo "$REVIEW_TITLE_FAILED"
         echo "<!-- kiro-review:${SHORT_SHA:-unknown} run:${REVIEW_RUN} -->"
         review_render_history_marker "$mh"
         echo ""

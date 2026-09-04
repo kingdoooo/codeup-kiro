@@ -151,11 +151,17 @@ fi
 
 # ---------- P1-09 <details> 渲染（需人工在 UI 查看）----------
 DETAILS_MD=$(cat <<'MD'
-## 🤖 codeup-kiro 渲染探测
+# codeup-kiro 渲染探测
 <!-- kiro-review:probe -->
 | 项 | 值 |
 |---|---|
-| 目的 | 检查 Codeup 是否渲染 `<details>` 与表格 |
+| 目的 | 检查 Codeup 是否渲染 `<details>`、表格与各级标题 |
+
+## 二级标题（应渲染为标题）
+### 三级标题（2026-09-04 实测：显示为普通文字）
+#### 四级标题（同上）
+##### 五级标题（同上）
+**整行加粗（模板用它代替三级以下标题）**
 
 <details><summary>折叠区（点开应看到一行列表）</summary>
 
@@ -166,7 +172,7 @@ P0 必须修复 · P1 应当修复 · P2 可选改进
 MD
 )
 call POST "$MR_BASE/comments" "$(jq -cn --arg c "$DETAILS_MD" '{comment_type:"GLOBAL_COMMENT", content:$c, draft:false, resolved:false}')"
-if ok; then cid=$(jget '.comment_biz_id'); CREATED_IDS+=("$cid"); record P1-09 INFO "已发汇总评论 id=${cid:0:8}…，请到 MR 页面确认 <details> 是否可折叠、表格是否渲染"
+if ok; then cid=$(jget '.comment_biz_id'); CREATED_IDS+=("$cid"); record P1-09 INFO "已发汇总评论 id=${cid:0:8}…，请到 MR 页面确认 <details> 是否可折叠、表格是否渲染、#/## 之外的标题是否显示为普通文字（模板据此只用 #/## 与加粗）"
 else record P1-09 FAIL "HTTP ${CODEUP_HTTP_CODE}: $(cut -c1-200 <<<"$RESP")"; fi
 
 # ---------- 清理 ----------

@@ -192,7 +192,7 @@ assert_rc "$RC" 0 "M14：变异体仍能跑完"
 comment=$(posted_comment "$OUT")
 assert_eq "$(printf '%s\n' "$comment" | grep -c '<!-- kiro-review:')" "2" \
   "M14：评论里出现两个评审标记——端到端「标记恰好一个」断言会失败（后续票按标记原地更新会被打乱）"
-assert_eq "$(printf '%s\n' "$comment" | grep -c '^### 结论：')" "2" \
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^## 结论：')" "2" \
   "M14：模型文本里的伪造结论章节成了真章节——端到端断言会失败"
 
 # --- M15：让「受信 agent 契约标识」检查永远通过 → 非受信产出会被贴到 MR 上 ---
@@ -292,9 +292,16 @@ assert_eq "$(printf '%s\n' "$comment" | grep -ci '^<details')" "2" \
   "M23：行首开标签变成 2 个（脚本一个 + 模型文本一个）——端到端计数断言会失败"
 
 # --- M24：删掉「退到最后一个完整行」→ 截断点切在标签中间时留下半个标签 ---
-# 1603 字节这个上限落在渲染结果里 `<det|ails>` 的中间（实测开标签在第 1599 字节）。
+# 上限要落在渲染结果里第一个 `<details>` 开标签的 `<det|ails>` 中间。这个字节位置随模板变动
+# （2026-09-04 标题层级改成 `#`/`##`/加粗就把它挪前了，写死的 1603 当场失配），所以不写死：
+# 先用未变异的集成包跑一次同一用例，量出开标签所在行的字节偏移，再加 4。
+run_case m24-probe "$ROOT"
+assert_rc "$RC" 0 "M24 前置：未变异的集成包能跑完"
+details_off=$(posted_comment "$OUT" | grep -b -m1 '^<details' | cut -d: -f1)
+assert_eq "$([[ "${details_off:-}" =~ ^[0-9]+$ && "${details_off:-0}" -gt 0 ]] && echo ok)" "ok" \
+  "M24 前置：量出了 <details> 开标签的字节偏移（${details_off:-<空>}）"
 pkg=$(make_mutant m24-retreat-line 's|awk .NR > 1 { print prev } { prev = \$0 }. "\$dir/cut" > "\$dir/out"|cp "$dir/cut" "$dir/out"|' scripts/lib/review-render.sh)
-run_case m24 "$pkg" MAX_COMMENT_BYTES=1603
+run_case m24 "$pkg" MAX_COMMENT_BYTES=$((details_off + 4))
 assert_rc "$RC" 0 "M24：变异体仍能跑完"
 comment=$(posted_comment "$OUT")
 assert_eq "$(printf '%s\n' "$comment" | grep -ciE '^</?d[a-z]*$' || true)" "1" \
@@ -325,6 +332,8 @@ assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')"
   "M25 对照：渲染器失败时未变异实现退回最小失败评论并照常原地更新"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "只保留最小信息" "M25 对照：最小失败评论说明自己是退化产物"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^# Kiro 代码评审 · ⚠️ 评审未完成$')" "1" \
+  "M25 对照：最小失败评论的标题与 review_render_failure 同形（一级标题、同一份 REVIEW_TITLE_FAILED）"
 assert_contains "$comment" "<!-- kiro-review:" "M25 对照：最小失败评论仍带评审标记（下次评审找得到）"
 assert_contains "$comment" "<!-- kiro-history:" "M25 对照：仍带本次一行历史"
 assert_contains "$comment" "第 2 次评审" "M25 对照：仍带页脚"
@@ -373,7 +382,7 @@ assert_rc "$RC" 0 "对照：行内开启后评审成功"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "对照：quiet 下发 3 条"
 assert_eq "$(inline_bodies "$OUT" | jq -r '.line_number' | sort -u | paste -sd, -)" "2" "对照：行号都落在变更行集合内"
 assert_contains "$(posted_comment "$OUT")" "其中 3 条已标注在「文件改动」对应行" "对照：统计行注明行内条数"
-assert_contains "$(posted_comment "$OUT")" "#### 未定位问题（2）" "对照：未定位问题在折叠区"
+assert_contains "$(posted_comment "$OUT")" "**未定位问题（2）**" "对照：未定位问题在折叠区"
 inline_case baseline-rerun "$ROOT" "$IFXR"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：重跑时三条都被区间去重，一条都不重发"
 
@@ -388,7 +397,7 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "4" \
   "M26：可定位判定恒真后多发了一条（G5，行号 99 不在变更行集合内）——端到端「quiet 下发 3 条」断言会失败"
 assert_contains "$(inline_bodies "$OUT" | jq -r '.line_number' | sort -u | paste -sd, -)" "99" \
   "M26：行内评论被发到了本次没改过的第 99 行——端到端「行号都落在变更行集合内」断言会失败"
-assert_not_contains "$(posted_comment "$OUT")" "#### 未定位问题（2）" \
+assert_not_contains "$(posted_comment "$OUT")" "**未定位问题（2）**" \
   "M26：未定位小节只剩 1 条（没有 file 的那条）——端到端折叠区断言会失败"
 
 # --- M27：把去重判定改成恒「未命中」→ 重跑在同一行上重复发 ---
@@ -461,7 +470,7 @@ assert_contains "$(posted_comment "$OUT")" "其中 3 条已标注在「文件改
   "M28：统计行也跟着变成 3——端到端「上限 1 时行内计数为 1」断言会失败"
 # 截取被拿掉后 overflow 桶仍照原样算出来，于是同两条问题既发了行内评论、又出现在折叠区
 # （违反 I4「同一问题只出现一次」）——这是这条变异的第二个可观测后果
-assert_contains "$(posted_comment "$OUT")" "#### 超出行内上限的 P0/P1（2）" \
+assert_contains "$(posted_comment "$OUT")" "**超出行内上限的 P0/P1（2）**" \
   "M28：那两条问题同时出现在行内与折叠区（同一问题出现两次）"
 
 # --- M29：发布结果不回填 → 发失败的问题在 MR 上一条都看不到 ---
@@ -473,7 +482,7 @@ assert_rc "$RC" 0 "M29：变异体仍能跑完"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 3 条已标注在「文件改动」对应行" \
   "M29：一条都没发出去却报「3 条已标注」——端到端「全部发布失败时行内计数为 0」断言会失败"
-assert_not_contains "$comment" "#### 行内发布失败" \
+assert_not_contains "$comment" "**行内发布失败" \
   "M29：折叠区里没有「行内发布失败」小节——那三个问题在 MR 上彻底消失了"
 assert_not_contains "$comment" "硬编码疑似应用密钥" "M29：连问题标题都看不到了"
 
@@ -491,7 +500,7 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "9" \
 # 对照：未变异实现在同样注入下每条只发一次
 inline_case m30control "$ROOT" "$IFX" DRY_RUN_FAIL_ROUTES="create-comment-inline:500" CODEUP_RETRY_BACKOFF=0
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "M30 对照：未变异实现三条各只尝试一次"
-assert_contains "$(posted_comment "$OUT")" "#### 行内发布失败（3）" "M30 对照：不重试的代价只是进折叠区，下次评审重发"
+assert_contains "$(posted_comment "$OUT")" "**行内发布失败（3）**" "M30 对照：不重试的代价只是进折叠区，下次评审重发"
 
 # --- M31：拿掉「一次提交后回读」→ 被服务端拒掉的草稿被当成已发布 ---
 # 提交返回 2xx 只说明请求被受理，不保证每个 id 都真的转成了 OPENED。
@@ -507,14 +516,14 @@ jq -n --arg bot "$BOT" '[
 ]' > "$IFXSD/list-comments-inline.2.json"
 inline_case baseline-readback "$ROOT" "$IFXSD"
 assert_eq "$(req_count "$OUT" DELETE 'comments/draft-1$')" "1" "对照：回读发现仍是草稿 → 删除"
-assert_contains "$(posted_comment "$OUT")" "#### 行内发布失败（1）" "对照：那条进折叠区"
+assert_contains "$(posted_comment "$OUT")" "**行内发布失败（1）**" "对照：那条进折叠区"
 assert_contains "$(posted_comment "$OUT")" "其中 2 条已标注在「文件改动」对应行" "对照：行内计数为 2"
 pkg=$(make_mutant m31-no-readback 's|if codeup_list_inline_comments "\$LOCAL_ID" > "\$WORK/inline-after.json"; then|if false; then|')
 inline_case m31 "$pkg" "$IFXSD"
 assert_rc "$RC" 0 "M31：变异体仍能跑完"
 # 变异后走的是「回读失败」那条 fail-closed 分支：不会把被拒的草稿谎报成已发布
 assert_eq "$(req_count "$OUT" DELETE 'comments/draft-1$')" "0" "M31：不回读就发现不了那条仍是草稿，也就不会删除它"
-assert_contains "$(posted_comment "$OUT")" "#### 行内发布失败（3）" \
+assert_contains "$(posted_comment "$OUT")" "**行内发布失败（3）**" \
   "M31：拿不到回读结果时三条全部按失败处理——端到端「行内发布失败（1）」与「已标注 2 条」断言都会失败"
 
 # --- M3：删掉 settings 调用 → 继承未被禁用 ---
@@ -522,5 +531,16 @@ pkg=$(make_mutant m3-settings '/chat.disableInheritingDefaultResources true/d')
 run_case m3 "$pkg"
 assert_rc "$RC" 0 "M3：变异体仍能跑完"
 assert_eq "$([[ -s "$CASE/settings" ]] && echo called || echo none)" "none" "M3：settings 未被调用——端到端断言会失败"
+
+# --- M35：让「整行加粗 → 转义」失效 → 模型文本能逐字节冒充问题分组行 / 问题标题行 ---
+# 2026-09-04 起分组与每条问题都是整行加粗（Codeup 不渲染 ### 以下标题），这条清洗是它们唯一的防伪造手段。
+pkg=$(make_mutant m35-bold-line 's/def _is_bold_line: (/def _is_bold_line: false and (/' scripts/lib/review-render.sh)
+run_case m35 "$pkg" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/inject.json"
+assert_rc "$RC" 0 "M35：变异体仍能跑完"
+assert_eq "$(printf '%s\n' "$(posted_comment "$OUT")" | grep -c '^\*\*P0 必须修复（')" "2" \
+  "M35：模型文本里的整行加粗成了第二个「P0 必须修复」分组行——单测「分组行恰好一个」断言会失败"
+run_case m35control "$ROOT" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/inject.json"
+assert_eq "$(printf '%s\n' "$(posted_comment "$OUT")" | grep -c '^\*\*P0 必须修复（')" "1" "M35 对照：未变异实现里分组行恰好一个"
+assert_contains "$(posted_comment "$OUT")" '\*\*P0 必须修复（1）\*\*' "M35 对照：模型文本里的那行被转义成字面量"
 
 report

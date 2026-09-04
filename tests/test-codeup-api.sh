@@ -99,7 +99,7 @@ out=$(DRY_RUN_FIXTURE_DIR="$FX/prior-run1" codeup_list_global_comments 7 2>/dev/
 assert_eq "$(printf '%s' "$out" | jq -r 'length')" "4" "list_comments: 返回 fixture 内容"
 
 # ============ 票 03：原地更新评论 ============
-md=$(mktemp); printf '## 🤖 Kiro 代码评审\n<!-- kiro-review:abc1234 run:2 -->\n' > "$md"
+md=$(mktemp); printf '# Kiro 代码评审\n<!-- kiro-review:abc1234 run:2 -->\n' > "$md"
 rc=0; err=$(codeup_update_comment 7 b1f0e9d8c7b6a5948372615049382716 "$md" 2>&1 >/dev/null) || rc=$?
 assert_rc "$rc" 0 "update_comment: DRY_RUN 成功"
 assert_contains "$err" "DRY_RUN PUT" "update_comment: 用 PUT（实测 UpdateChangeRequestComment）"
@@ -196,7 +196,7 @@ assert_contains "$err" "没有 username 字段" "R6：200 但缺 username 时留
 # ---- R8：新建评论的作者用户名日志必须同时兼容对象与数组两种响应形态 ----
 # 这是运维拿到 CODEUP_BOT_USERNAME 取值的唯一途径；本文件头注释就写明官方响应体形态在接口之间
 # 不一致（CreateChangeRequestComment 被记为 snake_case 数组），只认对象的话这条日志可能永远不打印。
-md=$(mktemp); printf '## 🤖 Kiro 代码评审\n' > "$md"
+md=$(mktemp); printf '# Kiro 代码评审\n' > "$md"
 err=$(DRY_RUN_FIXTURE_DIR="$FX/created" codeup_post_comment 7 "$md" 2>&1 >/dev/null)
 assert_contains "$err" "新建评论的作者用户名=aliyun:kingdooo_hvFXC" "R8：对象形态响应能取到作者用户名"
 err=$(DRY_RUN_FIXTURE_DIR="$FX/created-array" codeup_post_comment 7 "$md" 2>&1 >/dev/null)

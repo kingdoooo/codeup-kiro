@@ -94,7 +94,7 @@ assert_contains "$(cat "$CASE/stdin")" "SECRET_KEY" "diff 已喂入 stdin"
 assert_contains "$out" "changeRequests/7/comments" "回写到 MR 7"
 
 # --- 汇总评论（INLINE_COMMENT=0）：由脚本按契约渲染，不再是模型原文 ---
-assert_contains "$out" "🤖 Kiro 代码评审" "评论标题"
+assert_contains "$out" "# Kiro 代码评审" "评论标题（一级标题，无图标）"
 assert_contains "$out" "<!-- kiro-review:" "评论含评审标记"
 assert_contains "$out" "run:1" "评审标记含评审次数"
 assert_contains "$out" "变更摘要" "评论含变更摘要小节"
@@ -410,7 +410,7 @@ assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-
 
 # ============ 失败评论的标题与标记必须与成功/降级评论同形（供后续票原地更新）============
 run_case failheader MOCK_KIRO_FAIL=1
-assert_contains "$OUT" "🤖 Kiro 代码评审 · ⚠️ 评审未完成" "失败评论：标题与成功评论同一产品名"
+assert_contains "$OUT" "# Kiro 代码评审 · ⚠️ 评审未完成" "失败评论：标题与成功评论同一产品名"
 assert_not_contains "$OUT" "Kiro 自动代码评审" "失败评论：不再使用旧标题"
 assert_eq "$(printf '%s' "$OUT" | grep -c 'kiro-review:[0-9a-f]* run:1')" "1" "失败评论：标记带 run 字段，与成功评论同形"
 
@@ -693,7 +693,7 @@ assert_eq "$(inline_bodies "$OUT" | jq -r 'select(.draft == true and .resolved =
 assert_eq "$(submit_body "$OUT" | jq -r '.submitDraftCommentIds | join(",")')" "draft-1,draft-2,draft-3" "行内开启：提交带上三个不同的草稿 id"
 assert_eq "$(submit_body "$OUT" | jq -r 'has("reviewOpinion")')" "false" "行内开启：提交不带 reviewOpinion（不卡合并）"
 # 行内评论正文（spec §4.4）
-assert_contains "$(inline_bodies "$OUT" | jq -r '.content' | head -20)" "### P0 · 硬编码疑似应用密钥" "行内正文：级别 · 标题"
+assert_contains "$(inline_bodies "$OUT" | jq -r '.content' | head -20)" "**P0 · 硬编码疑似应用密钥**" "行内正文：级别 · 标题（整行加粗且闭合；Codeup 不渲染三级标题）"
 assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" "<!-- kiro-inline:" "行内正文：带去重指纹标记"
 assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" "（L2–L3）" "行内正文：多行区间在标题后附 L 起–L 止"
 assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" "— Kiro 评审 · 提交 " "行内正文：落款"
@@ -701,9 +701,9 @@ assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" "— Kiro 评审 ·
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 3 条已标注在「文件改动」对应行" "汇总：注明已标注到行的条数"
 assert_contains "$comment" "<details><summary>折叠区：未展开的问题（3）</summary>" "汇总：折叠区带条数"
-assert_contains "$comment" "#### P2 建议（1）" "汇总：折叠区含 P2 小节"
-assert_contains "$comment" "#### 未定位问题（2）" "汇总：折叠区含未定位小节"
-assert_not_contains "$comment" "### 问题清单" "汇总：明细已在行内，不再展开清单（I4 同一问题只出现一次）"
+assert_contains "$comment" "**P2 建议（1）**" "汇总：折叠区含 P2 小节"
+assert_contains "$comment" "**未定位问题（2）**" "汇总：折叠区含未定位小节"
+assert_not_contains "$comment" "## 问题清单" "汇总：明细已在行内，不再展开清单（I4 同一问题只出现一次）"
 assert_not_contains "$comment" "硬编码疑似应用密钥" "汇总：已发行内的问题不在汇总里重复"
 assert_contains "$comment" "<!-- kiro-review:" "汇总：仍带评审标记"
 assert_contains "$comment" "<details><summary>历次评审（1）</summary>" "汇总：历次表照旧"
@@ -717,12 +717,12 @@ assert_rc "$RC" 0 "critical：退出码 0"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "2" "critical：只发 2 条 P0"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 2 条已标注在「文件改动」对应行" "critical：行内计数为 2"
-assert_contains "$comment" "#### P1/P2 建议（2）" "critical：可定位的 P1/P2 进折叠区且标题如实列出级别"
+assert_contains "$comment" "**P1/P2 建议（2）**" "critical：可定位的 P1/P2 进折叠区且标题如实列出级别"
 
 # ---- 档位 balanced：可定位的全发 ----
 run_inline_case balanced ifx-balanced INLINE_PROFILE=balanced
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "4" "balanced：4 条可定位问题全发"
-assert_contains "$(posted_comment "$OUT")" "#### 未定位问题（2）" "balanced：未定位的仍进折叠区"
+assert_contains "$(posted_comment "$OUT")" "**未定位问题（2）**" "balanced：未定位的仍进折叠区"
 
 # ---- 非法档位：回落 quiet 并留痕 ----
 run_inline_case badprofile ifx-badprofile INLINE_PROFILE=严格模式
@@ -738,7 +738,7 @@ run_inline_case max1 ifx-max1 MAX_INLINE_COMMENTS=1
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "1" "上限 1：只发 1 条"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 1 条已标注在「文件改动」对应行" "上限 1：行内计数为 1"
-assert_contains "$comment" "#### 超出行内上限的 P0/P1（2）" "上限 1：超限的 P0/P1 进折叠区"
+assert_contains "$comment" "**超出行内上限的 P0/P1（2）**" "上限 1：超限的 P0/P1 进折叠区"
 run_inline_case badmax ifx-badmax MAX_INLINE_COMMENTS=很多
 assert_contains "$OUT" "不是非负整数" "非法上限：日志告警"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "非法上限：按默认 10 处理"
@@ -916,11 +916,11 @@ run_inline_case allfail ifx-allfail DRY_RUN_FAIL_ROUTES="submit-review:400,creat
 assert_rc "$RC" 0 "全部发布失败：评审仍以 0 退出（评审本身产出了）"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 0 条已标注在「文件改动」对应行" "全部发布失败：行内计数为 0"
-assert_contains "$comment" "#### 行内发布失败（3）" "全部发布失败：折叠区单独一节列出"
+assert_contains "$comment" "**行内发布失败（3）**" "全部发布失败：折叠区单独一节列出"
 assert_contains "$comment" "硬编码疑似应用密钥" "全部发布失败：问题本身仍然可见"
 assert_contains "$comment" "<details><summary>折叠区：未展开的问题（6）</summary>" "全部发布失败：折叠区 3 + 3"
 # R4：一条行内评论都没发出去时，说明与修复建议在 MR 上再没有别的落点（I10），必须完整渲染
-assert_contains "$comment" '##### 1. `src/app.py:2` — 硬编码疑似应用密钥' "R4：发布失败小节带编号与定位串"
+assert_contains "$comment" '**1. `src/app.py:2` — 硬编码疑似应用密钥**' "R4：发布失败小节带编号与定位串"
 assert_contains "$comment" "硬编码模式会让真实密钥被提交、传播或误用于其他环境。" "R4：发布失败的问题说明完整可见（不只是首句）"
 assert_contains "$comment" "从环境变量或密钥管理服务读取，启动时校验非空。" "R4：发布失败的问题修复建议完整可见"
 assert_contains "$comment" "立即轮换该凭证，并考虑清理历史。" "R4：第二条失败问题的修复建议也在"
@@ -936,7 +936,7 @@ assert_rc "$RC" 0 "版本列表失败：评审仍成功"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "版本列表失败：一条行内评论都不发（不拿猜的版本去挂行）"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "行内评论未发出" "版本列表失败：汇总里说明原因（I10 失败可见）"
-assert_contains "$comment" "### 问题清单" "版本列表失败：回落成完整展开的问题清单"
+assert_contains "$comment" "## 问题清单" "版本列表失败：回落成完整展开的问题清单"
 assert_contains "$comment" "硬编码疑似应用密钥" "版本列表失败：问题明细仍在汇总里"
 assert_not_contains "$comment" "已标注在" "版本列表失败：不谎报行内计数"
 
@@ -952,7 +952,7 @@ CASE_TWEAK=mk_nopair run_case nopair DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
 assert_rc "$RC" 0 "选不出版本对：评审仍成功"
 assert_contains "$OUT" "MERGE_TARGET" "选不出版本对：日志点名缺哪一侧"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "选不出版本对：不发行内评论"
-assert_contains "$(posted_comment "$OUT")" "### 问题清单" "选不出版本对：回落成完整清单"
+assert_contains "$(posted_comment "$OUT")" "## 问题清单" "选不出版本对：回落成完整清单"
 
 # ---- 最新合并源版本的提交与 HEAD 不一致 → 记 warning，但仍以 API 版本为准 ----
 IFX_DIR="$tmp/ifx-shamismatch"; mkdir -p "$IFX_DIR"
@@ -1033,7 +1033,7 @@ ibody=$(inline_bodies "$OUT" | jq -r '.content')
 assert_eq "$(printf '%s\n' "$ibody" | grep -c '^<!-- kiro-inline:')" "1" "行内正文注入：指纹标记恰好一个"
 assert_contains "$ibody" "&lt;!-- kiro-inline:1111" "行内正文注入：模型文本里的伪造指纹标记被转义"
 assert_contains "$ibody" "&lt;DETAILS>" "行内正文注入：折叠标签被转义"
-assert_eq "$(printf '%s\n' "$ibody" | grep -c '^## ')" "0" "行内正文注入：伪造标题不成立"
+assert_eq "$(printf '%s\n' "$ibody" | grep -c '^#\{1,6\} ')" "0" "行内正文注入：伪造标题不成立（行内正文没有任何标题行）"
 
 # ---- R5：上次运行断在「建好草稿」与「一次提交」之间，残留草稿必须先删再重发 ----
 # 不删就会在同一行上留两份，而旧那条的 id 我们早就没有了——永远提交不了，也永远删不掉；
@@ -1079,7 +1079,7 @@ assert_eq "$(req_count "$OUT" DELETE 'comments/draft-1$')" "1" "R6 回读：仍�
 assert_eq "$(req_count "$OUT" DELETE 'comments/draft-2$')" "0" "R6 回读：已转公开的那条不动"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 2 条已标注在「文件改动」对应行" "R6 回读：行内计数只算真的转成公开评论的（3 → 2）"
-assert_contains "$comment" "#### 行内发布失败（1）" "R6 回读：被拒的那条进折叠区"
+assert_contains "$comment" "**行内发布失败（1）**" "R6 回读：被拒的那条进折叠区"
 assert_contains "$comment" "硬编码疑似应用密钥" "R6 回读：被拒那条的内容在折叠区完整可见"
 
 # ---- R6b：提交后回读失败 → 全部按发布失败处理（fail-closed）----
@@ -1089,7 +1089,7 @@ assert_contains "$OUT" "本次跳过去重" "R6b 回读失败：发布前那次�
 assert_contains "$OUT" "全部按发布失败处理" "R6b 回读失败：日志说明 fail-closed"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 0 条已标注在「文件改动」对应行" "R6b 回读失败：不谎报已标注条数"
-assert_contains "$comment" "#### 行内发布失败（3）" "R6b 回读失败：三条都在折叠区完整列出（宁可重复，绝不藏问题）"
+assert_contains "$comment" "**行内发布失败（3）**" "R6b 回读失败：三条都在折叠区完整列出（宁可重复，绝不藏问题）"
 
 # ---- R8：Codeup 侧的比较基准与本地 merge-base 不一致 → 警告 + 汇总里说明 ----
 IFX_DIR="$tmp/ifx-basemismatch"; mkdir -p "$IFX_DIR"
