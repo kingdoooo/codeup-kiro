@@ -1149,7 +1149,44 @@ _review_render_header() {
   echo ""
   echo "| Commit | 分支 | 时间 | diff |"
   echo "|---|---|---|---|"
-  echo "| \`${_RR_SHA}\` | \`${_RR_SRC}\` → \`${_RR_DST}\` | ${_RR_TS} | ${_RR_DIFF_NOTE} |"
+  echo "| \`${_RR_SHA}\` | \`$(_review_meta_cell "$_RR_SRC")\` → \`$(_review_meta_cell "$_RR_DST")\` | ${_RR_TS} | ${_RR_DIFF_NOTE} |"
+}
+
+# --- 元信息单元格的字符许可清单（$1=原始取值 → stdout）---
+# 只用在 --src/--dst 上：分支名是 **MR 作者可控输入**。实测 `git check-ref-format --branch`：
+# `< > | ` 反引号 **都是合法 ref 字符**（而 `\ ~ ^ : ? * [` 与空格被 git 拒绝）。所以真正可达的
+# 危险输入就是前四个；反斜杠与控制字符 git 侧已挡，这里仍一并过滤作纵深防御——`--dst` 还能经
+# `MR_TARGET_BRANCH` 从流水线变量/CreatePipelineRun envs 注入，那条路**不过 git 校验**。
+#   `|`      —— GFM 先按 | 切单元格再解析行内，`a|b|c` 会给 4 列表头配出 6 格，把时间与 diff 挤出表格；
+#   反引号   —— **以反引号开头**的名字逃出脚本包的 code span，其后的原始 HTML 直接进评论；
+#   `<` `>`  —— 逃出 code span 后 `<details>`/`<script>` 就是原始 HTML，未闭合的 <details> 折叠掉整段后文；
+#              也让 `<!--`/`-->` 再也构不成 HTML 注释（隐藏标记不会被提前闭合）；
+#   控制字符 —— 换行是关键的一个：`--dst $'x\n<!-- kiro-review:… run:9 -->'` 会让评论出现第二行
+#              评审标记，review_select_prior_comment 的「标记恰好一个」不成立 → 每次评审新建汇总（破 I4）。
+# 字符集与 review_history_append 的 `safe()` 保持一致（三份同类规则的收敛见票 13）。
+# **只处理这两个**：`--sha` 来自 `git rev-parse`，`--ts` 由脚本 date 生成，`--diff-note` 是脚本常量，
+# 三者都不含不受信输入；过滤它们只会掩盖「脚本自己传错了」这类问题。
+# 全部用参数展开完成（bash 3.2 实测支持 `${v//[[:cntrl:]]/}`）：渲染路径每次评审都要走，不为两个
+# 单元格起六个进程。只有真的需要截断时才起一次 iconv。
+_review_meta_cell() {
+  local v="${1-}" orig="${1-}"
+  v=${v//[<>|\`\\]/}
+  v=${v//[[:cntrl:]]/}
+  # 截断到 200 字符：分支名上限远小于此，超长只会撑坏表格。
+  # `${v:0:200}` 在 POSIX locale（CI 容器常见 LANG 未设置）下按**字节**切，会切在 UTF-8 序列中间，
+  # 于是评论正文里出现非法字节、jq 静默替换成 U+FFFD、页面上一个乱码方块且无任何日志。
+  # 与 kiro-review.sh 的评论截断同一处置：截完用 iconv -c 清掉残缺序列。
+  if [[ "${#v}" -gt 200 ]]; then
+    v=${v:0:200}
+    v=$(printf '%s' "$v" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null) || true
+  fi
+  # 过滤成空串时不能直接渲染成一对相邻反引号：GFM 找不到配对会按字面量显示两个裸反引号，
+  # 分支信息彻底丢失且列数断言看不出来。回填占位，让读者知道「名字被过滤掉了」而不是「没有分支」。
+  [[ -n "$v" ]] || v="(名称含非法字符，已过滤)"
+  # 过滤改变了取值就留痕：否则评论上的分支名与真实 ref 不一致，运维照抄去 checkout 会失败而无从得知
+  # （同一仓库对模型侧 file 字段的处置也是「计数 + 日志 + 写进统计行」，见 delocated_findings）。
+  [[ "$v" == "$orig" ]] || echo "review 渲染：元信息表里的分支名含表格/HTML 危险字符，已过滤后显示（原值不进评论）" >&2
+  printf '%s' "$v"
 }
 
 # --- 折叠区（INLINE_COMMENT=1；spec §4.3）---

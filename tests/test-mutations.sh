@@ -566,4 +566,58 @@ UNKNOWN_DIFF=$(printf 'diff --git a/x b/x\n--- a/x\n+++ "b/x\\qy.py"\n@@ -0,0 +1
 assert_eq "$(mut_keys "$ROOT" "$UNKNOWN_DIFF")" "<rc:3>" "M36 对照：表外转义在未变异实现里硬失败"
 assert_eq "$(mut_keys "$pkg" "$UNKNOWN_DIFF")" "xqy.py" "M36：变异体反而猜出一个路径（正是「宁可失败也不猜」要挡的行为）"
 
+
+# --- M37：让元信息表的分支名过滤失效 → MR 作者的分支名撑破表格并把原始 HTML 带进评论 ---
+# 分支名是 MR 作者可控输入（票 07）。单测粒度：把变异体的库 source 进子壳直接渲染一次。
+# 变异点 = 许可清单那一行（控制字符那半由 M38 单独覆盖）。用地址 `/\[<>/` 选行、再整行替换：
+# 那一行里有转义反引号与双反斜杠，直接写进 sed 模式在不同 sed 实现下含义不同（GNU 把 \` 当
+# 缓冲区起始锚），而地址里只用 `[<>` 三个字节，稳。
+# 提醒：改 `_review_meta_cell` 的实现时这条 sed 会失配，make_mutant 的「必须改动文件」检查会
+# 立刻报出来（本票就是这样被抓到的），按新实现重新选点即可，别删掉这条变异。
+pkg=$(make_mutant m37-metacell '/\[<>/ s@v=${v//.*@: # 变异：不过滤危险字符@' scripts/lib/review-render.sh)
+mut_meta_row() { # $1=集成包根 $2=分支名 → stdout 元信息行（提取器用 helpers.sh 的 meta_row，只有一份）
+  local pkg_root="$1" branch="$2" out
+  ( set +e; source "$pkg_root/scripts/lib/review-render.sh"
+    review_validate < "$ROOT/tests/fixtures/contract/full.json" > "$tmp/m37.json"
+    out=$(review_render_summary --json "$tmp/m37.json" --sha 90fcb05 --src "$branch" --dst master \
+            --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>/dev/null)
+    meta_row "$out" )
+}
+mut_render() { # $1=集成包根 $2=分支名 → stdout 整段汇总评论（M38 要看被劈开的行，meta_row 找不到它）
+  local pkg_root="$1" branch="$2"
+  ( set +e; source "$pkg_root/scripts/lib/review-render.sh"
+    review_validate < "$ROOT/tests/fixtures/contract/full.json" > "$tmp/m37.json"
+    review_render_summary --json "$tmp/m37.json" --sha 90fcb05 --src "$branch" --dst master \
+      --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>/dev/null )
+}
+# 元信息行开头那一段（`| \`sha\` | …`）的竖线数：行被换行劈开时前半截只剩 2 个
+sha_row_pipes() { printf '%s\n' "$1" | grep -F '90fcb05' | grep -F '| `' | head -1 | tr -cd '|' | wc -c | tr -d ' '; }
+assert_eq "$(mut_meta_row "$pkg" 'a|b|c' | tr -cd '|' | wc -c | tr -d ' ')" "7" \
+  "M37：过滤失效后 '\''a|b|c'\'' 把元信息行撑成 7 个竖线（4 列变 6 格）——单测「表格列数」断言会失败"
+assert_contains "$(mut_meta_row "$pkg" '`<details><summary>h</summary>')" "<details" \
+  "M37：过滤失效后原始 HTML 进入元信息单元格——单测「不把 < 带进单元格」断言会失败"
+assert_eq "$(mut_meta_row "$ROOT" 'a|b|c' | tr -cd '|' | wc -c | tr -d ' ')" "5" \
+  "M37 对照：未变异实现里元信息行恒为 5 个竖线"
+assert_not_contains "$(mut_meta_row "$ROOT" '`<details><summary>h</summary>')" "<details" \
+  "M37 对照：未变异实现把 < 与反引号一并剔掉"
+
+
+# --- M38：只去掉元信息单元格的控制字符过滤 → 带换行的分支名把表格行劈成两行 ---
+# 与 M37 分开：M37 的变异点是返回行，一次同时杀掉「许可清单 + 截断 + 占位」；这条只杀控制字符那一半，
+# 否则「删掉 `${v//[[:cntrl:]]/}` 后全套测试照样绿」（复审实测过）。
+# 注：复审推测「换行能造出第二个评审标记」——实测**不成立**，`<`/`>` 已被许可清单剔掉、`<!--` 构不成；
+# 换行的真实后果是表格行被劈开，所以断言写在行形态上。
+pkg=$(make_mutant m38-metacell-cntrl 's|  v=${v//\[\[:cntrl:\]\]/}|  : # 变异：不过滤控制字符|' scripts/lib/review-render.sh)
+nl_branch=$(printf 'feat/a\nb|c')
+# 变异体里那一行被换行劈成两行，于是**连一条形态完整的元信息行都找不到**（meta_row 返回空串），
+# 前半截只剩 2 个竖线。这两条一起看才能区分「行被劈开」与「渲染器改了形态」。
+assert_eq "$(mut_meta_row "$pkg" "$nl_branch")" "" \
+  "M38：不过滤控制字符时找不到形态完整的元信息行（行被换行劈开）——单测「表格列数恒 5」断言会失败"
+assert_eq "$(sha_row_pipes "$(mut_render "$pkg" "$nl_branch")")" "2" \
+  "M38：被劈开后前半截只剩 2 个竖线"
+assert_eq "$(mut_meta_row "$ROOT" "$nl_branch" | tr -cd '|' | wc -c | tr -d ' ')" "5" \
+  "M38 对照：未变异实现把换行剔掉，元信息行仍是完整一行（5 个竖线）"
+assert_eq "$(sha_row_pipes "$(mut_render "$ROOT" "$nl_branch")")" "5" \
+  "M38 对照：未变异实现里前半截就是完整那一行"
+
 report

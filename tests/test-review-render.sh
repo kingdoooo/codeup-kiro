@@ -1624,6 +1624,74 @@ assert_eq "$(printf '%s\n' "$fence_deg" | grep -c '^```[[:space:]]*$')" "0" \
   "rerun_hint：降级评论里不会多出一行独立的代码围栏"
 assert_contains "$fence_deg" "> 结构化输出通常在下一次评审就能恢复——" "rerun_hint：降级提示仍在引用块里"
 
+# ============ 元信息表：源/目标分支名是 MR 作者可控输入（票 07）============
+# git check-ref-format 允许 ` | < > !，只禁空格与控制字符。两条实测可用载荷：
+#   (a) `a|b|c`   —— GFM 先按 | 切单元格再解析行内，4 列表头会配出 6 格，时间与 diff 两列被挤出表格
+#   (b) `` `<details> `` —— 以反引号开头的名字逃出脚本的 code span，原始 HTML 进入评论；
+#        未闭合的 <details> 在页面上折叠掉整段后文
+# 损坏后评审标记仍能解析（run 号照常），所以坏评论会被后续运行一直原地更新、没人看得见。
+review_validate < fixtures/contract/full.json > "$tmp/v07.json"
+printf 'model text\n' > "$tmp/raw07.md"
+for payload in 'a|b|c' '`<details><summary>h</summary>' '`<script>x' 'x-->y' 'a<!--b'; do
+  for fn in summary degraded failure; do
+    case "$fn" in
+      summary)  out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 \
+                        --src "$payload" --dst "$payload" --ts "2026-09-02 20:10:02" --diff-note "完整直传") ;;
+      degraded) out=$(review_render_degraded --text "$tmp/raw07.md" --sha 90fcb05 \
+                        --src "$payload" --dst "$payload" --ts "2026-09-02 20:10:02" --diff-note "完整直传" --reason r) ;;
+      failure)  out=$(review_render_failure --reason r --sha 90fcb05 \
+                        --src "$payload" --dst "$payload" --ts "2026-09-02 20:10:02" --diff-note "完整直传") ;;
+    esac
+    row=$(meta_row "$out")   # helpers.sh 里的实现没匹配也返回 0，不会在 pipefail 下中止
+    [[ -n "$row" ]] || { echo "FAIL: 元信息行没找到（${fn} / ${payload}）" >&2; exit 1; }
+    # 表格结构：元信息行的 | 恰好 5 个（4 列两侧各一个 + 列间三个），与正常分支名一致
+    assert_eq "$(printf '%s' "$row" | tr -cd '|' | wc -c | tr -d ' ')" "5" \
+      "元信息表：分支名 [${payload}] 不撑破 ${fn} 的表格列数"
+    # 原始 HTML 与 HTML 注释都不许出现在元信息行上（评审标记那一行不在此列）
+    assert_not_contains "$row" "<" "元信息表：分支名 [${payload}] 不把 < 带进 ${fn} 的单元格"
+    assert_not_contains "$row" ">" "元信息表：分支名 [${payload}] 不把 > 带进 ${fn} 的单元格（→ 是箭头，不是 >）"
+    # code span 结构：元信息行恒有 4 个反引号（sha 一对、分支两段各一对里的 2 个）——
+    # 「不含 <」挡不住的那一半（反引号自身配对被破坏）只有数反引号才看得出来
+    assert_eq "$(printf '%s' "$row" | tr -cd '`' | wc -c | tr -d ' ')" "6" \
+      "元信息表：分支名 [${payload}] 不破坏 ${fn} 的 code span 配对（反引号恒 6 个）"
+  done
+done
+# 评审标记仍可解析（修复不能动 run 号）
+out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src 'a|b`<x' --dst master \
+        --ts "2026-09-02 20:10:02" --diff-note "完整直传")
+assert_eq "$(printf '%s\n' "$out" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:[0-9]+ -->$')" "1" \
+  "元信息表：过滤分支名不影响评审标记（仍恰好一行、仍可解析）"
+# 控制字符：`--dst` 经 MR_TARGET_BRANCH 从流水线变量/envs 注入，不过 git 校验（git 自己禁控制字符）。
+# 实测过：**换行造不出第二个评审标记**——`<`/`>` 已被同一条许可清单剔掉，`<!--` 根本构不成；
+# 换行真正破坏的是**表格行本身**（一行被劈成两行，后半截只剩 3 个竖线，见变异 M38）。
+# 下面仍断言「标记恰好一行」作为回归：将来若有人放宽 `<>` 过滤，这条会先响。
+evil_nl=$(printf 'x\n<!-- kiro-review:deadbeef run:9 -->')
+out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src "$evil_nl" --dst "$evil_nl" \
+        --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>/dev/null)
+assert_eq "$(printf '%s\n' "$out" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:[0-9]+ -->$')" "1" \
+  "元信息表：带换行的分支名不能在评论里造出第二行评审标记（I4）"
+# 去掉 <> 后 `run:9` 只是单元格里的普通文字（构不成标记行），关键是它没成为第二个**标记**
+assert_eq "$(printf '%s\n' "$out" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:9 -->$')" "0" \
+  "元信息表：注入的取值没有变成第二个评审标记行"
+assert_not_contains "$out" '<!-- kiro-review:deadbeef' "元信息表：注入的标记前缀不出现在评论里"
+assert_eq "$(meta_row "$out" | tr -cd '|' | wc -c | tr -d ' ')" "5" "元信息表：带换行的分支名不撑破表格"
+# 过滤后为空：不能渲染成一对相邻反引号（GFM 会显示两个裸反引号，分支信息彻底丢失）
+out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src '<<>>' --dst master \
+        --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>/dev/null)
+assert_contains "$(meta_row "$out")" '(名称含非法字符，已过滤)' "元信息表：分支名被过滤空时回填占位而不是空 code span"
+assert_not_contains "$(meta_row "$out")" '``' "元信息表：不出现相邻反引号"
+# 过滤改变取值时必须在 stderr 留痕（评论上的名字与真实 ref 不同，运维要能看出来）
+err=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src 'a|b' --dst master \
+        --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>&1 >/dev/null)
+assert_contains "$err" "已过滤后显示" "元信息表：分支名被过滤时打日志"
+err=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src feature/ok --dst master \
+        --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>&1 >/dev/null)
+assert_not_contains "$err" "已过滤后显示" "元信息表：正常分支名不打那条日志（正控）"
+# 正常分支名不受影响（过滤只删危险字符，不动普通路径）
+out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src feature/user-search --dst master \
+        --ts "2026-09-02 20:10:02" --diff-note "完整直传")
+assert_contains "$(meta_row "$out")" '`feature/user-search` → `master`' "元信息表：正常分支名原样渲染"
+
 if [[ "$GOLDEN_DIRTY" == "1" ]]; then
   echo "GOLDEN_UPDATE=1：golden 文件已重写，本次运行不构成通过。请人工读 git diff 确认渲染正确，再不带该变量重跑。" >&2
   exit 1

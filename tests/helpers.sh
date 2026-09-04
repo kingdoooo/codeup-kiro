@@ -53,6 +53,13 @@ inline_bodies() {
     | sed 's/^DRY_RUN body: //' | jq -c 'select(has("file_path"))'
 }
 
+# 汇总/降级/失败评论里的「元信息行」（`| \`sha\` | \`src\` → \`dst\` | 时间 | diff |`）。
+# 单测与变异测试都要用它判断「分支名有没有撑破表格 / 有没有把原始 HTML 带进单元格」，
+# 所以实现只能有一份——提取管道一变，两处拷贝里没改的那一处会静静地返回空串，
+# 然后以「过滤失效」的名义失败，把维护者引向错误的方向（与 req_count/inline_bodies 同一理由）。
+# 没匹配到时返回空串而不是让调用方在 pipefail 下直接中止（调用方要能打出自己的诊断）。
+meta_row() { printf '%s\n' "$1" | { grep -F '| `' || true; } | { grep -F ' → ' || true; } | head -1; }
+
 # 端到端 fixture 里机器人账号的用户名（取自 spec §4.7.1 P1-00 实测值）
 TEST_BOT_USERNAME='aliyun:kingdooo_hvFXC'
 
