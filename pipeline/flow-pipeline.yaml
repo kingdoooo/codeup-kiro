@@ -9,6 +9,11 @@
 # - 只执行 integration_repo 中的脚本；绝不执行 business_repo 中的任何脚本，
 #   否则 MR 作者可修改脚本窃取流水线密钥。
 #
+# 并发度（必做，只能在 UI 配）：「触发设置 → 并发度限制」→ 并发运行实例数 = 1。
+# YAML 侧没有对应字段（官方语法的顶层节点只有 name/sources/stages 与 defaultWorkspace、mountDirs 等，
+# 不含并发度），所以粘贴本文件之后仍要去 UI 勾一次。不设的话同一 MR 连推两次会并行跑两个运行，
+# 汇总评论互相覆盖（丢结论与历次记录）、行内草稿互删（同一问题出现两份）——详见 setup-guide 第 4 节第 4 步。
+#
 # 变量 KIRO_API_KEY / YUNXIAO_TOKEN 必须在 UI「变量和缓存」配置为私密变量，不要写入本文件。
 # 使用前替换 <...> 占位：两个 endpoint、以及 serviceConnection（首次在 YAML 编辑器粘贴后，
 # 校验器会识别并回填你组织的服务连接 ID）。

@@ -432,9 +432,19 @@ review_changed_lines() {
     }
     function rec(pj, s, e) { return "{\"p\":\"" pj "\",\"s\":" s ",\"e\":" e "}" }
     # `+++ ` 之后那一段 → JSON 编码后的真实路径（去掉 b/ 前缀）；"!" = 解析失败
-    function newpath_json(raw,   p, t) {
+    function newpath_json(raw,   p, t, q, i2) {
       p = raw
-      if (substr(p, 1, 1) == "\"") { p = cq2json(p); if (p == "!") return "!" }
+      if (substr(p, 1, 1) == "\"") {
+        # 引号形式后面 git 还会补一个 TAB（实测：`+++ "b/has space\tand tab.py"<TAB>`）。
+        # 不能按「去掉首尾各一个字符」剥引号——那样剥掉的是 TAB，键上多留一个 `"`：该文件的问题
+        # 全判为未定位，而 `<真名>"` 也是合法文件名，攻击者再加一个那样命名的文件就能拿到别人的行号。
+        # 结尾引号是**最后**一个 `"`（名字里的引号都已转义成 \"），所以按最后一个 `"` 截断是安全的。
+        q = 0
+        for (i2 = length(p); i2 >= 1; i2--) { if (substr(p, i2, 1) == "\"") { q = i2; break } }
+        if (q < 2) return "!"
+        p = cq2json(substr(p, 1, q))
+        if (p == "!") return "!"
+      }
       else { t = index(p, "\t"); if (t > 0) p = substr(p, 1, t - 1); p = jsonstr(p) }
       if (substr(p, 1, 2) == "b/") p = substr(p, 3)   # 前缀是字面 ASCII，转义不影响它
       return p

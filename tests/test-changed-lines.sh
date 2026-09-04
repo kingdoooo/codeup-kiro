@@ -268,4 +268,24 @@ out_partial=$(set +o pipefail; printf '%s' "$partial" | review_changed_lines 2>/
 assert_eq "$([[ "$rc" != "0" ]] && echo failed || echo ok)" "failed" "表外转义：没开 pipefail 时仍失败（awk 的 rc 被显式检查）"
 assert_eq "$out_partial" "" "表外转义：失败时不输出部分集合（前面已解析成功的 good.py 也不许漏出去）"
 
+
+# ============ 引号形式的路径后面还跟着一个 TAB（票 09 复审残留）============
+# git 对需要转义的路径输出 `+++ "b/…"` **并在后面补一个 TAB**。按「去掉首尾各一个字符」剥引号时
+# 剥掉的是那个 TAB 而不是结尾引号，键上就多一个 `"`：
+#   ① 该文件的所有问题都判为「未定位」（键对不上），静默进折叠区；
+#   ② `<真名>"` 本身也是合法文件名——攻击者再加一个那样命名的文件，就能让它拿到别的文件的行号区间。
+# 空格路径（引号但无转义字符）与 Tab 路径（有转义字符）分别测过，**组合**从没测过。
+p_first()  { printf 'x\n' > keep.txt; }
+p_second() {
+  printf 'l1\nl2\n' > "$(printf 'has space\tand tab.py')"
+  printf 'l1\n'     > "$(printf 'has space\tand tab.py"')"
+}
+d=$(mk_repo quotedtab p_first p_second)
+raw=$( (cd "$d" && _git_diff_pinned --no-renames -U0 HEAD~1 HEAD) )
+assert_contains "$raw" '+++ "b/has space\tand tab.py"' "前置：引号形式的路径确实出现"
+j=$(changed_json "$d")
+assert_eq "$(lines_of "$j" "$(printf 'has space\tand tab.py')")" "1,2" "引号+TAB：键是真实路径，不多一个引号"
+assert_eq "$(lines_of "$j" "$(printf 'has space\tand tab.py"')")" "1" "引号+TAB：真的以引号结尾的文件名是它自己的键"
+assert_eq "$(printf '%s' "$j" | jq -r 'length')" "2" "引号+TAB：恰好两个键（两个文件互不串位）"
+
 report
