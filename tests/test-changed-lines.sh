@@ -207,4 +207,65 @@ assert_eq "$(printf '%s' "$j" | jq -r 'keys | join(",")')" "DST/cfg.py" "正控�
 j=$( (cd "$d" && GIT_EXTERNAL_DIFF="$tmp/extdiff.sh" git diff --no-renames -U0 HEAD~1 HEAD) | review_changed_lines )
 assert_eq "$j" "{}" "正控：不加 --no-ext-diff 时集合为空"
 
+# ============ 文件名含换行/Tab/控制字符：不能伪造出别的文件的键，也不能把自己丢掉（票 09）============
+# git 对控制字符一律 C 转义（core.quotePath=false 也不例外），解析器还原后的换行若原样进入按行切分的
+# 中间流，第二行 `src/untouched.py<US>1<US>2` 字段数正好合法——一个 MR 没碰的文件就出现在变更行集合里，
+# 行内评论可以被引到它的任意行上（而带换行文件名自己的问题全部落进「未定位」）。
+n_first()  { mkdir -p src; printf 'a\nb\nc\n' > src/untouched.py; printf 'x\n' > keep.txt; }
+n_second() {
+  local nl_name tab_name us_name
+  nl_name=$(printf 'x\nsrc/untouched.py'); tab_name=$(printf 't\tab.py'); us_name=$(printf 'u\037src/untouched.py\0371\0373.py')
+  mkdir -p "$(dirname "$nl_name")" "$(dirname "$us_name")"
+  printf 'l1\nl2\n' > "$nl_name"
+  printf 'l1\n' > "$tab_name"
+  printf 'l1\nl2\nl3\n' > "$us_name"
+}
+d=$(mk_repo ctrlpath n_first n_second)
+raw=$( (cd "$d" && _git_diff_pinned --no-renames -U0 HEAD~1 HEAD) )
+assert_contains "$raw" '+++ "b/x\nsrc/untouched.py"' "前置：core.quotePath=false 下 git 仍对控制字符做 C 转义"
+j=$(changed_json "$d")
+assert_eq "$(printf '%s' "$j" | jq -r 'has("src/untouched.py")')" "false" "控制字符路径：没碰过的 src/untouched.py 不得出现在集合里"
+assert_eq "$(lines_of "$j" "$(printf 'x\nsrc/untouched.py')")" "1,2" "控制字符路径：带换行的文件名本身是键、行号正确"
+assert_eq "$(lines_of "$j" "$(printf 't\tab.py')")" "1" "控制字符路径：Tab 文件名是键"
+assert_eq "$(lines_of "$j" "$(printf 'u\037src/untouched.py\0371\0373.py')")" "1,2,3" "控制字符路径：含 0x1f 的文件名不被字段分隔符吃掉"
+assert_eq "$(printf '%s' "$j" | jq -r 'length')" "3" "控制字符路径：恰好三个键"
+
+
+# ============ git 的全部 C 转义都必须按表还原（票 09 复审）============
+# git quote.c 会输出 \a \b \f \n \r \t \v \" \\ 与 \NNN 八进制。解析器若对不认识的转义
+# 「丢掉反斜杠、留下字母」，`src/<BEL>pp.py`（git 写成 `+++ "b/src/\app.py"`）就会被还原成
+# `src/app.py`——一个 MR 没碰过的文件，行内评论可以挂到它任意行上（I5「定位可信」）。
+o_first()  { mkdir -p src; printf 'real\n' > src/app.py; printf 'real\n' > src/back.py; printf 'x\n' > keep.txt; }
+o_second() {
+  mkdir -p src
+  printf 'l1\nl2\n' > "$(printf 'src/\007pp.py')"    # \a → 若丢反斜杠会变成 src/app.py
+  printf 'l1\n'     > "$(printf 'src/\010ack.py')"   # \b → src/back.py
+  printf 'l1\n'     > "$(printf 'src/\014f.py')"     # \f → src/ff.py
+  printf 'l1\n'     > "$(printf 'src/\013t.py')"     # \v → src/vt.py
+}
+d=$(mk_repo cescapes o_first o_second)
+raw=$( (cd "$d" && _git_diff_pinned --no-renames -U0 HEAD~1 HEAD) )
+assert_contains "$raw" '+++ "b/src/\app.py"' "前置：git 用 \\a 转义 BEL 字节"
+j=$(changed_json "$d")
+for forged in src/app.py src/back.py src/ff.py src/vt.py; do
+  assert_eq "$(printf '%s' "$j" | jq -r --arg p "$forged" 'has($p)')" "false" "C 转义：不得伪造出未改动文件 ${forged} 的键"
+done
+assert_eq "$(lines_of "$j" "$(printf 'src/\007pp.py')")" "1,2" "C 转义：\\a 还原为 BEL，键是真实文件名"
+assert_eq "$(lines_of "$j" "$(printf 'src/\010ack.py')")" "1" "C 转义：\\b 还原为 BS"
+assert_eq "$(lines_of "$j" "$(printf 'src/\014f.py')")" "1" "C 转义：\\f 还原为 FF"
+assert_eq "$(lines_of "$j" "$(printf 'src/\013t.py')")" "1" "C 转义：\\v 还原为 VT"
+assert_eq "$(printf '%s' "$j" | jq -r 'length')" "4" "C 转义：恰好四个键"
+
+# 表外转义（git 不会产出）必须硬失败，绝不能猜：猜错就是把评论发到别的文件上
+rc=0
+printf 'diff --git a/x b/x\n--- a/x\n+++ "b/x\\qy.py"\n@@ -0,0 +1 @@\n+a\n' | review_changed_lines >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ "$rc" != "0" ]] && echo failed || echo ok)" "failed" "表外转义 \\q → 解析失败（调用方据此终止评审），不静默猜路径"
+# 失败必须不依赖调用方的 pipefail，且**先解析成功的文件也不能漏出去**：
+# 部分集合 + 成功返回 = 行内评论照发、失败的那些文件静默进「未定位」，比整次失败更糟
+partial=$(printf 'diff --git a/g b/g\n--- a/g\n+++ b/good.py\n@@ -0,0 +1 @@\n+a\ndiff --git a/x b/x\n--- a/x\n+++ "b/x\\qy.py"\n@@ -0,0 +1 @@\n+a\n')
+rc=0
+out_partial=$(set +o pipefail; printf '%s' "$partial" | review_changed_lines 2>/dev/null) || rc=$?
+assert_eq "$([[ "$rc" != "0" ]] && echo failed || echo ok)" "failed" "表外转义：没开 pipefail 时仍失败（awk 的 rc 被显式检查）"
+assert_eq "$out_partial" "" "表外转义：失败时不输出部分集合（前面已解析成功的 good.py 也不许漏出去）"
+
 report

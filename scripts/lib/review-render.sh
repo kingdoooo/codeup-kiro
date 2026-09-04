@@ -372,48 +372,84 @@ review_validate() {
 #   ③ `@@ -1,2 +3,4 @@` 的新侧计数为 0（`+0,0` / `+4,0`）表示纯删除 hunk，不贡献任何行号。
 #      省略计数（`@@ -5 +5 @@`）等价于计数 1。
 #   ④ `\ No newline at end of file` 行既不是头也不是 hunk，天然被忽略。
+#   ⑤ 还原后的路径可能含换行/Tab/0x1f 等控制字符（git 只对它们做 C 转义，core.quotePath=false 不例外）。
+#      awk → jq 的中间流按行切分，路径若原样进入，一个 `x\nsrc/untouched.py` 就会被切成两条记录，
+#      第二条恰好是「MR 没碰过的文件 + 攻击者选的行号」（票 09）。所以 awk 侧先把路径 JSON 编码，
+#      每条记录是一行 `{"p":…,"s":N,"e":N}`，jq 用 fromjson 解，路径里任何字节都构不成记录边界。
 # LC_ALL=C：按字节处理，diff 里的无效 UTF-8 字节不会让 awk 罢工（与 review_clean_text 同理）。
 review_changed_lines() {
-  local sep
-  sep=$(printf '\037')
-  LC_ALL=C awk -v SEP="$sep" '
-    # C 风格转义还原（git 对含特殊字符的路径会整体加引号）
-    function unquote(s,   body, out, i, c, n, oct, v) {
-      body = substr(s, 2, length(s) - 2)
+  # awk 的 rc 必须显式检查，不能依赖调用方开了 pipefail：没开时 awk 的 exit 3 会被 jq 的 rc 0 吞掉，
+  # 而失败发生在流中间时前面的文件已经写出去了——那就是「部分变更行集合 + 成功返回」，
+  # 行内评论照发、少掉的文件全静默进「未定位」。所以先落盘、验 rc，再交给 jq。
+  local _rcl_raw _rcl_rc=0
+  _rcl_raw=$(mktemp) || return 1
+  LC_ALL=C awk '
+    # --- git 的 C 转义 → JSON 字符串字面量，一次翻译到位 ---
+    # 刻意**不**先还原成裸控制字节再重新编码：那条路要维护两张必须与 git quote.c 逐项一致的表，
+    # 漏一项就悄悄错——`\a` 曾被「丢反斜杠留字母」还原成 `a`，于是 `src/<BEL>pp.py` 变成
+    # `src/app.py`（一个 MR 没碰过的文件），行内评论能挂到它任意行上（票 09 复审）。
+    # git quote.c 输出的全集：\a \b \f \n \r \t \v \" \\ 与 \NNN 八进制。表外转义一律硬失败。
+    function jesc(o) { return sprintf("\\u%04x", o) }
+    function cq2json(s,   body, out, i, c, n, oct, v) {
+      body = substr(s, 2, length(s) - 2)   # 去掉两端引号
       out = ""; i = 1
       while (i <= length(body)) {
         c = substr(body, i, 1)
-        if (c != "\\") { out = out c; i++; continue }
+        if (c != "\\") { out = out jsonbyte(c); i++; continue }
         n = substr(body, i + 1, 1)
-        if (n == "n")       { out = out "\n"; i += 2 }
-        else if (n == "t")  { out = out "\t"; i += 2 }
-        else if (n == "r")  { out = out "\r"; i += 2 }
-        else if (n == "\"") { out = out "\""; i += 2 }
-        else if (n == "\\") { out = out "\\"; i += 2 }
+        if      (n == "a")  { out = out jesc(7);  i += 2 }
+        else if (n == "b")  { out = out jesc(8);  i += 2 }
+        else if (n == "t")  { out = out jesc(9);  i += 2 }
+        else if (n == "n")  { out = out jesc(10); i += 2 }
+        else if (n == "v")  { out = out jesc(11); i += 2 }
+        else if (n == "f")  { out = out jesc(12); i += 2 }
+        else if (n == "r")  { out = out jesc(13); i += 2 }
+        else if (n == "\"") { out = out "\\\""; i += 2 }
+        else if (n == "\\") { out = out "\\\\"; i += 2 }
         else if (n >= "0" && n <= "7") {
           oct = substr(body, i + 1, 3)
+          if (length(oct) < 3) return "!"
           v = (substr(oct, 1, 1) + 0) * 64 + (substr(oct, 2, 1) + 0) * 8 + (substr(oct, 3, 1) + 0)
-          out = out sprintf("%c", v); i += 4
+          out = out (v < 32 || v == 127 ? jesc(v) : jsonbyte(sprintf("%c", v)))
+          i += 4
         }
-        else { out = out n; i += 2 }
+        else return "!"                    # 表外转义：宁可整次评审失败，也不猜路径
       }
       return out
     }
-    # `+++ ` 之后那一段 → 真实路径（去掉 b/ 前缀）
-    function newpath(raw,   p, t) {
+    # 未加引号的路径里只可能有普通字节，但 `"`/`\` 仍要转义；控制字节走 \u00XX（防御性）
+    function jsonbyte(c,   o) {
+      if (c == "\"") return "\\\""
+      if (c == "\\") return "\\\\"
+      o = ord[c]
+      if (o != "" && o < 32) return jesc(o)
+      return c
+    }
+    function jsonstr(s,   out, i) {
+      out = ""
+      for (i = 1; i <= length(s); i++) out = out jsonbyte(substr(s, i, 1))
+      return out
+    }
+    function rec(pj, s, e) { return "{\"p\":\"" pj "\",\"s\":" s ",\"e\":" e "}" }
+    # `+++ ` 之后那一段 → JSON 编码后的真实路径（去掉 b/ 前缀）；"!" = 解析失败
+    function newpath_json(raw,   p, t) {
       p = raw
-      if (substr(p, 1, 1) == "\"") p = unquote(p)
-      else { t = index(p, "\t"); if (t > 0) p = substr(p, 1, t - 1) }
-      if (substr(p, 1, 2) == "b/") p = substr(p, 3)
+      if (substr(p, 1, 1) == "\"") { p = cq2json(p); if (p == "!") return "!" }
+      else { t = index(p, "\t"); if (t > 0) p = substr(p, 1, t - 1); p = jsonstr(p) }
+      if (substr(p, 1, 2) == "b/") p = substr(p, 3)   # 前缀是字面 ASCII，转义不影响它
       return p
     }
-    BEGIN { cur = ""; in_hunks = 0 }
+    BEGIN { for (i = 1; i < 32; i++) ord[sprintf("%c", i)] = i; cur = ""; in_hunks = 0 }
     /^diff --git / { cur = ""; in_hunks = 0; next }
     !in_hunks && /^\+\+\+ / {
       raw = substr($0, 5)
       if (raw == "/dev/null") { cur = ""; next }
-      cur = newpath(raw)
-      if (cur != "") print cur SEP 0 SEP 0     # 文件出现过（即使没有可定位行）
+      cur = newpath_json(raw)
+      if (cur == "!") {
+        print "review_changed_lines: +++ 行里有无法按 git 转义表还原的路径，拒绝猜测（原始行：" $0 "）" > "/dev/stderr"
+        exit 3
+      }
+      if (cur != "") print rec(cur, 0, 0)     # 文件出现过（即使没有可定位行）
       next
     }
     /^@@ / {
@@ -425,18 +461,18 @@ review_changed_lines() {
       if (ci > 0) { start = substr(spec, 1, ci - 1) + 0; cnt = substr(spec, ci + 1) + 0 }
       else        { start = spec + 0; cnt = 1 }
       if (start < 1 || cnt < 1) next
-      print cur SEP start SEP (start + cnt - 1)
+      print rec(cur, start, start + cnt - 1)   # cur 已是编码后的形态，每个 hunk 直接复用
       next
     }
-  ' | jq -Rs --arg sep "$sep" '
-      split("\n") | map(select(length > 0))
-      | reduce .[] as $line ({};
-          ($line | split($sep)) as $f
-          | (if ($f | length) == 3 then $f[0] else "" end) as $p
-          | if $p == "" then .
-            else ($f[1] | tonumber) as $s | ($f[2] | tonumber) as $e
-                 | .[$p] = ((.[$p] // []) + (if $s >= 1 and $e >= $s then [[$s, $e]] else [] end))
-            end)'
+  ' > "$_rcl_raw" || _rcl_rc=$?
+  if [[ "$_rcl_rc" != "0" ]]; then rm -f "$_rcl_raw"; return "$_rcl_rc"; fi
+  jq -Rn '
+      reduce (inputs | fromjson) as $r ({};
+        if ($r.p | length) == 0 then .
+        else .[$r.p] = ((.[$r.p] // []) + (if $r.s >= 1 and $r.e >= $r.s then [[$r.s, $r.e]] else [] end))
+        end)' < "$_rcl_raw" || _rcl_rc=$?
+  rm -f "$_rcl_raw"
+  return "$_rcl_rc"
 }
 
 # --- 行内档位（CONTEXT.md「行内档位」）---

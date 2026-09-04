@@ -154,7 +154,9 @@ while IFS= read -r line; do
 done < "$tmp/omitted6.txt"
 TESTS_PASSED=$((TESTS_PASSED + 1))
 # 直传 diff 头数 + 清单条数 == git 报告的变更文件数：一个不多（伪造记录）一个不少（被截断的名字）
-n_files=$(git diff --name-only -z "$INJ_BASE" "$INJ_HEAD" | tr -cd '\0' | wc -c | tr -d ' ')
+# 基线必须用生产的 _git_diff_pinned --no-renames（与 build_review_input 同一条枚举命令）：
+# 裸 git diff 默认开重命名检测，fixture 一旦出现删+增配对就会与生产口径不一致，断言会因无关原因失败
+n_files=$(_git_diff_pinned --no-renames --name-only -z "$INJ_BASE" "$INJ_HEAD" | tr -cd '\0' | wc -c | tr -d ' ')
 n_direct=$(grep -c '^diff --git' "$tmp/out6.diff" || true)
 n_omitted=$(jq -r .chunk "$tmp/omitted6.txt" | wc -l | tr -d ' ')
 assert_eq "$((n_direct + n_omitted))" "$n_files" "inject: 直传 diff 头数 + 清单条数 == 变更文件数"

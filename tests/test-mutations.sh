@@ -543,4 +543,27 @@ run_case m35control "$ROOT" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/in
 assert_eq "$(printf '%s\n' "$(posted_comment "$OUT")" | grep -c '^\*\*P0 必须修复（')" "1" "M35 对照：未变异实现里分组行恰好一个"
 assert_contains "$(posted_comment "$OUT")" '\*\*P0 必须修复（1）\*\*' "M35 对照：模型文本里的那行被转义成字面量"
 
+
+# --- M36：让 review_changed_lines 的 git 转义表失效 → 未改动文件被伪造成变更行集合的键 ---
+# 这是行内评论「定位可信」（I5）的最外层依据：键错了，评论就发到 MR 没碰过的文件上。
+# 单测粒度（不跑端到端）：直接把变异体的库 source 进子壳喂一条 git 真实形态的 +++ 行。
+# 两处一起改才是「修复前」的行为：既停掉 \a 的专用分支，又让表外转义回到「丢反斜杠留字母」。
+# 只改后者不构成变异——\a 有自己的分支，根本走不到那里（第一版 M36 就是这样空转的）。
+pkg=$(make_mutant m36-cescape 's|if      (n == "a")  { out = out jesc(7);  i += 2 }|if      (0)         { out = out jesc(7);  i += 2 }|; s|else return "!"                    # 表外转义|else { out = out n; i += 2 }  # 变异：表外转义|' scripts/lib/review-render.sh)
+mut_keys() { # $1=集成包根 $2=diff 文本 → stdout 键名（每行一个）；rc 非 0 时输出 <rc:N>
+  local pkg_root="$1" text="$2"
+  ( set +e; source "$pkg_root/scripts/lib/review-render.sh"
+    out=$(printf '%s' "$text" | review_changed_lines 2>/dev/null); rc=$?
+    if [[ "$rc" != "0" ]]; then printf '<rc:%s>' "$rc"; else printf '%s' "$out" | jq -r 'keys[]'; fi )
+}
+# `+++ "b/src/\app.py"` 是 git 对文件名 `src/<BEL>pp.py` 的真实输出
+BEL_DIFF=$(printf 'diff --git a/x b/x\n--- a/x\n+++ "b/src/\\app.py"\n@@ -0,0 +1 @@\n+a\n')
+assert_eq "$(mut_keys "$pkg" "$BEL_DIFF")" "src/app.py" \
+  "M36：转义表失效后 \\a 被当成字母 a，键变成 MR 没碰过的 src/app.py——单测「不得伪造未改动文件的键」断言会失败"
+assert_eq "$(mut_keys "$ROOT" "$BEL_DIFF")" "$(printf 'src/\007pp.py')" \
+  "M36 对照：未变异实现把 \\a 还原为 BEL，键是真实文件名"
+UNKNOWN_DIFF=$(printf 'diff --git a/x b/x\n--- a/x\n+++ "b/x\\qy.py"\n@@ -0,0 +1 @@\n+a\n')
+assert_eq "$(mut_keys "$ROOT" "$UNKNOWN_DIFF")" "<rc:3>" "M36 对照：表外转义在未变异实现里硬失败"
+assert_eq "$(mut_keys "$pkg" "$UNKNOWN_DIFF")" "xqy.py" "M36：变异体反而猜出一个路径（正是「宁可失败也不猜」要挡的行为）"
+
 report
