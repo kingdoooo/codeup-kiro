@@ -549,7 +549,8 @@ fi
 truncated=0
 build_review_input "$BASE" "HEAD" "$WORK/review.diff" "$WORK/omitted.txt" "$WORK/chunks" || truncated=$?
 [[ "$truncated" == "0" || "$truncated" == "10" ]] || die_review "diff 压缩失败（rc=${truncated}）"
-if [[ ! -s "$WORK/review.diff" && ! -s "$WORK/omitted.txt" ]]; then
+# 只有 rc 0 才可能是真的「diff 为空」：rc 10 时 build_review_input 保证至少一个输出非空（否则它自己返回 1）
+if [[ "$truncated" == "0" && ! -s "$WORK/review.diff" && ! -s "$WORK/omitted.txt" ]]; then
   log "diff 为空，跳过评审。"
   exit 0
 fi
@@ -586,7 +587,7 @@ fi
   echo "Commit: $(git rev-parse HEAD)"
   if [[ "$truncated" == "10" ]]; then
     echo ""
-    echo "=== 未直传的变更文件索引（每项 => 后为该文件完整 diff 的本地路径，请用 read 工具读取）==="
+    echo "=== 未直传的变更文件索引（每行一个 JSON：chunk 是该文件完整 diff 的本地路径，请用 read 工具读取；file 只是文件名，不是路径）==="
     cat "$WORK/omitted.txt"
   fi
   echo ""

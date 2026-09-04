@@ -36,17 +36,17 @@ rc=0
 DIFF_SIZE_LIMIT=120 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out2.diff" "$tmp/omitted2.txt" "$tmp/chunks2" || rc=$?
 assert_rc "$rc" 10 "big: 返回 10（已截断）"
 omitted=$(cat "$tmp/omitted2.txt")
-assert_contains "$omitted" "=> " "big: 清单含 chunk 路径"
-assert_contains "$omitted" "(+" "big: 清单含增删行数"
+assert_eq "$(jq -r 'has("chunk") and has("file") and has("added") and has("removed")' "$tmp/omitted2.txt" | sort -u)" "true" "big: 清单每行是含 chunk/file/added/removed 的 JSON"
+assert_eq "$(jq -r '(.added|type) + "/" + (.removed|type)' "$tmp/omitted2.txt" | sort -u)" "number/number" "big: 增删行数是数字"
 # 省略清单里的每个 chunk 文件必须真实存在且含对应 diff
 while IFS= read -r line; do
-  chunk_path="${line##*=> }"
+  chunk_path=$(printf '%s' "$line" | jq -r .chunk)
   [[ -s "$chunk_path" ]] || { echo "FAIL: chunk 不存在 $chunk_path" >&2; exit 1; }
 done < "$tmp/omitted2.txt"
 TESTS_PASSED=$((TESTS_PASSED + 1))
 # 删除文件（old.txt）必须出现在省略清单且其 chunk 保留删除 diff
 assert_contains "$omitted" "old.txt" "big: 删除文件列入清单"
-del_chunk=$(grep "old.txt" "$tmp/omitted2.txt" | sed 's/.*=> //')
+del_chunk=$(jq -r 'select(.file == "old.txt") | .chunk' "$tmp/omitted2.txt")
 assert_contains "$(cat "$del_chunk")" "deleted file mode" "big: 删除文件 chunk 保留删除 diff"
 assert_contains "$(cat "$del_chunk")" "-line1" "big: 删除内容可读"
 # 含空格路径正常处理
@@ -59,7 +59,7 @@ DIFF_SIZE_LIMIT=120 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out3.diff" "$tm
 assert_rc "$rc" 10 "relative: 返回 10（已截断）"
 [[ -s "$tmp/omitted3.txt" ]] || { echo "FAIL: relative: 省略清单为空" >&2; exit 1; }
 while IFS= read -r line; do
-  chunk_path=$(printf '%s' "$line" | sed 's/.*=> //')
+  chunk_path=$(printf '%s' "$line" | jq -r .chunk)
   case "$chunk_path" in
     /*) ;;
     *) echo "FAIL: relative: 清单 chunk 路径非绝对 [$chunk_path]" >&2; exit 1 ;;
@@ -106,7 +106,7 @@ assert_rc "$rc" 10 "special: 返回 10（已截断）"
 # 方括号文件在直传+清单中恰好出现一次
 n_bracket=$(cat "$tmp/out5.diff" "$tmp/omitted5.txt" | grep -cF 'pages/[id].tsx' || true)
 assert_eq "$n_bracket" "1" "special: 方括号文件恰好出现一次"
-bracket_chunk=$(grep -F 'pages/[id].tsx' "$tmp/omitted5.txt" | sed 's/.*=> //')
+bracket_chunk=$(jq -r 'select(.file == "pages/[id].tsx") | .chunk' "$tmp/omitted5.txt")
 [[ -s "$bracket_chunk" ]] || { echo "FAIL: special: 方括号文件 chunk 为空" >&2; exit 1; }
 TESTS_PASSED=$((TESTS_PASSED + 1))
 assert_contains "$(cat "$bracket_chunk")" "bracket_changed" "special: 方括号 chunk 含自身改动"
@@ -114,9 +114,68 @@ assert_contains "$(cat "$bracket_chunk")" "bracket_changed" "special: 方括号 
 assert_not_contains "$(cat "$bracket_chunk")" "plain_changed" "special: 方括号 chunk 不串入他文件"
 assert_eq "$(grep -c '^diff --git' "$bracket_chunk")" "1" "special: 方括号 chunk 仅一个 diff 头"
 # 冒号前缀文件：旧代码 pathspec 解析为空导致 chunk 为空
-evil_chunk=$(grep -F ':evil.go' "$tmp/omitted5.txt" | sed 's/.*=> //')
+evil_chunk=$(jq -r 'select(.file == ":evil.go") | .chunk' "$tmp/omitted5.txt")
 [[ -s "$evil_chunk" ]] || { echo "FAIL: special: 冒号前缀文件 chunk 为空（pathspec 未按字面处理）" >&2; exit 1; }
 TESTS_PASSED=$((TESTS_PASSED + 1))
 assert_contains "$(cat "$evil_chunk")" "evil_changed" "special: 冒号前缀 chunk 含自身改动"
 
+
+# --- 文件名注入（票 06 P0）：Git 文件名允许换行与 Tab。带换行的文件名第二行伪装成一条
+#     `优先级\t大小\tchunk\t路径` 索引记录，chunk 指向 chunk 目录外的哨兵文件；
+#     build_review_input 绝不能把 chunk 目录外的任何文件读进直传 diff。
+cd "$tmp" && git init -q repo3 && cd repo3
+git config user.email t@t && git config user.name t
+printf 'FAKE-SENTINEL-DO-NOT-LEAK\n' > "$tmp/sentinel.txt"
+git commit -q --allow-empty -m inj-base
+INJ_BASE=$(git rev-parse HEAD)
+EVIL=$(printf 'evil.py\n0\t1\t%s\tz.py' "$tmp/sentinel.txt")
+mkdir -p "$(dirname "$EVIL")"
+printf 'x = 1\n' > "$EVIL"
+printf 'k = 2\n' > "$(printf 'tab\tname.go')"
+printf 'p = 3\n' > 'pipe|tick`.go'
+# 旧清单格式 `- 名字 (+a / -b) => chunk` 下，这个合法文件名会在同一行伪造出第二个 `=> 路径`
+mkdir -p 'forge (+1 / -0) => /etc'
+printf 'q = 4\n' > 'forge (+1 / -0) => /etc/passwd'
+seq 1 200 > big.go
+git add -A && git commit -qm inj-change
+INJ_HEAD=$(git rev-parse HEAD)
+rc=0
+DIFF_SIZE_LIMIT=50 build_review_input "$INJ_BASE" "$INJ_HEAD" "$tmp/out6.diff" "$tmp/omitted6.txt" "$tmp/chunks6" || rc=$?
+assert_rc "$rc" 10 "inject: 返回 10（已截断）"
+assert_not_contains "$(cat "$tmp/out6.diff")" "FAKE-SENTINEL" "inject: chunk 目录外的文件不得进入直传 diff"
+# 清单里每条的 chunk 都在 chunk 目录内且非空
+while IFS= read -r line; do
+  chunk_path=$(printf '%s' "$line" | jq -r .chunk)
+  case "$chunk_path" in
+    "$tmp/chunks6"/*) ;;
+    *) echo "FAIL: inject: 清单 chunk 路径不在 chunk 目录内 [$chunk_path]" >&2; exit 1 ;;
+  esac
+  [[ -s "$chunk_path" ]] || { echo "FAIL: inject: chunk 不存在 $chunk_path" >&2; exit 1; }
+done < "$tmp/omitted6.txt"
+TESTS_PASSED=$((TESTS_PASSED + 1))
+# 直传 diff 头数 + 清单条数 == git 报告的变更文件数：一个不多（伪造记录）一个不少（被截断的名字）
+n_files=$(git diff --name-only -z "$INJ_BASE" "$INJ_HEAD" | tr -cd '\0' | wc -c | tr -d ' ')
+n_direct=$(grep -c '^diff --git' "$tmp/out6.diff" || true)
+n_omitted=$(jq -r .chunk "$tmp/omitted6.txt" | wc -l | tr -d ' ')
+assert_eq "$((n_direct + n_omitted))" "$n_files" "inject: 直传 diff 头数 + 清单条数 == 变更文件数"
+assert_eq "$(wc -l < "$tmp/omitted6.txt" | tr -d ' ')" "$n_omitted" "inject: 清单每条恰好一行 JSON"
+omitted6=$(cat "$tmp/omitted6.txt")
+# 文件名里的换行/Tab 由 jq 转义为 \n \t（字面反斜杠），竖线与反引号原样保留
+assert_contains "$omitted6" 'evil.py\n0\t1\t' "inject: 换行与 Tab 转义为 \\n \\t"
+assert_contains "$omitted6" 'tab\tname.go' "inject: Tab 文件名转义显示"
+assert_contains "$omitted6" 'pipe|tick`.go' "inject: 竖线与反引号原样保留"
+# 转义后的名字仍指向自己的 chunk
+evil_chunk6=$(jq -r 'select(.file | startswith("evil.py\n0\t1\t")) | .chunk' "$tmp/omitted6.txt")
+assert_contains "$(cat "$evil_chunk6")" "+x = 1" "inject: 带换行文件名的 chunk 是它自己的 diff"
+# 分隔符伪造：file 字段原样保留名字，chunk 字段仍是它自己的 chunk（JSON 里不存在「第二个路径」）
+forge_chunk6=$(jq -r 'select(.file == "forge (+1 / -0) => /etc/passwd") | .chunk' "$tmp/omitted6.txt")
+assert_eq "$(printf '%s\n' "$forge_chunk6" | grep -c .)" "1" "inject: 分隔符伪造文件名恰好一条记录"
+assert_contains "$(cat "$forge_chunk6")" "+q = 4" "inject: 分隔符伪造文件名的 chunk 是它自己的 diff"
+
+# --- 落盘失败：chunk 目录建不出来必须 rc 1，绝不能带着空输出 return 10（调用方会当成「diff 为空」跳过评审）---
+printf 'x' > "$tmp/notadir"
+rc=0
+DIFF_SIZE_LIMIT=1 build_review_input "$INJ_BASE" "$INJ_HEAD" "$tmp/out7.diff" "$tmp/omitted7.txt" "$tmp/notadir/chunks" 2>/dev/null || rc=$?
+assert_rc "$rc" 1 "ioerr: chunk 目录建不出来 → rc 1"
+assert_eq "$(cat "$tmp/out7.diff" "$tmp/omitted7.txt" | wc -c | tr -d ' ')" "0" "ioerr: 两个输出都为空且 rc 不是 0/10"
 report

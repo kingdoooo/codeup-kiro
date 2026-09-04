@@ -142,22 +142,22 @@ assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "bot_username: 身份�
 assert_eq "$out" "" "bot_username: 只有 .name 时不输出任何用户名"
 rm -rf "$nameonly"
 
-# 复审修复：评论列表达到常见单页上限时必须留痕——旧汇总落在页外会被误判成「首次评审」
+# 复审修复：评论列表条数达到异常保护阈值时必须留痕——接口文档不分页，但服务端若有未文档化上限，旧汇总会被误判成「首次评审」
 pagedir=$(mktemp -d); jq -n '[range(5) | {comment_biz_id:"x", comment_type:"GLOBAL_COMMENT", content:"c"}]' > "$pagedir/list-comments.json"
 err=$(DRY_RUN_FIXTURE_DIR="$pagedir" CODEUP_COMMENT_PAGE_HINT=5 codeup_list_global_comments 7 2>&1 >/dev/null)
-assert_contains "$err" "已达常见单页上限" "list_comments: 条数达上限时告警（分页参数未实测，只能留痕）"
+assert_contains "$err" "达到异常保护阈值" "list_comments: 条数达阈值时告警（异常保护，只留痕）"
 err=$(DRY_RUN_FIXTURE_DIR="$pagedir" CODEUP_COMMENT_PAGE_HINT=6 codeup_list_global_comments 7 2>&1 >/dev/null)
-assert_not_contains "$err" "已达常见单页上限" "list_comments: 未达上限时不告警"
+assert_not_contains "$err" "达到异常保护阈值" "list_comments: 未达阈值时不告警"
 # 票 05 复审修复：非整数取值不能让这条告警**永久失效**（bash 算术错误 + 恒取假），
 # 必须回落默认值并留痕。默认 100 > 5 条，所以这次不该告警，但也不该报算术错误。
 err=$(DRY_RUN_FIXTURE_DIR="$pagedir" CODEUP_COMMENT_PAGE_HINT=100条 codeup_list_global_comments 7 2>&1 >/dev/null)
 assert_contains "$err" "不是 ≥1 的整数，按默认 100 处理" "list_comments: PAGE_HINT 非整数 → 回落默认并留痕"
 assert_not_contains "$err" "value too great for base" "list_comments: PAGE_HINT 非整数不漏 bash 算术报错"
-assert_not_contains "$err" "已达常见单页上限" "list_comments: 回落到 100 后 5 条不算达上限"
+assert_not_contains "$err" "达到异常保护阈值" "list_comments: 回落到 100 后 5 条不算达阈值"
 # 正控：回落后的默认值真的还在比较（把 fixture 撑到 100 条应重新告警）
 jq -n '[range(100) | {comment_biz_id:"x", comment_type:"GLOBAL_COMMENT", content:"c"}]' > "$pagedir/list-comments.json"
 err=$(DRY_RUN_FIXTURE_DIR="$pagedir" CODEUP_COMMENT_PAGE_HINT=100条 codeup_list_global_comments 7 2>&1 >/dev/null)
-assert_contains "$err" "已达常见单页上限（100）" "list_comments: 回落后的默认上限仍在生效（正控）"
+assert_contains "$err" "达到异常保护阈值（100；" "list_comments: 回落后的默认阈值仍在生效（正控）"
 rm -rf "$pagedir"
 
 # ============ 协调者复审修复 ============

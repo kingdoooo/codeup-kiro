@@ -241,23 +241,24 @@ codeup_post_comment() {
 # 路径与参数以 scripts/probe/probe-codeup-inline.sh 实测为准：POST `…/changeRequests/<id>/comments/list`，
 # body `{"comment_type":"GLOBAL_COMMENT"}`（P1-06 实测支持按 comment_type 过滤）。
 # 响应是评论对象数组，每项含 comment_biz_id / comment_type / content / state / author.username。
-# 分页：探测只在一条评论的新 MR 上调过 `{}`（probe-codeup-inline.sh），**分页参数名未实测**，
-# 因此这里不凭记忆往 body 里塞 page/perPage。取而代之的是：返回条数达到常见单页上限时打警告——
-# 旧汇总评论落在页外时脚本会误判「首次评审」而每次新建一条。补分页需要先做一次探测（见票 03 Comments）。
+# 分页：接口**不分页**——官方文档核对（2026-09-04，spec P1-13）：旧版 ListMergeRequestComments 明写
+# 「查询合并请求中的评论列表，不分页」；新版请求体只有 comment_biz_id_list / comment_type / file_path /
+# patchset_biz_id_list / resolved / state，没有 page/perPage/nextToken。一次返回全部评论，所以这里不带
+# 任何分页参数。下面「返回条数达到 100」的告警只是防未文档化服务端上限的异常保护，不是已知风险。
 # $1=localId → stdout=响应体；rc 1=失败（按既有重试策略重试后仍失败）
 CODEUP_COMMENT_PAGE_HINT_DEFAULT=100
 CODEUP_COMMENT_PAGE_HINT="${CODEUP_COMMENT_PAGE_HINT:-$CODEUP_COMMENT_PAGE_HINT_DEFAULT}"
 # 取值校验放在**用的时候**（与 _codeup_retry_backoff 同一形态），不是 source 时：
-# 非整数取值会让下面那句 `-ge` 比较变成 bash 算术错误并恒取假，于是「返回 N 条评论，已达常见
-# 单页上限」这条告警**永久失效**——而它是「旧汇总落在页外 → 每次误判为首次评审 → MR 上堆出
-# 多条汇总」这个已知故障的唯一提示。回落默认值并留痕，不因此中断评审。
+# 非整数取值会让下面那句 `-ge` 比较变成 bash 算术错误并恒取假，于是「返回 N 条评论，达到异常
+# 保护阈值」这条告警**永久失效**——它是「服务端若有未文档化的返回上限 → 旧汇总不在返回里 →
+# 误判为首次评审 → MR 上堆出多条汇总」这条假想故障的唯一提示。回落默认值并留痕，不因此中断评审。
 _codeup_page_hint() {
   local v="${CODEUP_COMMENT_PAGE_HINT-}"
   if [[ "$v" =~ ^[0-9]+$ ]] && [[ "$((10#$v))" -ge 1 ]]; then printf '%s' "$((10#$v))"; return 0; fi
   echo "codeup: CODEUP_COMMENT_PAGE_HINT=${v} 不是 ≥1 的整数，按默认 ${CODEUP_COMMENT_PAGE_HINT_DEFAULT} 处理" >&2
   printf '%s' "$CODEUP_COMMENT_PAGE_HINT_DEFAULT"
 }
-# 内部实现：两种评论类型只差 body 里的 comment_type 与告警文案，共用一份请求/分页告警逻辑。
+# 内部实现：两种评论类型只差 body 里的 comment_type 与告警文案，共用一份请求/异常保护告警逻辑。
 # 用法：_codeup_list_comments <localId> <GLOBAL_COMMENT|INLINE_COMMENT> <日志前缀> <达上限时的后果说明>
 _codeup_list_comments() {
   local local_id="$1" ctype="$2" prefix="$3" consequence="$4" tmp cnt rc=0
@@ -273,7 +274,7 @@ _codeup_list_comments() {
     local hint
     hint=$(_codeup_page_hint)
     if [[ "${cnt:-0}" =~ ^[0-9]+$ && "${cnt:-0}" -ge "$hint" ]]; then
-      echo "${prefix}: 返回 ${cnt} 条评论，已达常见单页上限（${hint}）→ ${consequence}" >&2
+      echo "${prefix}: 返回 ${cnt} 条评论，达到异常保护阈值（${hint}；接口文档不分页，评论确实很多时调高 CODEUP_COMMENT_PAGE_HINT）→ ${consequence}" >&2
     fi
     cat "$tmp"
   fi
@@ -282,7 +283,7 @@ _codeup_list_comments() {
 }
 codeup_list_global_comments() {
   _codeup_list_comments "$1" GLOBAL_COMMENT codeup_list_global_comments \
-    "旧汇总评论可能不在本页内，可能误判为首次评审并多发一条汇总"
+    "若服务端有未文档化的返回上限，旧汇总可能不在返回里而被误判为首次评审、多发一条汇总"
 }
 
 # --- 原地更新一条评论（UpdateChangeRequestComment）---
@@ -452,11 +453,11 @@ codeup_submit_drafts() {
 # body 只带 comment_type（P1-06 实测支持该过滤，返回含 author.username / state / filePath / line_number）。
 # **刻意不带 state 过滤**：探测只验证过 comment_type，state 参数名未实测；凭记忆传一个可能 400 的
 # 参数会让整条去重通路挂掉，而去重挂掉的后果是重跑在同一行上堆重复评论。状态在脚本侧按 .state 过滤
-# （review_inline_existing_ranges）。分页告警与汇总评论列表同理。
+# （review_inline_existing_ranges）。异常保护告警与汇总评论列表同理。
 # $1=localId → stdout=响应体；rc 1=失败
 codeup_list_inline_comments() {
   _codeup_list_comments "$1" INLINE_COMMENT codeup_list_inline_comments \
-    "已有的行内评论可能不在本页内，去重可能漏判、重跑会重复发"
+    "若服务端有未文档化的返回上限，已有行内评论可能不在返回里，去重漏判、重跑会重复发"
 }
 
 # --- 删除一条评论（DeleteChangeRequestComment）---
