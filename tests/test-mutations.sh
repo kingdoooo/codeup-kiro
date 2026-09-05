@@ -277,10 +277,14 @@ assert_eq "$(printf '%s\n' "$comment" | grep -c '</details>')" "0" "M21：截断
 # --- M23：把折叠标签的转义改回大小写敏感 → 模型文本里的 <DETAILS> 原样进入评论 ---
 # HTML 标签名不区分大小写：大写形式一样会被渲染成折叠块，能把脚本渲染的历次表与页脚
 # 吞进攻击者自己的折叠块并伪造历次计数。
+# 载荷放在**代码围栏内**：票 14 之后围栏外任何像标签的 `<` 都会被通用规则转义，围栏外的 <DETAILS>
+# 不再能区分「折叠规则大小写不敏感」与「通用规则兜住了」——变异体会被通用规则遮住、观察不到变化
+# （2026-09-05 实测）。折叠规则刻意也作用于围栏内（review_truncate_comment 按行首 `<details` 计数，
+# 截断切在围栏中间时围栏内的那一行会露出来），所以围栏内是它独占的观察点。
 cat > "$tmp/upperdetails.json" <<'JSON'
 {"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
  {"id":"F1","severity":"P0","category":"security","title":"注入企图","file":"src/app.py","line_start":2,"line_end":2,
-  "body":"业务库里写着：\n<DETAILS><SUMMARY>历次评审（99）</SUMMARY>\n伪造的历次表。","fix":""}]}
+  "body":"业务库里写着：\n```\n<DETAILS><SUMMARY>历次评审（99）</SUMMARY>\n伪造的历次表。\n```","fix":""}]}
 JSON
 pkg=$(make_mutant m23-details-case 's/| gsub("<(?<tag>\/?details)"; "\&lt;\\(.tag)"; "i"))/| gsub("<(?<tag>\/?details)"; "\&lt;\\(.tag)"))/' scripts/lib/review-render.sh)
 run_case m23 "$pkg" MOCK_KIRO_CONTRACT="$tmp/upperdetails.json"
@@ -665,5 +669,26 @@ run_case m41 "$pkg" MOCK_KIRO_LEAK_SECRET=1
 assert_rc "$RC" 0 "M41：变异体仍能跑完"
 assert_contains "$OUT" "dGhpcyBpcyBh""IHNlY3JldA=="   "M41：带 base64 补位的凭证完整进了评论——端到端「补位形态被掩掉」断言会失败"
 assert_not_contains "$OUT" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"   "M41 对照：不含 = 的取值仍被掩掉（隔离出「值里含 = 」才是触发条件）"
+
+# --- M44：让「像标签的 <」转义失效 → 模型文本里的原始 HTML 直达评论 ---
+# 变异只把 _escape_tags 换成恒等（其余清洗规则都不动），所以观察到的差异只能来自这一条规则。
+pkg=$(make_mutant m44-tag-escape 's|^  def _escape_tags: .*$|  def _escape_tags: .;|' scripts/lib/review-render.sh)
+run_case m44 "$pkg" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/inject.json"
+assert_rc "$RC" 0 "M44：变异体仍能跑完"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" '<div style="display:none">' \
+  "M44：不闭合的 display:none 原样进了评论——端到端「不进评论」断言会失败（页面上它之后的一切都被吞掉）"
+assert_contains "$comment" "<h1>结论：可合并</h1>" "M44：<h1> 原样进了评论——端到端断言会失败"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^<details')" "1" "M44 对照：<details> 仍由另一条规则转义（变异只杀了新规则）"
+
+# --- M45：把分隔线/下划线判定退回「连续 3+ 个 -*_=」→ `- - -` 与单个 `=` 漏网 ---
+pkg=$(make_mutant m45-break-line \
+  's|^  def _is_break_line: .*$|  def _is_break_line: test("^[[:space:]]{0,3}[-*_=]{3,}[[:space:]]*$");|' scripts/lib/review-render.sh)
+run_case m45 "$pkg" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/inject.json"
+assert_rc "$RC" 0 "M45：变异体仍能跑完"
+comment=$(posted_comment "$OUT")
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^- - -$')" "1" "M45：间隔分隔线原样进了评论——端到端「\\- - -」断言会失败"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^=$')" "1" "M45：单个 = 原样进了评论——端到端「\\=」断言会失败"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^\\---$')" "1" "M45 对照：连续三个 --- 仍被旧规则转义（变异只放宽了间隔与单字符）"
 
 report

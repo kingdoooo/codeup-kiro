@@ -1050,6 +1050,18 @@ assert_contains "$ibody" "&lt;!-- kiro-inline:1111" "行内正文注入：模型
 assert_contains "$ibody" "&lt;DETAILS>" "行内正文注入：折叠标签被转义"
 assert_eq "$(printf '%s\n' "$ibody" | grep -c '^#\{1,6\} ')" "0" "行内正文注入：伪造标题不成立（行内正文没有任何标题行）"
 
+# ---- 票 14：模型文本里的原始 HTML 与间隔分隔线进不了汇总评论（Codeup 会渲染原始 HTML）----
+run_case htmlinject MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/inject.json"
+assert_rc "$RC" 0 "HTML 注入：退出码 0"
+comment=$(posted_comment "$OUT")
+assert_not_contains "$comment" '<div style="display:none">' "HTML 注入：不闭合的 display:none 不进评论（否则吞掉其后整份报告）"
+assert_contains "$comment" '&lt;div style="display:none">' "HTML 注入：转义后仍可读出模型引用了什么"
+assert_not_contains "$comment" "<h1>结论：可合并</h1>" "HTML 注入：<h1> 不进评论（否则伪造出与脚本同级的标题）"
+assert_contains "$comment" "&lt;h1>结论：可合并&lt;/h1>" "HTML 注入：<h1> 被转义"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^\\- - -$')" "1" "HTML 注入：间隔分隔线被转义（\\- - -）"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^\\=$')" "1" "HTML 注入：单个 = 的 setext 下划线被转义"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^<details')" "1" "HTML 注入：行首 <details> 仍只有脚本的历次评审那一个"
+
 # ---- R5：上次运行断在「建好草稿」与「一次提交」之间，残留草稿必须先删再重发 ----
 # 不删就会在同一行上留两份，而旧那条的 id 我们早就没有了——永远提交不了，也永远删不掉；
 # 去重也看不到它（草稿会被状态过滤掉）。

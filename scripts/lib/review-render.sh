@@ -78,26 +78,63 @@ _REVIEW_JQ_SANITIZE='
                          | sub("\\*\\*(?<ws>[[:space:]]*)$"; "\\*\\*" + .ws)
                          | sub("^(?<sp>[[:space:]]{0,3})__"; .sp + "\\_\\_")
                          | sub("__(?<ws>[[:space:]]*)$"; "\\_\\_" + .ws);
+  # 票 14：Codeup 会渲染原始 HTML，而模型文本进评论的通道有 summary/verdict_reason/title/body/fix
+  # 与降级路径的整段原文。提示词要求模型把注入企图当 P0 报出来并引用原文，所以业务库里写一段
+  # `<div style="display:none">`（不闭合）就能吞掉它之后的整份报告，`<h1>` 能伪造出与脚本同级的标题。
+  # 策略（三选一，选 ②）：① 转义全部 `<`——模型引用代码里的 `<` 全变实体，围栏内还得豁免；
+  # ② 只转义「看起来像标签」的 `<`（后跟字母、`/`、`!`、`?`）——`a < b`、`<3`、`<-` 不动，
+  #    `a<b` 变 `a&lt;b` 但渲染后与原文无异；③ 标签许可清单——要维护、且任何一个放行的标签都是新入口。
+  # `!`/`?` 后不要求字母：CommonMark 把 `<?…?>` 与 `<![CDATA[…]]>` 当原始 HTML 放行，浏览器则把它们
+  # 当「错误注释」一路吞到下一个 `>`（复审 A1）。
+  # **行内 code span 不豁免**（复审 C1）：code span 能跨行配对——上一行结尾一个孤立反引号会和本行开头的
+  # 反引号配成一对，本行「看起来平衡」的 `` `<div>` `` 在渲染器眼里反而在 span 之外。逐行判定做不对，
+  # 做对要重写整个块级解析；这是安全控制，宁可让 `` `<div>` `` 显示成 `` `&lt;div>` ``（实体在 span 内不解码，
+  # 读者仍能认出）。4 空格缩进的代码块同理不豁免：段落后一行缩进 4 空格是段落的惰性延续，不是代码。
+  # 自动链接 `<https://…>` 也会被转义成文字——结构只能来自脚本，这个损失有意接受。
+  def _re_tag: "<(?=[A-Za-z/!?])";
+  def _escape_tags: gsub(_re_tag; "&lt;");
+  # 围栏按 CommonMark 判定（复审 C2）：反引号围栏的 info string 里不能有反引号（```` ```x`y ```` 不是围栏，
+  # 渲染器把它当段落，其后的 `<div>` 照样渲染）；闭合围栏必须与开启同一字符、长度不短于开启、后面只能
+  # 有空白（所以 ``` 里的 `~~~` 是内容，`~~~` 里的 ``` 也是）。开启行本身也过标签转义：info string 里
+  # 的 `<` 没有任何合法用途。围栏内只认定不渲染 HTML，其余一律按普通行处理。
+  def _fence_open: [capture("^[[:space:]]{0,3}(?<f>`{3,}|~{3,})(?<info>.*)$")][0]
+                   | if . == null then null
+                     elif (.f | startswith("~")) or (.info | test("`") | not) then {ch: .f[0:1], len: (.f | length)}
+                     else null end;
+  def _fence_close($ch; $len): [capture("^[[:space:]]{0,3}(?<f>`{3,}|~{3,})[[:space:]]*$")][0]
+                   | . != null and (.f[0:1] == $ch) and ((.f | length) >= $len);
+  # 分隔线与 setext 下划线（PROGRESS：原先只认连续 3+ 个 `-*_=`，`- - -`/`* * *`/单个 `=`/`-` 漏网）：
+  # CommonMark 的分隔线是同一字符 3 个以上、之间可夹空白；setext 下划线是任意长度的 `=` 或 `-`
+  # （单个 `=` 就能把上一行变成一级标题）。`= = =` 与 `* *` 两者都不是，不动。
+  def _re_thematic: "^[[:space:]]{0,3}([-*_])([[:space:]]*\\1){2,}[[:space:]]*$";
+  def _re_setext: "^[[:space:]]{0,3}(=+|-+)[[:space:]]*$";
+  def _is_break_line: (test(_re_thematic) or test(_re_setext));
   def _sanitize_md:
     if type != "string" then "" else
     (gsub("<!--"; "&lt;!--") | gsub("-->"; "--&gt;")
      | gsub("<(?<tag>/?details)"; "&lt;\(.tag)"; "i"))
     | split("\n")
-    | reduce .[] as $l ({fence: false, out: []};
-        if ($l | test("^[[:space:]]{0,3}(```|~~~)")) then
-          {fence: (.fence | not), out: (.out + [$l])}
-        elif .fence then
-          {fence: .fence, out: (.out + [$l])}
-        elif ($l | test("^[[:space:]]{0,3}#{1,6}([[:space:]]|$)")) then
-          {fence: .fence, out: (.out + [($l | sub("^(?<sp>[[:space:]]{0,3})(?<h>#{1,6})"; .sp + "\\" + .h))])}
-        elif ($l | test("^[[:space:]]{0,3}[-*_=]{3,}[[:space:]]*$")) then
-          {fence: .fence, out: (.out + [($l | sub("^(?<sp>[[:space:]]{0,3})"; .sp + "\\"))])}
-        elif ($l | _is_bold_line) then
-          {fence: .fence, out: (.out + [($l | _escape_bold_line)])}
+    | reduce .[] as $l ({fch: null, flen: 0, out: []};
+        . as $st
+        | if .fch != null then
+          if ($l | _fence_close($st.fch; $st.flen)) then {fch: null, flen: 0, out: (.out + [$l])}
+          else {fch: .fch, flen: .flen, out: (.out + [$l])} end
         else
-          {fence: .fence, out: (.out + [$l])}
+          ($l | _fence_open) as $o
+          | if $o != null then {fch: $o.ch, flen: $o.len, out: (.out + [($l | _escape_tags)])}
+            else
+              ($l | _escape_tags) as $t
+              | {fch: null, flen: 0, out: (.out + [
+                  if ($t | test("^[[:space:]]{0,3}#{1,6}([[:space:]]|$)")) then
+                    ($t | sub("^(?<sp>[[:space:]]{0,3})(?<h>#{1,6})"; .sp + "\\" + .h))
+                  elif ($t | _is_break_line) then
+                    ($t | sub("^(?<sp>[[:space:]]{0,3})"; .sp + "\\"))
+                  elif ($t | _is_bold_line) then
+                    ($t | _escape_bold_line)
+                  else $t end ])}
+            end
         end)
-    | (if .fence then (.out + ["```"]) else .out end)
+    | (if .fch != null then (.out + [(.fch * .flen)]) else .out end)
     | join("\n")
     end;
 '
@@ -107,6 +144,13 @@ _REVIEW_JQ_SANITIZE='
 # 用 -r 的话 jq 还会再补一个，降级评论的正文与页脚之间就多出一个空行。
 review_sanitize_md() {
   jq -Rjs "${_REVIEW_JQ_SANITIZE} _sanitize_md"
+}
+# 清洗后再折成单行：给要嵌进**一行**里的不受信取值用（页脚的重评提示、降级引用块里的 --reason）。
+# 顺序不能反：_sanitize_md 在代码围栏数为奇数时会**追加一行** ```，先折行的话那个换行又被加回来——
+# 页脚会变成两行，而降级评论里那一行还会跳出 `> ` 引用块并开一个吞掉后文的未闭合围栏。
+# 用法：_review_sanitize_oneline <取值> → stdout（不带换行）
+_review_sanitize_oneline() {
+  printf '%s' "$1" | review_sanitize_md | LC_ALL=C tr '\n\r\t' '   '
 }
 
 # --- 从 JSON Lines 事件流取最终消息 ---
@@ -1118,16 +1162,14 @@ review_render_history_table() {
 REVIEW_RERUN_HINT_DEFAULT="重跑流水线可重新评审"
 # 取值来自流水线变量、会原样进入评论，所以先过一遍 Markdown 结构清洗（运维手抖写进一个
 # `<!-- kiro-review:… -->` 就会让评论带上第二个评审标记 → 下一次评审判它「标记不唯一」
-# 而新建第二条汇总，违反 I4），**再**折成单行。
-# 顺序不能反：_sanitize_md 在代码围栏数为奇数时会**追加一行** ```，先折行的话那个换行又被加回来——
-# 页脚会变成两行，而降级评论里那一行还会跳出 `> ` 引用块并开一个吞掉后文的未闭合围栏。
+# 而新建第二条汇总，违反 I4），**再**折成单行（顺序的理由见 _review_sanitize_oneline）。
 # 全空白视为未配置。取值在一次评审里是常量，按原始取值缓存，避免降级路径重复起 jq。
 _review_rerun_hint() {
   local raw="${REVIEW_RERUN_HINT-}" v
   if [[ "${_RRH_RAW-$'\001'}" != "$raw" ]]; then
     v="$raw"
     [[ -n "${v//[[:space:]]/}" ]] || v="$REVIEW_RERUN_HINT_DEFAULT"
-    _RRH_VAL=$(printf '%s' "$v" | review_sanitize_md | LC_ALL=C tr '\n\r\t' '   ')
+    _RRH_VAL=$(_review_sanitize_oneline "$v")
     _RRH_RAW="$raw"
   fi
   printf '%s' "$_RRH_VAL"
@@ -1780,7 +1822,11 @@ review_render_degraded() {
   _review_history_ok "$hist" review_render_degraded || { rm -f "$hist"; return 2; }
   _review_render_header "$REVIEW_TITLE_DEGRADED" "$hist"
   echo ""
-  echo "> ⚠️ 评审已完成，但输出不符合结构化契约（${_RR_REASON:-未说明原因}），无法给出分级问题清单与统计。"
+  # --reason 是一个真实的不受信 sink：kiro-review.sh 在「契约 JSON 顶层结构不符」时把 review_validate
+  # 的最后一行 stderr 拼进 reason，而那是 jq 自己的报错——jq 会把出错的取值回显在消息里
+  # （`Cannot iterate over string ("<模型文本…")`），模型文本就这样进了这一行。所以与失败评论一样过结构
+  # 清洗；再多一步折成单行，因为它嵌在一行 `> ` 引用块里（失败评论的 reason 独占一行，不用折）。
+  echo "> ⚠️ 评审已完成，但输出不符合结构化契约（$(_review_sanitize_oneline "${_RR_REASON:-未说明原因}")），无法给出分级问题清单与统计。"
   echo "> 下面是评审员输出的原文（已由脚本对疑似凭证再做一次掩码，并把其中的 Markdown 标题、分隔线与"
   echo "> HTML 注释降级为普通文本——评论的结构只能来自脚本，否则原文里可以伪造标题与评审标记）。"
   # 「怎么重新评审」与页脚同一份取值：两处写死同一句话时，换档位只改一处会留下另一处的假承诺
