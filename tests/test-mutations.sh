@@ -726,4 +726,19 @@ assert_eq "$(printf '%s\n' "$comment" | grep -c '^- - -$')" "1" "M45：间隔分
 assert_eq "$(printf '%s\n' "$comment" | grep -c '^=$')" "1" "M45：单个 = 原样进了评论——端到端「\\=」断言会失败"
 assert_eq "$(printf '%s\n' "$comment" | grep -c '^\\---$')" "1" "M45 对照：连续三个 --- 仍被旧规则转义（变异只放宽了间隔与单字符）"
 
+# --- M48：索引节标题改名 → 提示词引用的标题与脚本写出的对不上（票 12 ⑤ 的契约守卫）---
+pkg=$(make_mutant m48-index-title 's|=== 未直传的变更文件索引|=== 省略清单|' scripts/kiro-review.sh)
+run_case m48 "$pkg" DIFF_SIZE_LIMIT=1
+assert_rc "$RC" 0 "M48：变异体仍能跑完"
+assert_eq "$(grep -c -F '=== 未直传的变更文件索引' "$CASE/stdin")" "0" "M48：stdin 里找不到提示词引用的节标题——端到端「恰好一个标题」断言会失败"
+
+# --- M49：省略清单退回 `- 名字 (+a / -b) => chunk` 分隔文本 → 文件名能伪造第二个路径（票 06 P0 复发路径）---
+pkg=$(make_mutant m49-omitted-format \
+  "s|'{chunk: \$chunk, file: \$file, added: \$added, removed: \$removed}'|-r '\"- \" + \$file + \" (+\" + (\$added\|tostring) + \" / -\" + (\$removed\|tostring) + \") => \" + \$chunk'|" scripts/lib/diff-compress.sh)
+run_case m49 "$pkg" DIFF_SIZE_LIMIT=1
+assert_rc "$RC" 0 "M49：变异体仍能跑完"
+idx49=$(awk 'index($0, "=== 未直传的变更文件索引") == 1 {on=1; next} on && $0 == "" {exit} on {print}' "$CASE/stdin")
+assert_contains "$idx49" "=> " "M49：索引行回到了分隔文本形态——端到端「每行是 JSON 对象」断言会失败"
+assert_eq "$(printf '%s\n' "$idx49" | jq -e . >/dev/null 2>&1 && echo json || echo notjson)" "notjson" "M49：索引行不再是 JSON"
+
 report

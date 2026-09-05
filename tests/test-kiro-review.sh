@@ -1183,6 +1183,32 @@ assert_contains "$comment" "<details><summary>历次评审（2）</summary>" "�
 # ============================================================================
 # 票 05 复审修复
 # ============================================================================
+# ============ 票 12 ============
+# ---- ⑤ 超限路径的端到端契约——喂给 Kiro 的 stdin 里有索引节，每行一个含 chunk/file 的 JSON ----
+# 这是「脚本节标题」与 prompts/review-prompt.md 契约不漂移的唯一守卫：任一侧退回 `- 名字 => 路径` 的分隔文本
+# 就是票 06 P0（文件名伪造第二个路径）的复发路径，而此前没有任何测试会因此变红。
+IDX_HDR='=== 未直传的变更文件索引'
+assert_eq "$(grep -c -F "$IDX_HDR" "$ROOT/prompts/review-prompt.md")" "1" "超限契约：提示词里引用的是同一个节标题"
+run_case overlimit DIFF_SIZE_LIMIT=1
+assert_rc "$RC" 0 "超限：退出码 0"
+stdin_ol=$(cat "$CASE/stdin")
+assert_eq "$(printf '%s\n' "$stdin_ol" | grep -c -F "$IDX_HDR")" "1" "超限：stdin 里恰好一个索引节标题"
+# 索引节 = 标题行之后、下一个空行之前的所有行：每行必须是含 chunk/file/added/removed 的 JSON 对象
+idx_lines=$(printf '%s\n' "$stdin_ol" | awk -v h="$IDX_HDR" 'index($0, h) == 1 {on=1; next} on && $0 == "" {exit} on {print}')
+n_changed=$(git -C "$CASE/work" diff --no-renames --name-only master HEAD | wc -l | tr -d ' ')
+assert_eq "$(printf '%s\n' "$idx_lines" | grep -c .)" "$n_changed" "超限：fixture 的全部变更文件（${n_changed} 个）都在索引里（阈值 1 字节，一个都装不下）"
+assert_eq "$(printf '%s\n' "$idx_lines" | jq -r 'type == "object" and has("chunk") and has("file") and (.added|type) == "number" and (.removed|type) == "number"' | sort -u)" "true" \
+  "超限：索引每行都是含 chunk/file/added/removed 的 JSON 对象"
+assert_eq "$(printf '%s\n' "$idx_lines" | jq -r '.chunk | test("^/.*/[0-9]{4}\\.diff$")' | sort -u)" "true" "超限：chunk 是绝对路径、NNNN.diff 形态"
+assert_not_contains "$idx_lines" "=> " '超限：索引里没有旧的 `=> 路径` 分隔文本'
+assert_contains "$idx_lines" '"file":"src/app.py"' "超限：file 字段是文件名本身"
+assert_eq "$(printf '%s\n' "$idx_lines" | jq -r 'select(.file == "src/app.py") | .added')" "1" "超限：src/app.py 的增行数按 numstat 算（+1 行密钥）"
+assert_contains "$stdin_ol" "=== DIFF ===" "超限：DIFF 节仍在（此时为空）"
+assert_contains "$(posted_comment "$OUT")" "已按优先级截断" "超限：汇总评论的 diff 说明写明已截断"
+# 正控：阈值足够大时没有索引节
+run_case underlimit DIFF_SIZE_LIMIT=1000000
+assert_eq "$(grep -c -F "$IDX_HDR" "$CASE/stdin")" "0" "未超限：stdin 里没有索引节（正控）"
+
 # ---- KIRO_TIMEOUT / DIFF_SIZE_LIMIT 必须是正整数：非法取值是「静默走偏」，必须硬失败 ----
 # KIRO_TIMEOUT=15m → timeout 会以 rc 125 退出，MR 上只剩「Kiro 评审失败（退出码 125）」
 run_case badtimeout KIRO_TIMEOUT=15m

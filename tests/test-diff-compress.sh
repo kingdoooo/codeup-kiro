@@ -180,4 +180,133 @@ rc=0
 DIFF_SIZE_LIMIT=1 build_review_input "$INJ_BASE" "$INJ_HEAD" "$tmp/out7.diff" "$tmp/omitted7.txt" "$tmp/notadir/chunks" 2>/dev/null || rc=$?
 assert_rc "$rc" 1 "ioerr: chunk 目录建不出来 → rc 1"
 assert_eq "$(cat "$tmp/out7.diff" "$tmp/omitted7.txt" | wc -c | tr -d ' ')" "0" "ioerr: 两个输出都为空且 rc 不是 0/10"
+
+# ============ 票 12 ============
+# --- ① 从仓库子目录调用：--name-only 给的是仓库根相对路径，`:(literal)` 却按 cwd 解析 → 每个 chunk 都是
+#     0 字节 → 文件既不进直传也不进清单，从评审范围里消失且无日志。pathspec 改用 `:(top,literal)`。
+cd "$tmp/repo/src"
+rc=0
+DIFF_SIZE_LIMIT=1 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out8.diff" "$tmp/omitted8.txt" "$tmp/chunks8" || rc=$?
+assert_rc "$rc" 10 "subdir: 返回 10（已截断）"
+n_files=$(_git_diff_pinned --no-renames --name-only -z "$BASE" "$HEAD_SHA" | tr -cd '\0' | wc -c | tr -d ' ')
+n_direct=$(grep -c '^diff --git' "$tmp/out8.diff" || true)
+n_omitted=$(jq -r .chunk "$tmp/omitted8.txt" | wc -l | tr -d ' ')
+assert_eq "$((n_direct + n_omitted))" "$n_files" "subdir: 子目录下调用，直传 + 清单仍等于变更文件数（一个都没消失）"
+while IFS= read -r line; do
+  chunk_path=$(printf '%s' "$line" | jq -r .chunk)
+  [[ -s "$chunk_path" ]] || { echo "FAIL: subdir: chunk 为 0 字节 $chunk_path（pathspec 按 cwd 解析了）" >&2; exit 1; }
+done < "$tmp/omitted8.txt"
+TESTS_PASSED=$((TESTS_PASSED + 1))
+main_chunk8=$(jq -r 'select(.file == "src/main.go") | .chunk' "$tmp/omitted8.txt")
+assert_contains "$(cat "$main_chunk8")" 'fmt.Println' "subdir: src/main.go 的 chunk 是它自己的 diff"
+[[ ! -e "$tmp/chunks8/.full.diff" && ! -e "$tmp/chunks8/.names" ]] || { echo "FAIL: subdir: 临时文件 .full.diff/.names 没清掉" >&2; exit 1; }
+TESTS_PASSED=$((TESTS_PASSED + 1))
+[[ ! -e "$tmp/chunks1/.full.diff" ]] || { echo "FAIL: small: 未超限路径也不该留下 .full.diff" >&2; exit 1; }
+TESTS_PASSED=$((TESTS_PASSED + 1))
+cd "$tmp/repo"
+
+# --- ① 复审补充：gitconfig 里开了 diff.relative，从子目录调用时输出只含 cwd 之下的路径且去掉前缀，
+#     `:(top,literal)` 也对不上 → 每个 chunk 又是 0 字节。这个开关必须钉死在 _git_diff_pinned 里。
+git config diff.relative true
+cd "$tmp/repo/src"
+rc=0
+DIFF_SIZE_LIMIT=1 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out8r.diff" "$tmp/omitted8r.txt" "$tmp/chunks8r" || rc=$?
+assert_rc "$rc" 10 "relative-cfg: diff.relative=true + 子目录 → 仍返回 10"
+n_omitted=$(jq -r .chunk "$tmp/omitted8r.txt" | wc -l | tr -d ' ')
+n_direct=$(grep -c '^diff --git' "$tmp/out8r.diff" || true)
+assert_eq "$((n_direct + n_omitted))" "$n_files" "relative-cfg: 文件一个都没消失"
+assert_contains "$(cat "$tmp/omitted8r.txt")" '"file":"src/main.go"' "relative-cfg: 文件名仍是仓库根相对路径（不是 main.go）"
+cd "$tmp/repo" && git config --unset diff.relative
+
+# --- ① 守卫：枚举列出了文件、逐文件 diff 却是 0 字节 → 内部错误，整次失败（而不是静默漏掉那个文件）---
+# 正常输入到不了这条分支（上面已证明 top 魔法下 chunk 非空），用替身让某一个文件的 diff 为空来证明守卫会响。
+eval "$(declare -f _git_diff_pinned | sed '1s/^_git_diff_pinned/_orig_git_diff_pinned/')"
+_git_diff_pinned() {
+  case " $* " in
+    *" :(top,literal)docs/readme.md "*) return 0 ;;   # 这个文件的逐文件 diff 假装为空
+    *) _orig_git_diff_pinned "$@" ;;
+  esac
+}
+rc=0; err=$(DIFF_SIZE_LIMIT=1 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out9.diff" "$tmp/omitted9.txt" "$tmp/chunks9" 2>&1) || rc=$?
+assert_rc "$rc" 1 "emptychunk: 某文件 chunk 为 0 字节 → rc 1（内部错误）"
+assert_contains "$err" "docs/readme.md" "emptychunk: 报错点名是哪个文件"
+assert_contains "$err" "0 字节" "emptychunk: 报错说明是 chunk 为空"
+# 正控：同一替身下把「假装为空」去掉就正常
+_git_diff_pinned() { _orig_git_diff_pinned "$@"; }
+rc=0; DIFF_SIZE_LIMIT=1 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out9b.diff" "$tmp/omitted9b.txt" "$tmp/chunks9b" || rc=$?
+assert_rc "$rc" 10 "emptychunk 正控：替身透传时照常 rc 10"
+
+# --- ② 枚举命令的退出码要检查：git 中途死掉不能变成「部分索引 + rc 10」被当成成功 ---
+_git_diff_pinned() {
+  case " $* " in
+    *" --name-only "*) echo "fatal: 模拟 git 中途死掉" >&2; return 128 ;;
+    *) _orig_git_diff_pinned "$@" ;;
+  esac
+}
+rc=0; DIFF_SIZE_LIMIT=1 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out10.diff" "$tmp/omitted10.txt" "$tmp/chunks10" 2>/dev/null || rc=$?
+assert_rc "$rc" 1 "enumrc: 枚举失败 → rc 1（不是 10）"
+assert_eq "$(cat "$tmp/out10.diff" "$tmp/omitted10.txt" | wc -c | tr -d ' ')" "0" "enumrc: 两个输出都为空（没有半份索引）"
+# 总量那一步的 git 失败也一样
+_git_diff_pinned() {
+  case " $* " in
+    *" --name-only "*|*" -- "*) _orig_git_diff_pinned "$@" ;;
+    *) echo "fatal: 模拟总量 diff 失败" >&2; return 128 ;;
+  esac
+}
+rc=0; build_review_input "$BASE" "$HEAD_SHA" "$tmp/out11.diff" "$tmp/omitted11.txt" "$tmp/chunks11" 2>/dev/null || rc=$?
+assert_rc "$rc" 1 "totalrc: 算总量的 diff 失败 → rc 1（原先 \$(… | wc -c | tr) 报的是 tr 的退出码）"
+# 空文件名守卫：--name-only -z 不会给出空名，用替身证明守卫会响（空名对应的 pathspec `:(top,literal)` 会匹配整个
+# 仓库，chunk 反而非空，靠「chunk 为 0 字节」那条守卫拦不住它）
+_git_diff_pinned() {
+  case " $* " in
+    *" --name-only "*) printf 'src/main.go\0\0docs/readme.md\0' ;;
+    *) _orig_git_diff_pinned "$@" ;;
+  esac
+}
+rc=0; err=$(DIFF_SIZE_LIMIT=1 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out10b.diff" "$tmp/omitted10b.txt" "$tmp/chunks10b" 2>&1) || rc=$?
+assert_rc "$rc" 1 "emptyname: 枚举给出空文件名 → rc 1"
+assert_contains "$err" "空文件名" "emptyname: 报错点名原因"
+# numstat 没给出该文件（pathspec 没对上）→ 内部错误，不能折成 0/0（那和「只改模式」的真 0/0 分不开）
+_git_diff_pinned() {
+  case " $* " in
+    *" --numstat "*" :(top,literal)docs/readme.md "*) return 0 ;;
+    *) _orig_git_diff_pinned "$@" ;;
+  esac
+}
+rc=0; err=$(DIFF_SIZE_LIMIT=1 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out10c.diff" "$tmp/omitted10c.txt" "$tmp/chunks10c" 2>&1) || rc=$?
+assert_rc "$rc" 1 "numstat-empty: numstat 输出为空 → rc 1（不折成 0/0）"
+assert_contains "$err" "docs/readme.md" "numstat-empty: 报错点名文件"
+unset -f _git_diff_pinned; eval "$(declare -f _orig_git_diff_pinned | sed '1s/^_orig_git_diff_pinned/_git_diff_pinned/')"
+# 二进制文件：numstat 给 `-`，按 0 计
+assert_eq "$(_chunk_numstat "$BASE" "$HEAD_SHA" "src/main.go")" "2 1" "numstat: 文本文件的增删行数"
+
+# --- ③ 增删行计数：只插入空行的文件、以 `++` 开头的内容行，原先 grep '^+[^+]' 都数成 0 ---
+cd "$tmp" && git init -q repo4 && cd repo4
+git config user.email t@t && git config user.name t
+printf 'line\n' > blank.txt
+printf 'i = 0\n' > inc.c
+printf 'a\n\n\nb\n' > shrink.txt
+git add -A && git commit -qm cnt-base
+CNT_BASE=$(git rev-parse HEAD)
+printf 'line\n\n\n' > blank.txt          # 只加两个空行
+printf 'i = 0\n++i;\n' > inc.c           # 内容行以 ++ 开头
+printf 'a\nb\n' > shrink.txt             # 只删两个空行
+git add -A && git commit -qm cnt-change
+CNT_HEAD=$(git rev-parse HEAD)
+rc=0
+DIFF_SIZE_LIMIT=1 build_review_input "$CNT_BASE" "$CNT_HEAD" "$tmp/out12.diff" "$tmp/omitted12.txt" "$tmp/chunks12" || rc=$?
+assert_rc "$rc" 10 "count: 返回 10"
+cnt() { jq -r --arg f "$1" 'select(.file == $f) | "\(.added)/\(.removed)"' "$tmp/omitted12.txt"; }
+assert_eq "$(cnt blank.txt)" "2/0" "count: 只插入两个空行 → added=2（原先 0）"
+assert_eq "$(cnt inc.c)" "1/0" "count: 以 ++ 开头的内容行也算一行（原先 0）"
+assert_eq "$(cnt shrink.txt)" "0/2" "count: 只删两个空行 → removed=2（原先 0）"
+
+# --- ④ sidecar 守卫：缺失或 0 字节都必须硬失败，不能输出 "file":"" ---
+printf 'src/a.py' > "$tmp/side.ok"; : > "$tmp/side.empty"
+rc=0; _check_path_sidecar "$tmp/side.ok" || rc=$?;      assert_rc "$rc" 0 "sidecar: 正常 sidecar → rc 0"
+rc=0; _check_path_sidecar "$tmp/side.empty" 2>/dev/null || rc=$?;   assert_rc "$rc" 1 "sidecar: 0 字节 → rc 1（原先读成空串、输出 file:\"\"）"
+rc=0; _check_path_sidecar "$tmp/side.missing" 2>/dev/null || rc=$?; assert_rc "$rc" 1 "sidecar: 缺失 → rc 1"
+err=$(_check_path_sidecar "$tmp/side.empty" 2>&1 || true)
+assert_contains "$err" "内部错误" "sidecar: 报错标明内部错误"
+
 report

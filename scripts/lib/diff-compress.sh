@@ -25,10 +25,14 @@ DIFF_SIZE_LIMIT="${DIFF_SIZE_LIMIT:-307200}"
 #   -c diff.noprefix=false              去掉 a/ b/ 前缀后，真名以 `b/` 开头的文件会被剥错
 #   -c diff.mnemonicPrefix=false        前缀会变成 c/ i/ w/ o/，`b/` 就剥不掉了
 #   -c core.quotePath=false             非 ASCII 路径不被转义，键名就是真实路径
+#   -c diff.relative=false              开了 diff.relative 后，从子目录调用时输出只含 cwd 之下的路径且去掉了
+#                                       前缀：`+++ b/<路径>` 的键名变了，而 build_review_input 的 `:(top,literal)`
+#                                       pathspec 也会对不上、每个 chunk 都是 0 字节（复审实测，票 12 ①）
 # 喂给评审员的 diff（kiro-review.sh 第 4 步，经本文件）与变更行集合（第 4.5 步）共用这一个封装：
 # 模型看到的行与脚本判定「可定位」的行必须出自同一次、同一形态的比较。
 _git_diff_pinned() {
   git -c core.quotePath=false -c diff.external= -c diff.noprefix=false -c diff.mnemonicPrefix=false \
+      -c diff.relative=false \
     diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ "$@"
 }
 
@@ -46,9 +50,36 @@ _diff_priority() {
 # $1=chunk 目录（绝对路径） $2=序号 → stdout=该文件的 chunk 路径。索引与省略清单都只认这个形态。
 _chunk_file() { printf '%s/%04d.diff' "$1" "$2"; }
 
+# $1=文件名 sidecar（NNNN.path）。缺失或 0 字节都是内部错误：`read -d ''` 读 0 字节文件会得到空串而不报错，
+# 省略清单里就会出现 "file":""，读清单的模型不知道那是哪个文件。所以先查再读（票 12 ④）。
+_check_path_sidecar() {
+  local side="$1"
+  [[ -f "$side" ]] || { echo "build_review_input: 缺少 ${side}（内部错误）" >&2; return 1; }
+  [[ -s "$side" ]] || { echo "build_review_input: ${side} 为 0 字节（内部错误：文件名不可能为空）" >&2; return 1; }
+}
+
+# $1=base $2=head $3=仓库根相对路径 → stdout "added removed"；rc 1 = git 失败或 numstat 没给出这个文件。
+# 用 --numstat 而不是 `grep -c '^+[^+]'`：后者要求 `+` 后还有字符，只插入空行的文件、以 `++` 开头的
+# 内容行（C 的 `++i;`）都数成 0——而这两个数正是提示词让模型用来排优先级的信号（票 12 ③）。
+# 每个未直传文件多起一次 git（几毫秒）；换 awk 数 chunk 又回到自己解析 patch 形态的老路，不值。
+# 只有二进制文件的 `-` 按 0 计（numstat 的约定形态）；输出为空或字段不够两个说明 pathspec 没对上文件，
+# 是内部错误——不能把它折成 0/0，那和「改了模式没改内容」的真 0/0 分不开（复审指出）。
+_chunk_numstat() {
+  local ns added removed
+  ns=$(_git_diff_pinned --no-renames --numstat "$1" "$2" -- ":(top,literal)$3") || return 1
+  [[ "$ns" == *$'\t'*$'\t'* ]] \
+    || { echo "build_review_input: numstat 没有给出 ${3} 的增删行数（内部错误）：[${ns}]" >&2; return 1; }
+  added=${ns%%$'\t'*}; removed=${ns#*$'\t'}; removed=${removed%%$'\t'*}
+  [[ "$added" == "-" ]] && added=0
+  [[ "$removed" == "-" ]] && removed=0
+  [[ "$added" =~ ^[0-9]+$ && "$removed" =~ ^[0-9]+$ ]] \
+    || { echo "build_review_input: numstat 给出的增删行数不是数字（内部错误）：[${ns}]" >&2; return 1; }
+  printf '%s %s\n' "$added" "$removed"
+}
+
 # $1=base_sha $2=head_sha $3=输出直传diff $4=输出省略清单 $5=chunk目录
 # 返回 0=未截断；10=已截断；1=内部错误（落盘失败、索引损坏等——调用方按 rc≠0/10 回写「评审未完成」）。
-# 需在业务仓库 git 目录内调用。
+# 需在业务仓库内调用（仓库根或任意子目录都行：pathspec 用 `:(top,…)` 按仓库根解析，不依赖 cwd，票 12 ①）。
 # 省略清单形态：每行一个 compact JSON 对象 {"chunk":<该文件完整 diff 的绝对路径>,"file":<文件名>,
 # "added":N,"removed":N}。用 JSON 而不是 `- 文件名 (+a / -b) => chunk` 这类分隔文本：文件名是 MR 作者
 # 可控的，任何靠分隔符切分的行都能被名字里的同款分隔符伪造出第二个「chunk 路径」，让读清单的模型去
@@ -64,37 +95,56 @@ build_review_input() {
   # 省略清单契约要求 chunk 为绝对路径（下游读取方 cwd 不一定等于调用方 cwd）
   chunk_dir=$(cd "$chunk_dir" && pwd) || return 1
 
-  # --no-renames：重命名按删除+新增处理，保证总量与 chunk 大小口径一致
-  local total
-  total=$(_git_diff_pinned --no-renames "$base" "$head" | wc -c | tr -d ' ') || return 1
+  # --no-renames：重命名按删除+新增处理，保证总量与 chunk 大小口径一致。
+  # 整份 diff 先落盘再量大小：`$(git … | wc -c | tr …)` 报的是管道最后一个命令的退出码，git 中途死掉会得到
+  # total=0、当成「未超限」再跑一次（票 12 ②）。落盘一次也免得同一份 diff 算两遍。
+  # .full.diff 与下面的 .names 都是临时文件，用完即删：chunk 目录的契约只有 NNNN.diff / NNNN.path / .index*，
+  # 超限的大 MR 也不该在磁盘上留两份整 diff。
+  local full="$chunk_dir/.full.diff" total
+  _git_diff_pinned --no-renames "$base" "$head" > "$full" || return 1
+  total=$(wc -c < "$full") || return 1
+  total=${total// /}
+  [[ "$total" =~ ^[0-9]+$ ]] || { echo "build_review_input: 量不出 diff 大小（内部错误）：[${total}]" >&2; return 1; }
   if [[ "$total" -le "$DIFF_SIZE_LIMIT" ]]; then
-    _git_diff_pinned --no-renames "$base" "$head" > "$out_diff" || return 1
+    cat "$full" > "$out_diff" || return 1
+    rm -f "$full"
     return 0
   fi
+  rm -f "$full"
 
   # 逐文件生成 chunk（NUL 分隔读路径，含空格/换行/Tab 安全）。
+  # 枚举先落盘、检查退出码，再逐行读：`done < <(git …)` 拿不到进程替换的退出码，git 中途死掉（OOM、对象
+  # 读错）会得到「部分索引 + 部分清单 + rc 10」，调用方当成功（票 12 ②）。
   # 索引只存脚本自己产生的三个数字字段：优先级、大小、序号。**文件名不进索引**——Git 文件名允许
   # 换行与 Tab，写进按行/Tab 解析的中间文件就等于让 MR 作者伪造索引记录、把下面的 `cat` 指向
   # 评审机上的任意可读文件（票 06 P0：伪造记录 `0\t1\t/root/.aws/credentials` 曾能把凭证读进评审输入）。
   # 文件名一名一文件落在 NNNN.path 里（printf '%s'，无分隔符），只在渲染省略清单时读出。
-  local index="$chunk_dir/.index" n=0 path chunk prio size
+  local index="$chunk_dir/.index" names="$chunk_dir/.names" n=0 path chunk prio size
   : > "$index" || return 1
+  _git_diff_pinned --no-renames --name-only -z "$base" "$head" > "$names" || return 1
   while IFS= read -r -d '' path; do
     n=$((n + 1))
+    [[ -n "$path" ]] || { echo "build_review_input: 枚举给出空文件名（内部错误）" >&2; return 1; }
     chunk=$(_chunk_file "$chunk_dir" "$n")
-    # :(literal) 防止路径中的 pathspec 魔法前缀（如冒号开头）或 glob 字符
-    # 导致 chunk 为空或串入其他文件的 diff
-    _git_diff_pinned --no-renames "$base" "$head" -- ":(literal)$path" > "$chunk" || return 1
+    # :(top,literal)：top 让 pathspec 按仓库根解析（--name-only 给的就是仓库根相对路径；只用 literal 时
+    # 按 cwd 解析，从子目录调用每个 chunk 都是 0 字节），literal 防止路径中的魔法前缀（冒号开头）或
+    # glob 字符导致 chunk 为空或串入其他文件的 diff。
+    _git_diff_pinned --no-renames "$base" "$head" -- ":(top,literal)$path" > "$chunk" || return 1
+    # 枚举列出了它，逐文件 diff 却为空：只能是 pathspec 解析走偏（内部错误）。不能静默放过——0 字节的 chunk
+    # 永远「装得下」，cat 进直传什么都不加，文件就从评审范围里消失且无日志；函数末尾那条「两个输出都空」
+    # 只在**全部**文件都掉的时候才响（票 12 ①）。
+    [[ -s "$chunk" ]] || { echo "build_review_input: ${path} 的 chunk 为 0 字节（内部错误：枚举列出了它，逐文件 diff 却为空）" >&2; return 1; }
     printf '%s' "$path" > "${chunk%.diff}.path" || return 1
     prio=$(_diff_priority "$path" "$chunk")
-    size=$(wc -c < "$chunk" | tr -d ' ')
+    size=$(wc -c < "$chunk"); size=${size// /}
     printf '%s\t%s\t%s\n' "$prio" "$size" "$n" >> "$index" || return 1
-  done < <(_git_diff_pinned --no-renames --name-only -z "$base" "$head")
+  done < "$names"
+  rm -f "$names"
 
   # 优先级升序、同级内小文件优先、同级同大小按 git 顺序，逐个装填预算；整文件删除(3)永不直传。
   # chunk 路径永远由序号重建，绝不从索引读回；三个字段必须是纯数字——索引是本函数刚写的，
   # 出现别的东西只能是内部错误，宁可整次评审失败也不能猜。
-  local sorted="$chunk_dir/.index.sorted" used=0 added removed
+  local sorted="$chunk_dir/.index.sorted" used=0 added removed ns
   sort -t"$(printf '\t')" -k1,1n -k2,2n -k3,3n "$index" > "$sorted" || return 1
   while IFS=$'\t' read -r prio size n; do
     [[ "$prio" =~ ^[0-9]+$ && "$size" =~ ^[0-9]+$ && "$n" =~ ^[0-9]+$ ]] \
@@ -104,14 +154,13 @@ build_review_input() {
       cat "$chunk" >> "$out_diff" || return 1
       used=$((used + size))
     else
-      added=$(grep -c '^+[^+]' "$chunk" || true)
-      removed=$(grep -c '^-[^-]' "$chunk" || true)
       # 文件名从 NNNN.path 读回：read -d '' 而不是 $(cat)（命令替换会吃掉文件名末尾的换行）；
-      # 先清空再读，sidecar 缺失时绝不能沿用上一个文件的名字——那是内部错误，直接失败。
+      # 先清空再读，sidecar 缺失或 0 字节时绝不能沿用上一个文件的名字或写出空名——那是内部错误，直接失败。
       path=""
-      [[ -f "${chunk%.diff}.path" ]] \
-        || { echo "build_review_input: 缺少 ${chunk%.diff}.path（内部错误）" >&2; return 1; }
+      _check_path_sidecar "${chunk%.diff}.path" || return 1
       IFS= read -r -d '' path < "${chunk%.diff}.path" || true
+      ns=$(_chunk_numstat "$base" "$head" "$path") || return 1     # 不用 < <(…)：进程替换拿不到退出码
+      read -r added removed <<< "$ns"
       jq -nc --arg chunk "$chunk" --arg file "$path" --argjson added "$added" --argjson removed "$removed" \
         '{chunk: $chunk, file: $file, added: $added, removed: $removed}' >> "$out_omitted" || return 1
     fi
