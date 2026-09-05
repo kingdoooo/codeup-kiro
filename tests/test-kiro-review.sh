@@ -792,6 +792,32 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "去重：同一处�
 assert_contains "$OUT" "已存在跳过 3 条" "去重：日志计数 3"
 assert_contains "$(posted_comment "$OUT")" "其中 3 条已标注在「文件改动」对应行" "去重：3 条问题并到同一条已有评论上，计数按问题算"
 
+# ---- 票 11：加粗首行 + 旧格式标记的旧评论 ----
+# 脚本自己没发过这种形态（sev 进标记的 e534631 早于加粗首行的 5a1a9e3），会落到它的是被人改过首行的旧评论。
+# 级别只能从首行解析；解析正则若仍只认 `### `，级别就成了 null → 不能压制 → 同一处每次重跑都多三条重复。
+# 用 **P0**：解析对了 → 三条全压（去重生效，0 条新发）；解析成 null → 三条重复发出。
+# （用 P2 的话两种结果都是「三条照发」，测不出正则；旧 P2 压不住新 P0 这条由单测与级别未知用例覆盖。）
+IFX_DIR="$tmp/ifx-dedup-bold"; mkdir -p "$IFX_DIR"
+jq -n --arg fp "$fp_dup" --arg bot "$BOT" '[
+  {comment_biz_id:"old-bold-p0", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:2, author:{username:$bot},
+   content:("**P0 · 上一次的结论**\n<!-- kiro-inline:" + $fp + " -->\n\n上一次发的。\n")}
+]' > "$IFX_DIR/list-comments-inline.json"
+CASE_TWEAK=mk_inline_fixture run_case dedupbold DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+assert_rc "$RC" 0 "票 11 加粗旧评论：退出码 0"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "票 11 加粗旧评论：旧 P0 的级别从「**P0 · 」解析得出，同一处 P0/P0/P1 三条全压（去重生效）"
+assert_contains "$OUT" "已存在跳过 3 条" "票 11 加粗旧评论：三条都记为已存在"
+assert_contains "$(posted_comment "$OUT")" "其中 3 条已标注在「文件改动」对应行" "票 11 加粗旧评论：汇总计数照旧"
+# 首行被人改掉、级别解析不出：按「最严」处理 = 不能压制任何级别
+IFX_DIR="$tmp/ifx-dedup-nosev"; mkdir -p "$IFX_DIR"
+jq 'map(.content |= sub("\\*\\*P0 · 上一次的结论\\*\\*"; "上一次（标题被人改过）"))' "$tmp/ifx-dedup-bold/list-comments-inline.json" > "$IFX_DIR/list-comments-inline.json"
+CASE_TWEAK=mk_inline_fixture run_case dedupnosev DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+assert_rc "$RC" 0 "票 11 级别未知：退出码 0"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "票 11 级别未知：解析不出级别的旧评论不压任何一条（宁可重复，不能吞掉 P0）"
+assert_contains "$OUT" "已存在跳过 0 条" "票 11 级别未知：没有一条被压"
+
 # ---- 真实验收暴露的缺陷（2026-09-03，demo-app MR #2 重跑 4 → 9）----
 # fixture = 真实回读的第一次运行的 4 条行内评论（旧格式标记）；契约 = 第二次运行的形态：
 # 标题全变、行号漂移 1 行（20→21、37→36）、一条问题拆成两条（L14 与 L22）。期望：0 条新建、跳过 5 条。

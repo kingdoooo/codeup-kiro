@@ -690,9 +690,16 @@ REVIEW_INLINE_MARKER_SUFFIX=" -->"
 # 行号位数限 1–7：行内评论在 Codeup 上是人可编辑的（与 REVIEW_MARKER_LINE_RE 限 run 位数同理），
 # 改成天文数字的标记宁可整条不认（重发一条）也不能让它压住整个文件。
 REVIEW_INLINE_MARKER_RE='^<!-- kiro-inline:(?<fp>[0-9a-f]{40})(?: L(?<start>[0-9]{1,7})-(?<end>[0-9]{1,7}) sev=(?<sev>P[0-2]))? -->[[:space:]]*$'
-# 旧格式评论只能从首行标题里的「（L起–L止）」还原结束行（review_render_inline_body 渲染的形态，破折号是 U+2013）
-REVIEW_INLINE_TITLE_RANGE_RE='（L(?<s>[0-9]{1,7})–L(?<e>[0-9]{1,7})）[[:space:]]*$'
-REVIEW_INLINE_TITLE_SEV_RE='^### (?<sev>P[0-2]) · '
+# 旧格式评论只能从首行标题里的「（L起–L止）」还原结束行与级别（review_render_inline_body 渲染的形态，
+# 破折号是 U+2013）。首行有两种历史形态，都要认（票 11）：
+#   · bff99dd 起 `### P0 · 标题（L起–L止）`（真实 demo MR 上的旧格式评论都是这一种，见 fixtures/inline/real-rerun）；
+#   · 5a1a9e3（2026-09-04 10:54）起 `**P0 · 标题（L起–L止）**`。sev 写进标记是更早的 e534631（同日 00:19），
+#     所以脚本自己**没有**发出过「加粗首行 + 旧格式标记」的评论；会落到这个形态的是被人改过首行、或从加粗
+#     评论里复制出来的旧格式标记。原先正则只认 `### `，这种首行的级别解析成 null——级别未知本身由
+#     review_inline_overlaps 兜底（不能压制），这里解析对了才能让去重继续生效（旧 P0 仍压同一处的 P0/P1/P2），
+#     否则同一处每次重跑都多一条重复评论。
+REVIEW_INLINE_TITLE_RANGE_RE='（L(?<s>[0-9]{1,7})–L(?<e>[0-9]{1,7})）(?:\*\*)?[[:space:]]*$'
+REVIEW_INLINE_TITLE_SEV_RE='^(?:### |\*\*)(?<sev>P[0-2]) · '
 # 读回的区间宽度上限（行）。区间来自模型给的 line_end 或人可编辑的标记/标题：一条「（L1–L800）」
 # 不设上限就能把整个文件后续所有 P0/P1 都压掉。去重要找的是「同一处」，起点附近几十行足够；
 # 超出的部分截掉（end = start + 上限），起点不动。
@@ -818,8 +825,10 @@ review_inline_draft_ranges() { _review_inline_ranges "${1-}" draft; }
 # → 视为同一问题。容差 2 行来自实测漂移幅度（1 行）留一倍余量；标题不参与判定（模型每次措辞都不同）。
 # 级别门槛：已有评论只压制**级别不高于它**的新问题（P0 压 P0/P1/P2，P1 压 P1/P2，P2 只压 P2）——
 # 否则同一处一条旧 P2 就能让重跑时新出现的 P0 从 MR 上消失（outcome=existing 留在 inline，而
-# INLINE_COMMENT=1 的汇总不展开 inline）。已有评论解析不出级别（旧格式且标题不合形）→ 不设门槛；
-# 调用方不给新问题级别 → 也不设门槛。
+# INLINE_COMMENT=1 的汇总不展开 inline）。
+# 调用方不给新问题级别 → 不设门槛。已有评论的级别**解析不出**（标记是旧格式、首行又被人改过）→ 按最严处理：
+# 它不能压制任何级别（票 11）。原先这种情况按「不设门槛」处理，等于一条来历不明的旧评论能吞掉同一处新出现的
+# P0；代价是这种评论旁边会多出一条重复评论——与 rc 2 的取舍一致：宁可重复，绝不吞掉 P0。
 # 代价是同一处相邻两行上的两条**不同**、级别相同的问题在重跑时会被并成一条——接受：MR 上已经有一条
 # 指着那里，读者能看到；反过来不并的话，每次重跑都在同一处多出一组措辞不同的重复评论（真实验收 4 → 9）。
 # 用法：review_inline_overlaps <区间 JSON 文件> <文件路径> <起始行> [结束行] [新问题级别 P0|P1|P2]
@@ -842,7 +851,7 @@ review_inline_overlaps() {
     | .[]
     | select(type == "object" and .file == $f and (.start | type) == "number" and (.end | type) == "number")
     | select(($s - .end) <= $tol and (.start - $e) <= $tol)
-    | select($sev == "" or (.sev | type) != "string" or ((.sev | rank) == null) or ((.sev | rank) <= ($sev | rank)))
+    | select($sev == "" or ((.sev | type) == "string" and ((.sev | rank) != null) and ((.sev | rank) <= ($sev | rank))))
     | (.id // "") | if (type == "string" and length > 0) then . else "?" end' "$ranges" 2>/dev/null) \
     || { echo "review_inline_overlaps: 区间文件不是合法 JSON：${ranges}" >&2; return 2; }
   [[ -n "$hits" ]] || return 1

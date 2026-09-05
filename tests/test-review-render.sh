@@ -1375,6 +1375,54 @@ assert_eq "$(printf '%s' "$out" | jq -r 'length')" "5" "区间：恰好 5 条可
 assert_eq "$(jq -c '[.[] | select(type == "object" and .comment_biz_id == "o2") | .content |= sub("（L5–L6）"; "")]' "$tmp/mixed-list.json" \
   | review_inline_existing_ranges "$TEST_BOT_USERNAME" | jq -r 'length')" "0" "区间：旧格式、无 line_number、标题无区间 → 跳过"
 
+# ---- 票 11：首行改成加粗后，旧格式标记的级别仍要解析得出；解析不出的级别不能压制任何问题 ----
+# 5a1a9e3 把行内评论首行从 `### P0 · ` 改成 `**P0 · **`；sev 进标记的 e534631 在它之前，所以脚本没发过
+# 「加粗首行 + 旧格式标记」的评论——会落到这个形态的是被人改过首行的旧评论。解析正则原先只认 `### `。
+jq -n --arg fp "$FP40" --arg bot "$TEST_BOT_USERNAME" '[
+  {comment_biz_id:"b1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:2, author:{username:$bot},
+   content:("**P2 · 加粗首行 + 旧格式标记**\n<!-- kiro-inline:" + $fp + " -->\n\n说明。\n")},
+  {comment_biz_id:"b2", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:9, author:{username:$bot},
+   content:("**P1 · 加粗且带区间（L9–L11）**\n<!-- kiro-inline:" + $fp + " -->\n")},
+  {comment_biz_id:"b3", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:20, author:{username:$bot},
+   content:("上一次（标题被人改过，没有级别）\n<!-- kiro-inline:" + $fp + " -->\n")}
+]' > "$tmp/bold-list.json"
+out=$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < "$tmp/bold-list.json")
+rng() { printf '%s' "$out" | jq -r --arg id "$1" '.[] | select(.id == $id) | "\(.file):\(.start)-\(.end):\(.sev)"'; }
+assert_eq "$(rng b1)" "src/app.py:2-2:P2" "票 11：加粗首行 + 旧格式标记 → 级别从「**P2 · 」解析得出"
+assert_eq "$(rng b2)" "src/app.py:9-11:P1" "票 11：加粗首行的区间「（L9–L11）」照样解析"
+assert_eq "$(rng b3)" "src/app.py:20-20:null" "票 11：首行没有级别 → sev 为 null（而不是整条丢掉：区间仍可用于日志）"
+printf '%s' "$out" > "$tmp/bold-ranges.json"
+# 级别门槛：旧 P2 不能压新 P0/P1，只压新 P2
+rc=0; review_inline_overlaps "$tmp/bold-ranges.json" src/app.py 2 2 P0 >/dev/null || rc=$?
+assert_rc "$rc" 1 "票 11：旧 P2（加粗首行）不压新 P0"
+rc=0; review_inline_overlaps "$tmp/bold-ranges.json" src/app.py 2 2 P2 >/dev/null || rc=$?
+assert_rc "$rc" 0 "票 11：旧 P2 压新 P2（正控：门槛仍在）"
+# 解析不出级别的旧评论：按「最严」处理 = 不能压制任何级别（宁可重复，不能吞掉 P0）
+for lv in P0 P1 P2; do
+  rc=0; review_inline_overlaps "$tmp/bold-ranges.json" src/app.py 20 20 "$lv" >/dev/null || rc=$?
+  assert_rc "$rc" 1 "票 11：级别未知的旧评论不压新 ${lv}（原先按「不设门槛」处理，连 P0 都压掉）"
+done
+# 调用方不给新问题级别 = 明确不要门槛：级别未知的旧评论照样命中（这条分支只有测试在用，语义不变）
+rc=0; review_inline_overlaps "$tmp/bold-ranges.json" src/app.py 20 20 >/dev/null || rc=$?
+assert_rc "$rc" 0 "票 11：调用方不给级别 → 不设门槛，级别未知也命中（语义不变）"
+
+# 回环元测试（复审建议）：首行格式写在三处——review_render_inline_body 的 printf 与两条解析正则。票 11 的成因
+# 就是 5a1a9e3 只改了 printf。这里把 golden 里**渲染器实际写出的首行**配上旧格式标记喂回解析器：任一侧再漂移，
+# 这条先红。
+rt_line=$(head -1 "$GOLDEN/inline-range.md"); rt_single=$(head -1 "$GOLDEN/inline-single.md")
+jq -n --arg fp "$FP40" --arg bot "$TEST_BOT_USERNAME" --arg l1 "$rt_line" --arg l2 "$rt_single" '[
+  {comment_biz_id:"rt1", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:30, author:{username:$bot}, content:($l1 + "\n<!-- kiro-inline:" + $fp + " -->\n")},
+  {comment_biz_id:"rt2", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:27, author:{username:$bot}, content:($l2 + "\n<!-- kiro-inline:" + $fp + " -->\n")}
+]' > "$tmp/rt-list.json"
+out=$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < "$tmp/rt-list.json")
+assert_eq "$(rng rt1)" "src/app.py:30-31:P0" "票 11 回环：golden 里带区间的首行 → 级别 P0、区间 30–31 都解析得出"
+assert_eq "$(rng rt2)" "src/app.py:27-27:P1" "票 11 回环：golden 里单行的首行 → 级别 P1、单行"
+
 # ---- 区间宽度上限：标记与标题都是人可编辑/模型给的，一条「（L1–L800）」不能压住整个文件 ----
 assert_eq "$REVIEW_INLINE_MAX_RANGE_SPAN" "50" "区间上限常量 = 50 行"
 jq -n --arg fp "$FP40" --arg bot "$TEST_BOT_USERNAME" '[
@@ -1510,7 +1558,9 @@ assert_eq "$(ovs a.py 10 10 P2)" hit "级别门槛：旧 P2 压新 P2"
 assert_eq "$(ovs a.py 20 20 P0)" "miss:1" "级别门槛：旧 P1 不压新 P0"
 assert_eq "$(ovs a.py 20 20 P1)" hit "级别门槛：旧 P1 压新 P1"
 assert_eq "$(ovs a.py 20 20 P2)" hit "级别门槛：旧 P1 压新 P2"
-assert_eq "$(ovs a.py 30 30 P0)" hit "级别门槛：旧评论解析不出级别 → 不设门槛，按原裁决压制"
+# 票 11 改了裁决：解析不出级别的旧评论不能压制任何级别（原先按「不设门槛」处理，一条来历不明的旧评论能吞掉 P0）
+assert_eq "$(ovs a.py 30 30 P0)" "miss:1" "级别门槛：旧评论解析不出级别 → 按最严处理，不压新 P0（票 11）"
+assert_eq "$(ovs a.py 30 30 P2)" "miss:1" "级别门槛：旧评论解析不出级别 → 连新 P2 也不压（宁可重复）"
 assert_eq "$(ovs a.py 10 10)" hit "级别门槛：调用方不给新问题级别 → 不设门槛"
 assert_eq "$(ovs a.py 10 10 "")" hit "级别门槛：级别为空串 → 不设门槛"
 rc=0; review_inline_overlaps "$tmp/sev-ranges.json" a.py 10 10 P9 >/dev/null 2>&1 || rc=$?

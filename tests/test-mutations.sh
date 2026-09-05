@@ -457,12 +457,47 @@ jq -n --arg bot "$BOT" --arg fp "$(review_fingerprint src/app.py 2 上一次)" '
 inline_case baseline-sev "$ROOT" "$IFXSEV"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "2" "对照：同一处旧 P1 只压掉 P1 那条，两条 P0 照发"
 assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" "硬编码疑似应用密钥" "对照：P0 仍在 MR 上"
-pkg=$(make_mutant m34-sevgate 's#select($sev == "" or (.sev | type) != "string" or ((.sev | rank) == null) or ((.sev | rank) <= ($sev | rank)))#select(true)#' scripts/lib/review-render.sh)
+pkg=$(make_mutant m34-sevgate 's#select($sev == "" or ((.sev | type) == "string" and ((.sev | rank) != null) and ((.sev | rank) <= ($sev | rank))))#select(true)#' scripts/lib/review-render.sh)
 inline_case m34 "$pkg" "$IFXSEV"
 assert_rc "$RC" 0 "M34：变异体仍能跑完"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" \
   "M34：没有级别门槛时两条 P0 也被旧 P1 压掉——端到端「两条 P0 照发」断言会失败"
 assert_not_contains "$(posted_comment "$OUT")" "硬编码疑似应用密钥" "M34：那条 P0 既不在行内也不在折叠区——从 MR 上彻底消失（这正是门槛要防的）"
+
+# --- M46：首行级别正则退回只认 `### ` → 加粗首行 + 旧格式标记的旧 P0 认不出级别，重跑在同一处堆出三条重复（票 11）---
+# 载荷用 **P0**（而不是票面复现用的 P2）：票 11 同时把「级别未知」改成「不能压制」，于是旧 P2 解析成 null 之后
+# 三条照发——与正确解析出 P2 的结果一样，变异体观察不到变化（2026-09-05 实测）。旧 P0 则两边不同：
+# 解析对了 → 三条全压（去重生效）；退回旧正则 → null → 不能压制 → 三条重复发出。
+IFXBOLD="$tmp/ifx-bold"
+mkdir -p "$IFXBOLD"
+cp "$IFX/list-patchsets.json" "$IFXBOLD/"
+cp "$IFX"/create-comment-inline.*.json "$IFXBOLD/"
+jq -n --arg bot "$BOT" --arg fp "$(review_fingerprint src/app.py 2 上一次)" '[
+  {comment_biz_id:"old-bold-p0", comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
+   filePath:"src/app.py", line_number:2, author:{username:$bot},
+   content:("**P0 · 上一次**\n<!-- kiro-inline:" + $fp + " -->\n")}]' > "$IFXBOLD/list-comments-inline.json"
+inline_case baseline-bold "$ROOT" "$IFXBOLD"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：加粗首行的旧 P0 解析得出级别，同一处 P0/P0/P1 三条全压（去重生效）"
+pkg=$(make_mutant m46-title-sev-re "s|^REVIEW_INLINE_TITLE_SEV_RE=.*\$|REVIEW_INLINE_TITLE_SEV_RE='^### (?<sev>P[0-2]) · '|" scripts/lib/review-render.sh)
+inline_case m46 "$pkg" "$IFXBOLD"
+assert_rc "$RC" 0 "M46：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
+  "M46：级别解析成 null → 不能压制 → 三条在同一处重复发出——端到端「旧 P0 全压」断言会失败"
+
+# --- M47：级别未知的旧评论改回「不设门槛」→ 标题被人改掉的一条旧评论压掉同一处所有新问题（票 11）---
+IFXNOSEV="$tmp/ifx-nosev"
+mkdir -p "$IFXNOSEV"
+cp "$IFX/list-patchsets.json" "$IFXNOSEV/"
+cp "$IFX"/create-comment-inline.*.json "$IFXNOSEV/"
+jq 'map(.content |= sub("\\*\\*P0 · 上一次\\*\\*"; "上一次（标题被人改过）"))' "$IFXBOLD/list-comments-inline.json" > "$IFXNOSEV/list-comments-inline.json"
+inline_case baseline-nosev "$ROOT" "$IFXNOSEV"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "对照：级别未知的旧评论不压任何一条"
+pkg=$(make_mutant m47-unknown-sev 's#(.sev | type) == "string" and ((.sev | rank) != null) and ((.sev | rank) <= ($sev | rank))#(.sev | type) != "string" or ((.sev | rank) == null) or ((.sev | rank) <= ($sev | rank))#' scripts/lib/review-render.sh)
+inline_case m47 "$pkg" "$IFXNOSEV"
+assert_rc "$RC" 0 "M47：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" \
+  "M47：级别未知按「不设门槛」处理时三条全被压掉——端到端「三条照发」断言会失败"
+assert_not_contains "$(posted_comment "$OUT")" "硬编码疑似应用密钥" "M47：那条 P0 既不在行内也不在折叠区——从 MR 上彻底消失"
 
 # --- M28：拿掉上限截取 → MAX_INLINE_COMMENTS 失效 ---
 pkg=$(make_mutant m28-max 's|(\$cand\[0:\$max\]) as \$inline|($cand) as $inline|' scripts/lib/review-render.sh)
