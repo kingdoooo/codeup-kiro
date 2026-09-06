@@ -27,6 +27,8 @@
 #   MOCK_KIRO_STATUS_FAILED=1   runFinished.data.status 非 success（→ 脚本应走失败评论）
 #   MOCK_KIRO_STATUS_TEXT=<串>  runFinished.data.status 用这个串（非 success 即失败；票 16-fix 用它把合成 token
 #                               塞进失败原因 → die_review 的日志行必须掩码）
+#   MOCK_KIRO_STDERR_TEXT=<串>  往 stderr 写这一行（与 MOCK_KIRO_FAIL=1 搭配：脚本会把 kiro-cli 的 stderr 尾巴打进流水线日志，
+#                               16-fix2 第 24 条要求先掩码）
 #   MOCK_KIRO_NO_RUNFINISHED=1  事件流里没有 runFinished（→ 脚本应走失败评论）
 #   MOCK_KIRO_NO_METADATA=1     不产出 metadata 事件（credits 不可得时日志不应崩）
 #   MOCK_KIRO_CONTRACT=<文件>   用指定文件的内容当契约 JSON（默认 fixtures/contract/mock-review.json）
@@ -89,6 +91,7 @@ if [[ -n "${MOCK_CWD_SCAN_FILE:-}" ]]; then
   } > "$MOCK_CWD_SCAN_FILE"
 fi
 [[ "${MOCK_KIRO_HANG:-0}" == "1" ]] && sleep 300
+[[ -n "${MOCK_KIRO_STDERR_TEXT:-}" ]] && printf '%s\n' "$MOCK_KIRO_STDERR_TEXT" >&2
 if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
   echo "mock: 模拟 kiro 失败" >&2; exit 1
 fi

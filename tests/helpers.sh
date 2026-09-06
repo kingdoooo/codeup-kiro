@@ -11,8 +11,11 @@ assert_eq() {  # 实际值 期望值 说明
   fi
 }
 
+# 不用 grep -q：-q 在第一处命中就退出，pipefail 下还没写完的 printf 会被 SIGPIPE 杀掉（rc 141）、整条管道判失败——
+# 内容一大、机器一忙就随机出现「明明有子串却报未找到」的假阴性（2026-09-06/07 两次全套在负载 40+ 时各踩到一次）。
+# 让 grep 读完全部输入（输出丢弃）即可，语义不变。
 assert_contains() {  # 内容 子串 说明
-  if printf '%s' "$1" | grep -qF -- "$2"; then
+  if printf '%s' "$1" | grep -F -- "$2" >/dev/null; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
   else
     echo "FAIL: $3 — 未找到子串 [$2]，内容: [$1]" >&2
@@ -21,7 +24,7 @@ assert_contains() {  # 内容 子串 说明
 }
 
 assert_not_contains() {  # 内容 子串 说明
-  if printf '%s' "$1" | grep -qF -- "$2"; then
+  if printf '%s' "$1" | grep -F -- "$2" >/dev/null; then
     echo "FAIL: $3 — 不应出现子串 [$2]" >&2
     exit 1
   else
@@ -30,6 +33,25 @@ assert_not_contains() {  # 内容 子串 说明
 }
 
 assert_rc() { assert_eq "$1" "$2" "$3"; }
+# 非零退出码（第 15 条：`assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero"` 这句习语重复了十几次）
+assert_nonzero() {  # rc 说明
+  if [[ "$1" =~ ^[0-9]+$ && "$1" -ne 0 ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+  else
+    echo "FAIL: $2 — 期望非零退出码，实际 [$1]" >&2
+    exit 1
+  fi
+}
+# 两个文件逐字节相同（第 15 条）：失败时打一次 diff，而不是只说 same/differ
+assert_same_file() {  # 文件A 文件B 说明
+  if cmp -s "$1" "$2"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+  else
+    echo "FAIL: $3 — 两个文件不同：[$1] vs [$2]" >&2
+    diff "$1" "$2" >&2 | head -40 >&2 || true
+    exit 1
+  fi
+}
 
 # DRY_RUN 下数一数脚本真的发了哪些请求（stderr 上每个请求一行 `DRY_RUN <方法> <URL>`）。
 # 用法：req_count "$OUT" PUT [URL 片段（ERE）]
@@ -91,20 +113,48 @@ with_secrets() {
                            | if endswith("```") then .[:-3] + $kv + "\n```" else . + "\n" + $kv end)
     | .findings[2].body |= sub("。"; " " + $ghp + "。")' "$1"
 }
-# 故障注入替身：只让 review_redact_secrets 那段 awk 程序失败（按程序文本识别），其余 awk 调用透传给真 awk——
-# 否则 diff/变更行的 awk 也会挂，评审在到达 sink 之前就失败了，测不到「掩码失败」这一段。
+# 三种 token 的六条事实一处定义（第 14 条）：原文都不在、掩码形态都在。只收**内容字符串**（文件调用方传 "$(cat f)"）——
+# 以前有一个收文件路径的同名助手，串用时 assert_not_contains 对路径字面量恒真、只剩一半断言会响。
+assert_masked() {  # 内容 说明前缀
+  assert_no_secrets "$1" "$2"
+  assert_contains "$1" "$SEC_GHP_MASKED" "$2：ghp_ 形态掩成前 4 后 4"
+  assert_contains "$1" "$SEC_AKIA_MASKED" "$2：AKIA 形态掩成前 4 后 4"
+  assert_contains "$1" "$SEC_B64_MASKED" "$2：base64 补位形态掩成前 4 后 4"
+}
+assert_no_secrets() {  # 内容 说明前缀：三种原文都不在（掩码形态在不在不管——给「掩码失败 → 只剩固定文案」的用例用）
+  assert_not_contains "$1" "$SEC_GHP" "$2：ghp_ 形态原文不出现"
+  assert_not_contains "$1" "$SEC_AKIA" "$2：AKIA 形态原文不出现"
+  assert_not_contains "$1" "$SEC_B64" "$2：base64 补位形态原文不出现"
+}
+# 故障注入替身：让 review_redact_secrets 那段 awk 程序失败（按程序文本识别），其余 awk 调用透传给真 awk——
+# 否则 diff/变更行的 awk 也会挂，评审在到达出口之前就失败了，测不到「掩码失败」这一段。
 # 真 awk 的路径在这里就解析好并写死进替身，不在替身里靠剥 PATH 首项去找：kiro-review.sh 找不到 kiro-cli 时
 # 会往 PATH 前面再插一段，那时首项就不是替身目录，剥错了就会 exec 到自己、无限递归。
-# 用法：make_bad_awk <目录>   → 在 <目录>/awk 写好替身；调用方把 <目录> 放到 PATH 最前面
+# 用法：make_bad_awk <目录> [all|doc|inline]   → 在 <目录>/awk 写好替身；调用方把 <目录> 放到 PATH 最前面
+#   all（默认）：字段级与文档级都失败（→ review_redact_json 先失败，评审走失败评论）
+#   doc：只让文档级（--keep-lines，参数里带 keeplines=1）失败——字段级照常，用来测文档级兜底的失败分支
+#   inline：只让**行内正文**的文档级掩码失败（stdin 里带 <!-- kiro-inline: 标记）——汇总照常发出，用来测「掩码失败 → 折叠区」
 make_bad_awk() {
-  local dir="$1" real
+  local dir="$1" mode="${2:-all}" real
   real=$(command -v awk) || { echo "make_bad_awk: 本机找不到 awk" >&2; return 1; }
   mkdir -p "$dir"
   {
     echo '#!/usr/bin/env bash'
+    echo 'is_mask=0; is_doc=0'
     echo 'for a in "$@"; do'
-    echo '  [[ "$a" == *"function mask(s)"* ]] && { echo "badawk: 模拟掩码程序失败" >&2; exit 1; }'
+    echo '  [[ "$a" == *"function mask(s)"* ]] && is_mask=1'
+    echo '  [[ "$a" == "keeplines=1" ]] && is_doc=1'
     echo 'done'
+    case "$mode" in
+      all)    echo '[[ $is_mask == 1 ]] && { echo "badawk: 模拟掩码程序失败" >&2; exit 1; }' ;;
+      doc)    echo '[[ $is_mask == 1 && $is_doc == 1 ]] && { echo "badawk: 模拟文档级掩码失败" >&2; exit 1; }' ;;
+      inline) echo 'if [[ $is_mask == 1 && $is_doc == 1 ]]; then'
+              echo '  buf=$(mktemp); cat > "$buf"'
+              echo '  if grep -q "<!-- kiro-inline:" "$buf"; then rm -f "$buf"; echo "badawk: 模拟行内正文掩码失败" >&2; exit 1; fi'
+              printf '  %q "$@" < "$buf"; rc=$?; rm -f "$buf"; exit $rc\n' "$real"
+              echo 'fi' ;;
+      *) echo "make_bad_awk: 未知模式 ${mode}" >&2; return 1 ;;
+    esac
     printf 'exec %q "$@"\n' "$real"
   } > "$dir/awk"
   chmod +x "$dir/awk"
