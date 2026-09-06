@@ -188,7 +188,7 @@ mut_degraded() { # $1=集成包根 → stdout 降级评论（原文里带未掩�
     review_render_degraded --text "$tmp/m12.raw.md" --sha 90fcb05 --src feature/x --dst master \
       --ts "2026-09-02 20:10:02" --diff-note "完整直传" --reason "输出中未找到契约标记" 2>/dev/null )
 }
-pkg=$(make_mutant m12-degrade-redact 's|review_redact_secrets --keep-lines < "\$_RR_TEXT" > "\$masked"|cat "$_RR_TEXT" > "$masked"|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m12-degrade-redact 's|^  _review_redact_to "\$_RR_TEXT" "\$masked" review_render_degraded .*$|  cat "$_RR_TEXT" > "$masked"  # 变异 M12：降级原文不掩码|' scripts/lib/review-render.sh)
 assert_contains "$(mut_degraded "$pkg")" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" \
   "M12：降级渲染器不再掩码——单测「票 16 降级：原文不出现」断言会失败"
 assert_not_contains "$(mut_degraded "$ROOT")" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" "M12 对照：未变异的降级渲染器自己掩掉"
@@ -930,7 +930,7 @@ assert_not_contains "$OUT" "$SEC_GHP" "M-n 对照：未变异实现掩掉"
 # ============ 16-fix3 的守卫 ============
 make_bad_awk "$tmp/badawk"   # 全部掩码程序失败的替身（M-s 用）
 # --- M-o：第 7 条——行内出口的字节硬守卫拆掉 → 超限正文照样发出 ---
-pkg=$(make_mutant m-o-body-guard 's|^    if \[\[ "\$body_bytes" -gt "\$MAX_COMMENT_BYTES" \]\]; then$|    if false; then  # 变异 M-o：不守字节上限|')
+pkg=$(make_mutant m-o-body-guard 's|^    if ! \[\[ "\$body_bytes" =~ .*\]\]; then .*$|    if false; then  # 变异 M-o：不守字节上限|')
 python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["findings"][0]["body"]="B"*40000; json.dump(c,open(sys.argv[2],"w"),ensure_ascii=False)' "$E2EC" "$tmp/oversize-inline.json"
 inline_case m-o "$pkg" "$IFX" MAX_COMMENT_BYTES=20000 MOCK_KIRO_CONTRACT="$tmp/oversize-inline.json"
 assert_rc "$RC" 0 "M-o：变异体仍能跑完"
@@ -938,7 +938,7 @@ assert_eq "$(inline_bodies "$OUT" | grep -c . || true)" "3" "M-o：超限正文�
 inline_case m-o-control "$ROOT" "$IFX" MAX_COMMENT_BYTES=20000 MOCK_KIRO_CONTRACT="$tmp/oversize-inline.json"
 assert_eq "$(inline_bodies "$OUT" | grep -c . || true)" "2" "M-o 对照：未变异实现只发 2 条"
 # --- M-p：第 12 条——去掉宽松第二遍 → 口令含 / 的凭证 URL 裸奔 ---
-pkg=$(make_mutant m-p-url-loose 's|    function redact_url(line) { return redact_url_pass(redact_url_pass(line, URL_STRICT_RE, 0), URL_LOOSE_RE, 1) }|    function redact_url(line) { return redact_url_pass(line, URL_STRICT_RE, 0) }  # 变异 M-p|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-p-url-loose 's|^      return redact_url_pass(redact_url_pass(line, URL_STRICT_RE, 0), URL_LOOSE_RE, 1)$|      return redact_url_pass(line, URL_STRICT_RE, 0)  # 变异 M-p|' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" 'https://ci:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@git.example.com/x.git')" 'https://ci:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@git.example.com/x.git' "M-p：没有宽松第二遍，含 / 的口令裸奔——单测「仍掩」断言会失败"
 assert_eq "$(mut_rd "$ROOT" 'https://ci:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@git.example.com/x.git')" 'https://ci:wJal****EKEY@git.example.com/x.git' "M-p 对照：未变异实现掩"
 pkg=$(make_mutant m-p2-url-port 's%        if (loose && pass ~ /\^\[0-9\]+\\//) { out = out seg; continue }   # host:port/path…@ 不是凭证%        # 变异 M-p2：不排除端口 + 路径%' scripts/lib/review-render.sh)
@@ -963,7 +963,7 @@ assert_contains "$OUT" "MIIEowIBAAKCAQEA""fakekey0123456" "M-r：降级评论里
 run_case m-r-control "$ROOT" MOCK_KIRO_LEAK_SECRET=1
 assert_not_contains "$OUT" "MIIEowIBAAKCAQEA""fakekey0123456" "M-r 对照：未变异实现屏蔽"
 # --- M-s：第 13 条——降级渲染器掩码失败不再 fail-closed → 空正文的降级评论以 rc 0 发出 ---
-pkg=$(make_mutant m-s-degraded-open 's|  if ! review_redact_secrets --keep-lines < "\$_RR_TEXT" > "\$masked" \|\| \[\[ ! -s "\$masked" \&\& -s "\$_RR_TEXT" \]\]; then|  if false; then  # 变异 M-s：掩码失败照样渲染|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-s-degraded-open 's|^  _review_redact_to "\$_RR_TEXT" "\$masked" review_render_degraded .*$|  _review_redact_to "$_RR_TEXT" "$masked" review_render_degraded "" --keep-lines \|\| : > "$masked"  # 变异 M-s：掩码失败照样渲染（空正文）|' scripts/lib/review-render.sh)
 # 替身只让**原文**的掩码失败（渲染好的评论带 <!-- kiro- 标记，文档级兜底照常）——否则出口的兜底会替降级渲染器把评审拦下，
 # 观察不到渲染器自己的 fail-open
 make_bad_awk "$tmp/badawk-raw" raw
@@ -983,7 +983,7 @@ assert_not_contains "$(mut_rd_multi "$pkg" "x\n$PEM_B\n（内容已省略）\n$P
 assert_contains "$(mut_rd_multi "$ROOT" "x\n$PEM_B\n（内容已省略）\n$PEM_L64\n$PEM_E\ny\n")" "其间 2 行已随密钥块一并屏蔽" "M-v 对照：未变异实现给提示"
 # ============ 16-fix4 的守卫 ============
 # --- M-w：第 11 条——begin_block 的悬挂行不再对标记前的散文过 redact_line → AKIA 原文跟着出去 ---
-pkg=$(make_mutant m-w-begin-pre 's|      if (keeplines) print redact_line(pre) substr(l, RSTART, RLENGTH) redact_b64(redact_line(tail), 20, 0)|      if (keeplines) print pre substr(l, RSTART, RLENGTH) redact_b64(redact_line(tail), 20, 0)  # 变异 M-w|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-w-begin-pre 's|      if (keeplines) print redact_line(pre) mk redact_b64(redact_line(tail), 20, 0)|      if (keeplines) print pre mk redact_b64(redact_line(tail), 20, 0)  # 变异 M-w|' scripts/lib/review-render.sh)
 assert_contains "$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w：悬挂行 BEGIN 前的 AKIA 原样出去——单测「悬挂行掩码」断言会失败"
 assert_not_contains "$( ( set +e; source "$ROOT/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w 对照：未变异实现掩"
 
