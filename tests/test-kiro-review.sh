@@ -497,6 +497,13 @@ assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-la
 # ============ 失败评论的标题与标记必须与成功/降级评论同形（供后续票原地更新）============
 run_case failheader MOCK_KIRO_FAIL=1
 assert_contains "$OUT" "# Kiro 代码评审 · ⚠️ 评审未完成" "失败评论：标题与成功评论同一产品名"
+# 15-fix4 #3：kiro-cli 非零退出 + 未探测版本 → 失败评论带版本告警（这条路径上 MR 只剩失败评论，告警不能丢；对 5462175 必须失败）
+run_case failnotice MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "失败 + 未探测版本：非零退出"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "评审未完成" "失败 + 未探测版本：是失败评论"
+assert_contains "$comment" "> ⚠️ 注意：本次 kiro-cli 版本 9.9.9 未经 P1-15 探测" "失败 + 未探测版本：失败评论带版本告警引用块"
+assert_contains "$comment" "构建号" "失败 + 未探测版本：日志线索仍在"
 assert_not_contains "$OUT" "Kiro 自动代码评审" "失败评论：不再使用旧标题"
 assert_eq "$(printf '%s' "$OUT" | grep -c 'kiro-review:[0-9a-f]* run:1')" "1" "失败评论：标记带 run 字段，与成功评论同形"
 
@@ -1488,6 +1495,17 @@ assert_contains "$comment" "结构化解析失败" "降级 + 版本不在名单�
 assert_contains "$comment" "未经 P1-15 探测" "降级 + 版本不在名单：降级评论也带版本 notice"
 assert_contains "$comment" "9.9.9" "降级 + 版本不在名单：notice 写出实际版本"
 assert_not_contains "$(posted_comment "$out")" "未经 P1-15 探测" "成功路径（2.21.1）：汇总评论无版本 notice"
+
+# 15-fix4 #3 / A7：降级评论只带 REVIEW_NOTICE——INLINE_NOTICE（「全部问题都归入未定位」这类关于分桶的提示）不该出现在一份没有问题清单的评论里。
+# 纯删除 MR + INLINE_COMMENT=1 让第 4.5 步产生 INLINE_NOTICE，再让评审员不守契约走降级。对 5462175 必须失败（那里降级评论继承 ALL_NOTICE）。
+tweak_pure_delete() { git reset -q --hard origin/master; git rm -q src/app.py; git commit -qm "delete app"; git push -qf origin feature/x; }
+CASE_TWEAK=tweak_pure_delete run_case degnoinline INLINE_COMMENT=1 MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
+assert_rc "$RC" 0 "降级 + 纯删除 MR：退出码 0"
+assert_contains "$OUT" "全部问题都归入" "降级 + 纯删除 MR：日志里有分桶提示（INLINE_NOTICE 确实产生了）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "结构化解析失败" "降级 + 纯删除 MR：是降级评论"
+assert_contains "$comment" "未经 P1-15 探测" "降级 + 纯删除 MR：版本 notice 在"
+assert_not_contains "$comment" "全部问题都归入" "降级 + 纯删除 MR：分桶提示（INLINE_NOTICE）不进降级评论"
 
 # ---- 日志里的变量名清单按数组元素取名字（15-fix #7）：取值含换行时，换行后的半个取值不能进日志 ----
 run_case nlkey KIRO_API_KEY="$(printf 'k\nSECRETFRAG=leaked')"

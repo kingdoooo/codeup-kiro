@@ -68,8 +68,11 @@ KIRO_ENGINE=v2
 
 log() { echo "[kiro-review] $*" >&2; }
 die() { log "错误：$*"; exit 1; }
-# 汇总评论里的一句话 notice（与行内评论的 INLINE_NOTICE 并列；评论比日志可见范围大，I10）
+# 汇总评论里的一句话 notice（与行内评论的 INLINE_NOTICE 并列；评论比日志可见范围大，I10）。
+# 归属（15-fix4 #3）：REVIEW_NOTICE 是版本 / 环境类提示，三种评论都带；INLINE_NOTICE 是关于分桶的提示（「全部问题都归入未定位」），
+# 只对带问题清单的汇总评论有意义——降级 / 失败评论只传 REVIEW_NOTICE。all_notice() 是汇总评论那一份合成，读全局、只在这里拼一次。
 REVIEW_NOTICE=""
+all_notice() { printf '%s' "${REVIEW_NOTICE}${REVIEW_NOTICE:+${INLINE_NOTICE:+ }}${INLINE_NOTICE}"; }
 
 # 定位到 MR 后的失败：best-effort 回写"评审未完成"评论再退出
 MR_LOCATED=0
@@ -115,6 +118,7 @@ die_review() {
       --src "${SOURCE_BRANCH:-?}" --dst "${TARGET_BRANCH:-?}" \
       --ts "$(date '+%Y-%m-%d %H:%M:%S')" --diff-note "${DIFF_NOTE:-（本次未生成 diff）}" \
       --run "$REVIEW_RUN" "${hist_args[@]+"${hist_args[@]}"}" \
+      --notice "$REVIEW_NOTICE" \
       --log-hint "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。" > "$f" \
       || log "警告：失败评论渲染异常（rc≠0），改用最小失败评论"
     # 渲染器在参数不合规时（例如 --ts 为空、--history 不可读）以 rc 2 提前返回，$f 就是 0 字节。
@@ -790,8 +794,6 @@ render_args=(--sha "$SHORT_SHA" --src "$SOURCE_BRANCH" --dst "$TARGET_BRANCH"
 # 上一条汇总里读回的历次记录：渲染器会在它后面追加本次那一行
 [[ -n "$PRIOR_HISTORY_FILE" ]] && render_args+=(--history "$PRIOR_HISTORY_FILE")
 
-# 汇总/降级评论共用的一句话 notice：kiro-cli 版本 notice 在前，行内评论的 notice 在后；降级路径也要带（15-fix3 #3）
-ALL_NOTICE="${REVIEW_NOTICE}${REVIEW_NOTICE:+${INLINE_NOTICE:+ }}${INLINE_NOTICE}"
 if [[ -n "$DEGRADE_REASON" ]]; then
   # 降级：评审已经产出、只是没按契约输出——贴清洗后的原文并在标题标明，退出码仍为 0。
   log "警告：结构化解析失败（${DEGRADE_REASON}），降级为贴出评审员输出原文"
@@ -800,9 +802,9 @@ if [[ -n "$DEGRADE_REASON" ]]; then
   [[ "$final_rc" == "0" ]] || die_review "结构化解析失败，且取评审员原文也失败（rc=${final_rc}）"
   review_clean_text < "$WORK/final.txt" > "$WORK/raw.md"
   [[ -s "$WORK/raw.md" ]] || die_review "结构化解析失败，且评审员输出为空"
-  degraded_args=()
-  [[ -n "$ALL_NOTICE" ]] && degraded_args+=(--notice "$ALL_NOTICE")
-  review_render_degraded --text "$WORK/raw.md" --reason "$DEGRADE_REASON" "${degraded_args[@]+"${degraded_args[@]}"}" "${render_args[@]}" \
+  # 降级评论只带 REVIEW_NOTICE（版本 / 环境类）：INLINE_NOTICE 是关于分桶的提示，放进一份没有问题清单的评论里没有意义（15-fix4 #3 / A7）。
+  # --notice "" 是已验证的 no-op（解析器接受空值、渲染器按 [[ -n ]] 判断），不需要一次性数组与空数组守卫。
+  review_render_degraded --text "$WORK/raw.md" --reason "$DEGRADE_REASON" --notice "$REVIEW_NOTICE" "${render_args[@]}" \
     > "$WORK/comment.md" || die_review "降级评论渲染失败"
 else
   dropped=$(jq -r '.dropped_findings' "$WORK/validated.json")
@@ -818,11 +820,8 @@ else
   if [[ "$INLINE_COMMENT" == "1" ]] && publish_inline_comments "$WORK/validated.json"; then
     SUMMARY_JSON="$WORK/plan.json"
   fi
-  summary_args=(--inline-comment "$INLINE_ACTIVE")
-  # INLINE_NOTICE 可能在 publish_inline_comments 里刚被追加，所以这里重算一次
-  ALL_NOTICE="${REVIEW_NOTICE}${REVIEW_NOTICE:+${INLINE_NOTICE:+ }}${INLINE_NOTICE}"
-  [[ -n "$ALL_NOTICE" ]] && summary_args+=(--notice "$ALL_NOTICE")
-  review_render_summary --json "$SUMMARY_JSON" "${summary_args[@]}" "${render_args[@]}" \
+  # 汇总评论带合成的 notice（版本 notice 在前，行内评论的 notice 在后）；all_notice 读全局，INLINE_NOTICE 可能在 publish_inline_comments 里刚被追加
+  review_render_summary --json "$SUMMARY_JSON" --inline-comment "$INLINE_ACTIVE" --notice "$(all_notice)" "${render_args[@]}" \
     > "$WORK/comment.md" || die_review "汇总评论渲染失败"
 fi
 [[ -s "$WORK/comment.md" ]] || die_review "渲染后的评论为空"

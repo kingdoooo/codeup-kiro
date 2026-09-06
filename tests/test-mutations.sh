@@ -289,11 +289,18 @@ assert_rc "$RC" 0 "M5u：变异体仍能跑完"
 assert_eq "$([[ -f "$CASE/work/.kiro" ]] && echo kept || echo gone)" "kept" "M5u：根 .kiro 普通文件幸存——端到端「根 .kiro 普通文件被删」断言会失败"
 
 # --- M5v：降级评论不再接 --notice → 版本 notice 只在日志、评论里没有（15-fix3 #3）---
-pkg=$(make_mutant m5v-degraded-notice '/degraded_args+=(--notice "\$ALL_NOTICE")/d')
+pkg=$(make_mutant m5v-degraded-notice 's/--reason "\$DEGRADE_REASON" --notice "\$REVIEW_NOTICE"/--reason "$DEGRADE_REASON"/')
 run_case m5v "$pkg" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
 assert_rc "$RC" 0 "M5v：变异体仍能跑完"
 assert_contains "$OUT" "未经 P1-15 探测" "M5v：日志仍有警告"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5v：降级评论丢了 notice——端到端「降级评论也带版本 notice」断言会失败"
+
+# --- M5ad：die_review 不再给失败评论传 --notice → kiro-cli 非零退出 + 未探测版本时失败评论没有版本告警（15-fix4 #3）---
+pkg=$(make_mutant m5ad-failure-notice '/^      --notice "\$REVIEW_NOTICE" \\$/d')
+run_case m5ad "$pkg" MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5ad：仍是失败"
+assert_contains "$OUT" "未经 P1-15 探测" "M5ad：日志仍有警告"
+assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5ad：失败评论丢了版本告警——端到端「失败评论带版本告警引用块」断言会失败"
 
 # --- M5w：被拒的凭证形状名字不再掩码 → 完整名字进失败评论（15-fix3 #6）---
 pkg=$(make_mutant m5w-cred-mask 's/cred+=("$(_kiro_env_mask_token "$tok")")/cred+=("$tok")/' scripts/lib/kiro-agent.sh)

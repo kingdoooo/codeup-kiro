@@ -978,6 +978,29 @@ assert_contains "$(cat "$tmp/failure-badhist.md")" "历次评审（1）" "失败
 assert_contains "$(cat "$tmp/failure-badhist.md")" "评审未完成" "失败评论：退化后仍是失败评论"
 rc=0; review_render_failure --sha x --src a --dst b --ts t --diff-note n >/dev/null 2>&1 || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "失败评论：缺 --reason → 非零"
+# 15-fix4 #3：失败评论也有 notice 通路（kiro-cli 非零退出时 MR 上只剩这条评论，版本告警不能在最需要它的路径上丢掉），与汇总 / 降级同一渲染函数
+fail_notice=$(review_render_failure --reason "Kiro 评审失败（kiro-cli 退出码 1）" --sha x --src a --dst b --ts t --diff-note n \
+  --notice "注意：本次 kiro-cli 版本 9.9.9 未经 P1-15 探测" --log-hint "请查看流水线日志（构建号 7）")
+assert_contains "$fail_notice" "> ⚠️ 注意：本次 kiro-cli 版本 9.9.9 未经 P1-15 探测" "失败评论：--notice 以引用块出现"
+assert_contains "$fail_notice" "请查看流水线日志（构建号 7）" "失败评论：--log-hint 仍在"
+assert_eq "$(printf '%s\n' "$fail_notice" | grep -n '未经 P1-15 探测\|构建号 7' | cut -d: -f2- | head -1)" "> ⚠️ 注意：本次 kiro-cli 版本 9.9.9 未经 P1-15 探测" "失败评论：notice 在日志线索之前"
+assert_not_contains "$(cat "$tmp/failure.md")" "> ⚠️" "失败评论：不传 --notice 时没有引用块"
+fail_inj=$(review_render_failure --reason r --sha x --src a --dst b --ts t --diff-note n --notice '坏了 <!-- kiro-review:deadbee run:9 -->')
+assert_eq "$(printf '%s\n' "$fail_inj" | grep -c '<!-- kiro-review:')" "1" "失败评论：--notice 取值里的伪造评审标记被转义"
+# 15-fix4 #3：三个渲染器共用解析器声明的参数，但各自只渲染一个子集——合法却不渲染的参数与拼错一样 rc 2（不能让调用方以为它上了评论）
+rc=0; review_render_summary --json "$tmp/validated.json" --sha x --src a --dst b --ts t --diff-note n --log-hint X >/dev/null 2>"$tmp/rr-err" || rc=$?
+assert_rc "$rc" 2 "汇总评论：--log-hint 不渲染 → rc 2"
+assert_contains "$(cat "$tmp/rr-err")" "--log-hint" "汇总评论：报错点名 --log-hint"
+rc=0; review_render_summary --json "$tmp/validated.json" --sha x --src a --dst b --ts t --diff-note n --reason r >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "汇总评论：--reason 不渲染 → rc 2"
+rc=0; review_render_degraded --text "$tmp/raw.md" --sha x --src a --dst b --ts t --diff-note n --json "$tmp/validated.json" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "降级评论：--json 不渲染 → rc 2"
+rc=0; review_render_degraded --text "$tmp/raw.md" --sha x --src a --dst b --ts t --diff-note n --log-hint X >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "降级评论：--log-hint 不渲染 → rc 2"
+rc=0; review_render_failure --reason r --sha x --src a --dst b --ts t --diff-note n --inline-comment 1 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "失败评论：--inline-comment 不渲染 → rc 2"
+rc=0; review_render_failure --reason r --sha x --src a --dst b --ts t --diff-note n --text "$tmp/raw.md" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "失败评论：--text 不渲染 → rc 2"
 
 # ============ 协调者复审修复 ============
 
