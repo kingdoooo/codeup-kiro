@@ -188,7 +188,7 @@ mut_degraded() { # $1=集成包根 → stdout 降级评论（原文里带未掩�
     review_render_degraded --text "$tmp/m12.raw.md" --sha 90fcb05 --src feature/x --dst master \
       --ts "2026-09-02 20:10:02" --diff-note "完整直传" --reason "输出中未找到契约标记" 2>/dev/null )
 }
-pkg=$(make_mutant m12-degrade-redact 's|review_redact_secrets < "\$_RR_TEXT"|cat "$_RR_TEXT"|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m12-degrade-redact 's|review_redact_secrets --keep-lines < "\$_RR_TEXT" > "\$masked"|cat "$_RR_TEXT" > "$masked"|' scripts/lib/review-render.sh)
 assert_contains "$(mut_degraded "$pkg")" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" \
   "M12：降级渲染器不再掩码——单测「票 16 降级：原文不出现」断言会失败"
 assert_not_contains "$(mut_degraded "$ROOT")" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" "M12 对照：未变异的降级渲染器自己掩掉"
@@ -699,51 +699,30 @@ assert_eq "$(mut_meta_row "$ROOT" "$nl_branch" | tr -cd '|' | wc -c | tr -d ' ')
 assert_eq "$(sha_row_pipes "$(mut_render "$ROOT" "$nl_branch")")" "5" \
   "M38 对照：未变异实现里前半截就是完整那一行"
 
-# --- M39：让 EOF 时的放出失效 → 未配对的 BEGIN 之后暂存的全部正文一起消失 ---
-# 等价于票 10 之前的「块内一律丢弃、只有 END 行才退出」：模型只引用起始行时，评论上只剩那句
-# 「已屏蔽 PRIVATE KEY」，真正的结论一个字都到不了 MR，也没有任何提示。
-pkg=$(make_mutant m39-pem-unclosed 's|    END { if (inpem) pem_flush() }|    END { }|' scripts/lib/review-render.sh)
-run_case m39 "$pkg" MOCK_KIRO_LEAK_SECRET=1
-assert_rc "$RC" 0 "M39：变异体仍能跑完"
-assert_not_contains "$OUT" "总体结论：不建议合并。" \
-  "M39：未配对 BEGIN 之后的结论被整段吞掉——端到端「结论仍在」断言会失败"
-assert_not_contains "$OUT" "没有配对的 END 行" "M39：也没有任何未闭合提示，读者看不出正文缺失"
-
-# --- M40：只掐掉未闭合提示（正文照样放出）→ 读者不知道刚才那段被吞的是什么 ---
-# 与 M39 分开：M39 一次杀掉「放出正文 + 给提示」两件事，只留它会让「提示」这一半没人测。
-# 变异体要保持是**合法 awk**（这段 awk 程序在 bash 里只是个字符串，make_mutant 的 bash -n 查不出
-# awk 语法错误；写成 `:` 会让整个掩码管道运行时失败，那测的就不是「少了提示」而是「掩码崩了」）。
+# --- M39–M43：PEM 未闭合块的放出 / 提示 / 掩码——16-fix3 第 14 条后降级路径走保行模式，字段级的 pem_flush 只在
+#     review_redact_json 里跑，这几条改为库级探针（字段模式的 review_redact_secrets），端到端向量换成保行模式的 M-r ---
+D5="-----"; PEM_B="${D5}BEGIN RSA PRIVATE KEY${D5}"; PEM_E="${D5}END RSA PRIVATE KEY${D5}"   # 拆片段：完整 PEM 头字面量不进源码
+PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02abcdefghijkl"
+PEM_PLACEHOLDER="**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
+mut_rd_multi() { ( set +e; source "$1/scripts/lib/review-render.sh"; printf '%b' "$2" | review_redact_secrets ); }   # <包根> <多行文本（printf %b）>
+unclosed_in="$PEM_B\n（下面是私钥内容，节选）\nMIIEowIBAAKCAQEAfakekey0123456\n正文片段 $PEM_L64 出现在 app/key.pem\n\n总体结论：不建议合并。\n"
+# M39：让字段末 / EOF 时的放出失效 → 未配对 BEGIN 之后暂存的全部正文一起消失（等价于票 10 之前的「块内一律丢弃」）
+pkg=$(make_mutant m39-pem-unclosed 's|    END { emit_pending(); if (inpem \&\& !keeplines) pem_flush() }|    END { emit_pending() }|' scripts/lib/review-render.sh)
+assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "总体结论：不建议合并。" "M39：未配对 BEGIN 之后的结论被整段吞掉——单测「结论仍在」断言会失败"
+assert_contains "$(mut_rd_multi "$ROOT" "$unclosed_in")" "总体结论：不建议合并。" "M39 对照：未变异实现放出结论"
+# M40：只掐掉未闭合提示（正文照样放出）
 pkg=$(make_mutant m40-pem-note 's|      print pem_note(held_n - first + 1)|      held_n = held_n  # 变异：不打未闭合提示|' scripts/lib/review-render.sh)
-run_case m40 "$pkg" MOCK_KIRO_LEAK_SECRET=1
-assert_rc "$RC" 0 "M40：变异体仍能跑完"
-assert_contains "$OUT" "总体结论：不建议合并。" "M40：正文仍在（变异只影响提示）"
-assert_not_contains "$OUT" "没有配对的 END 行" "M40：未闭合提示消失——端到端提示断言会失败"
-
-# --- M42：放出时不再掩夹在句子里的 base64 连片 → 私钥正文片段完整进评论 ---
-pkg=$(make_mutant m42-b64-runs \
-  's|out = out substr(line, 1, RSTART - 1) (is_hex(m) ? m : mask(m))|out = out substr(line, 1, RSTART - 1) m|' scripts/lib/review-render.sh)
-run_case m42 "$pkg" MOCK_KIRO_LEAK_SECRET=1
-assert_rc "$RC" 0 "M42：变异体仍能跑完"
-assert_contains "$OUT" "MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02" \
-  "M42：句子里的私钥正文片段完整进了评论——端到端「片段不进评论」断言会失败"
-assert_not_contains "$OUT" "MIIEowIBAAKCAQEA""fakekey0123456" "M42 对照：整行正文仍被掩（另一条规则）"
-
-# --- M43：放出时不再掩整行 base64 → 说明行之后的整行私钥正文完整进评论 ---
-pkg=$(make_mutant m43-b64-line 's|        if (pem_body_like(l)) l = redact(l, "\[A-Za-z0-9+/=\]+")|        l = l  # 变异：整行 base64 不掩|' scripts/lib/review-render.sh)
-run_case m43 "$pkg" MOCK_KIRO_LEAK_SECRET=1
-assert_rc "$RC" 0 "M43：变异体仍能跑完"
-assert_contains "$OUT" "MIIEowIBAAKCAQEA""fakekey0123456" \
-  "M43：整行私钥正文完整进了评论——端到端「整行正文不进评论」断言会失败"
-assert_not_contains "$OUT" "MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02" "M43 对照：句子里的片段仍被掩（另一条规则）"
-
-# --- M41：把 key=value 的分隔符扫描改回「从段末往回找」→ base64 补位的取值整段裸奔 ---
-# 取值字符类里也有 `=`，往回找会把补位的 `=` 当成分隔符，取值变成空串、整段原样输出。
-pkg=$(make_mutant m41-assign-sep \
-  's|for (i = 1; i <= length(seg); i++) {|for (i = length(seg); i >= 1; i--) {|' scripts/lib/review-render.sh)
-run_case m41 "$pkg" MOCK_KIRO_LEAK_SECRET=1
-assert_rc "$RC" 0 "M41：变异体仍能跑完"
-assert_contains "$OUT" "dGhpcyBpcyBh""IHNlY3JldA=="   "M41：带 base64 补位的凭证完整进了评论——端到端「补位形态被掩掉」断言会失败"
-assert_not_contains "$OUT" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"   "M41 对照：不含 = 的取值仍被掩掉（隔离出「值里含 = 」才是触发条件）"
+assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "总体结论：不建议合并。" "M40：正文仍在（变异只影响提示）"
+assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "没有配对的 END 行" "M40：未闭合提示消失——单测「给出提示」断言会失败"
+assert_contains "$(mut_rd_multi "$ROOT" "$unclosed_in")" "没有配对的 END 行" "M40 对照：未变异实现给提示"
+# M42：放出时不再掩夹在句子里的 base64 连片（redact_b64 的掩码换成原样）
+pkg=$(make_mutant m42-b64-runs 's|out = out substr(s, 1, RSTART - 1) (is_hex(m) ? m : (full ? "\*\*\*\*" : mask(m)))|out = out substr(s, 1, RSTART - 1) m|' scripts/lib/review-render.sh)
+assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "$PEM_L64" "M42：句子里的私钥正文片段完整放出——单测「片段不进评论」断言会失败"
+assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "MIIEowIBAAKCAQEAfakekey0123456" "M42 对照：整行正文仍被掩（另一条规则）"
+# M43：放出时不再掩整行 base64
+pkg=$(make_mutant m43-b64-line 's|        if (pem_body_like(l)) l = redact(l, "\[" B64C "=\]+")|        l = l  # 变异：整行 base64 不掩|' scripts/lib/review-render.sh)
+assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "MIIEowIBAAKCAQEAfakekey0123456" "M43：整行私钥正文完整放出——单测「整行正文不进评论」断言会失败"
+assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "$PEM_L64" "M43 对照：句子里的片段仍被掩（另一条规则）"
 
 # --- M44：让「像标签的 <」转义失效 → 模型文本里的原始 HTML 直达评论 ---
 # 变异只把 _escape_tags 换成恒等（其余清洗规则都不动），所以观察到的差异只能来自这一条规则。
@@ -861,14 +840,13 @@ run_case m-d "$pkg" PATH="$tmp/badawk-doc:$PATH" MOCK_KIRO_CONTRACT="$SEC_SUMMAR
 assert_rc "$RC" 0 "M-d：变异体把掩码失败吞掉后评审「成功」"
 assert_contains "$(meta_row "$(posted_comment "$OUT")")" "feature/${SEC_AKIA}" "M-d：未掩码的元信息表被回写——端到端「掩码失败不回写原文」断言会失败"
 
-# --- M-e：文档级重新允许删行（--keep-lines 失效）→ 行数守卫 rc 3 拦住（库级探针，方案 C 裁决里的那条变异）---
+# --- M-e：保行模式重新允许删行（正文行分支从「等行数换占位」改成「丢弃」）→ 行数守卫 rc 3 拦住（方案 C 裁决里的那条变异）---
 mut_doc_pem() { ( set +e; source "$1/scripts/lib/review-render.sh"
-  printf '| 文件 | P0 |\n|---|---|\n| %sBEGIN RSA PRIVATE KEY%s | 1 |\n%sBEGIN RSA PRIVATE KEY%s\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCfake02abcdefghijkl\n%sEND RSA PRIVATE KEY%s\n' \
-    ----- ----- ----- ----- ----- ----- > "$tmp/m-e.md"
+  printf '| 文件 | P0 |\n|---|---|\n| x | 1 |\n%s\n%s\n%s\n' "$PEM_B" "$PEM_L64" "$PEM_E" > "$tmp/m-e.md"
   review_redact_file "$tmp/m-e.md" 2>/dev/null; echo $? ); }
-pkg=$(make_mutant m-e-doc-deletes-lines 's|^    !keeplines \&\& pem_marker(\$0, "BEGIN") {$|    pem_marker($0, "BEGIN") {  # 变异 M-e：文档级也进 PEM 整块删除|; s|^    !keeplines \&\& inpem \&\& pem_marker(\$0, "END") { pem_drop(); next }$|    inpem \&\& pem_marker($0, "END") { pem_drop(); next }|; s|^    !keeplines \&\& inpem { pem_hold(\$0); next }$|    inpem { pem_hold($0); next }|' scripts/lib/review-render.sh)
-assert_eq "$(mut_doc_pem "$pkg")" "3" "M-e：文档级重新允许删行 → 行数守卫 rc 3 拒绝写回（单测「逐字节不变 rc 0」断言会失败）"
-assert_eq "$(mut_doc_pem "$ROOT")" "0" "M-e 对照：未变异实现文档级不碰 PEM、rc 0"
+pkg=$(make_mutant m-e-doc-deletes-lines 's|      if (pem_body_like(\$0) \|\| pem_is_hdr(\$0)) { print PEM_BODY_PH; next }   # 正文行 / RFC 1421 头：等行数替换（第 11 条）|      if (pem_body_like($0) \|\| pem_is_hdr($0)) { next }  # 变异 M-e：保行模式删行|' scripts/lib/review-render.sh)
+assert_eq "$(mut_doc_pem "$pkg")" "3" "M-e：保行模式删行 → 行数守卫 rc 3 拒绝写回（单测「行数不变 rc 0」断言会失败）"
+assert_eq "$(mut_doc_pem "$ROOT")" "0" "M-e 对照：未变异实现正文行等行数替换、rc 0"
 
 # --- M-f：拆掉标记守卫（_review_replace_guarded 不再核对标记）→ 删了评审标记的输出照样写回（行数补齐一行绕过行数守卫）---
 mut_guard() { ( set +e; source "$1/scripts/lib/review-render.sh"
@@ -923,7 +901,7 @@ assert_eq "$(mut_rd "$pkg" 'aws_secret_access_key = "/JalrXUtnFEMIK7MDENGbPxRfiC
 assert_eq "$(mut_rd "$ROOT" 'aws_secret_access_key = "/JalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"')" 'aws_secret_access_key = "/Jal****EKEY"' "M-k 对照：未变异实现掩"
 
 # --- M-l：第 9 条——口令字符类放回 / → 普通 URL 被掩成「像凭证 URL」---
-pkg=$(make_mutant m-l-url-slash 's#:\\/\\/\[A-Za-z0-9._~+-\]+:\[A-Za-z0-9._~+=%-\]+@/#:\\/\\/[A-Za-z0-9._~+-]+:[A-Za-z0-9._~+\\/=%-]+@/#' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-l-url-slash 's#URL_STRICT_RE = "\[a-zA-Z\]\[a-zA-Z0-9+.-\]\*://\[A-Za-z0-9._~+-\]+:\[A-Za-z0-9._~+=%-\]+@"#URL_STRICT_RE = "[a-zA-Z][a-zA-Z0-9+.-]*://[A-Za-z0-9._~+-]+:[A-Za-z0-9._~+/=%-]+@"#' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" 'https://registry.npmjs.org:443/@babel/core')" 'https://registry.npmjs.org:****@babel/core' "M-l：口令字符类含 / 时 npm URL 被改写——单测「不掩」断言会失败"
 assert_eq "$(mut_rd "$ROOT" 'https://registry.npmjs.org:443/@babel/core')" 'https://registry.npmjs.org:443/@babel/core' "M-l 对照：未变异实现不动"
 
@@ -942,5 +920,46 @@ run_case m-n "$pkg" MOCK_KIRO_FAIL=1 MOCK_KIRO_STDERR_TEXT="Authorization: Beare
 assert_contains "$OUT" "Authorization: Bearer ${SEC_GHP}" "M-n：kiro stderr 尾巴带 bearer 原文进了日志——端到端「日志不含原文」断言会失败"
 run_case m-n-control "$ROOT" MOCK_KIRO_FAIL=1 MOCK_KIRO_STDERR_TEXT="Authorization: Bearer ${SEC_GHP}"
 assert_not_contains "$OUT" "$SEC_GHP" "M-n 对照：未变异实现掩掉"
+
+# ============ 16-fix3 的守卫 ============
+make_bad_awk "$tmp/badawk"   # 全部掩码程序失败的替身（M-s 用）
+# --- M-o：第 7 条——行内出口的字节硬守卫拆掉 → 超限正文照样发出 ---
+pkg=$(make_mutant m-o-body-guard 's|^    if \[\[ "\$body_bytes" -gt "\$MAX_COMMENT_BYTES" \]\]; then$|    if false; then  # 变异 M-o：不守字节上限|')
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["findings"][0]["body"]="B"*40000; json.dump(c,open(sys.argv[2],"w"),ensure_ascii=False)' "$E2EC" "$tmp/oversize-inline.json"
+inline_case m-o "$pkg" "$IFX" MAX_COMMENT_BYTES=20000 MOCK_KIRO_CONTRACT="$tmp/oversize-inline.json"
+assert_rc "$RC" 0 "M-o：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | grep -c . || true)" "3" "M-o：超限正文照样发出（3 条）——端到端「超限那条不发」断言会失败"
+inline_case m-o-control "$ROOT" "$IFX" MAX_COMMENT_BYTES=20000 MOCK_KIRO_CONTRACT="$tmp/oversize-inline.json"
+assert_eq "$(inline_bodies "$OUT" | grep -c . || true)" "2" "M-o 对照：未变异实现只发 2 条"
+# --- M-p：第 12 条——去掉宽松第二遍 → 口令含 / 的凭证 URL 裸奔 ---
+pkg=$(make_mutant m-p-url-loose 's|    function redact_url(line) { return redact_url_pass(redact_url_pass(line, URL_STRICT_RE, 0), URL_LOOSE_RE, 1) }|    function redact_url(line) { return redact_url_pass(line, URL_STRICT_RE, 0) }  # 变异 M-p|' scripts/lib/review-render.sh)
+assert_eq "$(mut_rd "$pkg" 'https://ci:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@git.example.com/x.git')" 'https://ci:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@git.example.com/x.git' "M-p：没有宽松第二遍，含 / 的口令裸奔——单测「仍掩」断言会失败"
+assert_eq "$(mut_rd "$ROOT" 'https://ci:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@git.example.com/x.git')" 'https://ci:wJal****EKEY@git.example.com/x.git' "M-p 对照：未变异实现掩"
+pkg=$(make_mutant m-p2-url-port 's%        if (loose && pass ~ /\^\[0-9\]+\\//) { out = out seg; continue }   # host:port/path…@ 不是凭证%        # 变异 M-p2：不排除端口 + 路径%' scripts/lib/review-render.sh)
+assert_eq "$(mut_rd "$pkg" 'http://localhost:8080/oauth/callback/user@example.com')" 'http://localhost:8080****user@example.com' "M-p2：去掉端口 + 路径排除后普通 URL 被掩——单测「不掩」断言会失败"
+# --- M-q：第 10 条——装饰剥离去掉反引号 / 列表 → 装饰 BEGIN 行不再开块 ---
+pkg=$(make_mutant m-q-deco 's|        if (s ~ /\^\[>\*+`\]\[\[:space:\]\]\*/) { sub(/\^\[>\*+`\]\[\[:space:\]\]\*/, "", s); continue }|        # 变异 M-q：不剥引用 / 列表 / 反引号装饰|' scripts/lib/review-render.sh)
+# 起始行由「行末标记 + 下一行像正文」的兜底另行兜住（两道防线叠着），装饰剥离失效的可观测结果在 END 行：反引号装饰的 END
+# 不再认出 → 块到 EOF 仍未闭合 → 放出并插「没有配对的 END 行」提示（单测「整块丢弃、只剩一行占位」断言会失败）
+assert_contains "$(mut_rd_multi "$pkg" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "没有配对的 END 行" "M-q：装饰剥离失效后反引号装饰的 END 行认不出，块被当成未闭合——单测「整块丢弃」断言会失败"
+assert_eq "$(mut_rd_multi "$ROOT" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "$PEM_PLACEHOLDER" "M-q 对照：未变异实现整块丢弃、只剩一行占位"
+# --- M-t：第 10 条兜底——「含 BEGIN 且下一行像正文」不再当块起始 ---
+pkg=$(make_mutant m-t-pend 's|    pend != "" { if (!inpem \&\& (pem_body_like(\$0) \|\| pem_is_hdr(\$0))) { begin_block(pend); pend = "" } else emit_pending() }|    pend != "" { emit_pending() }  # 变异 M-t：兜底失效|' scripts/lib/review-render.sh)
+assert_contains "$(mut_rd_multi "$pkg" "私钥如下 $PEM_B\n$PEM_L64\n$PEM_E\n")" "$PEM_L64" "M-t：兜底失效后正文裸奔——单测「兜底当块起始」断言会失败"
+assert_not_contains "$(mut_rd_multi "$ROOT" "私钥如下 $PEM_B\n$PEM_L64\n$PEM_E\n")" "$PEM_L64" "M-t 对照：未变异实现兜底开块"
+# --- M-r：第 11 / 14 条——保行模式正文行不再换占位（原样打出）→ 降级评论 / kiro stderr 泄露正文 ---
+pkg=$(make_mutant m-r-keep-body 's|      if (pem_body_like(\$0) \|\| pem_is_hdr(\$0)) { print PEM_BODY_PH; next }   # 正文行 / RFC 1421 头：等行数替换（第 11 条）|      if (pem_body_like($0) \|\| pem_is_hdr($0)) { print; next }  # 变异 M-r：保行模式正文原样|' scripts/lib/review-render.sh)
+run_case m-r "$pkg" MOCK_KIRO_LEAK_SECRET=1
+assert_rc "$RC" 0 "M-r：变异体仍能跑完"
+assert_contains "$OUT" "MIIEowIBAAKCAQEA""fakekey0123456" "M-r：降级评论里整行私钥正文裸奔——端到端「整行正文不进评论」断言会失败"
+run_case m-r-control "$ROOT" MOCK_KIRO_LEAK_SECRET=1
+assert_not_contains "$OUT" "MIIEowIBAAKCAQEA""fakekey0123456" "M-r 对照：未变异实现屏蔽"
+# --- M-s：第 13 条——降级渲染器掩码失败不再 fail-closed → 空正文的降级评论以 rc 0 发出 ---
+pkg=$(make_mutant m-s-degraded-open 's|  if ! review_redact_secrets --keep-lines < "\$_RR_TEXT" > "\$masked" \|\| \[\[ ! -s "\$masked" \&\& -s "\$_RR_TEXT" \]\]; then|  if false; then  # 变异 M-s：掩码失败照样渲染|' scripts/lib/review-render.sh)
+run_case m-s "$pkg" PATH="$tmp/badawk:$PATH" MOCK_KIRO_LEAK_SECRET=1
+assert_rc "$RC" 0 "M-s：掩码失败被吞后评审「成功」——端到端「降级掩码失败 → 评审失败」断言会失败"
+assert_contains "$(posted_comment "$OUT")" "结构化解析失败" "M-s：发出的是一份降级评论（正文为空）"
+run_case m-s-control "$ROOT" PATH="$tmp/badawk:$PATH" MOCK_KIRO_LEAK_SECRET=1
+assert_nonzero "$RC" "M-s 对照：未变异实现 fail-closed"
 
 report

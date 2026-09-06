@@ -409,11 +409,13 @@ assert_contains "$OUT" 'api_key = ' "原文含未掩码凭证：键名保留"
 pem_body="MIIEowIBAAKCAQEA""fakekey0123456"
 pem_body2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02"
 assert_not_contains "$OUT" "$pem_body" "原文含未掩码凭证：说明行之后的整行私钥正文不进评论"
-assert_contains "$OUT" "MIIE****3456" "原文含未掩码凭证：整行正文掩成前 4 后 4"
+# 16-fix3 第 14 条：降级原文走保行模式——正文行就地换成占位、起始行保留为标记、不插提示行、不删任何行
+assert_contains "$OUT" "****（PEM 正文已屏蔽）" "原文含未掩码凭证：整行正文换成等行数的屏蔽占位（保行模式）"
 assert_not_contains "$OUT" "$pem_body2" "原文含未掩码凭证：夹在句子里的正文片段不进评论"
 assert_contains "$OUT" "正文片段 MIIE****ke02 出现在 app/key.pem" "原文含未掩码凭证：片段掩码后句子其余部分完整"
 assert_contains "$OUT" "（下面是私钥内容，节选）" "原文含未掩码凭证：起始行后的说明行放出来（不被吞）"
-assert_contains "$OUT" "没有配对的 END 行" "原文含未掩码凭证：未闭合的 PEM 块给出提示"
+assert_not_contains "$OUT" "没有配对的 END 行" "原文含未掩码凭证（第 14 条）：保行模式不再插「未闭合」提示行"
+assert_contains "$OUT" "BEGIN RSA PRIVATE KEY" "原文含未掩码凭证（第 14 条）：起始行作为标记原位保留"
 assert_contains "$OUT" "总体结论：不建议合并。" "原文含未掩码凭证：未闭合 PEM 之后的结论仍在评论里"
 
 # ============ 能力检查：kiro-cli 不支持 --output-format → 拒绝运行，不白烧额度 ============
@@ -1415,5 +1417,29 @@ run_case degrade-reason-log MOCK_KIRO_LEAK_SECRET=1
 assert_rc "$RC" 0 "16-fix 降级原因日志：评审成功（降级）"
 assert_contains "$OUT" "警告：结构化解析失败（评审员输出中没有成对的 <<<KIRO_REVIEW_JSON>>> 契约标记），降级为贴出评审员输出原文" \
   "16-fix 降级原因日志：过掩码后文案逐字不变"
+
+# ---- 16-fix3 第 13 条：降级路径掩码失败 fail-closed（48aff39：rc 0、评论 25 行正文空：正控）----
+run_case degrade-redactfail PATH="$tmp/badawk:$PATH" MOCK_KIRO_LEAK_SECRET=1
+assert_nonzero "$RC" "第 13 条：降级原文掩码失败 → 评审失败，而不是发一份空正文的降级评论"
+assert_contains "$OUT" "review_render_degraded: 原文掩码失败" "第 13 条：库函数点明原因"
+# 掩码程序不可用时 _redact_for_log 同样不可用：die_review 的原因行只留固定文案（第 20 条），原因文本不会原样进日志
+assert_contains "$OUT" "含不受信取值的失败原因在掩码程序不可用时不打日志，已省略" "第 13 条：日志里的失败原因退回固定文案"
+assert_no_secrets "$OUT" "第 13 条：全部输出不含原文"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "⚠️ 评审未完成" "第 13 条：MR 上是失败评论"
+# ---- 16-fix3 第 7 条：清洗会膨胀的填充（<!--）不再让行内正文超限；出口硬守卫兜住任何超限正文 ----
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); f="<!--"*10000; c["findings"][0]["title"]=f; c["findings"][0]["body"]=f; c["findings"][0]["fix"]=f; json.dump(c,open(sys.argv[2],"w"),ensure_ascii=False)' "$E2E_CONTRACT" "$tmp/expand-inline.json"
+run_inline_case expand ifx-expand MOCK_KIRO_CONTRACT="$tmp/expand-inline.json"
+assert_rc "$RC" 0 "第 7 条：膨胀填充不让评审失败"
+bodies=$(inline_bodies "$OUT")
+assert_eq "$(printf '%s\n' "$bodies" | grep -c .)" "3" "第 7 条：三条行内仍发出"
+max_body=$(printf '%s\n' "$bodies" | jq -r '.content | utf8bytelength' | sort -n | tail -1)
+assert_eq "$([[ $max_body -le 60000 ]] && echo ok)" "ok" "第 7 条：<!-- 填充清洗后再截断，单条行内正文 ≤ 60000（实际最大 ${max_body}；48aff39 为 89789：正控）"
+# 出口硬守卫：把 MAX_COMMENT_BYTES 压到 20000，40 KB 的 body 过不了守卫 → 该条 failed 进折叠区、不发
+run_inline_case bodyguard ifx-bodyguard MAX_COMMENT_BYTES=20000 MOCK_KIRO_CONTRACT="$tmp/oversize-inline.json"
+assert_rc "$RC" 0 "第 7 条守卫：评审成功"
+assert_contains "$OUT" "字节超过 MAX_COMMENT_BYTES=20000，转入折叠区" "第 7 条守卫：日志点明超限正文进折叠区"
+assert_eq "$(inline_bodies "$OUT" | grep -c . || true)" "2" "第 7 条守卫：超限的那一条没发出（其余两条照发）"
+assert_contains "$(posted_comment "$OUT")" "**行内发布失败（1）**" "第 7 条守卫：超限的那一条进了折叠区"
 
 report

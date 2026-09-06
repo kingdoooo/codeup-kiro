@@ -330,6 +330,13 @@ publish_inline_comments() {
       log "警告：问题 #${idx} 的行内评论正文渲染或掩码失败，转入折叠区"
       printf '{"idx":%s,"outcome":"failed"}\n' "$idx" >> "$WORK/outcomes.jsonl"; n_failed=$((n_failed + 1)); continue
     fi
+    # 行内正文没有截断逻辑（review_truncate_comment 只用于汇总）：字段上限让它正常情况下落在评论上限之内，但清洗 / 掩码的
+    # 膨胀不是零，这里加硬守卫——超过 MAX_COMMENT_BYTES 的正文不发（Codeup 会 4xx），按 failed 进折叠区（第 7 条）。
+    body_bytes=$(wc -c < "$WORK/body-${idx}.md" | tr -d ' ')
+    if [[ "$body_bytes" -gt "$MAX_COMMENT_BYTES" ]]; then
+      log "警告：问题 #${idx} 的行内评论正文 ${body_bytes} 字节超过 MAX_COMMENT_BYTES=${MAX_COMMENT_BYTES}，转入折叠区"
+      printf '{"idx":%s,"outcome":"failed"}\n' "$idx" >> "$WORK/outcomes.jsonl"; n_failed=$((n_failed + 1)); continue
+    fi
     # 必须用文件式接口而不是 `cid=$(codeup_create_inline_comment …)`：命令替换在子 shell 里跑，
     # CODEUP_HTTP_CODE 与 DRY_RUN 的 fixture 序号都传不回来（codeup-api.sh 里写明了这条约定）
     if codeup_create_inline_comment "$LOCAL_ID" "$WORK/body-${idx}.md" "$file" "$ls" \
@@ -741,7 +748,7 @@ if [[ -z "$DEGRADE_REASON" ]]; then
       review_redact_json "$WORK/validated.json" || die_review "字段级掩码失败"
       truncated_fields=$(jq -r '.truncated_fields // 0' "$WORK/validated.json")
       [[ "$truncated_fields" == "0" ]] \
-        || log "警告：${truncated_fields} 个模型字段超出上限已截断（summary/verdict_reason 8 KB、title 2 KB、body 32 KB、fix 16 KB）"
+        || log "警告：${truncated_fields} 个模型字段超出上限已截断（summary/verdict_reason ${REVIEW_CAP_SUMMARY}、title ${REVIEW_CAP_TITLE}、body ${REVIEW_CAP_BODY}、fix ${REVIEW_CAP_FIX} 字节）"
       ;;
     # 受信 agent 未生效：contract 字段只在 agent 提示词里要求，缺了就说明模型拿的是裸提示词——
     # 拒绝路径与掩码规则都没生效，这份输出不能贴到 MR 上，所以走失败评论而不是降级。

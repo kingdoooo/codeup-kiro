@@ -530,17 +530,20 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   **严格保行**的 `review_redact_file`（只做行内替换，行数前后必须相等、评审标记 / 隐藏历史 / 行内标记逐字节仍在，否则拒绝写回、
   评审按失败处理），兜住绕过 `validated.json` 的输出面（元信息表里的分支名、失败评论里的失败原因、降级原文）。失败原因 /
   降级原因 / kiro-cli 自己的 stderr / 去重日志里的文件名在打进流水线日志前同样过掩码；掩码程序不可用时不打原文、失败评论退回
-  只含固定文案的最小形态。模型字段另有上限（summary / verdict_reason 8 KB、title 2 KB、body 32 KB、fix 16 KB，超出截断并标注），
-  单条行内评论正文因此不会超过评论上限。
+  只含固定文案的最小形态。模型字段另有上限（summary / verdict_reason 8 KB、title 2 KB、body 32 KB、fix 16 KB，在结构清洗之后按字节施加，
+  超出截断并标注），单条行内评论正文正常情况下落在评论上限之内；万一超过 `MAX_COMMENT_BYTES`（清洗 / 掩码的膨胀），该条不发、
+  进折叠区。
   **掩什么**：带前缀的令牌（AWS `AKIA`/`ASIA`… 访问密钥 ID、GitHub `ghp_`/`github_pat_`/`gh?_`、Slack `xox?-`、Google `AIza`、
   OpenAI 风格 `sk-`、JWT）；`secret`/`token`/`password`/`api_key`/`access_key`/`private_key`/`client_secret`/`credential` 一类键名后的
   **字面量**取值——加了引号的只看长度（≥ 12 就掩，`"/Jalr…"`、`"ya29.…"`、`"-abc…"` 都掩）；未加引号的先排除代码形状
   （函数调用 / 路径 / 属性访问 `os.environ.get`），再按字符集与上下文判定：含数字、含 `/ + = - .`、键名全大写下划线风格
   （`SECRET_KEY=…`、`AWS_SECRET_ACCESS_KEY=…`、`MYSQL_PASSWORD: …`）、或分隔符不是代码里的 ` = `（env 的 `key=value`、YAML 的
   `key: value`）——满足任一即掩；`Authorization: Bearer/Basic` 与 `x-yunxiao-token` 一类令牌头后的取值（纯字母且短于 20 的
-  英文词除外，显式令牌头短于 12）；URL 里的 `user:pass@`（口令里不能有 `/`，所以 `https://registry.npmjs.org:443/@babel/core`
-  不动）；PEM 私钥块——起始行与 END 行都要**独占一行**（可带 diff/引用前缀）才算块，闭合即整块删除、零泄漏；未闭合的块到字段末
-  放出并继续掩码；句中引用的 `-----BEGIN…-----` 是正文，不动；`.env` 里用 `\n` 写成一行的密钥整段换成占位。
+  英文词除外，显式令牌头短于 12）；URL 里的 `user:pass@`（先按 RFC 3986 严格匹配，再放宽到口令含 `/` 的真实粘贴形态——`https://ci:wJal…/K7MD…@git…`
+  仍掩；`https://registry.npmjs.org:443/@babel/core`、`localhost:8080/oauth/callback/user@example.com` 不动）；PEM 私钥块——
+  起始行与 END 行都要**独占一行**（可带 diff / 引用 / 列表 / 反引号等 Markdown 装饰）才算块，字段里闭合即整块删除、零泄漏，
+  未闭合的块到字段末放出并继续掩码；降级原文、失败原因、kiro-cli 的 stderr 尾巴走保行模式：PEM 正文行逐行就地屏蔽、不删行；
+  句中引用的 BEGIN / END 标记是正文，不动；`.env` 里用 `\n` 写成一行的密钥整段换成占位。
   **不掩（有意接受）**：代码里的标识符引用——小写/camelCase 键 + ` = ` 两侧有空格 + 纯字母数字下划线取值
   （`token = userToken`、`String apiKey = configApiKey;`、`password = getPasswordDefault`），因此 `secret = MySecretValueHere` 这种
   形状上无法区分的值会漏掉，同一值写成 `SECRET=…`、`secret: …` 或加引号就会被掩；模型自己已经省略过的短前缀片段
