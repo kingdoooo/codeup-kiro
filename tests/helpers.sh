@@ -11,8 +11,11 @@ assert_eq() {  # 实际值 期望值 说明
   fi
 }
 
+# 子串断言用 bash 自己的 [[ == *"$sub"* ]]（逐字节、多行同样适用），**不走 printf | grep -qF**：grep -q 命中即退出，
+# 内容较长时 printf 会收到 EPIPE，测试文件都开了 pipefail，于是管道整体非零——明明包含却报 FAIL
+# （2026-09-07 全套与别的会话并发运行时实测复现：「渲染：统计行注明已标注到行的条数」内容里明明有那一行）。
 assert_contains() {  # 内容 子串 说明
-  if printf '%s' "$1" | grep -qF -- "$2"; then
+  if [[ "$1" == *"$2"* ]]; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
   else
     echo "FAIL: $3 — 未找到子串 [$2]，内容: [$1]" >&2
@@ -21,7 +24,7 @@ assert_contains() {  # 内容 子串 说明
 }
 
 assert_not_contains() {  # 内容 子串 说明
-  if printf '%s' "$1" | grep -qF -- "$2"; then
+  if [[ "$1" == *"$2"* ]]; then
     echo "FAIL: $3 — 不应出现子串 [$2]" >&2
     exit 1
   else
