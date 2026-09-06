@@ -529,7 +529,9 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   三个工具的读取范围由 `toolsSettings.*.allowedPaths` **许可清单**决定，只含两条运行时路径：业务库 checkout
   与本次 diff 片段目录（`$WORK/chunks`）。定义文件里是两个占位符，脚本安装时注入**物理路径**
   （符号链接已解析；kiro-cli 按解析后的路径比对，写逻辑路径会让全部读取落在 allow 之外），
-  占位符没替换干净就拒绝安装。kiro-cli 2.21.1 v2 headless 实测（`scripts/probe/probe-kiro-allowlist.sh`，P1-15）：
+  占位符没替换干净就拒绝安装。喂给模型的省略清单里的 chunk 路径同样按物理路径写出（`build_review_input`），
+  两侧形态逐字一致——kiro-cli 会不会先解析符号链接再比对未经实测，脚本不依赖它（macOS 的 `/var/folders`、
+  或 TMPDIR 本身是符号链接时，这一点决定评审员能不能读到 chunk）。kiro-cli 2.21.1 v2 headless 实测（`scripts/probe/probe-kiro-allowlist.sh`，P1-15）：
   allow 内的读取免确认；allow 外的读取被 CLI 直接拒绝（`Permission request failed … not supported in
   non-interactive mode`），运行正常结束、不等待到超时。**为什么改成许可清单**：此前只有拒绝清单，
   CodeX 复审用真实 kiro-cli 证明拒绝清单之外整台执行机可读（把一个安全 canary 放在令牌文件同目录，
