@@ -387,9 +387,13 @@ mk_patchsets() {
     *) src="$PS_SRC" ;;
   esac
   case "$PS_TGT" in BASE) tgt="$base" ;; *) tgt="$PS_TGT" ;; esac
-  jq -n --arg src "$src" --arg tgt "$tgt" --arg srcmode "$PS_SRC" \
+  # 取值语义与 test-kiro-review.sh 的同名函数保持一致：OMIT = 不带 commitId，NONE = 整条 MERGE_TARGET 都不写
+  # （于是选不出版本对）。两份不一致的话，同一个场景在两个套件里表现不同，很难查。
+  jq -n --arg src "$src" --arg tgt "$tgt" --arg srcmode "$PS_SRC" --arg tgtmode "$PS_TGT" \
         --arg srcid "$PS_SRC_ID" --arg tgtid "$PS_TGT_ID" '[
-    {patchSetBizId:$tgtid, versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$tgt},
+    (if $tgtmode == "NONE" then empty
+     else ({patchSetBizId:$tgtid, versionNo:1, relatedMergeItemType:"MERGE_TARGET"}
+           + (if $tgtmode == "OMIT" then {} else {commitId:$tgt} end)) end),
     ({patchSetBizId:$srcid, versionNo:9, relatedMergeItemType:"MERGE_SOURCE"}
      + (if $srcmode == "OMIT" then {} else {commitId:$src} end))
   ]' > "$_INLINE_FX/list-patchsets.json"
@@ -970,42 +974,54 @@ assert_rc "$RC" 0 "M61：变异体仍能跑完"
 comment=$(posted_comment "$OUT")
 assert_not_contains "$comment" "尚未包含本次提交" \
   "M61：方向反了之后滞后不再被认出——端到端「notice 点名滞后」断言会失败"
-assert_contains "$comment" "评审期间源分支有新推送" "M61：滞后被报成新推送（给出「等下一轮」这条等不到的建议）"
+# 方向一反，祖先在两个方向上都不成立 → 落到最后那支，滞后被报成 force-push：
+# notice 变成「等下一轮」（永远等不到），而正确的处置是「重跑流水线」。
+assert_contains "$comment" "不在同一条历史上" "M61：滞后被报成分叉历史（处置从「重跑流水线」变成「等下一轮」）"
 assert_not_contains "$OUT" "按退避重查" "M61：既然不认为是滞后，重查也不会发生（本该重查 3 次）"
 
-# --- M62（17-fix3 ④）：拆掉**滞后重查收尾**那个 fail-closed 出口 → 重查用尽仍滞后却继续发布，
-#     行内评论绑到一个旧版本上（I5 被违反）---
-# 这个出口只在「发布前才滞后」时走到（预采样滞后的话在 Kiro 之前就判定完了），所以 fixture 让第 1 次 GET
-# （预采样）返回本次提交、之后每次都返回旧版本：发布前采样判定 lag → 重查 3 次都还是旧版本 → 收尾出口。
+# --- M62（17-fix3 ②④）：拆掉**滞后重查收尾**那个 fail-closed 出口 → 重查期间成因变成「选不出版本对」，
+#     却仍被报成「滞后，重跑流水线即可」（重跑在同一份陈旧 checkout 上只会复现）---
+# 这个出口的独有价值正是「按最终状态重新分类」：只有它能把 http / nopair 这两种收尾说对——
+# 后面那个 fail-closed:to 出口读的是最后一次分类的结果，接口失败时那个值还停在 lag。
+# fixture 分三段：第 1 次 GET（预采样）= 本次提交 → ok；第 2 次（发布前采样）= 旧版本 → lag 触发重查；
+# 第 3 次起落到无序号那份，PS_TGT=NONE 让它只有 MERGE_SOURCE → 选不出版本对。
 IFXLAG2="$tmp/ifx-lag-late"
 mkdir -p "$IFXLAG2"
 cp "$IFX"/create-comment-inline.*.json "$IFXLAG2/"
 mk_lag_late() {
-  local base head
-  base=$(git merge-base origin/master HEAD); head=$(git rev-parse HEAD)
-  jq -n --arg sha "$head" --arg base "$base" '[
+  local base
+  base=$(git merge-base origin/master HEAD)
+  jq -n --arg sha "$(git rev-parse HEAD)" --arg base "$base" '[
     {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
     {patchSetBizId:"src-2", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
   ]' > "$IFXLAG2/list-patchsets.1.json"
   jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
     {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
     {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
-  ]' > "$IFXLAG2/list-patchsets.json"
+  ]' > "$IFXLAG2/list-patchsets.2.json"
 }
 lag_late_case() { # <用例名> <集成包根>
-  MUT_TWEAK=mk_lag_late inline_case "$1" "$2" "$IFXLAG2" CODEUP_RETRY_BACKOFF=0
+  PS_TGT=NONE PS_SRC_ID=src-9 MUT_TWEAK=mk_lag_late inline_case "$1" "$2" "$IFXLAG2" CODEUP_RETRY_BACKOFF=0
 }
 lag_late_case baseline-lag-late "$ROOT"
-assert_rc "$RC" 0 "对照：发布前才滞后时评审成功"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：发布前才滞后 → 0 条行内评论（走收尾出口）"
+assert_rc "$RC" 0 "对照：发布前才滞后、重查又选不出版本对时评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：0 条行内评论"
 assert_contains "$OUT" "两次采样：checkout 时判定=ok" "对照：两次采样比对写进日志"
+assert_contains "$(posted_comment "$OUT")" "选不出「最新合并目标版本 + 最新合并源版本」这一对" \
+  "对照：按最终状态（选不出版本对）给 notice"
+assert_not_contains "$(posted_comment "$OUT")" "重跑流水线即可" "对照：不谎称滞后"
 pkg=$(make_mutant m62-lag-exit '/# fail-closed:lag-end$/ s/return 1/:/')
 lag_late_case m62 "$pkg"
 assert_rc "$RC" 0 "M62：变异体仍能跑完"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
-  "M62：出口一拆，重查用尽仍滞后却发了 3 条行内评论——端到端「滞后时 0 条」断言会失败"
-assert_eq "$(inline_bodies "$OUT" | jq -r '.to_patchset_biz_id' | sort -u | paste -sd, -)" "src-9" \
-  "M62：绑的正是那个滞后的旧版本（I5 被违反）"
-assert_not_contains "$(posted_comment "$OUT")" "尚未包含本次提交" "M62：汇总里也没有滞后的说明"
+comment=$(posted_comment "$OUT")
+# 出口一拆，流程继续往下走，被后面那个 fail-closed:to 出口接住——而它读的是**最后一次分类**的结果，
+# 选不出版本对时那个值还停在 lag。于是同一条汇总里出现两句互相矛盾的成因，而且给出「重跑流水线」
+# 这条只会复现的建议（重跑在同一份陈旧 checkout 上还是选不出版本对）。
+assert_contains "$comment" "尚未包含本次提交" \
+  "M62：出口一拆，最终状态又被回落成「滞后」——端到端「不谎称滞后」断言会失败"
+assert_contains "$comment" "重跑流水线即可" "M62：给出「重跑」这条只会复现的建议"
+# 两句都在同一条 notice 里（INLINE_NOTICE 是拼接的，渲染成一行），所以按子串判而不是数行数
+assert_contains "$comment" "选不出「最新合并目标版本 + 最新合并源版本」这一对" \
+  "M62：正确的那句也还在——两句互相矛盾的成因同时进了汇总"
 
 report
