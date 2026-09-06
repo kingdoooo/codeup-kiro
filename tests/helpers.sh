@@ -95,6 +95,9 @@ SEC_GHP="ghp_""abcdefghij""klmnopqrst""uvwxyz0123""456789"   # GitHub PAT（clas
 SEC_GHP_MASKED='ghp_****6789'
 SEC_AKIA="AKIA""TESTFAKE01234567"                            # AWS 访问密钥 ID：AKIA + 16 位大写字母数字
 SEC_AKIA_MASKED='AKIA****4567'
+# 标题里的掩码：boldsafe 把所有 `*` 转义（16-fix4 第 22 条），渲染出来仍是 AKIA****4567，源码里是 AKIA\*\*\*\*4567
+SEC_AKIA_MASKED_TITLE='AKIA\*\*\*\*4567'
+SEC_GHP_MASKED_TITLE='ghp_\*\*\*\*6789'
 SEC_B64="dGhpcyBpcyBh""IHNlY3JldA=="                         # key=value 取值：末尾带 base64 补位 =
 SEC_B64_MASKED='dGhp****dA=='
 # 用法：with_secrets <契约 JSON 文件> → stdout：同一份契约，只多了 token——
@@ -118,7 +121,9 @@ with_secrets() {
 assert_masked() {  # 内容 说明前缀
   assert_no_secrets "$1" "$2"
   assert_contains "$1" "$SEC_GHP_MASKED" "$2：ghp_ 形态掩成前 4 后 4"
-  assert_contains "$1" "$SEC_AKIA_MASKED" "$2：AKIA 形态掩成前 4 后 4"
+  # AKIA 掩码可能只出现在标题里（行内正文：title 是它唯一的槽位）——标题里的 * 一律转义（第 22 条），两种形态认一种即可
+  if [[ "$1" == *"$SEC_AKIA_MASKED"* || "$1" == *"$SEC_AKIA_MASKED_TITLE"* ]]; then TESTS_PASSED=$((TESTS_PASSED + 1))
+  else echo "FAIL: $2：AKIA 形态掩成前 4 后 4（正文 ${SEC_AKIA_MASKED} 或标题 ${SEC_AKIA_MASKED_TITLE}）— 都未找到，内容: [$1]" >&2; exit 1; fi
   assert_contains "$1" "$SEC_B64_MASKED" "$2：base64 补位形态掩成前 4 后 4"
 }
 assert_no_secrets() {  # 内容 说明前缀：三种原文都不在（掩码形态在不在不管——给「掩码失败 → 只剩固定文案」的用例用）

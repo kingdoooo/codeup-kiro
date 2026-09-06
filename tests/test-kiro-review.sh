@@ -1283,7 +1283,7 @@ assert_not_contains "$OUT" "结构化解析失败" "A10：走的是正常结构�
 comment=$(posted_comment "$OUT")
 assert_masked "$comment" "A10 汇总正文"
 assert_masked "$OUT" "A10 全部输出（含流水线日志）"
-assert_contains "$comment" "硬编码疑似应用密钥 ${SEC_AKIA_MASKED}**" "A10 汇总：标题里的 token 掩码后，加粗标题其余部分完好"
+assert_contains "$comment" "硬编码疑似应用密钥 ${SEC_AKIA_MASKED_TITLE}**" "A10 汇总：标题里的 token 掩码后（* 转义，第 22 条），加粗标题其余部分完好"
 assert_contains "$comment" "api_key = \"${SEC_B64_MASKED}\"" "A10 汇总：fix 里的 key=value 只掩取值、键名保留"
 assert_contains "$comment" "FAKE****0000" "A10 汇总：模型已自行掩码的值不被二次改写（幂等）"
 # 掩码不碰脚本结构：评审标记 / 隐藏历史 / 元信息表 / 页脚都还在原形
@@ -1299,7 +1299,7 @@ bodies=$(inline_bodies "$OUT")
 assert_eq "$(printf '%s\n' "$bodies" | grep -c .)" "3" "A10 行内：仍发出 3 条行内评论（掩码不改变发布计划）"
 inline_text=$(printf '%s\n' "$bodies" | jq -r '.content')
 assert_masked "$inline_text" "A10 行内正文"
-assert_contains "$inline_text" "**P0 · 硬编码疑似应用密钥 ${SEC_AKIA_MASKED}**" "A10 行内正文：首行加粗完好，只有 token 变掩码"
+assert_contains "$inline_text" "**P0 · 硬编码疑似应用密钥 ${SEC_AKIA_MASKED_TITLE}**" "A10 行内正文：首行加粗完好，只有 token 变掩码（标题里的 * 转义）"
 assert_eq "$(printf '%s\n' "$inline_text" | grep -c '^<!-- kiro-inline:[0-9a-f]\{40\} L[0-9]*-[0-9]* sev=P[0-2] -->$')" "3" \
   "A10 行内正文：三条隐藏标记完好（sha1 是十六进制、sev= 不在键名清单里，都没被掩）"
 assert_no_secrets "$OUT" "A10 行内全部输出（含汇总与流水线日志）"

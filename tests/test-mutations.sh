@@ -716,11 +716,11 @@ assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "总体结论：不建�
 assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "没有配对的 END 行" "M40：未闭合提示消失——单测「给出提示」断言会失败"
 assert_contains "$(mut_rd_multi "$ROOT" "$unclosed_in")" "没有配对的 END 行" "M40 对照：未变异实现给提示"
 # M42：放出时不再掩夹在句子里的 base64 连片（redact_b64 的掩码换成原样）
-pkg=$(make_mutant m42-b64-runs 's|out = out substr(s, 1, RSTART - 1) (is_hex(m) ? m : (full ? "\*\*\*\*" : mask(m)))|out = out substr(s, 1, RSTART - 1) m|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m42-b64-runs 's|out = out substr(s, 1, RSTART - 1) (b64_material(m, minlen) ? (full ? "\*\*\*\*" : mask(m)) : m)|out = out substr(s, 1, RSTART - 1) m|' scripts/lib/review-render.sh)
 assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "$PEM_L64" "M42：句子里的私钥正文片段完整放出——单测「片段不进评论」断言会失败"
 assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "MIIEowIBAAKCAQEAfakekey0123456" "M42 对照：整行正文仍被掩（另一条规则）"
 # M43：放出时不再掩整行 base64
-pkg=$(make_mutant m43-b64-line 's|        if (pem_body_like(l)) l = redact(l, "\[" B64C "=\]+")|        l = l  # 变异：整行 base64 不掩|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m43-b64-line 's|        if (pem_body(l, 0, 0)) l = redact(l, "\[" B64C "=\]+")|        l = l  # 变异：整行 base64 不掩|' scripts/lib/review-render.sh)
 assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "MIIEowIBAAKCAQEAfakekey0123456" "M43：整行私钥正文完整放出——单测「整行正文不进评论」断言会失败"
 assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "$PEM_L64" "M43 对照：句子里的片段仍被掩（另一条规则）"
 
@@ -844,7 +844,7 @@ assert_contains "$(meta_row "$(posted_comment "$OUT")")" "feature/${SEC_AKIA}" "
 mut_doc_pem() { ( set +e; source "$1/scripts/lib/review-render.sh"
   printf '| 文件 | P0 |\n|---|---|\n| x | 1 |\n%s\n%s\n%s\n' "$PEM_B" "$PEM_L64" "$PEM_E" > "$tmp/m-e.md"
   review_redact_file "$tmp/m-e.md" 2>/dev/null; echo $? ); }
-pkg=$(make_mutant m-e-doc-deletes-lines 's|      if (pem_body_like(\$0) \|\| pem_is_hdr(\$0)) { print PEM_BODY_PH; next }   # 正文行 / RFC 1421 头：等行数替换（第 11 条）|      if (pem_body_like($0) \|\| pem_is_hdr($0)) { next }  # 变异 M-e：保行模式删行|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-e-doc-deletes-lines 's|      if (pem_body(\$0, 0, 0) \|\| pem_is_hdr(\$0)) { print PEM_BODY_PH; next }   # 正文行 / RFC 1421 头：等行数替换（第 11 条）|      if (pem_body($0, 0, 0) \|\| pem_is_hdr($0)) { next }  # 变异 M-e：保行模式删行|' scripts/lib/review-render.sh)
 assert_eq "$(mut_doc_pem "$pkg")" "3" "M-e：保行模式删行 → 行数守卫 rc 3 拒绝写回（单测「行数不变 rc 0」断言会失败）"
 assert_eq "$(mut_doc_pem "$ROOT")" "0" "M-e 对照：未变异实现正文行等行数替换、rc 0"
 
@@ -875,7 +875,7 @@ assert_not_contains "$OUT" "$SEC_GHP" "M-g 对照：未变异实现日志与评�
 # --- M-h：第 29 条的两条上下文判定各去掉一条 → 无数字凭证裸奔（单测「仍掩」断言会失败）---
 pkg=$(make_mutant m-h-no-caps-key 's|^      if (key ~ /\^\[A-Z0-9_-\]\*\[A-Z\]\[A-Z0-9_-\]\*\$/) return 1 .*$|      # 变异 M-h：去掉 ③ 键名全大写|' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" 'SECRET_KEY=MySuperSecretPassphrase')" 'SECRET_KEY=MySu****rase' "M-h 对照：去掉 ③ 后 SECRET_KEY=… 仍被 ④（无空格）兜住"
-assert_eq "$(mut_rd "$pkg" 'MYSQL_PASSWORD: SuperSecretPassword')" 'MYSQL_PASSWORD: Supe****word' "M-h 对照：去掉 ③ 后 YAML 形态仍被 ④b 兜住（16-fix4 第 5 条：无连字符的纯字母不算散文）"
+assert_eq "$(mut_rd "$pkg" 'MYSQL_PASSWORD: SuperSecretPassword')" 'MYSQL_PASSWORD: Supe****word' "M-h 对照：去掉 ③ 后 YAML 形态仍被 ④b 兜住（16-fix4 第 14 条：19 位驼峰不是词形）"
 assert_eq "$(mut_rd "$pkg" 'SECRET_KEY = MySuperSecretPassphrase')" 'SECRET_KEY = MySuperSecretPassphrase' "M-h：去掉 ③ 后「全大写键 + 有空格的 =」裸奔——单测断言会失败"
 assert_eq "$(mut_rd "$ROOT" 'SECRET_KEY = MySuperSecretPassphrase')" 'SECRET_KEY = MySu****rase' "M-h 对照：未变异实现按 ③ 掩"
 pkg=$(make_mutant m-h-no-unspaced 's|^      if (unspaced == 2) return 1 .*$|      # 变异 M-h2：去掉 ④a env / properties 形态|' scripts/lib/review-render.sh)
@@ -944,13 +944,13 @@ pkg=$(make_mutant m-q-deco 's|        if (s ~ /\^\[>\*+`\]\[\[:space:\]\]\*/) { 
 assert_contains "$(mut_rd_multi "$pkg" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "没有配对的 END 行" "M-q：装饰剥离失效后反引号装饰的 END 行认不出，块被当成未闭合——单测「整块丢弃」断言会失败"
 assert_eq "$(mut_rd_multi "$ROOT" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "$(printf '%s\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）' "$PEM_PLACEHOLDER")" "M-q 对照：未变异实现整块丢弃、占位 + 提示"
 # --- M-t：第 10 条兜底——「含 BEGIN 且下一行像正文」不再当块起始 ---
-pkg=$(make_mutant m-t-pend 's|    pend != "" { if (!inpem \&\& (pem_body_key(\$0, 20) \|\| pem_is_hdr(\$0))) { begin_block(pend); pend = "" } else emit_pending() }|    pend != "" { emit_pending() }  # 变异 M-t：兜底失效|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-t-pend 's|    pend != "" { if (!inpem \&\& (pem_body(\$0, 20, 1) \|\| pem_is_hdr(\$0))) { begin_block(pend); pend = "" } else emit_pending() }|    pend != "" { emit_pending() }  # 变异 M-t：兜底失效|' scripts/lib/review-render.sh)
 # 载荷用 28 位正文：≥ 40 位的整行会被第 17 条的整行规则另行掩掉（两道防线叠着），只有兜底能兜住 20–39 位的正文行
 PEM_L28="MIIEvQIBADANBgkq""1hkiG9w0BAQE"
 assert_contains "$(mut_rd_multi "$pkg" "私钥如下 $PEM_B\n$PEM_L28\n$PEM_E\n")" "$PEM_L28" "M-t：兜底失效后 28 位正文行裸奔——单测「兜底当块起始」断言会失败"
 assert_not_contains "$(mut_rd_multi "$ROOT" "私钥如下 $PEM_B\n$PEM_L28\n$PEM_E\n")" "$PEM_L28" "M-t 对照：未变异实现兜底开块、整块丢弃"
 # --- M-r：第 11 / 14 条——保行模式正文行不再换占位（原样打出）→ 降级评论 / kiro stderr 泄露正文 ---
-pkg=$(make_mutant m-r-keep-body 's|      if (pem_body_like(\$0) \|\| pem_is_hdr(\$0)) { print PEM_BODY_PH; next }   # 正文行 / RFC 1421 头：等行数替换（第 11 条）|      if (pem_body_like($0) \|\| pem_is_hdr($0)) { print; next }  # 变异 M-r：保行模式正文原样|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-r-keep-body 's|      if (pem_body(\$0, 0, 0) \|\| pem_is_hdr(\$0)) { print PEM_BODY_PH; next }   # 正文行 / RFC 1421 头：等行数替换（第 11 条）|      if (pem_body($0, 0, 0) \|\| pem_is_hdr($0)) { print; next }  # 变异 M-r：保行模式正文原样|' scripts/lib/review-render.sh)
 run_case m-r "$pkg" MOCK_KIRO_LEAK_SECRET=1
 assert_rc "$RC" 0 "M-r：变异体仍能跑完"
 assert_contains "$OUT" "MIIEowIBAAKCAQEA""fakekey0123456" "M-r：降级评论里整行私钥正文裸奔——端到端「整行正文不进评论」断言会失败"
@@ -968,7 +968,7 @@ run_case m-s-control "$ROOT" PATH="$tmp/badawk-raw:$PATH" MOCK_KIRO_LEAK_SECRET=
 assert_nonzero "$RC" "M-s 对照：未变异实现 fail-closed"
 assert_contains "$OUT" "review_render_degraded: 原文掩码失败" "M-s 对照：库函数点明原因"
 # --- M-u：第 17 条——去掉全模式的整行密钥正文规则 → 跨字段的正文行裸奔 ---
-pkg=$(make_mutant m-u-body-line 's|^      if (pem_body_key(line, 40)) return redact(line, "\[" B64C "=\]+")   .*$|      # 变异 M-u：无整行规则|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-u-body-line 's|^      if (pem_body(line, 40, 1)) {   .*$|      if (0) {   # 变异 M-u：无整行规则|' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" "$PEM_L64")" "$PEM_L64" "M-u：整行密钥正文原样——单测「≥ 40 位整行 base64 在任何字段都掩」断言会失败"
 assert_eq "$(mut_rd "$ROOT" "$PEM_L64")" "MIIE****ijkl" "M-u 对照：未变异实现掩"
 # --- M-v：第 24 条——闭合块不再打「其间 N 行」提示 → 整段无声消失 ---
@@ -980,5 +980,13 @@ assert_contains "$(mut_rd_multi "$ROOT" "x\n$PEM_B\n（内容已省略）\n$PEM_
 pkg=$(make_mutant m-w-begin-pre 's|      if (keeplines) print redact_line(pre) substr(l, RSTART, RLENGTH) redact_b64(redact_line(tail), 20, 0)|      if (keeplines) print pre substr(l, RSTART, RLENGTH) redact_b64(redact_line(tail), 20, 0)  # 变异 M-w|' scripts/lib/review-render.sh)
 assert_contains "$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w：悬挂行 BEGIN 前的 AKIA 原样出去——单测「悬挂行掩码」断言会失败"
 assert_not_contains "$( ( set +e; source "$ROOT/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w 对照：未变异实现掩"
+
+# --- M-x：第 26 条——b64_material 的路径排除 / 数字要求各去掉一条 → Java 路径被掩 / 无数字长标识符被掩（单测 golden 会失败）---
+pkg=$(make_mutant m-x1-no-path-branch 's|^      if (slashes >= 2) {$|      if (slashes >= 99) {  # 变异 M-x1：路径排除失效|' scripts/lib/review-render.sh)
+assert_eq "$(mut_rd "$pkg" 'src/main/java/com/example/v2/service/impl/UserService')" 'src/****vice' "M-x1：Java 长路径整行掩成碎片——单测「路径不是密钥正文」断言会失败"
+assert_eq "$(mut_rd "$ROOT" 'src/main/java/com/example/v2/service/impl/UserService')" 'src/main/java/com/example/v2/service/impl/UserService' "M-x1 对照：未变异实现原样"
+pkg=$(make_mutant m-x2-no-digit 's|^      if (s !~ /\[0-9\]/ \|\| s !~ /\[a-z\]/ \|\| s !~ /\[A-Z\]/) return 0$|      if (s !~ /[a-z]/ \|\| s !~ /[A-Z]/) return 0  # 变异 M-x2：不要求数字|' scripts/lib/review-render.sh)
+assert_eq "$(mut_rd "$pkg" 'disableInheritingDefaultResourcesForAllTenantsNow')" 'disa****sNow' "M-x2：无数字的 48 位标识符整行掩——单测「无数字的长标识符不算正文」断言会失败"
+assert_eq "$(mut_rd "$ROOT" 'disableInheritingDefaultResourcesForAllTenantsNow')" 'disableInheritingDefaultResourcesForAllTenantsNow' "M-x2 对照：未变异实现原样"
 
 report

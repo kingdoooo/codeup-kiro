@@ -442,11 +442,10 @@ review_finalize_json() {
     # 加粗槽位：title 会被脚本包进 `**…**`（问题标题行、折叠区条目、行内评论首行）。先把 `*` 转义成 `\*`，
     # 否则标题里的 `**kwargs` 会提前闭合脚本的加粗、把级别前缀变回普通文字。先转义再清洗：转义后的
     # 字符串以反斜杠开头，不会再被 _sanitize_md 的整行加粗规则二次转义。
-    # 掩码在转义之前跑（第 15 条），掩码结果 `AKIA****4567` 里的四颗星是脚本自己写的、两侧都是 token 字符（不成 Markdown 强调的
-    # 定界符），不转义——否则标题里的掩码会显示成 `AKIA\*\*\*\*4567`、与正文里的形态不一致。先用 \u0001 占位、转义其余 `*`、再还原
-    # （\u0001 在 _sanitize_md 之前还原，不会被控制字符剔除吞掉）。
-    def boldsafe: gsub("(?<a>[A-Za-z0-9+/=._-])\\*\\*\\*\\*(?<b>[A-Za-z0-9+/=._-])"; "\(.a)\u0001\u0001\u0001\u0001\(.b)")
-                  | gsub("\\*"; "\\*") | gsub("\u0001"; "*") | _sanitize_md;
+    # 标题里**所有** `*` 一律转义（16-fix4 第 22 条）：掩码结果 `AKIA****4567` 的四颗星也转义成 `\*\*\*\*`（渲染出来仍是 ****）——
+    # 一处掩码靠 CommonMark「三的倍数」规则碰巧不闭合外层 `**`，两处（`硬编码 AKIA… 与 ghp_… 两处密钥`）就互相配对、把 `P0 ·`
+    # 级别前缀打回普通文字。全部转义在两种解读下都安全。
+    def boldsafe: gsub("\\*"; "\\*") | _sanitize_md;
     . as $r
     | cap(($r.summary | _sanitize_md); $cap_summary) as $S
     | cap(($r.verdict_reason | _sanitize_md); $cap_summary) as $R
@@ -1723,10 +1722,12 @@ review_truncate_comment() {
 # （literal_credential，第 8/18/29 条）：
 #   · 加了引号 → 只看长度（引号里的东西就是字面量，「别把可读代码掩花」的理由不成立；`"/Jalr…"`、`"ya29.…"`、`"-abc…"` 都掩）；
 #   · 未加引号 → 先排除代码形状（表达式 / 路径开头 / 属性访问），剩下的按**字符集与上下文**判定：含数字、含 [A-Za-z0-9_]
-#     之外的字符（base64 的 / + = . -）、键名全大写下划线风格（SECRET_KEY / AWS_…）、分隔符不是代码里的 ` = `（env 的
-#     `key=value`、YAML 的 `key: value`）——满足任一即掩；四条都不满足（小写/camelCase 键 + ` = ` + 纯字母数字下划线取值）
-#     才按代码里的标识符引用放行（`token = userToken`、`String apiKey = configApiKey;`）。有意接受的漏报：
-#     `secret = MySecretValueHere`——形状上与标识符引用不可区分；同一值写成 `SECRET=…` / `secret: …` / 加引号就会被掩。
+#     之外的字符（/ + = . ~ - …，连字符也算——diceware 口令 `correct-horse-battery-staple` 就是连字符小写词组，第 14 条）、
+#     键名全大写下划线风格（SECRET_KEY / AWS_…）、env 形态 `key=value`、YAML 形态 `key: value`（短于 16 的英文词形除外）——
+#     满足任一即掩；都不满足（小写/camelCase 键 + ` = ` + 纯字母数字下划线取值）才按代码里的标识符引用放行
+#     （`token = userToken`、`String apiKey = configApiKey;`）。有意接受的漏报：`secret = MySecretValueHere`——形状上与标识符引用
+#     不可区分；`password: SuperSecretPass`（15 位驼峰，词形上与 sessionToken 一类引用不可分）；同一值写成 `SECRET=…` / 加引号 /
+#     长于 16 就会被掩。有意接受的误报：`token: rate-limited-endpoint` → `rate****oint`（键名保留）。
 # Bearer/Basic 与令牌头后面的取值：**散文词**（英文词形且长度 < 20；显式令牌头 x-api-key 等 < 12）不掩——
 #   `Basic authentication`、`Authorization: HeaderMissing`；真令牌几乎必含数字或 `.`/`/`/`=`，纯字母 ≥ 20（base32 恢复码、
 #   许可证密钥）仍掩。**不用**「大小写一致性」判定（TOKENName 会被放行），也**不用** looks_literal（它会把含 `.` 的
@@ -1772,15 +1773,12 @@ review_redact_secrets() {
       if (val ~ /^[\/.~\-]/) return 0                        # 绝对路径、./ 相对路径、~/、选项
       if (val ~ /[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_]/) return 0  # 属性访问（os.environ、server.key）
       if (val ~ /[0-9]/) return 1                            # ① 含数字
-      if (val ~ /[\/+=.%]/) return 1                         # ② 含 base64 / JWT / URL 编码字符（`-` 与 `_` 不算：连字符英文词组是散文，第 21 条）
+      if (val ~ /[^A-Za-z0-9_]/) return 1                    # ② 含标识符不会有的字符（/ + = . ~ - …；第 14 条：连字符不再是散文信号——diceware 口令就是连字符小写词组）
       if (key ~ /^[A-Z0-9_-]*[A-Z][A-Z0-9_-]*$/) return 1    # ③ 键名全大写 / 下划线风格（SECRET_KEY、AWS_…、MYSQL_PASSWORD）
       if (unspaced == 2) return 1                            # ④a env / properties 形态（key=value）
-      if (unspaced == 1 && !hyphen_prose(val)) return 1      # ④b YAML 形态（key: value）——`token: rate-limited-endpoint` 这类连字符散文除外
+      if (unspaced == 1 && !prose_word(val, 16)) return 1    # ④b YAML 形态（key: value）——短于 16 的英文词形（authentication、SuperSecretPass）放行
       return 0                                               # 代码里的标识符引用：token = userToken
     }
-    # 连字符英文词组（第 21 条，16-fix4 第 5 条改判）：至少一个连字符、至少两个全小写段（rate-limited-endpoint、
-    # must-be-rotated-quarterly）。零连字符的纯字母串（MySecretValueHere、correcthorsebattery）不是散文，照掩。
-    function hyphen_prose(v) { return (v ~ /^[a-z]+(-[a-z]+)+$/) }
     # 散文词（第 19 条）：短于 maxlen 的**英文词形**——全大写缩写，或小写 / 首字母大写的驼峰词（首段 ≥ 2 个小写字母，
     # 后续每段大写 + ≥ 1 个小写：authentication / Authentication / HeaderMissing / RequestId）。base64 的大小写是逐字符乱序的
     # （dXNlcjpwYXNz、dGhpcyBpcyBh），不成词形，所以照掩；长度上限另把 ≥ 20 的纯字母（base32 恢复码、许可证密钥、TOKENNameXXXX…）
@@ -1854,7 +1852,7 @@ review_redact_secrets() {
         # 显式令牌头（x-api-key / x-auth-token / x-yunxiao-token / private-token）后面 ≥ 8 位一律掩——头名本身就是上下文（第 18 条）
         if (tolower(val) ~ /^(bearer|basic)/) out = out seg
         else if (hdr == "authorization" && prose_word(val, 20)) out = out seg
-        else if (hdr != "authorization" && length(val) < 8) out = out seg
+        else if (hdr != "authorization" && length(val) < 8 && prose_word(val, 8)) out = out seg   # 第 24 条：只放行词形短值（short / none / TODO），aB3.x7 一律掩
         else out = out substr(seg, 1, vstart - 1) mask(val)
       }
       return out line
@@ -1875,7 +1873,12 @@ review_redact_secrets() {
       }
       return out line
     }
-    function redact_url(line) { return redact_url_pass(redact_url_pass(line, URL_STRICT_RE, 0), URL_LOOSE_RE, 1) }
+    # 没有 "://" 的行直接返回（第 12c 条）：两遍正则里 `[a-zA-Z][a-zA-Z0-9+.-]*://` 的无界 `*` 让 BSD awk 从每个起点向前重扫，
+    # 40 KB 无 URL 的单行要跑 15 s；index 一次就能排掉
+    function redact_url(line) {
+      if (index(line, "://") == 0) return line
+      return redact_url_pass(redact_url_pass(line, URL_STRICT_RE, 0), URL_LOOSE_RE, 1)
+    }
     # --- PEM 私钥块 ---
     # 起始行 / END 行都要**锚定整行**（第 10 条）：剥掉常见 Markdown 装饰（前导空白、引用 `>`、列表 `*`/`+`/`- `、有序列表 `1.`、
     # 反引号；diff 删除行紧贴标记的第 6 个 `-`；尾随反引号 / `*` / 空白）后整行只剩标记才算。句中引用（「…以 BEGIN RSA PRIVATE KEY
@@ -1894,13 +1897,15 @@ review_redact_secrets() {
       return s
     }
     function pem_marker(l, re) { return (pem_strip_deco(l) ~ ("^" re "$")) }
-    # base64 连片掩码（第 1 / 5 条：字母表只在 B64C 一处定义，四处共用）：≥ minlen、非纯十六进制；full=1 整段 ****，否则前 4 后 4
+    # base64 连片掩码（第 1 / 5 条：字母表只在 B64C 一处定义）：每个候选连片都要过 b64_material（第 23 / 26 条：含数字 + 大小写、
+    # 非纯十六进制、不是路径），否则原样——`见 <BEGIN 标记> 出现在 src/main/java/…/UserService` 的路径尾巴、块内散文里的 Java 长路径
+    # 都不能被打碎；full=1 整段 ****，否则前 4 后 4
     function redact_b64(s, minlen, full,   out, m, re) {
       re = "[" B64C "]{" minlen ",}={0,2}"
       out = ""
       while (match(s, re) > 0) {
         m = substr(s, RSTART, RLENGTH)
-        out = out substr(s, 1, RSTART - 1) (is_hex(m) ? m : (full ? "****" : mask(m)))
+        out = out substr(s, 1, RSTART - 1) (b64_material(m, minlen) ? (full ? "****" : mask(m)) : m)
         s = substr(s, RSTART + RLENGTH)
       }
       return out s
@@ -1927,32 +1932,49 @@ review_redact_secrets() {
     # 只有 RFC 1421 的这两个头属于 PEM 块内（加密私钥才有）。不放宽成「任意 Word: 值」：
     # 那样模型写在起始行后面的 `Note: …` 一类正文也会被当成块内容静静丢掉。
     function pem_is_hdr(l) { return tolower(l) ~ /^[[:space:]]*[-+>]?[[:space:]]*(proc-type|dek-info):[[:print:]]*$/ }
-    # 「像密钥正文」的行：去掉 diff/引用前缀与首尾空白后整行是 base64 字符集，并且
-    # ≥20 字符、或以补位 `=` 结尾、或数字+大小写混合（高熵）。后两条是为了收住正文的最后一行
-    # （`short==`、`AbCd1234EfGh`），而 `DONOTMERGE`、`P0`、`MERGE` 这些同样落在 base64 字符集里的
-    # 普通词一条都不满足，不会被当成正文丢掉。
-    function pem_body_like(l,   s) {
+    # 「像密钥正文」的行——一份判定、两种松紧（16-fix4 第 1 条：原先 pem_body_like 剥 diff/引用前缀而 pem_body_key 不剥，
+    # `+MIIE…` 这种带前缀的正文行整行规则与兜底都会漏掉）。都先去掉 `[-+>]?` 前缀与首尾空白、要求整行是 base64 字符集；
+    #   strict=1（第 10 条兜底 / 第 17 条整行规则）：b64_material(s, minlen)；
+    #   strict=0（票 10 的 pem_body_like，块内正文行）：b64_material(s, 20)、或以补位 `=` 结尾、或 < 20 的短行含数字 + 大小写混合
+    #     （收住正文最后一行 `short==`、`AbCd1234EfGh`，而 `DONOTMERGE`、`P0`、`MERGE`、`disableInheritingDefaultResources` 一条都不满足——
+    #     第 15 条 ②：≥ 20 分支不再放过无数字的纯字母标识符行）。
+    function pem_body(l, minlen, strict,   s) {
       s = l
       sub(/^[[:space:]]*[-+>]?[[:space:]]*/, "", s)
       sub(/[[:space:]]+$/, "", s)
       if (s !~ ("^[" B64C "=]+$")) return 0
-      if (length(s) >= 20 || s ~ /=$/) return 1
-      return (s ~ /[0-9]/ && s ~ /[a-z]/ && s ~ /[A-Z]/)
+      if (strict) return b64_material(s, minlen)
+      if (b64_material(s, 20) || s ~ /=$/) return 1
+      return (length(s) < 20 && s ~ /[0-9]/ && s ~ /[a-z]/ && s ~ /[A-Z]/)   # ≥ 20 的只认 b64_material（路径排除也要生效）
+    }
+    # 「就是密钥正文 / 密钥碎片」的**唯一**判定（第 26 条；pem_body 的严格分支、redact_b64 的每个候选连片都调它）：
+    #   base64 字符集、≥ minlen、非纯十六进制（40 位提交 SHA、64 位 SHA-256）、同时含数字 + 小写 + 大写
+    #   （64 位随机 base64 无数字的概率 ~1e-6；`disableInheritingDefaultResources` 这类长标识符无数字）；
+    #   **路径排除**：`/` 出现 ≥ 2 次且类别切换率 < 0.35——切换率 = 相邻字母数字字符之间（小写 / 大写 / 数字）类别变化次数 ÷ 相邻对数。
+    #   `src/main/java/com/example/v2/service/impl/UserService` 0.14、`packages/Core/src/main/java/com/acme/utf8/CodecHelper` 0.16 排除；
+    #   随机 base64 0.65–0.98 不排除；PKCS#8 首行 `MIIEvQIBADANBgkq…` 0.33 但没有 `/`、不进路径分支（仍掩）。
+    #   为什么要 `/` 门控：单靠切换率区分不了 ASN.1 结构化首行（0.33）与长驼峰标识符（0.27）；路径必然多 `/`，而含 ≥ 2 个 `/` 的
+    #   随机 base64 行切换率仍 ≥ 0.6，两者一起才干净。
+    function b64_material(s, minlen,   n, i, c, cls, prev, sw, pairs, slashes) {
+      if (s !~ ("^[" B64C "=]+$")) return 0
+      if (length(s) < minlen || is_hex(s)) return 0
+      if (s !~ /[0-9]/ || s !~ /[a-z]/ || s !~ /[A-Z]/) return 0
+      slashes = gsub(/\//, "/", s)
+      if (slashes >= 2) {
+        prev = ""; sw = 0; pairs = 0; n = length(s)
+        for (i = 1; i <= n; i++) {
+          c = substr(s, i, 1)
+          if (c ~ /[a-z]/) cls = "l"; else if (c ~ /[A-Z]/) cls = "u"; else if (c ~ /[0-9]/) cls = "d"; else continue
+          if (prev != "") { pairs++; if (cls != prev) sw++ }
+          prev = cls
+        }
+        if (pairs > 0 && sw / pairs < 0.35) return 0
+      }
+      return 1
     }
     # 纯十六进制串不算 base64 大块：40 位提交 SHA、64 位 SHA-256 在评审正文里很常见，而一行真正的
     # 密钥正文（64 个 base64 字符）全落在 [0-9a-f] 里的概率约 (22/64)^64，可以忽略。
     function is_hex(s) { return s ~ /^[0-9a-fA-F]+$/ }
-    # 「就是密钥正文」的行（比 pem_body_like 严）：去掉首尾空白后整行 base64 字符集、≥ minlen、非纯十六进制、且同时含数字与
-    # 大小写字母。Java 长路径 `src/main/java/com/example/service/impl/UserService` 无数字不中；40 位 SHA 纯十六进制不中；密钥正文行必中。
-    # minlen 20 给「含起始标记的行 + 下一行」的块起始兜底用（第 10 条再补），minlen 40 给全模式的整行规则用（第 17 条：跨字段的
-    # 密钥正文行——BEGIN 在上一个字段末、正文在下一个字段——不再靠 PEM 状态机，逐行就能掩）。
-    function pem_body_key(l, minlen,   s) {
-      s = l
-      sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s)
-      if (s !~ ("^[" B64C "=]+$")) return 0
-      if (length(s) < minlen || is_hex(s)) return 0
-      return (s ~ /[0-9]/ && s ~ /[a-z]/ && s ~ /[A-Z]/)
-    }
     # 提示文案只写一处：两种措辞只在结尾不同，抄成两条整句时改一句会漏另一句。
     function pem_note(k,   head) {
       head = "> ⚠️ 上面的 PEM 块没有配对的 END 行（评审员只引用了起始行，或原文被截断）；"
@@ -1977,13 +1999,13 @@ review_redact_secrets() {
         l = held[first]
         if (pem_is_hdr(l)) { prev_hdr = 1; first++; continue }
         if (prev_hdr && l ~ /^[[:space:]]*$/) { prev_hdr = 0; first++; continue }
-        if (pem_body_like(l)) { prev_hdr = 0; first++; continue }
+        if (pem_body(l, 0, 0)) { prev_hdr = 0; first++; continue }
         break
       }
       print pem_note(held_n - first + 1)
       for (i = first; i <= held_n; i++) {
         l = redact_line(held[i])
-        if (pem_body_like(l)) l = redact(l, "[" B64C "=]+")
+        if (pem_body(l, 0, 0)) l = redact(l, "[" B64C "=]+")
         print redact_b64(l, 40, 0)
       }
       pem_drop()
@@ -1991,7 +2013,10 @@ review_redact_secrets() {
     # 一行普通文本要过的全部掩码（PEM 之外的每一行、以及未闭合块放出来的每一行都走这一份）。
     # 带前缀的令牌形态合成一个交替式、一次 redact（第 6 条 ①；awk 的 match 取最左最长，与逐条套用结果逐字节相同）。
     function redact_line(line) {
-      if (pem_body_key(line, 40)) return redact(line, "[" B64C "=]+")   # 第 17 条：整行密钥正文（无论出现在哪个字段 / 哪种模式）
+      if (pem_body(line, 40, 1)) {                                       # 第 17 条：整行密钥正文（无论出现在哪个字段 / 哪种模式）
+        match(line, /^[[:space:]]*[-+>]?[[:space:]]*/)                     # 第 1 条补：diff / 引用前缀留下，只掩正文本身（`+` 也在 base64 字母表里）
+        return substr(line, 1, RLENGTH) redact(substr(line, RLENGTH + 1), "[" B64C "=]+")
+      }
       line = redact(line, PREFIX_RE)
       line = redact_url(line)
       line = redact_bearer(line)
@@ -2005,7 +2030,7 @@ review_redact_secrets() {
     # 16-fix3 一度整行原样（保行）/ 整行换占位（字段级），`硬编码凭证 AKIA… 与私钥 -----BEGIN…-----` 里的 AKIA 就跟着原样出去、
     # 或者整段问题陈述被无声吞掉（第 11 条 P0 回归）。标记后同一行的尾巴：保行按正文处理（掩 ≥ 20 位 base64 连片），字段级随块丢弃。
     function begin_block(l,   pre, mk, tail) {
-      inpem = 1
+      inpem = 1; kb_lines = 0
       if (pem_marker(l, PEM_BEGIN_RE)) { if (keeplines) print l; else print PEM_PLACEHOLDER; return }
       match(l, PEM_BEGIN_RE)
       # 三段先切好再掩：redact_line 内部的 match() 会改写 RSTART / RLENGTH
@@ -2034,14 +2059,19 @@ review_redact_secrets() {
     # 字段分隔行（review_redact_json 用随机 nonce 拼出，模型伪造不出）：一个字段结束——悬而未决的上一行放出、未闭合的 PEM 就地放出，
     # 分隔行原样透传
     sentre != "" && $0 ~ sentre { emit_pending(); if (inpem) { if (keeplines) inpem = 0; else pem_flush() } print; next }
-    pend != "" { if (!inpem && (pem_body_key($0, 20) || pem_is_hdr($0))) { begin_block(pend); pend = "" } else emit_pending() }
+    pend != "" { if (!inpem && (pem_body($0, 20, 1) || pem_is_hdr($0))) { begin_block(pend); pend = "" } else emit_pending() }
     inpem && pem_marker($0, PEM_END_RE) { if (keeplines) { print; inpem = 0 } else pem_close_block(); next }
     inpem && !keeplines { pem_hold($0); next }
     inpem && keeplines {
+      # 第 15 条 ①：保行模式的块状态有上界——连续 128 行没有 END 就退出（RSA-8192 的 PEM 约 100 行，含 RFC 1421 头也不到 128），
+      # 否则围栏里引用的一条裸 BEGIN 会让后文所有标识符行 / 代码行都按块内处理；已替换的行不回退、不加提示（保行不能加行）
+      if (++kb_lines > 128) { inpem = 0 }
+    }
+    inpem && keeplines {
       if (pem_marker($0, PEM_BEGIN_RE)) { print; next }                 # 块内又一条起始行：只是标记
-      if (pem_body_like($0) || pem_is_hdr($0)) { print PEM_BODY_PH; next }   # 正文行 / RFC 1421 头：等行数替换（第 11 条）
+      if (pem_body($0, 0, 0) || pem_is_hdr($0)) { print PEM_BODY_PH; next }   # 正文行 / RFC 1421 头：等行数替换（第 11 条）
       if ($0 ~ /^[[:space:]]*$/) { print; next }
-      print redact_b64(redact_line($0), 40, 0); next                    # 起始行之后的散文：继续掩码，并掩 ≥ 40 位 base64 连片
+      print redact_b64(redact_line($0), 40, 0); next                    # 起始行之后的散文：继续掩码，并掩 ≥ 40 位 base64 连片（连片须像密钥碎片）
     }
     pem_marker($0, PEM_BEGIN_RE) { begin_block($0); next }
     # 兜底是主规则（第 10 条再补）：一行**含**起始标记（前面有任何文字：`**F1** 硬编码私钥：-----BEGIN…-----`）且下一行就是密钥正文
@@ -2157,7 +2187,8 @@ _review_replace_guarded() {
 #   rc 3 = 守卫拒绝（行数变化或标记行丢失）；rc 4 = 写回失败；rc 5 = 守卫命令（grep / 行数统计）本身失败。
 #   非零时**原文件一个字节都没动**，调用方按渲染失败处理。
 # 字段级掩码（review_redact_json）已经覆盖了 validated.json 派生的全部文本；这一遍兜住任何绕过 validated.json 的输出面
-# （元信息表里的分支名、由 API 字符串拼出的 notice、失败评论的 --reason）。它只做行内替换（--keep-lines：不删行不加行），
+# （元信息表里的分支名、由 API 字符串拼出的 notice、失败评论的 --reason）。--keep-lines：不删行不加行，行内替换为主；
+# 唯一的整行改写是 PEM 块内的正文行 / RFC 1421 头等行数换成占位（16-fix3 第 11 条起有块状态，第 15 条起块状态最多 128 行），
 # 所以结构上不可能吞掉章节；守卫两条都要：行数前后相等（结构上排除吞行）+ 标记行逐字节仍在。
 # 行内评论正文今天确实只含 validated.json 的字段 + 指纹 + sha，也照样过这一遍：这是**有意的双保险**（第 9 条不采纳「跳过」）——
 # 兜底就是为「将来某个出口混入未经 validated.json 的文本」而设，每 MR 成本不到 1 s。

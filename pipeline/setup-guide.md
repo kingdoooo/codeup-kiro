@@ -524,9 +524,10 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   派生要读取的路径。回归测试见 `tests/test-diff-compress.sh`「文件名注入」段。
 - **疑似密钥的掩码有两道，第二道不依赖模型（票 16 / 16-fix2）**。第一道是 agent 提示词里的掩码规则（前 4 后 4）；
   但它只是「要求」——CodeX 复审用一份完全合法的契约证明，模型不遵守时 title / body / fix 里的 token 会原样进评论。
-  第二道在脚本侧，分两层：**字段级**——`review_validate` 之后对 `validated.json` 的 summary / verdict / verdict_reason / 每条
-  title / body / fix 逐字段过 `review_redact_secrets`（`review_redact_json`，PEM 私钥块的整块删除只在这里发生），渲染器、行内正文、
-  折叠区、截断副本与流水线日志拿到的都是掩码后的文本；**文档级兜底**——每个评论出口（汇总 / 行内 / 失败评论，sink）前再过一遍
+  第二道在脚本侧，分两层：**字段级**——`review_validate` 内部就是「归一化 → 字段级掩码 → 结构清洗 → 上限」：summary / verdict /
+  verdict_reason / 每条 title / body / fix / id / category（后两者只掩码不渲染）逐字段过 `review_redact_secrets`（`review_redact_json`，
+  PEM 私钥块的整块删除只在这里发生），渲染器、行内正文、折叠区、截断副本与流水线日志拿到的都是掩码后的文本；标题里的 `*`
+  （包括掩码本身的四颗星）一律转义，两处掩码也拆不开级别前缀的加粗；**文档级兜底**——每个评论出口（汇总 / 行内 / 失败评论，sink）前再过一遍
   **严格保行**的 `review_redact_file`（只做行内替换，行数前后必须相等、评审标记 / 隐藏历史 / 行内标记逐字节仍在，否则拒绝写回、
   评审按失败处理），兜住绕过 `validated.json` 的输出面（元信息表里的分支名、失败评论里的失败原因、降级原文）。失败原因 /
   降级原因 / kiro-cli 自己的 stderr / 去重日志里的文件名在打进流水线日志前同样过掩码；掩码程序不可用时不打原文、失败评论退回
@@ -536,19 +537,28 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   **掩什么**：带前缀的令牌（AWS `AKIA`/`ASIA`… 访问密钥 ID、GitHub `ghp_`/`github_pat_`/`gh?_`、Slack `xox?-`、Google `AIza`、
   OpenAI 风格 `sk-`、JWT）；`secret`/`token`/`password`/`api_key`/`access_key`/`private_key`/`client_secret`/`credential` 一类键名后的
   **字面量**取值——加了引号的只看长度（≥ 12 就掩，`"/Jalr…"`、`"ya29.…"`、`"-abc…"` 都掩）；未加引号的先排除代码形状
-  （函数调用 / 路径 / 属性访问 `os.environ.get`），再按字符集与上下文判定：含数字、含 `/ + = - .`、键名全大写下划线风格
-  （`SECRET_KEY=…`、`AWS_SECRET_ACCESS_KEY=…`、`MYSQL_PASSWORD: …`）、或分隔符不是代码里的 ` = `（env 的 `key=value`、YAML 的
-  `key: value`）——满足任一即掩；`Authorization: Bearer/Basic` 与 `x-yunxiao-token` 一类令牌头后的取值（纯字母且短于 20 的
-  英文词除外，显式令牌头短于 12）；URL 里的 `user:pass@`（先按 RFC 3986 严格匹配，再放宽到口令含 `/` 的真实粘贴形态——`https://ci:wJal…/K7MD…@git…`
+  （函数调用 / 路径 / 属性访问 `os.environ.get`），再按字符集与上下文判定：含数字、含标识符不会有的字符（`/ + = . ~ -` 等——
+  连字符也算，diceware 口令 `correct-horse-battery-staple` 就是连字符小写词组）、键名全大写下划线风格
+  （`SECRET_KEY=…`、`AWS_SECRET_ACCESS_KEY=…`、`MYSQL_PASSWORD: …`）、env 形态 `key=value`、YAML 形态 `key: value`（短于 16 的英文
+  词形除外：`password: authentication`）——满足任一即掩；`Authorization: Bearer/Basic` 后的取值（纯字母且短于 20 的英文词除外）、
+  `x-api-key` / `x-yunxiao-token` / `private-token` 一类显式令牌头后的取值（≥ 8 一律掩；短于 8 的只放行英文词形 `short` / `none`，
+  `aB3.x7`、`1234567` 照掩）；URL 里的 `user:pass@`（先按 RFC 3986 严格匹配，再放宽到口令含 `/` 的真实粘贴形态——`https://ci:wJal…/K7MD…@git…`
   仍掩；`https://registry.npmjs.org:443/@babel/core`、`localhost:8080/oauth/callback/user@example.com` 不动）；PEM 私钥块——
   起始行与 END 行都要**独占一行**（可带 diff / 引用 / 列表 / 反引号等 Markdown 装饰）才算块，字段里闭合即整块删除、零泄漏，
-  未闭合的块到字段末放出并继续掩码；降级原文、失败原因、kiro-cli 的 stderr 尾巴走保行模式：PEM 正文行逐行就地屏蔽、不删行；
+  未闭合的块到字段末放出并继续掩码；降级原文、失败原因、kiro-cli 的 stderr 尾巴走保行模式：PEM 正文行逐行就地屏蔽、不删行，
+  块状态最多 128 行（RSA-8192 约 100 行；围栏里引用的一条裸 BEGIN 不会把后文全部吞掉）；
   句中引用的 BEGIN / END 标记是正文，不动；`.env` 里用 `\n` 写成一行的密钥整段换成占位。
   **不掩（有意接受）**：代码里的标识符引用——小写/camelCase 键 + ` = ` 两侧有空格 + 纯字母数字下划线取值
   （`token = userToken`、`String apiKey = configApiKey;`、`password = getPasswordDefault`），因此 `secret = MySecretValueHere` 这种
-  形状上无法区分的值会漏掉，同一值写成 `SECRET=…`、`secret: …` 或加引号就会被掩；模型自己已经省略过的短前缀片段
-  （如 `MIIEvQIBADANBgkq...`，已不是可用密钥）；没有任何形态特征的裸高熵串（无前缀、不在键值对里）；长度不足 12 的取值整体替换为
-  `****`。掩码是纵深防御，不是「评论里绝不会有密钥」的承诺——真实密钥一旦提交进业务库，正确动作永远是轮换。
+  形状上无法区分的值会漏掉，同一值写成 `SECRET=…`、`secret: …`、加引号或含连字符就会被掩；YAML 冒号形态里短于 16 的驼峰词形
+  （`password: SuperSecretPass`，与 `sessionToken` 一类引用不可分）；反过来 `token: rate-limited-endpoint` 这类连字符英文词组会被
+  当成取值掩掉（键名保留，是有意接受的误报）。模型自己已经省略过的短前缀片段（如 `MIIEvQIBADANBgkq...`，已不是可用密钥）；
+  没有任何形态特征的裸高熵串（无前缀、不在键值对里）；长度不足 12 的取值整体替换为 `****`。「像密钥正文」只有一份判定：base64
+  字符集、≥ 20 / 40 位、非纯十六进制（40 / 64 位提交 SHA 与摘要不掩）、同时含数字与大小写，且不是路径（含 ≥ 2 个 `/` 而字符类别
+  几乎不切换的 `src/main/java/com/example/v2/service/impl/UserService` 原样）。跨字段的 PEM：BEGIN 落在上一字段末、正文落在下一字段
+  开头时，下一字段首行若是 20–39 位的正文尾巴会逃过 ≥ 40 的整行规则——真实正文行是 64 位、只有末行短，泄露上界是一段不可还原的
+  base64 尾巴，有意不带跨字段状态（字段隔离比这段尾巴重要）。掩码是纵深防御，不是「评论里绝不会有密钥」的承诺——真实密钥一旦
+  提交进业务库，正确动作永远是轮换。
 - **残余风险**：被评审代码仍可能试图误导评审结论（提示词注入）。评审员只读、评论不设合并卡点，
   最坏影响是评审意见失真；最终合并决策始终在人工评审。
 
