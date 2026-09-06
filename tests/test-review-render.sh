@@ -2169,6 +2169,35 @@ review_redact_file "$tmp/guard.md"
 assert_contains "$(cat "$tmp/guard.md")" "正文 ${SEC_GHP_MASKED}" "票 16 守卫正控：真规则对同一文件正常掩码"
 assert_eq "$(grep -cxF -- '<!-- kiro-review:90fcb05 run:1 -->' "$tmp/guard.md")" "1" "票 16 守卫正控：真规则不碰评审标记"
 
+# ============================================================================
+# 票 16-fix ①：掩码精度（R7）——sink 掩码落到正常路径后，fix 代码与英文散文的误报
+# ============================================================================
+# 裁决（协调者 2026-09-06）：redact_bearer / redact_header 后面跟着「散文词」（全字母且单一大小写、或首字母大写）不掩；
+# redact_assign 未加引号的取值须至少含一个数字才算字面凭证，加引号的取值维持原判定。票 10 的既有样例逐字节不变
+# （上面 R7 段与 golden② 兜着）。
+rd() { printf '%s\n' "$1" | review_redact_secrets; }
+# --- 不掩：英文散文与 camelCase 裸标识符 ---
+assert_eq "$(rd '建议改用 Basic authentication 而不是明文。')" '建议改用 Basic authentication 而不是明文。' "16-fix：Basic authentication 是散文，不掩"
+assert_eq "$(rd 'Use Bearer Authentication here.')" 'Use Bearer Authentication here.' "16-fix：Bearer Authentication（首字母大写的词）不掩"
+assert_eq "$(rd 'Authorization: header missing 时应返回 401。')" 'Authorization: header missing 时应返回 401。' "16-fix：Authorization: header 是散文，不掩（redact_header 同一条规则）"
+assert_eq "$(rd 'token = userToken')" 'token = userToken' "16-fix：未加引号的 camelCase 裸标识符不掩（9 位，本来就在票 10 的 <12 阈值下）"
+assert_eq "$(rd 'token = userTokenValue')" 'token = userTokenValue' "16-fix：≥12 位的 camelCase 裸标识符也不掩（不含数字）——这条在 0753e44 上会失败（正控）"
+assert_eq "$(rd 'api_key = getApiKey()')" 'api_key = getApiKey()' "16-fix：函数调用不掩"
+assert_eq "$(rd 'api_key = configApiKey')" 'api_key = configApiKey' "16-fix：configApiKey 不掩"
+assert_eq "$(rd 'password = getPasswordDefault')" 'password = getPasswordDefault' "16-fix：getPasswordDefault 不掩"
+assert_eq "$(rd 'String apiKey = configuredApiKey;')" 'String apiKey = configuredApiKey;' "16-fix：Java 赋值里的标识符不掩（自审复现的样例）"
+# --- 仍掩：加引号的字面量、含数字的裸值、真令牌形态（B 方案的正控）---
+assert_eq "$(rd 'token = "userTokenValue"')" 'token = "user****alue"' "16-fix：加引号的取值维持原判定（≥12 位、大小写混合 → 掩）"
+assert_eq "$(rd 'token = usr7Token9Xyz')" 'token = usr7****9Xyz' "16-fix：未加引号但含数字 → 仍掩"
+assert_eq "$(rd 'Authorization: Basic dXNlcjpwYXNz')" 'Authorization: Basic dXNl****YXNz' "16-fix：Basic 后的 base64（大小写混杂）仍掩"
+assert_eq "$(rd 'Authorization: Bearer ya29.a0AfH6SMBxabcdefghij')" 'Authorization: Bearer ya29****ghij' "16-fix：含 . 的 ya29. 令牌仍掩（B 方案正控：looks_literal 会把它当属性访问放过）"
+assert_eq "$(rd 'x-yunxiao-token: pt-abcdefghij0123456789')" 'x-yunxiao-token: pt-a****6789' "16-fix：令牌头后的真令牌仍掩"
+assert_eq "$(rd 'Authorization: Bearer abcdefghij0123456789KLMNOP')" 'Authorization: Bearer abcd****MNOP' "16-fix：票 10 的 Bearer 样例不变"
+assert_eq "$(rd 'Authorization: Bearer SomeLongerTokenValueX')" 'Authorization: Bearer Some****lueX' "16-fix：Bearer 后 camelCase（非单一大小写、非首字母大写词）仍掩"
+assert_eq "$(rd 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY')" 'AWS_SECRET_ACCESS_KEY=wJal****EKEY' "16-fix：票 10 的 key=value 样例不变（含数字）"
+# 说明：协调者 golden 里的 `token = "userToken"`（9 位）落在票 10 的「<12 位不算字面凭证」阈值之下，此前就不掩，本次不动。
+assert_eq "$(rd 'token = "userToken"')" 'token = "userToken"' "16-fix：9 位加引号取值维持票 10 判定（<12 不掩），不是本次改的"
+
 if [[ "$GOLDEN_DIRTY" == "1" ]]; then
   echo "GOLDEN_UPDATE=1：golden 文件已重写，本次运行不构成通过。请人工读 git diff 确认渲染正确，再不带该变量重跑。" >&2
   exit 1

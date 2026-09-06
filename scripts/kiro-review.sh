@@ -56,6 +56,18 @@ REVIEW_REPO_DIR="${REVIEW_REPO_DIR:-$PWD}"
 KIRO_ENGINE=v2
 
 log() { echo "[kiro-review] $*" >&2; }
+# 流水线日志也是 I3 的 sink（票 16-fix）：die_review 的失败原因与降级原因里可能带不受信取值（事件流的
+# runFinished.status、jq 报错回显的模型取值），打日志前先过一遍脚本侧掩码。评论正文已由 sink 掩码覆盖，
+# 这里只补日志那一行。掩码程序失败时退回粗掩（12 位以上的 token 字符连片一律 ****——阈值与 looks_literal 一致；
+# 字符集不含 . 与 =，这样 `runFinished.status=error` 这类字段名还读得出来，而 ghp_/AKIA/base64 正文都 ≥12 位被掩）；
+# 粗掩也失败就整段省略。用法：_redact_for_log <字符串> → stdout（不带结尾换行）
+_redact_for_log() {
+  local s="${1-}" out
+  [[ -n "$s" ]] || return 0
+  if out=$(printf '%s\n' "$s" | review_redact_secrets 2>/dev/null) && [[ -n "$out" ]]; then printf '%s' "$out"; return 0; fi
+  if out=$(printf '%s\n' "$s" | LC_ALL=C sed -E 's#[A-Za-z0-9+/_-]{12,}#****#g' 2>/dev/null) && [[ -n "$out" ]]; then printf '%s' "$out"; return 0; fi
+  printf '%s' "（失败原因掩码失败，已省略）"
+}
 die() { log "错误：$*"; exit 1; }
 
 # 定位到 MR 后的失败：best-effort 回写"评审未完成"评论再退出
@@ -126,7 +138,7 @@ _die_review_minimal() {
 }
 
 die_review() {
-  log "错误：$*"
+  log "错误：$(_redact_for_log "$*")"
   if [[ "$MR_LOCATED" == "1" ]]; then
     local f
     local -a hist_args=()
@@ -738,7 +750,7 @@ render_args=(--sha "$SHORT_SHA" --src "$SOURCE_BRANCH" --dst "$TARGET_BRANCH"
 
 if [[ -n "$DEGRADE_REASON" ]]; then
   # 降级：评审已经产出、只是没按契约输出——贴清洗后的原文并在标题标明，退出码仍为 0。
-  log "警告：结构化解析失败（${DEGRADE_REASON}），降级为贴出评审员输出原文"
+  log "警告：结构化解析失败（$(_redact_for_log "$DEGRADE_REASON")），降级为贴出评审员输出原文"
   final_rc=0
   review_stream_final_text "$WORK/stream.jsonl" > "$WORK/final.txt" || final_rc=$?
   [[ "$final_rc" == "0" ]] || die_review "结构化解析失败，且取评审员原文也失败（rc=${final_rc}）"

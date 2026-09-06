@@ -531,10 +531,15 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   **覆盖的形态**（凭证形态驱动，不碰脚本生成的结构——评审标记、隐藏历史、行内标记、元信息表与页脚由 golden 逐字节保证）：
   带前缀的令牌（AWS `AKIA`/`ASIA`… 访问密钥 ID、GitHub `ghp_`/`github_pat_`/`gh?_`、Slack `xox?-`、Google `AIza`、
   OpenAI 风格 `sk-`、JWT）；`secret`/`token`/`password`/`api_key`/`access_key`/`private_key`/`client_secret`/`credential`
-  一类键名后的**字面量**取值（含 base64 补位 `=`；表达式、路径、属性访问不掩，避免把可读代码掩成乱码）；
-  `Authorization: Bearer/Basic`、`x-yunxiao-token` 一类令牌头；URL 里的 `user:pass@`；PEM 私钥块（整块屏蔽；未闭合的块、
+  一类键名后的**字面量**取值（含 base64 补位 `=`；表达式、路径、属性访问不掩；**未加引号**的取值还须至少含一个数字——
+  `token = userTokenValue`、`api_key = configApiKey` 这类 camelCase 标识符是代码不是凭证，加引号的 `"userTokenValue"` 仍掩；
+  避免把可读代码掩成乱码）；`Authorization: Bearer/Basic`、`x-yunxiao-token` 一类令牌头（后面跟着的若是一个单一大小写或
+  首字母大写的英文词——`Basic authentication`、`Authorization: header missing`——是散文，不掩；`dXNlcjpwYXNz`、`ya29.…` 仍掩）；
+  URL 里的 `user:pass@`；PEM 私钥块（整块屏蔽；未闭合的块、
   或起始行与 END 行之间夹着非密钥内容的「块」——评审员只是在两处文字里引用了这两行——按票 10 的规则放出并继续掩码，
-  不吞掉中间的问题与小节）。掩码之后脚本还会核对评审标记 / 隐藏历史 / 行内标记逐字节仍在，丢了就按掩码失败处理。**有意不覆盖**：模型自己已经省略过的短前缀片段（如 `MIIEvQIBADANBgkq...`，
+  不吞掉中间的问题与小节）。掩码之后脚本还会核对评审标记 / 隐藏历史 / 行内标记逐字节仍在，丢了就按掩码失败处理。
+  流水线日志里的失败原因（`die_review`）与降级原因同样先过掩码再打印——事件流里的 `runFinished.status` 一类不受信取值会拼进
+  原因；掩码程序不可用时退回粗掩（12 位以上的 token 字符连片一律 `****`）。**有意不覆盖**：模型自己已经省略过的短前缀片段（如 `MIIEvQIBADANBgkq...`，
   已不是可用密钥，为它降阈值会把普通长标识符一起掩成乱码）；没有任何形态特征的裸高熵串（无前缀、不在键值对里）；
   长度不足 12 的取值整体替换为 `****`。掩码是纵深防御，不是「评论里绝不会有密钥」的承诺——真实密钥一旦提交进
   业务库，正确动作永远是轮换。

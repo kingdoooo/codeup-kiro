@@ -1368,4 +1368,26 @@ assert_not_contains "$comment" "评论掩码失败" "A10 掩码失败：最小�
 assert_eq "$(printf '%s\n' "$comment" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:1 -->$')" "1" "A10 掩码失败：最小评论仍带评审标记（下次评审找得到）"
 assert_eq "$(printf '%s\n' "$comment" | grep -c '^<!-- kiro-history:\[')" "1" "A10 掩码失败：最小评论仍带隐藏历史"
 
+# ---- 票 16-fix ②：die_review 的日志行也是 sink——失败原因里的不受信取值（runFinished.status）过掩码再打日志 ----
+# 评论正文已由 sink 掩码覆盖，这里补的是 `log "错误：…"` 那一行：事件流里的 status 串原样拼进原因，
+# 此前直接进流水线日志。降级原因走同一个 _redact_for_log（现有 review_validate 对各种怪类型都做了规范化、
+# jq 报错不会回显模型取值，所以降级原因目前没有能带出完整 token 的端到端向量——只断言那行日志仍在、没被包坏）。
+run_case statusleak MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP} ${SEC_AKIA}"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "16-fix 日志：status 非 success → 非零退出"
+assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status=error ${SEC_GHP_MASKED} ${SEC_AKIA_MASKED}）" \
+  "16-fix 日志：die_review 的日志行带掩码后的 status（原因文案与取值都在，只有 token 变掩码）"
+e2e_assert_no_secrets "$OUT" "16-fix 日志（全部输出：日志 + 失败评论）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "status=error ${SEC_GHP_MASKED}" "16-fix 日志对照：失败评论里同样是掩码后的 status（sink 掩码兜住）"
+# 掩码程序失败时的日志退回：粗掩（8 位以上 token 字符连片 → ****），原因文案仍在、token 原文不在
+run_case statusleak-badawk PATH="$tmp/badawk:$PATH" MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP}"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "16-fix 日志退回：非零退出"
+assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status=error ****）" "16-fix 日志退回：awk 掩码不可用时粗掩成 ****，文案保留"
+e2e_assert_no_secrets "$OUT" "16-fix 日志退回：全部输出不含原文"
+# 降级原因那一行没被包坏（原因文案完整）
+run_case degrade-reason-log MOCK_KIRO_LEAK_SECRET=1
+assert_rc "$RC" 0 "16-fix 降级原因日志：评审成功（降级）"
+assert_contains "$OUT" "警告：结构化解析失败（评审员输出中没有成对的 <<<KIRO_REVIEW_JSON>>> 契约标记），降级为贴出评审员输出原文" \
+  "16-fix 降级原因日志：过掩码后文案逐字不变"
+
 report

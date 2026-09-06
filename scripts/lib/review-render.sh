@@ -1663,7 +1663,7 @@ review_redact_secrets() {
     }
     # 形如 SECRET_KEY = "xxx" / token: xxx 的赋值：只掩码取值部分，保留键名（键名是排查线索）
     # 大小写不敏感靠 tolower 副本定位——tolower 不改变长度，下标可以直接套回原串
-    function redact_assign(line,   lo, out, seg, vstart, val, i, ch) {
+    function redact_assign(line,   lo, out, seg, vstart, val, i, ch, quoted) {
       out = ""
       while (1) {
         lo = tolower(line)
@@ -1683,13 +1683,26 @@ review_redact_secrets() {
           if (ch == ":" || ch == "=") { vstart = i + 1; break }
         }
         if (vstart == 0) { out = out seg; continue }
-        while (vstart <= length(seg) && substr(seg, vstart, 1) ~ /[[:space:]"'"'"']/) vstart++
+        quoted = 0
+        while (vstart <= length(seg) && substr(seg, vstart, 1) ~ /[[:space:]"'"'"']/) {
+          if (substr(seg, vstart, 1) ~ /["'"'"']/) quoted = 1
+          vstart++
+        }
         val = substr(seg, vstart)
-        if (looks_literal(val)) out = out substr(seg, 1, vstart - 1) mask(val)
-        else                    out = out seg
+        # 未加引号的取值还要至少含一个数字才算字面凭证（票 16-fix）：真实密钥几乎必含数字，而
+        # `token = userToken`、`api_key = configApiKey`、`password = getPasswordDefault` 这类 camelCase 裸标识符
+        # 不含——它们出现在 fix 的代码里，掩掉就是把可读代码掩成乱码。加引号的取值维持原判定（`"userToken"` 仍掩：
+        # 引号里的字符串就是字面量）。
+        if (looks_literal(val) && (quoted || val ~ /[0-9]/)) out = out substr(seg, 1, vstart - 1) mask(val)
+        else                                                 out = out seg
       }
       return out line
     }
+    # 「散文词」：全是字母且单一大小写、或首字母大写的一个词（authentication / Authentication / TOKEN）。
+    # Bearer / Basic / 令牌头后面跟着这样一个词，是英文正文（「Basic authentication」「Authorization: header missing」），
+    # 不是凭证；真实令牌几乎必含数字或大小写混杂（dXNlcjpwYXNz、ya29.a0Af…）。只排除这一种形态、其余维持现状
+    # （票 16-fix；不用 looks_literal——它会把含 . 的 ya29. 一类令牌当属性访问放过）。
+    function prose_word(v) { return (v ~ /^[a-z]+$/ || v ~ /^[A-Z][a-z]+$/ || v ~ /^[A-Z]+$/) }
     # Authorization: Bearer <token> / Authorization: Basic <b64>：掩码方案后面的那一段
     function redact_bearer(line,   lo, out, seg, p, val) {
       out = ""
@@ -1701,7 +1714,8 @@ review_redact_secrets() {
         line = substr(line, RSTART + RLENGTH)
         p = match(seg, /[[:space:]]+/)
         val = substr(seg, p + RLENGTH)
-        out = out substr(seg, 1, p + RLENGTH - 1) mask(val)
+        if (prose_word(val)) out = out seg
+        else                 out = out substr(seg, 1, p + RLENGTH - 1) mask(val)
       }
       return out line
     }
@@ -1717,8 +1731,8 @@ review_redact_secrets() {
         vstart = index(seg, ":") + 1
         while (vstart <= length(seg) && substr(seg, vstart, 1) ~ /[[:space:]]/) vstart++
         val = substr(seg, vstart)
-        # 值本身是 Bearer/Basic 方案时交给 redact_bearer，别把方案名掩掉
-        if (tolower(val) ~ /^(bearer|basic)/) out = out seg
+        # 值本身是 Bearer/Basic 方案时交给 redact_bearer，别把方案名掩掉；散文词（`Authorization: header missing`）不是令牌
+        if (tolower(val) ~ /^(bearer|basic)/ || prose_word(val)) out = out seg
         else out = out substr(seg, 1, vstart - 1) mask(val)
       }
       return out line

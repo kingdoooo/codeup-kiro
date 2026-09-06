@@ -892,4 +892,28 @@ pkg=$(make_mutant m-f-no-guard 's|^    grep -qxF -- "\$m" "\$out" \|\| { rm -f "
 assert_eq "$(mut_guard "$pkg")" "0" "M-f：守卫拆掉后删了评审标记的输出照样 rc 0 写回——单测「rc 3」断言会失败"
 assert_eq "$(mut_guard "$ROOT")" "3" "M-f 对照：未变异实现 rc 3"
 
+# --- M-g：die_review 的日志行不再过掩码 → 事件流 status 里的 token 原样进流水线日志（评论仍被 sink 掩码兜住）---
+pkg=$(make_mutant m-g-log-redact 's|^  log "错误：\$(_redact_for_log "\$\*")"$|  log "错误：$*"  # 变异 M-g：日志行不掩码|')
+run_case m-g "$pkg" MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP}"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-g：变异体仍以非零退出"
+assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status=error ${SEC_GHP}）" "M-g：日志行带 ghp_ 原文——端到端「日志不含原文」断言会失败"
+assert_not_contains "$(posted_comment "$OUT")" "$SEC_GHP" "M-g 对照：失败评论仍被 sink 掩码兜住（差别只在日志）"
+run_case m-g-control "$ROOT" MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP}"
+assert_not_contains "$OUT" "$SEC_GHP" "M-g 对照：未变异实现日志与评论都不含原文"
+
+# --- M-h：去掉「未加引号须含数字」→ userToken 被掩（单测「camelCase 裸标识符不掩」断言会失败）---
+mut_rd() { ( set +e; source "$1/scripts/lib/review-render.sh"; printf '%s\n' "$2" | review_redact_secrets ); }
+pkg=$(make_mutant m-h-assign-digit 's|if (looks_literal(val) \&\& (quoted \|\| val ~ /\[0-9\]/)) out = out|if (looks_literal(val)) out = out|' scripts/lib/review-render.sh)
+assert_eq "$(mut_rd "$pkg" 'token = userTokenValue')" 'token = user****alue' "M-h：数字要求去掉后裸 camelCase 被掩——单测断言会失败"
+assert_eq "$(mut_rd "$ROOT" 'token = userTokenValue')" 'token = userTokenValue' "M-h 对照：未变异实现不掩"
+assert_eq "$(mut_rd "$pkg" 'token = usr7Token9Xyz')" 'token = usr7****9Xyz' "M-h 对照：含数字的裸值两边都掩（变异只影响无数字的）"
+# --- M-i：去掉 bearer 的散文词豁免 → Basic authentication 被掩 ---
+pkg=$(make_mutant m-i-bearer-prose 's|        if (prose_word(val)) out = out seg$|        if (0) out = out seg  # 变异 M-i|' scripts/lib/review-render.sh)
+assert_eq "$(mut_rd "$pkg" 'Basic authentication')" 'Basic auth****tion' "M-i：豁免去掉后散文被掩——单测断言会失败"
+assert_eq "$(mut_rd "$ROOT" 'Basic authentication')" 'Basic authentication' "M-i 对照：未变异实现不掩"
+# --- M-j：去掉 header 的散文词豁免 → Authorization: header 被掩 ---
+pkg=$(make_mutant m-j-header-prose 's#if (tolower(val) ~ /^(bearer|basic)/ \|\| prose_word(val)) out = out seg#if (tolower(val) ~ /^(bearer|basic)/) out = out seg#' scripts/lib/review-render.sh)
+assert_eq "$(mut_rd "$pkg" 'Authorization: header missing')" 'Authorization: **** missing' "M-j：豁免去掉后 header 被掩——单测断言会失败"
+assert_eq "$(mut_rd "$ROOT" 'Authorization: header missing')" 'Authorization: header missing' "M-j 对照：未变异实现不掩"
+
 report
