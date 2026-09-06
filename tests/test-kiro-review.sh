@@ -1443,6 +1443,26 @@ run_case verstderr MOCK_KIRO_VERSION_STDERR=1
 assert_rc "$RC" 0 "kiro-cli --version 打到 stderr：评审照常完成"
 assert_contains "$OUT" "在 P1-15 探测过的版本名单内" "kiro-cli --version 打到 stderr：仍取得到版本、名单内"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "kiro-cli --version 打到 stderr：无 notice"
+# 15-fix4 #7：stderr 上先到的升级提示不能被当成已装版本。旧写法 `2>&1 | head -1 | grep -oE 数字` 取到的是先 flush 的那个流的第一行——
+# stderr 无缓冲、stdout 进管道块缓冲，升级提示「… 2.30.0 …」先到 → 脚本据以判定的是**可用**版本；等 2.30.0 进 KIRO_TESTED_VERSIONS，
+# 装着未探测 2.21.x 的机器反而不再告警。新取法：stdout 与 stderr 分开捕获，先在 stdout 里按程序名锚定 `kiro-cli <X.Y.Z>`，取不到再看 stderr。
+run_case verwarn MOCK_KIRO_VERSION_WARN=1
+assert_rc "$RC" 0 "stderr 先打升级提示：评审照常完成"
+assert_contains "$OUT" "kiro-cli 版本 2.21.1：在 P1-15 探测过的版本名单内" "stderr 先打升级提示：取到的是已装版本 2.21.1，不是提示里的 2.30.0"
+assert_not_contains "$OUT" "2.30.0 未经" "stderr 先打升级提示：没把 2.30.0 当成本次版本"
+assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "stderr 先打升级提示：无 notice"
+# 升级提示 + 版本打到 stderr（两条都在 stderr）：仍按程序名锚定取到已装版本
+run_case verwarn2 MOCK_KIRO_VERSION_WARN=1 MOCK_KIRO_VERSION_STDERR=1
+assert_contains "$OUT" "kiro-cli 版本 2.21.1：在 P1-15 探测过的版本名单内" "升级提示与版本都在 stderr：按程序名锚定仍取到 2.21.1"
+# --version 跑不起来（退出码 127）：走失败评论（固定文案），不再是软 notice 后在 chat 上烧掉整个 KIRO_TIMEOUT
+run_case verfail MOCK_KIRO_VERSION_RC=127
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "kiro-cli --version 退出 127：评审失败"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "评审未完成" "kiro-cli --version 退出 127：失败评论"
+assert_contains "$comment" "kiro-cli --version 失败" "kiro-cli --version 退出 127：失败评论固定文案点名 --version"
+assert_contains "$comment" "127" "kiro-cli --version 退出 127：失败评论带退出码"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "kiro-cli --version 退出 127：Kiro chat 未被启动（不烧额度）"
+assert_eq "$(call_count "$MD/calls" settings)" "0" "kiro-cli --version 退出 127：settings 也未调用（在能力检查处就停）"
 # 15-fix3 #3：降级路径（结构化解析失败）同样要带版本 notice——原来只在结构化分支并入
 run_case degnotice MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
 assert_rc "$RC" 0 "降级 + 版本不在名单：退出码 0"

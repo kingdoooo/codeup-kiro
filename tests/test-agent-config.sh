@@ -465,6 +465,32 @@ nl_old=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_API_KEY="$(printf 'k\nSECRETFRAG
   bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; printf "%s\n" "${KIRO_ENV_ALLOW[@]}" | cut -d= -f1' _ "$LIB")
 assert_contains "$nl_old" "SECRETFRAG" "正控：按行 cut 的旧写法会泄出换行后的半个取值"
 
+# --- kiro_cli_version（15-fix4 #7 / A6）：stdout 与 stderr 分开捕获、按程序名锚定、退出码单独返回；执行器与探测脚本共用 ---
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.1')" "2.21.1" "版本提取：kiro-cli 2.21.1"
+assert_eq "$(_kiro_cli_version_pick $'warn: A new version (2.30.0) of kiro-cli is available (installed 2.21.1).\nkiro-cli 2.21.1')" "2.21.1" "版本提取：升级提示里的 2.30.0 不算，锚定 kiro-cli 后面的数字"
+assert_eq "$(_kiro_cli_version_pick 'A new version (2.30.0) of kiro-cli is available')" "" "版本提取：只有升级提示、没有「kiro-cli <版本>」→ 空"
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli   2.21')" "2.21" "版本提取：多个空白、两段版本号"
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli version 2.21.1')" "" "版本提取：kiro-cli 与数字之间夹了别的词 → 不认（形态未知就当未知，宁可 notice）"
+assert_eq "$(_kiro_cli_version_pick 'mykiro-cli 9.9.9 kiro-cli 2.21.1')" "2.21.1" "版本提取：程序名前面粘着字母的不算"
+assert_eq "$(_kiro_cli_version_pick '')" "" "版本提取：空输入 → 空"
+# 真跑一次替身：stderr 先打升级提示 → 取已装版本；stderr 也打版本 → 回退到 stderr；退出码非零 → 返回 1 且带退出码
+mkdir -p "$tmp/vh/.kiro-mock"; mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_WARN=1
+TB=""; command -v timeout >/dev/null && TB=timeout; [[ -z "$TB" ]] && command -v gtimeout >/dev/null && TB=gtimeout
+ver_run() { env -i PATH="$ROOT/tests/mockbin:$PATH" HOME="$tmp/vh" bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist; kiro_cli_version "$3" "$2"; rc=$?; printf "rc=%s ver=[%s] err=[%s]" "$rc" "$KIRO_CLI_VERSION" "$KIRO_CLI_VERSION_ERROR"' _ "$LIB" "$tmp" "$TB" 2>/dev/null; }
+if command -v timeout >/dev/null || command -v gtimeout >/dev/null; then
+  assert_eq "$(ver_run)" "rc=0 ver=[2.21.1] err=[]" "kiro_cli_version：替身 stderr 先打升级提示 → 取到已装 2.21.1、无错误"
+  mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_STDERR=1 MOCK_KIRO_VERSION=3.0.0
+  assert_eq "$(ver_run)" "rc=0 ver=[3.0.0] err=[]" "kiro_cli_version：stdout 空、版本在 stderr → 回退到 stderr 取到 3.0.0"
+  mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_WARN=1 MOCK_KIRO_VERSION_STDERR=1
+  assert_eq "$(ver_run)" "rc=0 ver=[2.21.1] err=[]" "kiro_cli_version：升级提示与版本都在 stderr → 锚定程序名仍取 2.21.1"
+  mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_RC=127
+  ver_out=$(ver_run)
+  assert_contains "$ver_out" "rc=1 ver=[]" "kiro_cli_version：--version 退出 127 → 返回 1、版本为空"
+  assert_contains "$ver_out" "退出码 127" "kiro_cli_version：错误文案带退出码"
+else
+  echo "INFO: 本机无 timeout/gtimeout，跳过 kiro_cli_version 的替身用例" >&2
+fi
+
 # --- 真实 kiro-cli（若本机有）：集成包内与安装后的定义都通过 agent validate ---
 # 注意：kiro-cli 2.21 的 agent validate 无论结果如何都 exit 0，错误只打印在输出里（实测），所以看输出而不是退出码，
 # 并用一个必然出错的文件做正控，证明这个检查真的会失败。

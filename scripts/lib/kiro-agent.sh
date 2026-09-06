@@ -164,6 +164,38 @@ kiro_agent_selfcheck() {
   return 0
 }
 
+# ── kiro_cli_version ────────────────────────────────────────────────────────────────────────────
+# 取**已装** kiro-cli 的版本号（15-fix4 #7 / A6）。用法：kiro_cli_version <timeout 程序名> <运行目录> [超时秒，默认 60]
+# 前提：调用方已跑过 kiro_env_allowlist（KIRO_ENV_ALLOW 已填）——与另外三处 kiro-cli 调用同一份 env -i 许可清单。
+# 结果：KIRO_CLI_VERSION（取不到为空）；返回 0 = --version 跑通（版本取不到只是 notice，不是失败）；返回 1 = --version 退出码非零，
+#   KIRO_CLI_VERSION_ERROR 带退出码与 stderr 尾部（调用方 die_review；--version 都跑不起来的 CLI 不该再在 chat 上烧掉整个 KIRO_TIMEOUT）。
+# 取法：stdout 与 stderr **分开捕获**。`2>&1 | head -1` 取到的是先 flush 的那个流的第一行：stderr 无缓冲、stdout 进管道是块缓冲，
+#   升级提示「A new version (2.30.0) …」先到 → 报告并据以判定的是**可用**版本而不是已装版本；等 2.30.0 进 KIRO_TESTED_VERSIONS，
+#   装着未探测 2.21.x 的机器反而不再告警。先在 stdout 里按程序名锚定 `kiro-cli<空白>X.Y[.Z…]`，取不到再看 stderr（有的 CLI 把版本
+#   打到 stderr，15-fix3 #8）；两个流里都没有这个形态就当未知（宁可 notice，不猜）。
+# 执行器第 3 步与探测脚本（summary.json 的 kiro_cli 字段——人工抄进 KIRO_TESTED_VERSIONS 的来源）都调这一个函数。
+KIRO_CLI_VERSION=""
+KIRO_CLI_VERSION_ERROR=""
+# 按程序名锚定取版本：程序名前面不能粘着标识符字符（mykiro-cli 9.9.9 不算），后面只能是空白 + 数字点串；取第一个匹配
+_kiro_cli_version_pick() {
+  if [[ "$1" =~ (^|[^A-Za-z0-9_-])kiro-cli[[:space:]]+([0-9]+(\.[0-9]+)+) ]]; then printf '%s' "${BASH_REMATCH[2]}"; fi
+  return 0
+}
+kiro_cli_version() {
+  local tbin="$1" cwd="$2" secs="${3:-60}" out err errf rc=0
+  KIRO_CLI_VERSION=""; KIRO_CLI_VERSION_ERROR=""
+  errf=$(mktemp) || { KIRO_CLI_VERSION_ERROR="无法创建临时文件"; return 1; }
+  out=$(cd "$cwd" && "$tbin" "$secs" env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli --version 2>"$errf") || rc=$?
+  err=$(cat "$errf" 2>/dev/null || true); rm -f "$errf"
+  if [[ "$rc" -ne 0 ]]; then
+    KIRO_CLI_VERSION_ERROR="kiro-cli --version 失败（退出码 ${rc}$([[ "$rc" == "124" ]] && printf '，超时 %ss' "$secs")）；stderr 尾部：$(printf '%s\n' "$err" | tail -n 3 | tr '\n' ' ')"
+    return 1
+  fi
+  KIRO_CLI_VERSION=$(_kiro_cli_version_pick "$out")
+  [[ -n "$KIRO_CLI_VERSION" ]] || KIRO_CLI_VERSION=$(_kiro_cli_version_pick "$err")
+  return 0
+}
+
 # ── kiro_env_allowlist ──────────────────────────────────────────────────────────────────────────
 # Kiro 子进程环境的许可清单（票 15，spec §4.2 修订；15-fix #11/#12；15-fix2 #12 #13 #14 #17）：填充数组 KIRO_ENV_ALLOW，
 # 每个元素是 `VAR=value`，供 `env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli …` 使用（用数组而不是按行输出：取值里若有换行，

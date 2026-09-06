@@ -577,8 +577,10 @@ grep -q -- '--output-format' <<<"$KIRO_CHAT_HELP" \
 # kiro-cli 版本 vs 探测过的版本（15-fix2 #24）：读取边界（allowedPaths 之外的符号链接、../ 越界）靠 kiro-cli 先解析再比对，
 # 这是 P1-15 T8 在 KIRO_TESTED_VERSIONS 上实测的行为，不是文档承诺。版本不在名单里**不失败**（客户 curl 装的往往是最新版），
 # 但日志与汇总评论都要留一句 notice；取不到版本号同样 notice。生产的兜底不变：符号链接在隔离步骤里全部删除。
-# 2>&1（与 KIRO_CHAT_HELP 同款）：把版本打到 stderr 的 CLI 会让版本永远「未知」、每条评论永久带 notice 且无法清除（15-fix3 #8）
-KIRO_CLI_VERSION=$(cd "$PKG_ROOT" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli --version 2>&1 | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)
+# 取法在 kiro_cli_version（scripts/lib/kiro-agent.sh，探测脚本共用，15-fix4 #7）：stdout / stderr 分开捕获、按程序名锚定——stderr 上先到的
+# 升级提示「A new version (2.30.0) …」不能被当成已装版本；版本打到 stderr 的 CLI 仍取得到（15-fix3 #8）。--version 退出码非零 → 失败评论：
+# 连 --version 都跑不起来的 CLI，不该再在 chat 上烧掉整个 KIRO_TIMEOUT。
+kiro_cli_version "$TIMEOUT_BIN" "$PKG_ROOT" || die_review "${KIRO_CLI_VERSION_ERROR}。kiro-cli 无法运行，拒绝评审；请检查构建机上的 kiro-cli 安装"
 if [[ -z "$KIRO_CLI_VERSION" || " $KIRO_TESTED_VERSIONS " != *" $KIRO_CLI_VERSION "* ]]; then
   REVIEW_NOTICE="注意：本次 kiro-cli 版本 ${KIRO_CLI_VERSION:-未知} 未经 P1-15 探测（已探测：${KIRO_TESTED_VERSIONS}），读取边界依赖未验证的路径解析行为（符号链接 / ../ 是否先解析再比对 allowedPaths）；请按 scripts/probe/README.md「升级 kiro-cli 之后」跑一次探测。"
   log "警告：${REVIEW_NOTICE}"

@@ -75,7 +75,7 @@ done
 want() { [[ " $CASES " == *" $1 "* ]]; }
 # 「实际运行」的集合直接从 CASES ∩ ALL_CASES 推导（15-fix2 #4）：不再手工记账——漏记一处就把「走主方案」静默降成「子集运行」
 RAN=" "; for c in $ALL_CASES; do want "$c" && RAN+="$c "; done
-echo "[probe] kiro-cli $(kiro-cli --version 2>/dev/null | head -1) 输出目录 $KEEP" >&2
+echo "[probe] 输出目录 $KEEP" >&2
 
 # ---------- 可逆的环境准备 ----------
 source "$PKG_ROOT/scripts/lib/kiro-agent.sh"
@@ -145,6 +145,10 @@ echo "[probe] 探测 agent 已装：${INSTALLED}（read/grep/glob allowedPaths =
 kiro_env_allowlist || { echo "KIRO_ENV_PASSTHROUGH 不合法：${KIRO_ENV_ALLOW_ERROR}，中止（退出码 5）" >&2; exit 5; }
 kiro_env_allowlist_names > "$KEEP/env-allowlist-names.txt"      # 按数组元素取名字，不按行切（取值含换行时不泄半个取值）
 echo "[probe] env -i 许可清单变量：$(tr '\n' ' ' < "$KEEP/env-allowlist-names.txt")" >&2
+# kiro-cli 版本：与执行器第 3 步同一函数（kiro_cli_version：stdout / stderr 分开、按程序名锚定、同一 env -i 许可清单，15-fix4 #7 / A6）——
+# summary.json 的 kiro_cli 字段正是人工抄进 KIRO_TESTED_VERSIONS 的来源，`2>/dev/null | head -1` 会把版本打到 stderr 的 CLI 记成空串。
+kiro_cli_version "$TIMEOUT_BIN" "$WORK" || { echo "${KIRO_CLI_VERSION_ERROR}（环境准备失败，退出码 5）" >&2; exit 5; }
+echo "[probe] kiro-cli 版本：${KIRO_CLI_VERSION:-未知（--version 输出里没有「kiro-cli <版本>」形态）}" >&2
 
 # ---------- 运行与判定 ----------
 # run_case <名> <trust|notrust> <fullenv|allowenv> <提示词>：事件流 $KEEP/<名>.jsonl，stderr $KEEP/<名>.err；返回 kiro 退出码
@@ -357,7 +361,7 @@ fi
 
 # ---------- 汇总 ----------
 GATE_MISSING=""; for c in $GATE_CASES; do [[ "$RAN" == *" $c "* ]] || GATE_MISSING+="$c "; done
-jq -n --arg ts "$TS" --arg ver "$(kiro-cli --version 2>/dev/null | head -1)" --arg keep "$KEEP" --arg ran "${RAN# }" --arg missing "$GATE_MISSING" \
+jq -n --arg ts "$TS" --arg ver "$KIRO_CLI_VERSION" --arg keep "$KEEP" --arg ran "${RAN# }" --arg missing "$GATE_MISSING" \
       --argjson fail "$PROBE_FAIL" --argjson inc "$PROBE_INCONCLUSIVE" \
       '{probe: "P1-15", ts: $ts, kiro_cli: $ver, raw_dir: $keep, ran: ($ran | split(" ") | map(select(. != ""))),
         gate_missing: ($missing | split(" ") | map(select(. != ""))), any_fail: ($fail == 1), any_inconclusive: ($inc == 1)}' \

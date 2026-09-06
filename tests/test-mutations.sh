@@ -293,11 +293,21 @@ run_case m5w "$pkg" KIRO_ENV_PASSTHROUGH="svc_SECRET_9f3ab21c7de4"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5w：仍拒绝运行"
 assert_contains "$(posted_comment "$OUT")" "svc_SECRET_9f3ab21c7de4" "M5w：完整名字进了评论——端到端「完整名字不进评论」断言会失败"
 
-# --- M5x：--version 改回 2>/dev/null → 版本打到 stderr 的 CLI 让版本永远「未知」（15-fix3 #8）---
-pkg=$(make_mutant m5x-version-stderr 's/kiro-cli --version 2>&1 | head -1/kiro-cli --version 2>\/dev\/null | head -1/')
+# --- M5x：kiro_cli_version 去掉 stderr 回退 → 版本打到 stderr 的 CLI 让版本永远「未知」（15-fix3 #8 / 15-fix4 #7）---
+pkg=$(make_mutant m5x-version-stderr '/KIRO_CLI_VERSION=$(_kiro_cli_version_pick "$err")/d' scripts/lib/kiro-agent.sh)
 run_case m5x "$pkg" MOCK_KIRO_VERSION_STDERR=1
 assert_rc "$RC" 0 "M5x：变异体仍能跑完"
 assert_contains "$(posted_comment "$OUT")" "未知" "M5x：版本永远「未知」、评论带 notice——端到端「--version 打到 stderr：无 notice」断言会失败"
+# --- M5x2：执行器退回旧取法 `2>&1 | head -1 | grep -oE 数字`（正控，15-fix4 #7）→ stderr 上先到的升级提示 2.30.0 被当成本次版本 ---
+pkg=$(make_mutant m5x2-version-merged 's|^kiro_cli_version "\$TIMEOUT_BIN" "\$PKG_ROOT" \|\| die_review .*$|KIRO_CLI_VERSION=$(cd "$PKG_ROOT" \&\& "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli --version 2>\&1 \| head -1 \| grep -oE "[0-9]+(\\.[0-9]+)+" \| head -1 \|\| true)|')
+run_case m5x2 "$pkg" MOCK_KIRO_VERSION_WARN=1
+assert_rc "$RC" 0 "M5x2：变异体仍能跑完"
+assert_contains "$OUT" "2.30.0 未经 P1-15 探测" "M5x2：升级提示里的 2.30.0 被当成本次版本——端到端「取到的是已装版本 2.21.1」断言会失败"
+# --- M5x3：--version 退出码不再判 → 跑不起来的 CLI 只留软 notice、继续去 chat（15-fix4 #7）---
+pkg=$(make_mutant m5x3-version-rc 's|^kiro_cli_version "\$TIMEOUT_BIN" "\$PKG_ROOT" \|\| die_review .*$|kiro_cli_version "$TIMEOUT_BIN" "$PKG_ROOT" \|\| true|')
+run_case m5x3 "$pkg" MOCK_KIRO_VERSION_RC=127
+assert_rc "$RC" 0 "M5x3：--version 退出 127 也照跑——端到端「kiro-cli --version 退出 127：评审失败」断言会失败"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "launched" "M5x3：Kiro chat 仍被启动（额度照烧）"
 
 # --- M5y：自检去掉 `[[ -s ]]` 0 字节检查（15-fix4 #13）→ 空文件仍被第二道（--slurp 恰好一个值）拦下，但固定文案不再点明「0 字节」---
 # 单测「selfcheck：空文件的固定文案点明 0 字节」断言会失败。两道都在才是 fail-closed 的纵深：这条变异证明第一道有单独的可观测结果。
