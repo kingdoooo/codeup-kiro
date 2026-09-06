@@ -1778,12 +1778,9 @@ review_redact_secrets() {
       if (unspaced == 1 && !hyphen_prose(val)) return 1      # ④b YAML 形态（key: value）——`token: rate-limited-endpoint` 这类连字符散文除外
       return 0                                               # 代码里的标识符引用：token = userToken
     }
-    # 连字符英文词组（第 21 条）：纯 [A-Za-z-]、无数字、且不是「大小写混合且 ≥ 20」的高熵形态
-    function hyphen_prose(v) {
-      if (v !~ /^[A-Za-z-]+$/) return 0
-      if (length(v) >= 20 && v ~ /[a-z]/ && v ~ /[A-Z]/) return 0
-      return 1
-    }
+    # 连字符英文词组（第 21 条，16-fix4 第 5 条改判）：至少一个连字符、至少两个全小写段（rate-limited-endpoint、
+    # must-be-rotated-quarterly）。零连字符的纯字母串（MySecretValueHere、correcthorsebattery）不是散文，照掩。
+    function hyphen_prose(v) { return (v ~ /^[a-z]+(-[a-z]+)+$/) }
     # 散文词（第 19 条）：短于 maxlen 的**英文词形**——全大写缩写，或小写 / 首字母大写的驼峰词（首段 ≥ 2 个小写字母，
     # 后续每段大写 + ≥ 1 个小写：authentication / Authentication / HeaderMissing / RequestId）。base64 的大小写是逐字符乱序的
     # （dXNlcjpwYXNz、dGhpcyBpcyBh），不成词形，所以照掩；长度上限另把 ≥ 20 的纯字母（base32 恢复码、许可证密钥、TOKENNameXXXX…）

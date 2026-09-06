@@ -875,8 +875,7 @@ assert_not_contains "$OUT" "$SEC_GHP" "M-g 对照：未变异实现日志与评�
 # --- M-h：第 29 条的两条上下文判定各去掉一条 → 无数字凭证裸奔（单测「仍掩」断言会失败）---
 pkg=$(make_mutant m-h-no-caps-key 's|^      if (key ~ /\^\[A-Z0-9_-\]\*\[A-Z\]\[A-Z0-9_-\]\*\$/) return 1 .*$|      # 变异 M-h：去掉 ③ 键名全大写|' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" 'SECRET_KEY=MySuperSecretPassphrase')" 'SECRET_KEY=MySu****rase' "M-h 对照：去掉 ③ 后 SECRET_KEY=… 仍被 ④（无空格）兜住"
-assert_eq "$(mut_rd "$pkg" 'MYSQL_PASSWORD: SuperSecretPassword')" 'MYSQL_PASSWORD: SuperSecretPassword' "M-h：去掉 ③ 后 YAML 形态的 19 位混合大小写值裸奔（第 21 条：冒号分隔的 ④ 做散文判定，只剩 ③ 能兜）——单测「仍掩」断言会失败"
-assert_eq "$(mut_rd "$ROOT" 'MYSQL_PASSWORD: SuperSecretPassword')" 'MYSQL_PASSWORD: Supe****word' "M-h 对照：未变异实现按 ③ 掩"
+assert_eq "$(mut_rd "$pkg" 'MYSQL_PASSWORD: SuperSecretPassword')" 'MYSQL_PASSWORD: Supe****word' "M-h 对照：去掉 ③ 后 YAML 形态仍被 ④b 兜住（16-fix4 第 5 条：无连字符的纯字母不算散文）"
 assert_eq "$(mut_rd "$pkg" 'SECRET_KEY = MySuperSecretPassphrase')" 'SECRET_KEY = MySuperSecretPassphrase' "M-h：去掉 ③ 后「全大写键 + 有空格的 =」裸奔——单测断言会失败"
 assert_eq "$(mut_rd "$ROOT" 'SECRET_KEY = MySuperSecretPassphrase')" 'SECRET_KEY = MySu****rase' "M-h 对照：未变异实现按 ③ 掩"
 pkg=$(make_mutant m-h-no-unspaced 's|^      if (unspaced == 2) return 1 .*$|      # 变异 M-h2：去掉 ④a env / properties 形态|' scripts/lib/review-render.sh)
