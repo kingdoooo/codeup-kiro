@@ -91,17 +91,12 @@ mock_config_load() { # <HOME 目录>：把 .kiro-mock/mock.env 里的 MOCK_X=值
   done < "$dir/mock.env"
 }
 
-# ---- 注入面扫描谓词（15-fix2 #23）：与生产 scripts/lib/isolation.sh 的 review_isolate_workspace **同一条谓词的枚举版** ----
-# 在 cwd（业务库根）执行，每行一个相对路径：任意深度的 AGENTS.md（不分大小写、非目录）、.kiro（不分大小写、任何类型；命中即不下钻）、
-# 符号链接，以及根 lsp.json；任意深度的 .git 目录与根 ./.git 一律剪枝（不进、不报）。
-# 替身 kiro-cli 启动时的 cwdscan、端到端的 leftovers() 都用它；改这里必须同步改生产那条，等价性由端到端的合成树用例守卫。
+# ---- 注入面扫描（15-fix2 #23 / 15-fix4 #6）：**转调**生产 scripts/lib/isolation.sh 的单一发射器 review_isolation_scan，谓词只有一份 ----
+# 在 cwd（业务库根）执行，每行一个相对路径（去掉 class 列、NUL 换成换行；路径含换行的会拆成两行——只用于替身 cwdscan 与端到端
+# leftovers() 这类「有没有残留」的断言，集合相等的断言直接比 NUL 清单）。以前这里是第二份 find 表达式，本票内就与生产分叉过一次。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/lib/isolation.sh"
 injection_surface_scan() {
-  # 符号链接形态的根 lsp.json 由下面的 -type l 分支报出，这里只报普通文件 / 同名目录（否则同一路径出现两次，15-fix3 #11）
-  [[ ( -e lsp.json || -L lsp.json ) && ! -L lsp.json ]] && echo "./lsp.json"
-  find . \( -path ./.git -o \( -name .git -type d \) \) -prune \
-       -o -iname .kiro -prune -print \
-       -o \( -iname AGENTS.md -not -type d \) -print \
-       -o -type l -print
+  review_isolation_scan | tr '\0' '\n' | cut -f2-
   return 0
 }
 

@@ -365,7 +365,7 @@ assert_eq "$([[ -d "$CASE/work/src/sub/.kiro" ]] && echo exists || echo gone)" "
 assert_contains "$(cat "$MD/cwdscan")" "src/sub/.kiro" "M6：Kiro 启动时工作区扫描到子目录 .kiro——端到端断言「工作区干净」会失败"
 
 # --- M7：删掉根 lsp.json 的删除逻辑 → lsp.json 残留 ---
-pkg=$(make_mutant m7-lspjson '/rm -rf .\/lsp.json/d' scripts/lib/isolation.sh)
+pkg=$(make_mutant m7-lspjson '/-o -path .\/lsp.json -prune -exec sh -c/d' scripts/lib/isolation.sh)
 run_case m7 "$pkg"
 assert_rc "$RC" 0 "M7：变异体仍能跑完"
 assert_eq "$([[ -e "$CASE/work/lsp.json" ]] && echo exists || echo gone)" "exists" "M7：根 lsp.json 残留——端到端断言「lsp.json 已移除」会失败"

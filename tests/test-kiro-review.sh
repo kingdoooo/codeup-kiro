@@ -1564,9 +1564,10 @@ assert_eq "$([[ -e "$CASE/work/src/x/.KIRO" ]] && echo kept || echo gone)" "gone
 assert_eq "$([[ -e "$CASE/work/src/sub/.kiro" ]] && echo kept || echo gone)" "gone" ".kiro 变体：原有子目录 .kiro/ 照删"
 assert_eq "$(cat "$MD/cwdscan")" "" ".kiro 变体：Kiro 启动时扫描不到残留（扫描谓词同样不分大小写、不限类型）"
 assert_eq "$(leftovers)" "" ".kiro 变体：运行后无残留"
-assert_contains "$OUT" "4 个 .kiro/" ".kiro 变体：计数 4（根文件 + .Kiro + src/x/.KIRO + src/sub/.kiro）"
+assert_contains "$OUT" "4 个 .kiro、" ".kiro 变体：计数 4（根文件 + .Kiro + src/x/.KIRO + src/sub/.kiro）"
 
-# ---- 谓词等价（15-fix2 #23）：生产隔离函数实际删除的集合 == 测试谓词枚举的集合（在一棵刻意刁难的合成树上）----
+# ---- 谓词等价（15-fix2 #23 / 15-fix4 #6）：生产隔离函数实际删除的集合 == 枚举版列出的集合（在一棵刻意刁难的合成树上）----
+# 15-fix4 #6 起两者转调同一个发射器 review_isolation_scan，等价现在是恒等；用例保留为「删除清单 == 扫描结果」与计数口径的 golden。
 EQ="$tmp/eqtree"; mkdir -p "$EQ"
 ( cd "$EQ" && mkdir -p .git/hooks nested/repo/.git a/b c .kiro/settings d
   ln -s /etc/hosts .git/rootgitlink; printf 'x' > .git/AGENTS.md            # 根 .git 内部：不动
@@ -1579,9 +1580,12 @@ EQ="$tmp/eqtree"; mkdir -p "$EQ"
   printf 'x' > .kiro/settings/inner-agents.md )                               # .kiro 内部：随 .kiro 整体删，不单列
 expected=$(cd "$EQ" && injection_surface_scan | sort)
 assert_eq "$(printf '%s\n' "$expected" | grep -c .)" "10" "谓词等价前置：枚举版在合成树上列出 10 条（2 AGENTS.md + 2 .kiro + 5 符号链接 + 根 lsp.json）"
-counts=$(cd "$EQ" && review_isolate_workspace "$tmp/eq-removed.txt")
-actual=$(sort "$tmp/eq-removed.txt")
+pre_scan=$(cd "$EQ" && review_isolation_scan | od -An -c | tr -d ' \n')   # 删除前发射器的原始 NUL 流
+counts=$(cd "$EQ" && review_isolate_workspace "$tmp/eq-removed.zlist")
+actual=$(tr '\0' '\n' < "$tmp/eq-removed.zlist" | cut -f2- | sort)
 assert_eq "$actual" "$expected" "谓词等价：生产隔离函数删除的集合 == 测试谓词枚举的集合"
+assert_eq "$(od -An -c "$tmp/eq-removed.zlist" | tr -d ' \n')" "$pre_scan" "谓词等价：删除清单逐字节等于删除前发射器的 NUL 流（先写清单再删）"
+assert_eq "$(tr '\0' '\n' < "$tmp/eq-removed.zlist" | cut -f1 | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')" "agents=2 kiro=2 links=5 lsp=1 " "谓词等价：清单里的 class 列与四个计数一致"
 assert_eq "$counts" "2 2 5 1" "谓词等价：计数 = 2 个 AGENTS.md（根 + a/agents.md）、2 个 .kiro（目录 + 链接）、5 个符号链接（filelink dirlink dangling a/b/deeplink c/.git）、1 个根 lsp.json"
 assert_eq "$(cd "$EQ" && injection_surface_scan | wc -l | tr -d ' ')" "0" "谓词等价：隔离后枚举版扫描为空"
 assert_eq "$([[ -L "$EQ/.git/rootgitlink" && -f "$EQ/.git/AGENTS.md" ]] && echo kept || echo gone)" "kept" "谓词等价：根 .git 内部不动"
@@ -1595,16 +1599,44 @@ EQ2="$tmp/eqtree2"; mkdir -p "$EQ2"
 expected2=$(cd "$EQ2" && injection_surface_scan | sort)
 assert_eq "$(printf '%s\n' "$expected2" | grep -c .)" "4" "谓词等价 2：枚举版列出 4 条（.kiro 文件、a/.Kiro 目录、b/.KIRO 链接、lsp.json 链接）"
 assert_eq "$(printf '%s\n' "$expected2" | grep -c -x './lsp.json')" "1" "谓词等价 2：符号链接形态的根 lsp.json 只出现一次"
-counts2=$(cd "$EQ2" && review_isolate_workspace "$tmp/eq2-removed.txt")
-assert_eq "$(sort "$tmp/eq2-removed.txt")" "$expected2" "谓词等价 2：生产隔离函数删除的集合 == 枚举版集合"
-assert_eq "$counts2" "0 3 1 0" "谓词等价 2：计数 = 0 AGENTS.md、3 个 .kiro（文件/.Kiro/.KIRO 链接）、1 个符号链接（lsp.json 链接按链接计）、0 个普通 lsp.json"
+counts2=$(cd "$EQ2" && review_isolate_workspace "$tmp/eq2-removed.zlist")
+assert_eq "$(tr '\0' '\n' < "$tmp/eq2-removed.zlist" | cut -f2- | sort)" "$expected2" "谓词等价 2：生产隔离函数删除的集合 == 枚举版集合"
+# 15-fix4 #6 / B7：符号链接形态的根 lsp.json 归 lsp 类（日志「根 lsp.json（N 个）」与实际一致），不再落进符号链接桶
+assert_eq "$counts2" "0 3 0 1" "谓词等价 2：计数 = 0 AGENTS.md、3 个 .kiro（文件/.Kiro/.KIRO 链接）、0 个符号链接、1 个根 lsp.json（符号链接形态也算 lsp）"
+assert_eq "$(tr '\0' '\n' < "$tmp/eq2-removed.zlist" | grep -c $'^lsp\t./lsp.json$')" "1" "谓词等价 2：清单里 ./lsp.json 的 class 是 lsp"
 assert_eq "$(cd "$EQ2" && injection_surface_scan | wc -l | tr -d ' ')" "0" "谓词等价 2：隔离后枚举版扫描为空"
 assert_eq "$([[ -f "$EQ2/c/lsp.json" ]] && echo kept || echo gone)" "kept" "谓词等价 2：非根 lsp.json 不动"
-# 15-fix3 #10：计数按 find 匹配时的类别记账，不是按路径字符串回头重分类——路径含换行时不再算两次
+# 15-fix3 #10 / 15-fix4 #6：计数按 find 匹配时的类别记账；清单按 NUL 分隔——路径含换行时清单里仍是**一条**、且逐字等于那个名字（对 5462175 必须失败：那里按行写，一条拆成两行）
 EQ3="$tmp/eqtree3"; mkdir -p "$EQ3/.git" && ( cd "$EQ3" && ln -s /etc/hosts "$(printf 'weird\nname')" )
-counts3=$(cd "$EQ3" && review_isolate_workspace "$tmp/eq3-removed.txt")
+counts3=$(cd "$EQ3" && review_isolate_workspace "$tmp/eq3-removed.zlist")
 assert_eq "$counts3" "0 0 1 0" "谓词等价 3：含换行的符号链接只算 1 个（按 find 匹配计数，不按列表行数、不按字符串重分类）"
 assert_eq "$(ls -A "$EQ3" | grep -v '^.git$' | wc -l | tr -d ' ')" "0" "谓词等价 3：含换行名字的符号链接已删除"
+assert_eq "$(tr -cd '\0' < "$tmp/eq3-removed.zlist" | wc -c | tr -d ' ')" "1" "谓词等价 3：NUL 清单恰好一条记录"
+assert_eq "$(tr '\0' '\n' < "$tmp/eq3-removed.zlist" | head -c -1 2>/dev/null || tr '\0' '\n' < "$tmp/eq3-removed.zlist")" "$(printf 'links\t./weird\nname\n')" "谓词等价 3：那条记录逐字是 links<TAB>./weird<换行>name（集合相等，不只是计数）"
+# 15-fix4 #6 / E4：被删目录（.kiro/、目录形态的根 lsp.json/）内部的嵌套 .git 随目录一起删——不是工作树的版本库；工作树自己的 .git（根、a/.git）不动
+EQ4="$tmp/eqtree4"; mkdir -p "$EQ4/.git" "$EQ4/x/.kiro/fixtures/repo/.git/objects" "$EQ4/a/.git/objects" "$EQ4/lsp.json/.git"
+( cd "$EQ4" && printf 'x' > x/.kiro/fixtures/repo/.git/HEAD && printf 'x' > a/.git/HEAD && printf 'x' > .git/HEAD && printf 'x' > lsp.json/.git/HEAD )
+counts4=$(cd "$EQ4" && review_isolate_workspace "$tmp/eq4-removed.zlist")
+assert_eq "$counts4" "0 1 0 1" "谓词等价 4：1 个 .kiro（含内部嵌套 .git）+ 1 个目录形态的根 lsp.json（含内部 .git）"
+assert_eq "$([[ -e "$EQ4/x/.kiro" ]] && echo kept || echo gone)" "gone" "谓词等价 4：x/.kiro/ 连同内部嵌套的 .git 一起删除（不是工作树的版本库）"
+assert_eq "$([[ -e "$EQ4/lsp.json" ]] && echo kept || echo gone)" "gone" "谓词等价 4：目录形态的根 lsp.json/ 连同内部 .git 一起删除"
+assert_eq "$([[ -f "$EQ4/.git/HEAD" && -f "$EQ4/a/.git/HEAD" ]] && echo kept || echo gone)" "kept" "谓词等价 4：工作树自己的根 .git 与不在被删目录内的 a/.git 不动"
+# 15-fix4 #6：多批 -exec +（大量符号链接、长名字让 find 分多批调用 sh -c）——计数与清单都必须完整
+EQ5="$tmp/eqtree5"; mkdir -p "$EQ5/.git" "$EQ5/d"
+( cd "$EQ5/d" && longname=$(printf 'l%.0s' $(seq 1 150)) && for i in $(seq 1 7000); do ln -s /etc/hosts "${longname}-${i}"; done )
+counts5=$(cd "$EQ5" && review_isolate_workspace "$tmp/eq5-removed.zlist")
+assert_eq "$counts5" "0 0 7000 0" "谓词等价 5：7000 个符号链接（多批 -exec +）计数完整"
+assert_eq "$(tr -cd '\0' < "$tmp/eq5-removed.zlist" | wc -c | tr -d ' ')" "7000" "谓词等价 5：清单 7000 条"
+assert_eq "$(ls -A "$EQ5/d" | wc -l | tr -d ' ')" "0" "谓词等价 5：全部删除"
+# 15-fix4 #6：任一条删除失败 → 返回非零（清单已写、计数不打）：把一个 .kiro 目录设为不可删（父目录只读）
+if [[ "$(id -u)" != "0" ]]; then
+  EQ6="$tmp/eqtree6"; mkdir -p "$EQ6/.git" "$EQ6/ro/.kiro"; chmod 555 "$EQ6/ro"
+  rc6=0; out6=$(cd "$EQ6" && review_isolate_workspace "$tmp/eq6-removed.zlist" 2>/dev/null) || rc6=$?
+  chmod 755 "$EQ6/ro"
+  assert_eq "$([[ $rc6 -ne 0 ]] && echo nonzero)" "nonzero" "谓词等价 6：删不掉时返回非零"
+  assert_eq "$out6" "" "谓词等价 6：失败时不打计数（调用方 die_review）"
+  assert_eq "$(tr '\0' '\n' < "$tmp/eq6-removed.zlist" | cut -f2-)" "./ro/.kiro" "谓词等价 6：清单在删除之前已写好（先持久化再删）"
+fi
 
 # ---- 静态：scripts/ 里不得再有多字节分隔符的 paste（GNU coreutils 会截成单字节，产出非法 UTF-8；15-fix3 #4）与 --print-paths（#12）----
 # 只看 paste 的分隔符参数（-d'…' / -sd'…'），不看同一行别处的中文

@@ -676,10 +676,11 @@ fi
 # 是它的实现细节（探测 P1-15 T8 记录事实，见上面的 KIRO_TESTED_VERSIONS）；删掉是确定性、零依赖的兜底。
 # diff 已从 git 对象算好并写入 $WORK，删工作树文件不影响评审输入。**这一步会改动业务库工作树**：本流水线只有评审一个任务，
 # 若要在同一工作区追加别的任务，必须先重新 checkout（setup-guide §7/§12）。
-ISOLATION_COUNTS=$(review_isolate_workspace "$WORK/isolation-removed.txt") \
+# 删除清单 isolation-removed.zlist：`class<TAB>path<NUL>`，先写清单再删（15-fix4 #6）
+ISOLATION_COUNTS=$(review_isolate_workspace "$WORK/isolation-removed.zlist") \
   || die_review "隔离失败：无法移除业务库中的注入面文件（AGENTS.md / .kiro / 符号链接 / lsp.json），见流水线日志"
 read -r _iso_agents _iso_kiro _iso_links _iso_lsp <<<"$ISOLATION_COUNTS"
-log "隔离：已移除业务库工作树中 ${_iso_agents} 个 AGENTS.md、${_iso_kiro} 个 .kiro/、${_iso_links} 个符号链接（均任意深度）与根 lsp.json（${_iso_lsp} 个）；嵌套 .git 目录内部不动"
+log "隔离：已移除业务库工作树中 ${_iso_agents} 个 AGENTS.md、${_iso_kiro} 个 .kiro、${_iso_links} 个符号链接（均任意深度）与根 lsp.json（${_iso_lsp} 个，任何类型）；工作树自己的 .git 不动"
 unset _iso_agents _iso_kiro _iso_links _iso_lsp
 # 执行环境：禁止 Kiro 继承工作区默认资源（AGENTS.md/README.md 等），只对 v2 引擎有效（ADR-0004）。
 # 它依赖上面对 .kiro/ 的删除（见 ①），本身只覆盖「AGENTS.md 没删干净 / 藏在别处」这一种漏网情形。
