@@ -945,7 +945,7 @@ pkg=$(make_mutant m-q-deco 's|        if (s ~ /\^\[>\*+`\]\[\[:space:\]\]\*/) { 
 assert_contains "$(mut_rd_multi "$pkg" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "没有配对的 END 行" "M-q：装饰剥离失效后反引号装饰的 END 行认不出，块被当成未闭合——单测「整块丢弃」断言会失败"
 assert_eq "$(mut_rd_multi "$ROOT" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "$(printf '%s\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）' "$PEM_PLACEHOLDER")" "M-q 对照：未变异实现整块丢弃、占位 + 提示"
 # --- M-t：第 10 条兜底——「含 BEGIN 且下一行像正文」不再当块起始 ---
-pkg=$(make_mutant m-t-pend 's|    pend != "" { if (!inpem \&\& (pem_body_like(\$0) \|\| pem_is_hdr(\$0))) { begin_block(pend); pend = "" } else emit_pending() }|    pend != "" { emit_pending() }  # 变异 M-t：兜底失效|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-t-pend 's|    pend != "" { if (!inpem \&\& (pem_body_key(\$0, 20) \|\| pem_is_hdr(\$0))) { begin_block(pend); pend = "" } else emit_pending() }|    pend != "" { emit_pending() }  # 变异 M-t：兜底失效|' scripts/lib/review-render.sh)
 assert_contains "$(mut_rd_multi "$pkg" "私钥如下 $PEM_B\n$PEM_L64\n$PEM_E\n")" "$PEM_L64" "M-t：兜底失效后正文裸奔——单测「兜底当块起始」断言会失败"
 assert_not_contains "$(mut_rd_multi "$ROOT" "私钥如下 $PEM_B\n$PEM_L64\n$PEM_E\n")" "$PEM_L64" "M-t 对照：未变异实现兜底开块"
 # --- M-r：第 11 / 14 条——保行模式正文行不再换占位（原样打出）→ 降级评论 / kiro stderr 泄露正文 ---
