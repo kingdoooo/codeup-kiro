@@ -1345,13 +1345,13 @@ assert_masked "$OUT" "A10 回写失败（日志全文）"
 make_bad_awk "$tmp/badawk"
 run_case sinkleak-redactfail PATH="$tmp/badawk:$PATH" MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
 assert_nonzero "$RC" "A10 掩码失败：评审以失败结束（不能带着未掩码的评论成功）"
-assert_contains "$OUT" "review_redact_json: 掩码失败" "A10 掩码失败：库函数点明是字段级掩码失败"
+assert_contains "$OUT" "契约字段级掩码或清洗失败（rc=4" "A10 掩码失败：die_review 点明是字段级掩码失败（第 25 条：不含 token 连片的固定文案照常打出）"
 assert_no_secrets "$OUT" "A10 掩码失败（全部输出：汇总没发、失败评论与日志都不含原文）"
 assert_not_contains "$OUT" "$SEC_GHP_MASKED" "A10 掩码失败：掩码后的形态也不在（正控：掩码确实没跑成，不是替身没生效）"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "⚠️ 评审未完成" "A10 掩码失败：MR 上仍有失败评论（I10）"
 assert_contains "$comment" "只保留固定文案" "A10 掩码失败：失败评论退回只含固定文案的最小形态（掩码不可用时连 reason 都不带）"
-assert_not_contains "$comment" "字段级掩码失败" "A10 掩码失败：最小评论确实不带 die_review 的原因文本"
+assert_not_contains "$comment" "字段级掩码或清洗失败" "A10 掩码失败：最小评论确实不带 die_review 的原因文本"
 assert_eq "$(printf '%s\n' "$comment" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:1 -->$')" "1" "A10 掩码失败：最小评论仍带评审标记（下次评审找得到）"
 assert_eq "$(printf '%s\n' "$comment" | grep -c '^<!-- kiro-history:\[')" "1" "A10 掩码失败：最小评论仍带隐藏历史"
 # 只让文档级失败（字段级照常）：汇总出口的兜底失败 → 同样走失败评论（第 27 条：任何非零都退回最小失败评论）
@@ -1359,8 +1359,8 @@ make_bad_awk "$tmp/badawk-doc" doc
 run_case sinkleak-docfail PATH="$tmp/badawk-doc:$PATH" MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
 assert_nonzero "$RC" "A10 文档级掩码失败：评审以失败结束"
 assert_contains "$OUT" "review_redact_file: 掩码失败（awk 退出非零或无输出）" "A10 文档级掩码失败：库函数点明是文档级掩码程序失败"
-# 文档级掩码不可用时 _redact_for_log 同样不可用：die_review 的原因行只留固定文案（第 20 条），不会把原因原样打出去
-assert_contains "$OUT" "含不受信取值的失败原因在掩码程序不可用时不打日志，已省略" "A10 文档级掩码失败：日志里的失败原因退回固定文案"
+# 替身只让带评论标记的输入失败，die_review 的原因（无标记、无 token 连片）照常过 _redact_for_log 打出来（第 27 条的 rc 措辞）
+assert_contains "$OUT" "评论掩码失败（rc=1）" "A10 文档级掩码失败：die_review 原因带 rc（与守卫拒绝的 rc 3 措辞分开）"
 assert_no_secrets "$OUT" "A10 文档级掩码失败：全部输出不含原文（字段级已掩）"
 # 文档级兜底覆盖绕过 validated.json 的输出面：分支名（MR 作者可控）里的 token 只有文档级能掩
 run_case sinkleak-branch CI_COMMIT_REF_NAME="feature/${SEC_AKIA}" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/mock-review.json"

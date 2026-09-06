@@ -48,7 +48,7 @@ assert_same_file() {  # 文件A 文件B 说明
     TESTS_PASSED=$((TESTS_PASSED + 1))
   else
     echo "FAIL: $3 — 两个文件不同：[$1] vs [$2]" >&2
-    diff "$1" "$2" >&2 | head -40 >&2 || true
+    diff "$1" "$2" | head -40 >&2 || true   # 第 29 条：先 head 再进 stderr（原先 diff 的 stdout 直接进了 stderr，head 读到空管道）
     exit 1
   fi
 }
@@ -132,7 +132,8 @@ assert_no_secrets() {  # 内容 说明前缀：三种原文都不在（掩码形
 # 会往 PATH 前面再插一段，那时首项就不是替身目录，剥错了就会 exec 到自己、无限递归。
 # 用法：make_bad_awk <目录> [all|doc|inline]   → 在 <目录>/awk 写好替身；调用方把 <目录> 放到 PATH 最前面
 #   all（默认）：字段级与文档级都失败（→ review_redact_json 先失败，评审走失败评论）
-#   doc：只让文档级（--keep-lines，参数里带 keeplines=1）失败——字段级照常，用来测文档级兜底的失败分支
+#   doc：只让**评论出口**的文档级掩码失败（--keep-lines 且 stdin 带 <!-- kiro- 标记）——字段级（含单行槽位的保行模式）照常，
+#        用来测出口兜底的失败分支
 #   inline：只让**行内正文**的文档级掩码失败（stdin 里带 <!-- kiro-inline: 标记）——汇总照常发出，用来测「掩码失败 → 折叠区」
 #   raw：只让**原文**（stdin 里没有任何 <!-- kiro- 标记：降级原文、日志行）的保行掩码失败——渲染好的评论照常过文档级兜底，
 #        用来单独观察降级渲染器自己的 fail-closed（第 13 条）
@@ -149,7 +150,11 @@ make_bad_awk() {
     echo 'done'
     case "$mode" in
       all)    echo '[[ $is_mask == 1 ]] && { echo "badawk: 模拟掩码程序失败" >&2; exit 1; }' ;;
-      doc)    echo '[[ $is_mask == 1 && $is_doc == 1 ]] && { echo "badawk: 模拟文档级掩码失败" >&2; exit 1; }' ;;
+      doc)    echo 'if [[ $is_mask == 1 && $is_doc == 1 ]]; then'
+              echo '  buf=$(mktemp); cat > "$buf"'
+              echo '  if grep -q "<!-- kiro-" "$buf"; then rm -f "$buf"; echo "badawk: 模拟文档级掩码失败" >&2; exit 1; fi'
+              printf '  %q "$@" < "$buf"; rc=$?; rm -f "$buf"; exit $rc\n' "$real"
+              echo 'fi' ;;
       inline) echo 'if [[ $is_mask == 1 && $is_doc == 1 ]]; then'
               echo '  buf=$(mktemp); cat > "$buf"'
               echo '  if grep -q "<!-- kiro-inline:" "$buf"; then rm -f "$buf"; echo "badawk: 模拟行内正文掩码失败" >&2; exit 1; fi'

@@ -786,7 +786,7 @@ assert_eq "$(mut_meta_row "$pkg" 'a|b|c' | tr -cd '|' | wc -c | tr -d ' ')" "5" 
 # 仍被字段级掩掉，所以文档级的变异用**分支名**里的 token（MR 作者可控、不经 validated.json）作为观测向量。
 SEC_SUMMARY="$tmp/secrets-summary.json"; with_secrets "$ROOT/tests/fixtures/contract/mock-review.json" > "$SEC_SUMMARY"
 SEC_INLINE="$tmp/secrets-inline.json";   with_secrets "$E2EC" > "$SEC_INLINE"
-FIELD_LINE='^      review_redact_json "\$WORK/validated.json" || die_review "字段级掩码失败"$'
+FIELD_LINE='^  review_redact_json "\$f" || { rm -f "\$f"; echo "review_validate: 字段级掩码失败" >\&2; return 4; }$'   # 16-fix3 第 15 条起字段级掩码在 review_validate 内部
 DOC_LINE='^review_redact_file "\$WORK/comment.md" || rrc=\$?$'
 mut_rd() { ( set +e; source "$1/scripts/lib/review-render.sh"; printf '%s\n' "$2" | review_redact_secrets ); }   # 库级探针：<包根> <一行>
 
@@ -805,7 +805,7 @@ assert_contains "$(meta_row "$(posted_comment "$OUT")")" "feature/${SEC_AKIA}" "
 assert_not_contains "$(posted_comment "$OUT")" "$SEC_GHP" "M-a 对照：模型字段里的 token 仍被字段级掩掉"
 
 # --- M-b：去掉字段级掩码 → 模型 token 原样进行内正文与汇总、以及「评审报告：… 结论」那行日志（第 17 条的 768 行）---
-pkg=$(make_mutant m-b-field "s@${FIELD_LINE}@      :  # 变异 M-b：不做字段级掩码@")
+pkg=$(make_mutant m-b-field "s@${FIELD_LINE}@  :  # 变异 M-b：不做字段级掩码@" scripts/lib/review-render.sh)
 jq --arg a "$SEC_AKIA" '.verdict = "MERGE " + $a' "$SEC_INLINE" > "$tmp/secrets-inline-verdict.json"
 inline_case m-b "$pkg" "$IFX" MOCK_KIRO_CONTRACT="$tmp/secrets-inline-verdict.json"
 # 去掉字段级后 verdict 里的 token 一路进了隐藏历史 JSON，文档级兜底把那一行掩成 AKIA****4567 → 标记守卫认出历史行被改写 → rc 3 →
@@ -875,10 +875,11 @@ assert_not_contains "$OUT" "$SEC_GHP" "M-g 对照：未变异实现日志与评�
 # --- M-h：第 29 条的两条上下文判定各去掉一条 → 无数字凭证裸奔（单测「仍掩」断言会失败）---
 pkg=$(make_mutant m-h-no-caps-key 's|^      if (key ~ /\^\[A-Z0-9_-\]\*\[A-Z\]\[A-Z0-9_-\]\*\$/) return 1 .*$|      # 变异 M-h：去掉 ③ 键名全大写|' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" 'SECRET_KEY=MySuperSecretPassphrase')" 'SECRET_KEY=MySu****rase' "M-h 对照：去掉 ③ 后 SECRET_KEY=… 仍被 ④（无空格）兜住"
-assert_eq "$(mut_rd "$pkg" 'MYSQL_PASSWORD: SuperSecretPassword')" 'MYSQL_PASSWORD: Supe****word' "M-h 对照：YAML 形态仍被 ④ 兜住"
+assert_eq "$(mut_rd "$pkg" 'MYSQL_PASSWORD: SuperSecretPassword')" 'MYSQL_PASSWORD: SuperSecretPassword' "M-h：去掉 ③ 后 YAML 形态的 19 位混合大小写值裸奔（第 21 条：冒号分隔的 ④ 做散文判定，只剩 ③ 能兜）——单测「仍掩」断言会失败"
+assert_eq "$(mut_rd "$ROOT" 'MYSQL_PASSWORD: SuperSecretPassword')" 'MYSQL_PASSWORD: Supe****word' "M-h 对照：未变异实现按 ③ 掩"
 assert_eq "$(mut_rd "$pkg" 'SECRET_KEY = MySuperSecretPassphrase')" 'SECRET_KEY = MySuperSecretPassphrase' "M-h：去掉 ③ 后「全大写键 + 有空格的 =」裸奔——单测断言会失败"
 assert_eq "$(mut_rd "$ROOT" 'SECRET_KEY = MySuperSecretPassphrase')" 'SECRET_KEY = MySu****rase' "M-h 对照：未变异实现按 ③ 掩"
-pkg=$(make_mutant m-h-no-unspaced 's|^      if (unspaced) return 1 .*$|      # 变异 M-h2：去掉 ④ 分隔符两侧无空格|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-h-no-unspaced 's|^      if (unspaced == 2) return 1 .*$|      # 变异 M-h2：去掉 ④a env / properties 形态|' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" 'client_secret=hJKlMnOpQrStUvWxYzAbCdEfGhIj')" 'client_secret=hJKlMnOpQrStUvWxYzAbCdEfGhIj' "M-h2：去掉 ④ 后 client_secret=hJKl… 裸奔——单测断言会失败"
 assert_eq "$(mut_rd "$ROOT" 'client_secret=hJKlMnOpQrStUvWxYzAbCdEfGhIj')" 'client_secret=hJKl****GhIj' "M-h2 对照：未变异实现按 ④ 掩"
 
@@ -886,7 +887,7 @@ assert_eq "$(mut_rd "$ROOT" 'client_secret=hJKlMnOpQrStUvWxYzAbCdEfGhIj')" 'clie
 pkg=$(make_mutant m-i-bearer-prose 's|^        if (prose_word(val, 20)) out = out seg$|        if (0) out = out seg  # 变异 M-i|' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" 'Basic authentication')" 'Basic auth****tion' "M-i：豁免去掉后散文被掩——单测断言会失败"
 assert_eq "$(mut_rd "$ROOT" 'Basic authentication')" 'Basic authentication' "M-i 对照：未变异实现不掩"
-pkg=$(make_mutant m-j-header-prose 's#if (tolower(val) ~ /^(bearer|basic)/ \|\| prose_word(val, maxlen)) out = out seg#if (tolower(val) ~ /^(bearer|basic)/) out = out seg#' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-j-header-prose 's#        else if (hdr == "authorization" \&\& prose_word(val, 20)) out = out seg#        else if (0) out = out seg  \# 变异 M-j#' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" 'Authorization: header missing')" 'Authorization: **** missing' "M-j：豁免去掉后 header 被掩——单测断言会失败"
 assert_eq "$(mut_rd "$ROOT" 'Authorization: header missing')" 'Authorization: header missing' "M-j 对照：未变异实现不掩"
 # 第 19 条：散文词上限去掉 → 20 位纯小写令牌放行
@@ -915,7 +916,7 @@ inline_case m-m-control "$ROOT" "$IFX" PATH="$tmp/badawk-inline:$PATH" MOCK_KIRO
 assert_eq "$(inline_bodies "$OUT" | grep -c . || true)" "0" "M-m 对照：未变异实现掩码失败的正文一条都不发"
 
 # --- M-n：第 24 条——kiro stderr 尾巴不过掩码 → 日志带 bearer 原文 ---
-pkg=$(make_mutant m-n-stderr 's@^  tail -20 "\$WORK/kiro-stderr.log" 2>/dev/null | review_redact_secrets --keep-lines >\&2 || true$@  tail -20 "$WORK/kiro-stderr.log" >\&2 || true  # 变异 M-n@')
+pkg=$(make_mutant m-n-stderr 's@^  tail -20 "\$WORK/kiro-stderr.log" 2>/dev/null | review_clean_text | review_redact_secrets --keep-lines >\&2 || true$@  tail -20 "$WORK/kiro-stderr.log" >\&2 || true  # 变异 M-n@')
 run_case m-n "$pkg" MOCK_KIRO_FAIL=1 MOCK_KIRO_STDERR_TEXT="Authorization: Bearer ${SEC_GHP}"
 assert_contains "$OUT" "Authorization: Bearer ${SEC_GHP}" "M-n：kiro stderr 尾巴带 bearer 原文进了日志——端到端「日志不含原文」断言会失败"
 run_case m-n-control "$ROOT" MOCK_KIRO_FAIL=1 MOCK_KIRO_STDERR_TEXT="Authorization: Bearer ${SEC_GHP}"
@@ -942,7 +943,7 @@ pkg=$(make_mutant m-q-deco 's|        if (s ~ /\^\[>\*+`\]\[\[:space:\]\]\*/) { 
 # 起始行由「行末标记 + 下一行像正文」的兜底另行兜住（两道防线叠着），装饰剥离失效的可观测结果在 END 行：反引号装饰的 END
 # 不再认出 → 块到 EOF 仍未闭合 → 放出并插「没有配对的 END 行」提示（单测「整块丢弃、只剩一行占位」断言会失败）
 assert_contains "$(mut_rd_multi "$pkg" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "没有配对的 END 行" "M-q：装饰剥离失效后反引号装饰的 END 行认不出，块被当成未闭合——单测「整块丢弃」断言会失败"
-assert_eq "$(mut_rd_multi "$ROOT" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "$PEM_PLACEHOLDER" "M-q 对照：未变异实现整块丢弃、只剩一行占位"
+assert_eq "$(mut_rd_multi "$ROOT" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "$(printf '%s\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）' "$PEM_PLACEHOLDER")" "M-q 对照：未变异实现整块丢弃、占位 + 提示"
 # --- M-t：第 10 条兜底——「含 BEGIN 且下一行像正文」不再当块起始 ---
 pkg=$(make_mutant m-t-pend 's|    pend != "" { if (!inpem \&\& (pem_body_like(\$0) \|\| pem_is_hdr(\$0))) { begin_block(pend); pend = "" } else emit_pending() }|    pend != "" { emit_pending() }  # 变异 M-t：兜底失效|' scripts/lib/review-render.sh)
 assert_contains "$(mut_rd_multi "$pkg" "私钥如下 $PEM_B\n$PEM_L64\n$PEM_E\n")" "$PEM_L64" "M-t：兜底失效后正文裸奔——单测「兜底当块起始」断言会失败"
@@ -965,5 +966,13 @@ assert_contains "$(posted_comment "$OUT")" "结构化解析失败" "M-s：发出
 run_case m-s-control "$ROOT" PATH="$tmp/badawk-raw:$PATH" MOCK_KIRO_LEAK_SECRET=1
 assert_nonzero "$RC" "M-s 对照：未变异实现 fail-closed"
 assert_contains "$OUT" "review_render_degraded: 原文掩码失败" "M-s 对照：库函数点明原因"
+# --- M-u：第 17 条——去掉全模式的整行密钥正文规则 → 跨字段的正文行裸奔 ---
+pkg=$(make_mutant m-u-body-line 's|^      if (pem_body_key(line, 40)) return redact(line, "\[" B64C "=\]+")   .*$|      # 变异 M-u：无整行规则|' scripts/lib/review-render.sh)
+assert_eq "$(mut_rd "$pkg" "$PEM_L64")" "$PEM_L64" "M-u：整行密钥正文原样——单测「≥ 40 位整行 base64 在任何字段都掩」断言会失败"
+assert_eq "$(mut_rd "$ROOT" "$PEM_L64")" "MIIE****ijkl" "M-u 对照：未变异实现掩"
+# --- M-v：第 24 条——闭合块不再打「其间 N 行」提示 → 整段无声消失 ---
+pkg=$(make_mutant m-v-close-note 's|^      if (held_n > 0) print "> ⚠️ （其间 " held_n " 行已随密钥块一并屏蔽）"$|      # 变异 M-v：闭合块无提示|' scripts/lib/review-render.sh)
+assert_not_contains "$(mut_rd_multi "$pkg" "x\n$PEM_B\n（内容已省略）\n$PEM_L64\n$PEM_E\ny\n")" "其间 2 行已随密钥块一并屏蔽" "M-v：闭合块提示消失——单测「不再无声」断言会失败"
+assert_contains "$(mut_rd_multi "$ROOT" "x\n$PEM_B\n（内容已省略）\n$PEM_L64\n$PEM_E\ny\n")" "其间 2 行已随密钥块一并屏蔽" "M-v 对照：未变异实现给提示"
 
 report

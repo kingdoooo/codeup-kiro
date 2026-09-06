@@ -26,6 +26,8 @@ KIRO_TIMEOUT="${KIRO_TIMEOUT:-900}"
 # 都被截成残片。真正的兜底在 review_truncate_comment 里——截断后如果连评审标记都没了就拒绝截断，
 # 因为那份残片会被 PUT 到上一条汇总上，把上一次的完整报告与全部历次记录不可恢复地覆盖掉。
 MAX_COMMENT_BYTES_DEFAULT=60000
+# 掩码库的字段分隔行只走显式参数，这个变量已不被读取；仍 unset 作双保险（第 16 条：作业环境里一个 export 曾能让全部掩码直通）
+unset REVIEW_REDACT_SENTINEL_RE
 MAX_COMMENT_BYTES="${MAX_COMMENT_BYTES:-$MAX_COMMENT_BYTES_DEFAULT}"
 if ! [[ "$MAX_COMMENT_BYTES" =~ ^[0-9]+$ ]] || [[ "$MAX_COMMENT_BYTES" -lt 1 ]]; then
   echo "[kiro-review] 警告：MAX_COMMENT_BYTES=${MAX_COMMENT_BYTES} 不是 ≥1 的整数，按默认 ${MAX_COMMENT_BYTES_DEFAULT} 处理" >&2
@@ -58,13 +60,19 @@ KIRO_ENGINE=v2
 log() { echo "[kiro-review] $*" >&2; }
 # 流水线日志也是评论出口（I3）：die_review 的失败原因与降级原因里可能带不受信取值（事件流的 runFinished.status），
 # 打日志前先过一遍脚本侧掩码（--keep-lines：文本级、保行）。方案 C 下 validated.json 派生的文本已在字段级掩过，
-# 这里只剩失败原因 / 降级原因 / 去重日志里的 file 这几处文本级取值。掩码程序不可用时不打原文，只留固定文案——
-# 不再有第二套「粗掩」词汇（第 20 条）。用法：_redact_for_log <字符串> → stdout（不带结尾换行）
+# 这里只剩失败原因 / 降级原因 / 去重日志里的 file 这几处文本级取值。掩码程序不可用时不掩码，只分类（有没有像 token 的连片）：
+# 有就省略、没有就原样——不再有第二套「粗掩」词汇（第 20 / 25 条）。用法：_redact_for_log <字符串> → stdout（不带结尾换行）
 _redact_for_log() {
   local s="${1-}" out
   [[ -n "$s" ]] || return 0
   if out=$(printf '%s\n' "$s" | review_redact_secrets --keep-lines 2>/dev/null) && [[ -n "$out" ]]; then printf '%s' "$out"; return 0; fi
-  printf '%s' "（含不受信取值的失败原因在掩码程序不可用时不打日志，已省略）"
+  # 掩码程序不可用：不再掩码，只做**分类**（第 25 条）——原因里没有 ≥ 12 位 token 字符连片（二十来处固定文案都如此）就原样打，
+  # 有就整段省略；不是第二套掩码词汇，只是一个「值得不值得打」的判定
+  if LC_ALL=C grep -qE '[A-Za-z0-9+/=_-]{12,}' <<< "$s"; then
+    printf '%s' "（含不受信取值的失败原因在掩码程序不可用时不打日志，已省略）"
+  else
+    printf '%s' "$s"
+  fi
 }
 die() { log "错误：$*"; exit 1; }
 
@@ -161,7 +169,8 @@ die_review() {
     if [[ "$rrc" != "0" ]]; then
       case "$rrc" in
         3) log "警告：失败评论掩码后结构守卫拒绝写回（行数或标记行变化，rc=3），改用只含固定文案的最小失败评论（不带失败原因）" ;;
-        2) log "警告：失败评论文件不可读/为空或核对标记失败（rc=2），改用只含固定文案的最小失败评论（不带失败原因）" ;;
+        2) log "警告：失败评论文件不可读 / 为空（rc=2），改用只含固定文案的最小失败评论（不带失败原因）" ;;
+        4|5) log "警告：失败评论写回或守卫命令失败（rc=${rrc}），改用只含固定文案的最小失败评论（不带失败原因）" ;;
         *) log "警告：失败评论掩码程序失败（rc=${rrc}），改用只含固定文案的最小失败评论（不带失败原因）" ;;
       esac
       _die_review_minimal "" > "$f"
@@ -699,7 +708,7 @@ KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" kiro-cli chat --no-inte
 if [[ "$kiro_rc" -ne 0 ]]; then
   # kiro-cli 自己的 stderr 会引用被评审文件内容、失败请求（含 bearer）——也是评论出口，过掩码再打（第 24 条）；
   # 掩码程序不可用时宁可不打
-  tail -20 "$WORK/kiro-stderr.log" 2>/dev/null | review_redact_secrets --keep-lines >&2 || true
+  tail -20 "$WORK/kiro-stderr.log" 2>/dev/null | review_clean_text | review_redact_secrets --keep-lines >&2 || true
   [[ "$kiro_rc" == "124" ]] && die_review "Kiro 评审超时（${KIRO_TIMEOUT}s）"
   die_review "Kiro 评审失败（kiro-cli 退出码 ${kiro_rc}）"
 fi
@@ -742,14 +751,14 @@ if [[ -z "$DEGRADE_REASON" ]]; then
   review_validate < "$WORK/contract.json" > "$WORK/validated.json" 2> "$WORK/validate-err.log" || validate_rc=$?
   case "$validate_rc" in
     0)
-      # 字段级掩码：validated.json 是结构化路径全部模型文本的唯一收口点（16-fix2，Kent 裁决方案 C）。渲染器、行内正文、
-      # 折叠区、截断副本与下面「评审报告：…」那行日志拿到的都是掩码后的文本；PEM 整块删除只在这里发生。
-      # 掩码失败 → 失败评论：绝不能把未掩码的字段继续往下送。
-      review_redact_json "$WORK/validated.json" || die_review "字段级掩码失败"
-      truncated_fields=$(jq -r '.truncated_fields // 0' "$WORK/validated.json")
+      # review_validate 内部已按 归一化 → 字段级掩码 → 清洗 → 上限 的顺序处理（16-fix3 第 15 条）：validated.json 是结构化路径全部
+      # 模型文本的唯一收口点（方案 C），渲染器、行内正文、折叠区、截断副本与下面「评审报告：…」那行日志拿到的都是掩码后的文本。
+      truncated_fields=$(jq -r '.truncated_fields // 0' "$WORK/validated.json") || die_review "读取 validated.json 失败（jq rc=$?）"
       [[ "$truncated_fields" == "0" ]] \
         || log "警告：${truncated_fields} 个模型字段超出上限已截断（summary/verdict_reason ${REVIEW_CAP_SUMMARY}、title ${REVIEW_CAP_TITLE}、body ${REVIEW_CAP_BODY}、fix ${REVIEW_CAP_FIX} 字节）"
       ;;
+    # 字段级掩码或清洗失败：既不能把未掩码的字段往下送，也不能当「解析失败」把原文贴出去 → 失败评论
+    4) die_review "契约字段级掩码或清洗失败（rc=4，详见校验日志）" ;;
     # 受信 agent 未生效：contract 字段只在 agent 提示词里要求，缺了就说明模型拿的是裸提示词——
     # 拒绝路径与掩码规则都没生效，这份输出不能贴到 MR 上，所以走失败评论而不是降级。
     3) die_review "受信 agent 未生效：评审输出缺少 contract=\"${REVIEW_CONTRACT_ID}\" 标识（只在受信 agent 提示词里要求）。这份输出不是受信只读 agent 的产出，已拒绝回写其内容。请检查 ${AGENT_FILE} 的安装与 --agent ${AGENT_NAME} 是否生效" ;;
@@ -807,6 +816,7 @@ review_redact_file "$WORK/comment.md" || rrc=$?
 case "$rrc" in
   0) ;;
   3) die_review "评论掩码后结构守卫拒绝写回（行数或标记行变化）" ;;
+  4|5) die_review "评论掩码后写回或守卫命令失败（rc=${rrc}）" ;;
   *) die_review "评论掩码失败（rc=${rrc}）" ;;
 esac
 
