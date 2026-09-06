@@ -215,6 +215,43 @@ assert_eq "$(lib_code | grep -c 'index("\*\*/.git/\*\*")')" "1" "库里 deny 谓
 assert_eq "$(lib_code | grep -c '"read","grep","glob"')" "1" "库里工具三元组字面量只出现一次"
 assert_eq "$(lib_code | grep -c 'deniedPaths 缺失、为空或不含')" "1" "库里 deny 报错文案只出现一次"
 
+# 15-fix4 #19：自检按值核对 tools / toolsSettings 键集 / resources / permissions——隔离步骤存在的目的就是阻止工作区文件被自动加载，
+# 非空 resources 恰好把它重新引入；tools 带 execute_bash、toolsSettings 多出第四个键（其 allowedPaths 从不被改写）、permissions 放宽成 allow，
+# 5462175 的自检照过（正控：四条在 5462175 上都是 rc 0）
+jq '.tools = ["read","grep","glob","execute_bash"]' "$dest" > "$tmp/sc-tools.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-tools.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：tools 多了 execute_bash → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "tools 不是恰好" "selfcheck：点名 tools"
+jq '.tools = ["read","grep"]' "$dest" > "$tmp/sc-tools2.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-tools2.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：tools 少了 glob → 失败（精确相等，不是子集）"
+jq '.toolsSettings.execute_bash = {"allowedPaths": ["/"]}' "$dest" > "$tmp/sc-ts.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-ts.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：toolsSettings 多出 execute_bash 键 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "toolsSettings 多出工具键" "selfcheck：点名多出的键"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "execute_bash" "selfcheck：写出多出的键名"
+jq '.resources = ["file://AGENTS.md"]' "$dest" > "$tmp/sc-res.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-res.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：resources 非空 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "resources 不为空" "selfcheck：点名 resources"
+jq '.permissions.rules += [{"capability":"shell","effect":"allow"}]' "$dest" > "$tmp/sc-perm.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-perm.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：permissions.rules 混入 allow 规则 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "非 deny" "selfcheck：点名非 deny 规则"
+jq '.permissions.extra = true' "$dest" > "$tmp/sc-perm2.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-perm2.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：permissions 多出 rules 之外的键 → 失败"
+# 对照：resources 缺失 / permissions 缺失（更严格的定义）照样通过——检查的是「不放宽」，不是「必须存在」
+jq 'del(.resources) | del(.permissions)' "$dest" > "$tmp/sc-min.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-min.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "0" "selfcheck 对照：resources / permissions 缺失（更严格）→ 通过"
+# 安装器一侧同样核对 tools 精确相等（带 execute_bash 的定义不该先落盘再靠自检拒）
+jq --arg p "$ABS_PROMPT" '.prompt = $p | .tools += ["execute_bash"]' "$A" > "$tmp/bad-tools.json"
+rc=0; err=$(kiro_install_agent "$tmp/bad-tools.json" "$tmp/agents-badtools" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "安装器：tools 带 execute_bash → 拒装"
+assert_contains "$err" "tools 不是恰好" "安装器：报错点名 tools"
+assert_eq "$([[ -e "$tmp/agents-badtools" ]] && echo written || echo none)" "none" "安装器：tools 不合规不落盘"
+
 # --- 15-fix4 #13：空 / 纯空白 / 非对象 / 多值的定义文件必须 fail-closed ---
 # 5462175 及之前：单次 jq 对空输入不输出且退出 0 → reason="" → 自检返回 0。--print-paths 交叉核对已删（15-fix3 #12），自检是**唯一**
 # 一道门：长驻构建机上一份被截断 / 清零 / 误编辑的 ~/.kiro/agents/codeup-reviewer.json 会通过自检，评审带着 kiro-cli 回退的 agent 跑——
@@ -347,6 +384,14 @@ dest5=$(kiro_install_agent "$A" "$tmp/agents-stale" --workspace "$WS" --chunks "
 assert_eq "$([[ -e "$tmp/agents-stale/agent-codeup-reviewer.json" ]] && echo kept || echo removed)" "removed" "同名旧 agent 文件被移除"
 assert_eq "$([[ -e "$tmp/agents-stale/other.json" ]] && echo kept || echo removed)" "kept" "不同 name 的文件不受影响"
 assert_eq "$(ls "$tmp/agents-stale" | sort | paste -sd, -)" "codeup-reviewer.json,other.json" "安装目录只剩新文件与无关文件"
+
+# --- 15-fix4 #17：setup-guide §12 写出的固定名单必须与代码 KIRO_ENV_FIXED_NAMES 逐名相等（文档漂移过一次：少了 15-fix2 补的五个名字）---
+doc_line=$(grep -m1 '^  固定名单（KIRO_ENV_FIXED_NAMES）：' "$ROOT/pipeline/setup-guide.md" || true)
+assert_eq "$([[ -n "$doc_line" ]] && echo found || echo missing)" "found" "setup-guide §12 有「固定名单（KIRO_ENV_FIXED_NAMES）：」一行"
+doc_names=$(printf '%s' "${doc_line#*：}" | tr '、' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | sort)
+code_names=$(printf '%s\n' "${KIRO_ENV_FIXED_NAMES[@]}" | sort)
+assert_eq "$doc_names" "$code_names" "setup-guide §12 的固定名单与代码 KIRO_ENV_FIXED_NAMES 逐名相等"
+assert_eq "$(printf '%s\n' "${KIRO_ENV_FIXED_NAMES[@]}" | sort | uniq -d | wc -l | tr -d ' ')" "0" "KIRO_ENV_FIXED_NAMES 无重复名字"
 
 # --- 子进程环境许可清单 kiro_env_allowlist：**固定名单** + KIRO_ENV_PASSTHROUGH 逃生口（15-fix #11/#12）---
 # 不做形状匹配：KIRO_* / *_PROXY 会放行 CORP_SECRET_PROXY、客户自定义的 KIRO_…；额外需要的变量走 KIRO_ENV_PASSTHROUGH（只放名字）。

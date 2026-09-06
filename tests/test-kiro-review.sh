@@ -108,9 +108,9 @@ assert_contains "$out" "受信 agent 自检通过" "第 3 步自检通过并留�
 # kiro-cli 版本在 KIRO_TESTED_VERSIONS 名单内（替身默认 2.21.1）→ 不出 notice（15-fix2 #24）
 assert_contains "$out" "在 P1-15 探测过的版本名单内" "kiro-cli 版本核对：名单内"
 assert_not_contains "$out" "未经 P1-15 探测" "kiro-cli 版本核对：名单内时无警告"
-# 另两处 kiro-cli 调用（chat --help、settings）同样走 env -i + 许可清单（15-fix #8）：README 与指南的「Kiro 进程看不到…」
-# 才是绝对表述。替身把三次调用各自收到的环境变量名分别记在 env-help / env-settings / env。
-for f in env-help env-settings; do
+# 另三处 kiro-cli 调用（chat --help、--version、settings）同样走 env -i + 许可清单（15-fix #8 / 15-fix4 #18）：README 与指南的
+# 「Kiro 进程看不到…」才是绝对表述。替身把四次调用各自收到的环境变量名分别记在 env-help / env-version / env-settings / env。
+for f in env-help env-version env-settings; do
   names_f=$(cat "$MD/$f")
   for v in YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID KIRO_ENV_PASSTHROUGH; do
     assert_eq "$(printf '%s\n' "$names_f" | grep -c -x -- "$v")" "0" "${f}：这次 kiro-cli 调用的环境里没有 $v"

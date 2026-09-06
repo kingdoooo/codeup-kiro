@@ -52,13 +52,15 @@
 
 - 本集成包必须作为独立受信代码源引入流水线，严禁拷入业务库执行
   （否则 MR 作者可改脚本窃取流水线密钥）。
-- MR 源分支全部内容视为不受信数据：运行 Kiro 前移除业务库中任意深度的
-  `AGENTS.md`、`.kiro/`（含符号链接）与根目录 `lsp.json`；custom agent 关闭工作区
-  MCP/Powers 加载（`includeMcpJson: false`、`includePowers: false`），工具仅 read/grep/glob，
+- MR 源分支全部内容视为不受信数据：kiro-cli 从不在业务库里运行（四处调用都在一个空的临时目录下，业务库只在
+  `allowedPaths` 里、模型按绝对路径读取），运行前再移除业务库中任意深度的 `AGENTS.md`、`.kiro`（任何类型、不分大小写）、
+  全部符号链接与根目录 `lsp.json` 作为第二道；custom agent 关闭工作区
+  MCP/Powers 加载（`includeMcpJson: false`、`includePowers: false`），工具仅 read/grep/glob（安装后脚本按值自检：
+  `tools`、`allowedTools=[]`、三处 `allowedPaths`/`deniedPaths`、`resources=[]`、`permissions` 只含 deny、`toolsSettings` 无多余键），
   读取边界是**许可清单**（`allowedPaths`：业务库 checkout 与本次 diff chunk 目录，其它路径 headless 下直接被拒；
   业务库里的符号链接在启动前全部删除，免得 `payload -> /root/.aws/credentials` 借 allow 内的路径名读到 allow 外），
   `~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、`/var/run/secrets`、`**/.git/**` 等拒绝清单是第二道；
-  Kiro 进程的三次 kiro-cli 调用都以 `env -i` 固定名单环境启动，看不到云效令牌与 Flow 注入的其它变量。
+  Kiro 进程的四次 kiro-cli 调用（`chat --help`、`--version`、`settings`、`chat`）都以 `env -i` 固定名单环境启动，看不到云效令牌与 Flow 注入的其它变量。
 - Kiro 固定以 `--agent-engine v2` 运行：实测 headless 的默认引擎（v1）与预览版 v3 都不阻断
   工作区 `AGENTS.md` 注入，只有 v2 配合 `chat.disableInheritingDefaultResources` 才阻断
   （见 [docs/adr/0004-pin-kiro-cli-v2-engine.md](docs/adr/0004-pin-kiro-cli-v2-engine.md)）。

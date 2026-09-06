@@ -50,7 +50,7 @@
 # 整个替身跑在 set -euo pipefail 下：任何一步意外失败都让用例红，而不是假绿。
 # 与真实 kiro-cli 一致的一点：`--agent X` 必须能在 $HOME/.kiro/agents/X.json 找到定义，找不到就失败退出——
 # HOME 没透传或 agent 没装到位时，评审不能「静默用默认 agent 跑」。
-# 额外记录：env / env-help / env-settings ← 三种调用各自收到的环境变量名（每行一个，只记名字不记值）；
+# 额外记录：env / env-help / env-settings / env-version ← 四种调用各自收到的环境变量名（每行一个，只记名字不记值）；
 #           allowscan ← agent 定义里 read.allowedPaths 每条路径在 chat 时是否为目录及目录内容
 #           （`路径<TAB>dir|MISSING<TAB>逗号分隔的目录内容`），用于断言 chunks 目录就是 diff chunk 的落盘目录。
 set -euo pipefail
@@ -71,6 +71,7 @@ declare -F mock_config_load >/dev/null && declare -F injection_surface_scan >/de
 mock_config_load "$HOME"
 if [[ "${1:-}" == "--version" ]]; then
   echo "version" >> "$M/calls"
+  printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-version"   # 第四处 kiro-cli 调用的环境（15-fix4 #18）
   # MOCK_KIRO_VERSION_RC=<n>：--version 跑不起来（例如 127）——脚本必须按退出码走失败评论，而不是软 notice 后在 chat 上烧掉整个 KIRO_TIMEOUT（15-fix4 #7）
   if [[ "${MOCK_KIRO_VERSION_RC:-0}" != "0" ]]; then echo "mock: kiro-cli --version 模拟失败" >&2; exit "${MOCK_KIRO_VERSION_RC}"; fi
   # MOCK_KIRO_VERSION_WARN=1：stderr 上**先**打一条升级提示（带更高的版本号，不带「kiro-cli <版本>」形态），再在 stdout 打已装版本——

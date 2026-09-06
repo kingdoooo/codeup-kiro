@@ -41,10 +41,14 @@ CANARY_FILE="CANARY-KIROHOME-9c1d"
 # 退出码必须反映结论：文档把 FAIL 写成「不得接入生产」、INCONCLUSIVE 写成「不算通过」，
 # 而一律 exit 0 会让任何把本脚本接进流水线/`set -e` 做安全门禁的用法静默放行。
 PROBE_FAIL=0; PROBE_INCONCLUSIVE=0
-echo "[probe] kiro-cli $(kiro-cli --version 2>/dev/null | head -1) engine=${KIRO_ENGINE:-default} force_read=${FORCE_READ} 输出目录 $KEEP" >&2
+source "$PKG_ROOT/scripts/lib/kiro-agent.sh"
+# 版本取法与执行器同一函数（kiro_cli_version：stdout / stderr 分开、按程序名锚定，15-fix4 #7）；它要求先填好 env -i 许可清单——
+# 只有这一次 --version 调用走 env -i，下面的 run_kiro 仍刻意用完整环境（见 run_kiro 注释）
+kiro_env_allowlist || { echo "KIRO_ENV_PASSTHROUGH 不合法：${KIRO_ENV_ALLOW_ERROR}" >&2; exit 1; }
+kiro_cli_version "$TIMEOUT_BIN" "$KEEP" || { echo "${KIRO_CLI_VERSION_ERROR}" >&2; exit 1; }
+echo "[probe] kiro-cli ${KIRO_CLI_VERSION:-未知} engine=${KIRO_ENGINE:-default} force_read=${FORCE_READ} 输出目录 $KEEP" >&2
 
 # ---------- 可逆的环境准备 ----------
-source "$PKG_ROOT/scripts/lib/kiro-agent.sh"
 AGENT_SRC="$PKG_ROOT/kiro/agent-codeup-reviewer.json"
 AGENT_NAME=$(jq -r .name "$AGENT_SRC")
 AGENT_DIR="$HOME/.kiro/agents"; AGENT_DST="$AGENT_DIR/${AGENT_NAME}.json"

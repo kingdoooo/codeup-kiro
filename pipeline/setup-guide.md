@@ -217,9 +217,8 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 4. 引擎已钉死：日志出现「Kiro 引擎：v2（--agent-engine v2」。原因见第 12 节。
 5. 调用行**没有** `--trust-tools`、更没有 `--trust-all-tools`（第 12 节）：免确认只来自受信 agent 的
    `allowedPaths`。核对方式：日志「Kiro 进程环境许可清单（只透传这些变量）：…」那一行列出的变量名必须是**固定名单**
-   的子集——PATH、HOME、USER、TERM、TMPDIR、LANG、LC_ALL、LC_CTYPE、KIRO_API_KEY、KIRO_LOG_NO_COLOR、
-   HTTP_PROXY/HTTPS_PROXY/NO_PROXY（及小写）、SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、
-   XDG_CONFIG_HOME/XDG_DATA_HOME/XDG_CACHE_HOME/XDG_STATE_HOME——外加 `KIRO_ENV_PASSTHROUGH` 点名的那几个；
+   （完整名字列表只写在第 12 节「Kiro 进程环境只含固定名单变量」那一行，与代码 `KIRO_ENV_FIXED_NAMES` 由测试比对）的子集——
+   外加 `KIRO_ENV_PASSTHROUGH` 点名的那几个；
    **没有** YUNXIAO_TOKEN、YUNXIAO_ORG_ID、CODEUP_REPO_ID、CODEUP_BOT_USERNAME，也没有名单外任何形状像 `KIRO_*` /
    `*_PROXY` 的变量（这行只打名字、不打取值）。同一份名单也用于 `chat --help`、`--version` 与 `settings` 那几次 kiro-cli 调用。
    紧接着核对两行：「受信 agent 自检通过：allowedPaths 值比对…」（第 3 步把安装文件按值核对过——三处 allowedPaths 逐字等于
@@ -598,9 +597,8 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   `payload -> /root/.aws/credentials`，请求路径字面上就在 allowedPaths 之内，而 kiro-cli 是否先解析链接再比对未经实测
   （探测 P1-15 T8 记录事实，生产不依赖它）。diff 已从 git 对象算好，删链接不影响评审输入——链接本身的改动在 diff 里照样可见。
 - **Kiro 进程环境只含固定名单变量**：四处 kiro-cli 调用（能力检查 `chat --help` 与 `--version`、隔离 `settings`、评审 `chat`）
-  都以 `env -i` 启动，只透传**固定名单**：PATH、HOME（登录态与 agent 目录）、USER、TERM、TMPDIR、LANG、LANGUAGE、LC_ALL、
-  LC_CTYPE、LC_MESSAGES、KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY / HTTPS_PROXY / FTP_PROXY / ALL_PROXY / NO_PROXY（及小写）、
-  SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_CACHE_HOME / XDG_STATE_HOME / XDG_RUNTIME_DIR。
+  都以 `env -i` 启动，只透传**固定名单**（下一行与代码 `KIRO_ENV_FIXED_NAMES` 逐名比对，由 `tests/test-agent-config.sh` 守卫；HOME 承载登录态与 agent 目录）：
+  固定名单（KIRO_ENV_FIXED_NAMES）：PATH、HOME、USER、TERM、TMPDIR、LANG、LANGUAGE、LC_ALL、LC_CTYPE、LC_MESSAGES、KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY、HTTPS_PROXY、FTP_PROXY、ALL_PROXY、NO_PROXY、http_proxy、https_proxy、ftp_proxy、all_proxy、no_proxy、SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、XDG_CONFIG_HOME、XDG_DATA_HOME、XDG_CACHE_HOME、XDG_STATE_HOME、XDG_RUNTIME_DIR
   **不做形状匹配**（`KIRO_*`、`*_PROXY` 这类模式会放行 `CORP_SECRET_PROXY`、客户自定义的 `KIRO_…`）。自建执行机需要别的变量时
   用 `KIRO_ENV_PASSTHROUGH` 点名（第 11 节；只放名字，非法名字拒绝运行；`YUNXIAO_*`/`CODEUP_*`/`AWS_*`/含 TOKEN、SECRET、
   PASSWORD、CREDENTIAL、以 `_KEY` 结尾、`ghp_`/`gho_`/`github_pat_`/`AKIA`/`xox` 开头的凭证形状名字也拒绝——固定名单刚关掉的洞

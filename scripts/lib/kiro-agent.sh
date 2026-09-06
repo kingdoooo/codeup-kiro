@@ -88,6 +88,8 @@ kiro_install_agent() {
   # 第二行是检查本身（写成一行，变异测试 M5n 删掉即模拟「忘了检查」）。
   deny_missing=$(_kiro_agent_deny_missing "$src") || { echo "kiro_install_agent: 定义为空、不是恰好一个 JSON 对象或不是合法 JSON：${src}" >&2; return 1; }
   [[ -z "$deny_missing" ]] || { echo "kiro_install_agent: 定义里 toolsSettings.${deny_missing}.${KIRO_AGENT_DENY_MSG}——该工具没有拒绝清单，拒绝安装：${src}" >&2; return 1; }
+  # tools 必须恰好是 [read, grep, glob]（15-fix4 #19）：带 execute_bash 的定义装出去，自检会拒，但安装器不该先落盘
+  [[ "$(jq -c '.tools' "$src" 2>/dev/null)" == "$(jq -nc "[$KIRO_AGENT_TOOLS_JQ]")" ]] || { echo "kiro_install_agent: 定义 tools 不是恰好 [read, grep, glob]（$(jq -c '.tools' "$src" 2>/dev/null)），拒绝安装：${src}" >&2; return 1; }
   dest="${dest_dir}/${name}.json"
   # prompt：相对 file:// 改写为绝对；绝对 file:// 与内联文本原样保留（prompt_new 为空 = 不改写）
   prompt_new=""
@@ -130,6 +132,9 @@ kiro_install_agent() {
 #   · read/grep/glob 三处 allowedPaths 逐字等于 [$2, $3]（顺序、物理形态都算）
 #   · 三处 deniedPaths 存在、非空、含 **/.git/**
 #   · allowedTools == []（免确认只来自 allowedPaths）、includeMcpJson == false、includePowers == false
+#   · tools 恰好 == [read, grep, glob]、toolsSettings 的键 ⊆ {read, grep, glob}（多出的键其 allowedPaths 从不被改写）、resources 缺失或 []
+#     （非空 resources 会把隔离步骤要阻止的工作区文件重新自动载入）、permissions.rules 只含 deny 规则（V3 deny 是设计的一部分，
+#     ADR-0004；放宽成 allow 的规则不放行）——15-fix4 #19：README 把「工具仅 read/grep/glob」当成被强制的性质，自检要按值核对
 # 失败返回 1，原因放进 KIRO_AGENT_SELFCHECK_ERROR。执行器第 3 步用它把「日志声称的事实」变成断言；单测直接对篡改过的定义调用。
 # 全部检查在**一次** jq 里完成（15-fix3 #13），输出第一条不符的原因（都符合则为空）。
 # fail-closed（15-fix4 #13）：这是 --print-paths 交叉核对删掉后（15-fix3 #12）**唯一**的一道门。单次 jq 对空 / 纯空白文件不输出且
@@ -156,6 +161,11 @@ kiro_agent_selfcheck() {
               | "\($t).allowedPaths 写入的是 \(.toolsSettings[$t].allowedPaths | tojson)，预期 \(want | tojson)（业务库 checkout 物理路径 + chunks 物理路径，顺序固定）" ),
             ( select(deny_ok($t) | not) | "\($t).\($deny_msg)" ) ),
         ( select(.allowedTools != []) | "allowedTools 不为空（\(.allowedTools | tojson)）——免确认只能来自 allowedPaths" ),
+        ( select(.tools != ['"$KIRO_AGENT_TOOLS_JQ"']) | "tools 不是恰好 [read, grep, glob]（\(.tools | tojson)）" ),
+        ( select((((.toolsSettings // {}) | keys) - ['"$KIRO_AGENT_TOOLS_JQ"']) != []) | "toolsSettings 多出工具键 \((((.toolsSettings // {}) | keys) - ['"$KIRO_AGENT_TOOLS_JQ"']) | tojson)——其 allowedPaths 从不被改写" ),
+        ( select((.resources // []) != []) | "resources 不为空（\(.resources | tojson)）——工作区文件会被自动载入" ),
+        ( select([((.permissions // {}).rules // [])[] | select(.effect != "deny")] != []) | "permissions.rules 含非 deny 规则（V3 只同步 deny）" ),
+        ( select(((.permissions // {}) | keys) - ["rules"] != []) | "permissions 含 rules 之外的键（\((.permissions | keys) | tojson)）" ),
         ( select(.includeMcpJson != false) | "includeMcpJson 不是 false" ),
         ( select(.includePowers != false) | "includePowers 不是 false" )
       ) // ""

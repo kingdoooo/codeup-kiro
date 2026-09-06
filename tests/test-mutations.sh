@@ -193,6 +193,13 @@ run_case m5h "$pkg"
 assert_rc "$RC" 0 "M5h：变异体仍能跑完"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-settings")" "1" "M5h：settings 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-settings 没有 YUNXIAO_TOKEN」断言会失败"
 
+# --- M5gv：第四处 kiro-cli 调用（--version，在库函数 kiro_cli_version 里）去掉 env -i → 那次调用继承完整环境（15-fix4 #18）---
+pkg=$(make_mutant m5gv-version-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" kiro-cli --version/kiro-cli --version/' scripts/lib/kiro-agent.sh)
+run_case m5gv "$pkg"
+assert_rc "$RC" 0 "M5gv：变异体仍能跑完"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-version")" "1" "M5gv：--version 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-version 没有 YUNXIAO_TOKEN」断言会失败"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "0" "M5gv：chat 那次仍干净（变异只动了 --version）"
+
 # --- M5i：日志里的变量名清单改回按行 cut → 取值含换行时半个取值进日志（15-fix #7）---
 pkg=$(make_mutant m5i-names-cut 's/"\${KIRO_ENV_ALLOW\[@\]%%=\*}"/"${KIRO_ENV_ALLOW[@]}" | cut -d= -f1/' scripts/lib/kiro-agent.sh)
 run_case m5i "$pkg" KIRO_API_KEY="$(printf 'k\nSECRETFRAG=leaked')"
