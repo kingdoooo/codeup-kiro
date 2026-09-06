@@ -58,21 +58,15 @@ REVIEW_REPO_DIR="${REVIEW_REPO_DIR:-$PWD}"
 KIRO_ENGINE=v2
 
 log() { echo "[kiro-review] $*" >&2; }
-# 流水线日志也是评论出口（I3）：die_review 的失败原因与降级原因里可能带不受信取值（事件流的 runFinished.status），
-# 打日志前先过一遍脚本侧掩码（--keep-lines：文本级、保行）。方案 C 下 validated.json 派生的文本已在字段级掩过，
-# 这里只剩失败原因 / 降级原因 / 去重日志里的 file 这几处文本级取值。掩码程序不可用时不掩码，只分类（有没有像 token 的连片）：
-# 有就省略、没有就原样——不再有第二套「粗掩」词汇（第 20 / 25 条）。用法：_redact_for_log <字符串> → stdout（不带结尾换行）
-_redact_for_log() {
+# 流水线日志也是评论出口（I3）：失败原因 / 降级原因里**不受信**的那一部分（事件流的 runFinished.status、jq 报错回显、去重日志里的
+# 文件名）打日志前先过脚本侧掩码（--keep-lines：文本级、保行）。脚本自己的固定文案与不受信取值分成两个参数传进来（16-fix4 第 6 条），
+# 掩码程序不可用时只丢不受信部分、固定文案照打——不再用「有没有 ≥ 12 位连片」去猜哪些文案能打（那会把 INLINE_COMMENT / KIRO_TIMEOUT /
+# --output-format 这类最需要运维看到的配置错误整段吞掉，也会放过短口令）。用法：_untrusted_for_log <不受信取值> → stdout（不带结尾换行）
+_untrusted_for_log() {
   local s="${1-}" out
   [[ -n "$s" ]] || return 0
   if out=$(printf '%s\n' "$s" | review_redact_secrets --keep-lines 2>/dev/null) && [[ -n "$out" ]]; then printf '%s' "$out"; return 0; fi
-  # 掩码程序不可用：不再掩码，只做**分类**（第 25 条）——原因里没有 ≥ 12 位 token 字符连片（二十来处固定文案都如此）就原样打，
-  # 有就整段省略；不是第二套掩码词汇，只是一个「值得不值得打」的判定
-  if LC_ALL=C grep -qE '[A-Za-z0-9+/=_-]{12,}' <<< "$s"; then
-    printf '%s' "（含不受信取值的失败原因在掩码程序不可用时不打日志，已省略）"
-  else
-    printf '%s' "$s"
-  fi
+  printf '%s' "（不受信取值已省略：掩码程序不可用）"
 }
 die() { log "错误：$*"; exit 1; }
 
@@ -138,8 +132,11 @@ _die_review_minimal() {
   rm -f "$mh"
 }
 
+# 用法：die_review <固定文案> [<不受信取值>]——固定文案是脚本自己写的，不受信取值（事件流 / 模型派生）单独传，日志里只对后者掩码
 die_review() {
-  log "错误：$(_redact_for_log "$*")"
+  local reason_fixed="${1-}" detail="${2-}" reason_full
+  reason_full="${reason_fixed}${detail:+：$detail}"
+  log "错误：${reason_fixed}${detail:+：$(_untrusted_for_log "$detail")}"
   if [[ "$MR_LOCATED" == "1" ]]; then
     local f
     local -a hist_args=()
@@ -148,7 +145,7 @@ die_review() {
     # 与成功、降级评论同出一源：定位旧评论靠 `<!-- kiro-review:<sha> run:N -->`，
     # 失败评论若自己手写一份、哪天与渲染器走形，就会被漏掉、于是在 MR 上多出一条汇总。
     [[ -n "$PRIOR_HISTORY_FILE" ]] && hist_args=(--history "$PRIOR_HISTORY_FILE")
-    review_render_failure --reason "$*" --sha "${SHORT_SHA:-unknown}" \
+    review_render_failure --reason "$reason_full" --sha "${SHORT_SHA:-unknown}" \
       --src "${SOURCE_BRANCH:-?}" --dst "${TARGET_BRANCH:-?}" \
       --ts "$(date '+%Y-%m-%d %H:%M:%S')" --diff-note "${DIFF_NOTE:-（本次未生成 diff）}" \
       --run "$REVIEW_RUN" "${hist_args[@]+"${hist_args[@]}"}" \
@@ -158,7 +155,7 @@ die_review() {
     # 那份空文件绝不能交给 post_summary：PUT 空正文会把上一条完整报告覆盖成空白且不可恢复。
     # 退回一段最小的纯文本失败评论——仍带评审标记（下次评审才找得到这条）与本次一行历史。
     if [[ ! -s "$f" ]]; then
-      _die_review_minimal "$*" > "$f"
+      _die_review_minimal "$reason_full" > "$f"
       log "已退回最小失败评论（保证不 PUT 空正文）"
     fi
     # sink 掩码（票 16）：两种形态的 --reason 都可能回显模型取值（「契约 JSON 顶层结构不符」拼的是 jq 的报错，
@@ -326,7 +323,7 @@ publish_inline_comments() {
     if [[ "$hrc" == "0" ]]; then
       # file 是模型控制的取值（fpath 只拒空/禁用字符/控制字符）：它不在字段级掩码清单里（要与变更文件集合逐字比对，
       # 掩了就定位不到），只在这个日志出口掩（第 25 条）
-      log "去重：问题 #${idx}（${sev} $(_redact_for_log "$file") L${ls}$([[ "$le" =~ ^[0-9]+$ && "$le" != "$ls" ]] && printf -- '–L%s' "$le")）与已有行内评论 $(printf '%s' "$hits" | tr '\n' ',') 同文件且行区间重叠/相邻、级别不低于它，视为同一问题，跳过"
+      log "去重：问题 #${idx}（${sev} $(_untrusted_for_log "$file") L${ls}$([[ "$le" =~ ^[0-9]+$ && "$le" != "$ls" ]] && printf -- '–L%s' "$le")）与已有行内评论 $(printf '%s' "$hits" | tr '\n' ',') 同文件且行区间重叠/相邻、级别不低于它，视为同一问题，跳过"
       printf '{"idx":%s,"outcome":"existing"}\n' "$idx" >> "$WORK/outcomes.jsonl"; n_existing=$((n_existing + 1)); continue
     elif [[ "$hrc" != "1" ]]; then
       log "警告：问题 #${idx} 的去重判定出错（rc=${hrc}），本条按未重复处理照常发出（可能与已有评论重复）"
@@ -725,13 +722,13 @@ extract_rc=0
 review_extract_json "$WORK/stream.jsonl" "$REVIEW_NONCE" > "$WORK/contract.json" || extract_rc=$?
 case "$extract_rc" in
   2) die_review "Kiro 事件流中没有 runFinished 事件（评审未跑完；确认 --agent-engine ${KIRO_ENGINE} 与 --output-format stream-json 被接受）" ;;
-  3) die_review "Kiro 自报运行失败（runFinished.status=$(_redact_for_log "$(tr -d '\n' < "$WORK/contract.json")")）" ;;
+  3) die_review "Kiro 自报运行失败（runFinished.status 取值见后）" "$(tr -d '\n' < "$WORK/contract.json")" ;;
   # rc 7/8 是本地故障，绝不能和「被评审代码里有假标记」（rc 6）共用一个文案
   7) die_review "读不到 Kiro 事件流文件（本地 I/O 故障，不是评审内容问题）：${WORK}/stream.jsonl" ;;
   8) die_review "内部错误：提取契约时没有传入本次标记随机串（集成包缺陷，请报告）" ;;
 esac
 
-DEGRADE_REASON=""
+DEGRADE_REASON=""; DEGRADE_DETAIL=""
 case "$extract_rc" in
   0) ;;
   4) DEGRADE_REASON="评审员输出中没有成对的 <<<KIRO_REVIEW_JSON>>> 契约标记" ;;
@@ -762,7 +759,7 @@ if [[ -z "$DEGRADE_REASON" ]]; then
     # 受信 agent 未生效：contract 字段只在 agent 提示词里要求，缺了就说明模型拿的是裸提示词——
     # 拒绝路径与掩码规则都没生效，这份输出不能贴到 MR 上，所以走失败评论而不是降级。
     3) die_review "受信 agent 未生效：评审输出缺少 contract=\"${REVIEW_CONTRACT_ID}\" 标识（只在受信 agent 提示词里要求）。这份输出不是受信只读 agent 的产出，已拒绝回写其内容。请检查 ${AGENT_FILE} 的安装与 --agent ${AGENT_NAME} 是否生效" ;;
-    *) DEGRADE_REASON="契约 JSON 顶层结构不符（$(tail -1 "$WORK/validate-err.log")）" ;;
+    *) DEGRADE_REASON="契约 JSON 顶层结构不符"; DEGRADE_DETAIL="$(tail -1 "$WORK/validate-err.log")" ;;   # 校验器的最后一行 stderr 当不受信取值处理
   esac
 fi
 
@@ -777,13 +774,13 @@ render_args=(--sha "$SHORT_SHA" --src "$SOURCE_BRANCH" --dst "$TARGET_BRANCH"
 
 if [[ -n "$DEGRADE_REASON" ]]; then
   # 降级：评审已经产出、只是没按契约输出——贴清洗后的原文并在标题标明，退出码仍为 0。
-  log "警告：结构化解析失败（$(_redact_for_log "$DEGRADE_REASON")），降级为贴出评审员输出原文"
+  log "警告：结构化解析失败（${DEGRADE_REASON}${DEGRADE_DETAIL:+：$(_untrusted_for_log "$DEGRADE_DETAIL")}），降级为贴出评审员输出原文"
   final_rc=0
   review_stream_final_text "$WORK/stream.jsonl" > "$WORK/final.txt" || final_rc=$?
   [[ "$final_rc" == "0" ]] || die_review "结构化解析失败，且取评审员原文也失败（rc=${final_rc}）"
   review_clean_text < "$WORK/final.txt" > "$WORK/raw.md"
   [[ -s "$WORK/raw.md" ]] || die_review "结构化解析失败，且评审员输出为空"
-  review_render_degraded --text "$WORK/raw.md" --reason "$DEGRADE_REASON" "${render_args[@]}" \
+  review_render_degraded --text "$WORK/raw.md" --reason "${DEGRADE_REASON}${DEGRADE_DETAIL:+（$DEGRADE_DETAIL）}" "${render_args[@]}" \
     > "$WORK/comment.md" || die_review "降级评论渲染失败"
 else
   dropped=$(jq -r '.dropped_findings' "$WORK/validated.json")

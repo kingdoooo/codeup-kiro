@@ -1394,7 +1394,7 @@ assert_nonzero "$RC" "第 24 条：kiro 失败 → 非零退出"
 assert_contains "$OUT" "request failed: Authorization: Bearer ${SEC_GHP_MASKED}" "第 24 条：kiro stderr 尾巴打进日志前掩码"
 assert_no_secrets "$OUT" "第 24 条：全部输出不含原文"
 # 第 25 条：去重日志行里的 file 过掩码——file 必须命中变更行集合才走到去重日志，端到端造不出带 token 的路径；静态断言该行经过 _redact_for_log
-assert_eq "$(grep -c 'log "去重：问题 #${idx}（${sev} $(_redact_for_log "$file")' "$ROOT/scripts/kiro-review.sh")" "1" "第 25 条（静态）：去重日志行里的 file 经过 _redact_for_log"
+assert_eq "$(grep -c 'log "去重：问题 #${idx}（${sev} $(_untrusted_for_log "$file")' "$ROOT/scripts/kiro-review.sh")" "1" "第 25 条（静态）：去重日志行里的 file 经过 _untrusted_for_log"
 
 # ---- 票 16-fix ②：die_review 的日志行也是 sink——失败原因里的不受信取值（runFinished.status）过掩码再打日志 ----
 # 评论正文已由 sink 掩码覆盖，这里补的是 `log "错误：…"` 那一行：事件流里的 status 串原样拼进原因，
@@ -1402,15 +1402,15 @@ assert_eq "$(grep -c 'log "去重：问题 #${idx}（${sev} $(_redact_for_log "$
 # jq 报错不会回显模型取值，所以降级原因目前没有能带出完整 token 的端到端向量——只断言那行日志仍在、没被包坏）。
 run_case statusleak MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP} ${SEC_AKIA}"
 assert_nonzero "$RC" "16-fix 日志：status 非 success → 非零退出"
-assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status=error ${SEC_GHP_MASKED} ${SEC_AKIA_MASKED}）" \
-  "16-fix 日志：die_review 的日志行带掩码后的 status（原因文案与取值都在，只有 token 变掩码）"
+assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status 取值见后）：error ${SEC_GHP_MASKED} ${SEC_AKIA_MASKED}" \
+  "16-fix 日志：die_review 的日志行带掩码后的 status（固定文案与取值都在，只有 token 变掩码）"
 assert_no_secrets "$OUT" "16-fix 日志（全部输出：日志 + 失败评论）"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "status=error ${SEC_GHP_MASKED}" "16-fix 日志对照：失败评论里同样是掩码后的 status（sink 掩码兜住）"
+assert_contains "$comment" "取值见后）：error ${SEC_GHP_MASKED}" "16-fix 日志对照：失败评论里同样是掩码后的 status（出口掩码兜住）"
 # 掩码程序不可用时的日志退回：不打原文，只留固定文案（第 20 条：不再有第二套「粗掩」词汇）
 run_case statusleak-badawk PATH="$tmp/badawk:$PATH" MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP}"
 assert_nonzero "$RC" "16-fix 日志退回：非零退出"
-assert_contains "$OUT" "含不受信取值的失败原因在掩码程序不可用时不打日志，已省略" "16-fix 日志退回：掩码不可用时只留固定文案"
+assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status 取值见后）：（不受信取值已省略：掩码程序不可用）" "16-fix4 第 6 条：掩码不可用时固定文案照打、只丢不受信取值"
 assert_no_secrets "$OUT" "16-fix 日志退回：全部输出不含原文"
 # 降级原因那一行没被包坏（原因文案完整）
 run_case degrade-reason-log MOCK_KIRO_LEAK_SECRET=1
@@ -1422,8 +1422,7 @@ assert_contains "$OUT" "警告：结构化解析失败（评审员输出中没�
 run_case degrade-redactfail PATH="$tmp/badawk:$PATH" MOCK_KIRO_LEAK_SECRET=1
 assert_nonzero "$RC" "第 13 条：降级原文掩码失败 → 评审失败，而不是发一份空正文的降级评论"
 assert_contains "$OUT" "review_render_degraded: 原文掩码失败" "第 13 条：库函数点明原因"
-# 掩码程序不可用时 _redact_for_log 同样不可用：die_review 的原因行只留固定文案（第 20 条），原因文本不会原样进日志
-assert_contains "$OUT" "含不受信取值的失败原因在掩码程序不可用时不打日志，已省略" "第 13 条：日志里的失败原因退回固定文案"
+assert_contains "$OUT" "错误：降级评论渲染失败" "第 13 条 / 第 6 条：die_review 的固定文案在掩码不可用时照样打出"
 assert_no_secrets "$OUT" "第 13 条：全部输出不含原文"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "⚠️ 评审未完成" "第 13 条：MR 上是失败评论"
@@ -1441,5 +1440,9 @@ assert_rc "$RC" 0 "第 7 条守卫：评审成功"
 assert_contains "$OUT" "字节超过 MAX_COMMENT_BYTES=20000，转入折叠区" "第 7 条守卫：日志点明超限正文进折叠区"
 assert_eq "$(inline_bodies "$OUT" | grep -c . || true)" "2" "第 7 条守卫：超限的那一条没发出（其余两条照发）"
 assert_contains "$(posted_comment "$OUT")" "**行内发布失败（1）**" "第 7 条守卫：超限的那一条进了折叠区"
+# ---- 16-fix4 第 7 条：掩码程序不可用时，含 ≥ 12 位 ASCII 标识符的固定文案必须原样出现在日志里（cf29da0 的「连片分类器」会整段省略：正控）----
+run_case fixedtext-badawk PATH="$tmp/badawk:$PATH" INLINE_COMMENT=yes
+assert_nonzero "$RC" "第 7 条：INLINE_COMMENT=yes → 非零退出"
+assert_contains "$OUT" "错误：INLINE_COMMENT=yes 不是 0 或 1。行内评论开关只接受这两个取值" "第 7 条：含 INLINE_COMMENT 这种 ≥ 12 位标识符的固定文案在掩码不可用时仍原样进日志"
 
 report
