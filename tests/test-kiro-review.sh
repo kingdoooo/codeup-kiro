@@ -1639,9 +1639,18 @@ if [[ "$(id -u)" != "0" ]]; then
 fi
 
 # ---- 静态：scripts/ 里不得再有多字节分隔符的 paste（GNU coreutils 会截成单字节，产出非法 UTF-8；15-fix3 #4）与 --print-paths（#12）----
-# 只看 paste 的分隔符参数（-d'…' / -sd'…'），不看同一行别处的中文
-assert_eq "$(LC_ALL=C grep -rhoE "paste[[:space:]]+-[a-z]*d[[:space:]]*'[^']*'" "$ROOT/scripts" | LC_ALL=C grep -c "$(printf '[\x80-\xff]')")" "0" "静态：scripts/ 里 paste 的分隔符没有非 ASCII 字符（GNU coreutils 会截成单字节）"
-assert_eq "$(LC_ALL=C grep -rhoE "paste[[:space:]]+-[a-z]*d[[:space:]]*'[^']*'" "$ROOT/scripts" | wc -l | tr -d ' ')" "1" "静态前置：scripts/ 里确有 paste -d 调用（否则上一条恒真）"
+# 只看 paste 的分隔符参数：-d / -sd 后接单引号或双引号字面量，以及 --delimiters=… 的两种引号（15-fix4 #12）。
+# 非 ASCII 判定用 LC_ALL=C 下的**否定可打印类** `[^ -~[:space:]]`：BSD grep 在 C locale 下对 `[\x80-\xff]` 字节范围匹配不到任何东西
+# （macOS 上旧守卫恒为 0，正控只证明 paste -d 存在，D3 实测），否定类在 BSD / GNU 都按字节生效。
+paste_delims() { LC_ALL=C grep -rhoE "paste[[:space:]]+(-[a-z]*d[[:space:]]*|--delimiters=)('[^']*'|\"[^\"]*\")" "$@" || true; }   # 无匹配时输出空、不让 set -e 中止
+non_ascii_count() { LC_ALL=C grep -c '[^ -~[:space:]]' || true; }
+assert_eq "$(paste_delims "$ROOT/scripts" | non_ascii_count)" "0" "静态：scripts/ 里 paste 的每个分隔符字面量都是单字节 ASCII（GNU coreutils 会把多字节截成单字节）"
+assert_eq "$([[ "$(paste_delims "$ROOT/scripts" | wc -l | tr -d ' ')" -ge 1 ]] && echo some || echo none)" "some" "静态前置：scripts/ 里确有 paste -d 调用（否则上一条恒真）"
+# 正控（本平台上跑一次）：四种写法的多字节分隔符都必须被正则认出、且被非 ASCII 判定抓到——否则上面那条在本平台上是空的
+printf "%s\n" "x | paste -sd'、' -" 'y | paste -d"、" -' "z | paste --delimiters='、' -" 'w | paste -sd"，" -' "ok | paste -sd' ' -" > "$tmp/paste-ctl.txt"
+paste_ctl=$(paste_delims "$tmp/paste-ctl.txt")
+assert_eq "$(printf '%s\n' "$paste_ctl" | wc -l | tr -d ' ')" "5" "静态正控：五种 paste 分隔符写法都被正则认出"
+assert_eq "$(printf '%s\n' "$paste_ctl" | non_ascii_count)" "4" "静态正控：四个多字节分隔符在本平台上都被非 ASCII 判定抓到（单字节那个不算）"
 assert_eq "$(grep -rn -- '--print-paths\|print_paths' "$ROOT/scripts" | wc -l | tr -d ' ')" "0" "静态：--print-paths 协议已从 scripts/ 删除"
 
 run_case rerunhint REVIEW_RERUN_HINT='评论 `/kiro review` 可重新评审'

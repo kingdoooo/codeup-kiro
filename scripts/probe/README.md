@@ -33,7 +33,7 @@
 | `probe-codeup-inline.sh` | P1-00 身份/MR · P1-01 版本列表 · P1-02 行号侧向 · P1-03 必填字段 · P1-04 草稿一次提交 · P1-05 原地更新 · P1-06 评论列表 · P1-09 `<details>` 渲染 | 令牌：代码只读 + 合并请求读写；一个打开的测试 MR |
 | `probe-flow-run.sh` | P1-07 `CreatePipelineRun` 的 `envs` / `runningBranchs` 覆写 | 令牌：流水线读写；已配置的评审流水线 |
 | `probe-kiro-headless.sh` | P1-08 `stream-json` 事件形态 · P1-10 AGENTS.md 继承隔离 · P1-11 禁止路径 · P1-12 `--engine v3` 对照 | 装有 kiro-cli 的机器 + `KIRO_API_KEY`（或本机已 `kiro-cli login`） |
-| `probe-kiro-allowlist.sh` | P1-15 读取**许可清单**（`allowedPaths`）在 headless 下是不是边界。门禁用例：T1 allow 内 read 可读 · T1b/T1c allow 内 grep/glob 可用（不带 `--trust-tools`）· T2 allow 外/deny 外的 canary 被**拒绝**（不是等确认到超时）· T3 deny 先于 allow（`.git/logs/HEAD`）· T4 `env -i` 许可清单下能启动 · T8 业务库内指向 `$HOME` 的符号链接与 `<业务库>/../` 越界路径都被拒 · T9 业务库里提交的 `.ssh/config`、`.aws/config`、`keys/id_rsa.pub`、`keys/id_ed25519.pub` 都被拒（allow 内的仓库相对 deny 形状，四条各一）。非门禁：T5 正控（无 allowedPaths 的旧形态 + `--trust-tools` 读出 canary；默认跑）· T6/T7 INFO（`--trust-tools` 不覆盖 allow；`--trust-all-tools` **绕过** allow；要跑得显式 `PROBE_CASES`） | 同上；每用例一次调用（约 0.3 credit） |
+| `probe-kiro-allowlist.sh` | P1-15 读取**许可清单**（`allowedPaths`）在 headless 下是不是边界。门禁用例：T1 allow 内 read 可读 · T1b/T1c allow 内 grep/glob 可用（不带 `--trust-tools`）· T2 allow 外/deny 外的 canary 被**拒绝**（不是等确认到超时）· T3 deny 先于 allow（`.git/logs/HEAD`）· T4 `env -i` 许可清单下能启动 · T8a 业务库内指向 `$HOME` 的符号链接被拒 · T8b `<业务库>/../` 越界路径被拒 · T9a–T9d 业务库里提交的 `.ssh/config`、`.aws/config`、`keys/id_rsa.pub`、`keys/id_ed25519.pub` 各自被拒（allow 内的仓库相对 deny 形状，四条各一；**每个 canary 一次调用**，拒绝痕迹按运行归因而不是按文件名回扫）。装好的探测 agent 先过生产同一个 `kiro_agent_selfcheck`，不通过记 INCONCLUSIVE。非门禁：T5 正控（无 allowedPaths 的旧形态 + `--trust-tools` 读出 canary；默认跑）· T6/T7 INFO（`--trust-tools` 不覆盖 allow；`--trust-all-tools` **绕过** allow；要跑得显式 `PROBE_CASES`） | 同上；每用例一次调用（约 0.3 credit，默认 13 次） |
 
 ## 用法
 
@@ -68,7 +68,7 @@ bash scripts/probe/probe-kiro-allowlist.sh
 # 默认 = 八个门禁用例 + T5 正控（9 次调用）；T6/T7 是 INFO，要跑得显式列出
 # 只跑子集省额度：PROBE_CASES="T1 T2 T4" bash scripts/probe/probe-kiro-allowlist.sh
 #   用例名逐个校验（写错 → 退出码 2、零调用）；子集运行时结论打「不作发布判定」并以 4 退出，只有八个门禁用例全跑才打「走主方案」
-# 升级 kiro-cli 之后：跑一次（至少 T8）→ 全 PASS 后把新版本号加进 scripts/kiro-review.sh 的 KIRO_TESTED_VERSIONS，
+# 升级 kiro-cli 之后：跑一次（至少 T8a T8b）→ 全 PASS 后把 summary.json 里的 kiro_cli 版本号加进 scripts/kiro-review.sh 的 KIRO_TESTED_VERSIONS，
 #   否则每次评审的日志与汇总评论都会带「本次 kiro-cli 版本未经 P1-15 探测」的 notice
 # 原始输出默认留在 /tmp/kiro-probe-allowlist-<时间>（每用例 .jsonl/.err、agent-installed.json、
 # env-allowlist-names.txt、summary.json）

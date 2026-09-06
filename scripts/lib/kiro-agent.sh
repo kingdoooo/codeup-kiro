@@ -137,7 +137,7 @@ kiro_install_agent() {
 #     ADR-0004；放宽成 allow 的规则不放行）——15-fix4 #19：README 把「工具仅 read/grep/glob」当成被强制的性质，自检要按值核对
 # 失败返回 1，原因放进 KIRO_AGENT_SELFCHECK_ERROR。执行器第 3 步用它把「日志声称的事实」变成断言；单测直接对篡改过的定义调用。
 # 全部检查在**一次** jq 里完成（15-fix3 #13），输出第一条不符的原因（都符合则为空）。
-# fail-closed（15-fix4 #13）：这是 --print-paths 交叉核对删掉后（15-fix3 #12）**唯一**的一道门。单次 jq 对空 / 纯空白文件不输出且
+# fail-closed（15-fix4 #13）：这是安装器「打回路径」stdout 交叉核对删掉后（15-fix3 #12）**唯一**的一道门。单次 jq 对空 / 纯空白文件不输出且
 # 退出 0 → reason="" → 自检通过——长驻构建机上一份被截断 / 清零 / 误编辑的 ~/.kiro/agents/codeup-reviewer.json 会放行，评审带着
 # kiro-cli 回退的 agent 跑（没有 allowedPaths、没有 deniedPaths）；两个各自合格的定义拼在一个文件里也放行（两行空 reason 被 $(…) 吃掉）。
 # 三道：① `-s` 拒 0 字节（固定文案）；② `--slurp` 把整个文件读成数组，要求恰好一个元素且是对象（固定文案点明个数 / 类型）——
