@@ -134,6 +134,8 @@ assert_no_secrets() {  # 内容 说明前缀：三种原文都不在（掩码形
 #   all（默认）：字段级与文档级都失败（→ review_redact_json 先失败，评审走失败评论）
 #   doc：只让文档级（--keep-lines，参数里带 keeplines=1）失败——字段级照常，用来测文档级兜底的失败分支
 #   inline：只让**行内正文**的文档级掩码失败（stdin 里带 <!-- kiro-inline: 标记）——汇总照常发出，用来测「掩码失败 → 折叠区」
+#   raw：只让**原文**（stdin 里没有任何 <!-- kiro- 标记：降级原文、日志行）的保行掩码失败——渲染好的评论照常过文档级兜底，
+#        用来单独观察降级渲染器自己的 fail-closed（第 13 条）
 make_bad_awk() {
   local dir="$1" mode="${2:-all}" real
   real=$(command -v awk) || { echo "make_bad_awk: 本机找不到 awk" >&2; return 1; }
@@ -151,6 +153,11 @@ make_bad_awk() {
       inline) echo 'if [[ $is_mask == 1 && $is_doc == 1 ]]; then'
               echo '  buf=$(mktemp); cat > "$buf"'
               echo '  if grep -q "<!-- kiro-inline:" "$buf"; then rm -f "$buf"; echo "badawk: 模拟行内正文掩码失败" >&2; exit 1; fi'
+              printf '  %q "$@" < "$buf"; rc=$?; rm -f "$buf"; exit $rc\n' "$real"
+              echo 'fi' ;;
+      raw)    echo 'if [[ $is_mask == 1 && $is_doc == 1 ]]; then'
+              echo '  buf=$(mktemp); cat > "$buf"'
+              echo '  if ! grep -q "<!-- kiro-" "$buf"; then rm -f "$buf"; echo "badawk: 模拟原文掩码失败" >&2; exit 1; fi'
               printf '  %q "$@" < "$buf"; rc=$?; rm -f "$buf"; exit $rc\n' "$real"
               echo 'fi' ;;
       *) echo "make_bad_awk: 未知模式 ${mode}" >&2; return 1 ;;

@@ -956,10 +956,14 @@ run_case m-r-control "$ROOT" MOCK_KIRO_LEAK_SECRET=1
 assert_not_contains "$OUT" "MIIEowIBAAKCAQEA""fakekey0123456" "M-r 对照：未变异实现屏蔽"
 # --- M-s：第 13 条——降级渲染器掩码失败不再 fail-closed → 空正文的降级评论以 rc 0 发出 ---
 pkg=$(make_mutant m-s-degraded-open 's|  if ! review_redact_secrets --keep-lines < "\$_RR_TEXT" > "\$masked" \|\| \[\[ ! -s "\$masked" \&\& -s "\$_RR_TEXT" \]\]; then|  if false; then  # 变异 M-s：掩码失败照样渲染|' scripts/lib/review-render.sh)
-run_case m-s "$pkg" PATH="$tmp/badawk:$PATH" MOCK_KIRO_LEAK_SECRET=1
+# 替身只让**原文**的掩码失败（渲染好的评论带 <!-- kiro- 标记，文档级兜底照常）——否则出口的兜底会替降级渲染器把评审拦下，
+# 观察不到渲染器自己的 fail-open
+make_bad_awk "$tmp/badawk-raw" raw
+run_case m-s "$pkg" PATH="$tmp/badawk-raw:$PATH" MOCK_KIRO_LEAK_SECRET=1
 assert_rc "$RC" 0 "M-s：掩码失败被吞后评审「成功」——端到端「降级掩码失败 → 评审失败」断言会失败"
 assert_contains "$(posted_comment "$OUT")" "结构化解析失败" "M-s：发出的是一份降级评论（正文为空）"
-run_case m-s-control "$ROOT" PATH="$tmp/badawk:$PATH" MOCK_KIRO_LEAK_SECRET=1
+run_case m-s-control "$ROOT" PATH="$tmp/badawk-raw:$PATH" MOCK_KIRO_LEAK_SECRET=1
 assert_nonzero "$RC" "M-s 对照：未变异实现 fail-closed"
+assert_contains "$OUT" "review_render_degraded: 原文掩码失败" "M-s 对照：库函数点明原因"
 
 report
