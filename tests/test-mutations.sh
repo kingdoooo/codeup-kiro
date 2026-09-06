@@ -174,7 +174,7 @@ mut_add_symlinks() {
   mkdir -p src/sub2 && ln -s /etc src/sub2/link-to-etc-dir
   git add -A && git commit -qm "add symlinks"
 }
-pkg=$(make_mutant m5f-symlinks '/-o -type l -print -exec rm -f {} +/d' scripts/lib/isolation.sh)
+pkg=$(make_mutant m5f-symlinks '/-o -type l -exec sh -c/d' scripts/lib/isolation.sh)
 MUT_TWEAK=mut_add_symlinks run_case m5f "$pkg"
 assert_rc "$RC" 0 "M5f：变异体仍能跑完"
 assert_contains "$(cat "$MD/cwdscan")" "link-to-hosts" "M5f：Kiro 启动时符号链接仍在——端到端「工作区里没有任何符号链接」断言会失败"
@@ -225,7 +225,7 @@ assert_contains "$(posted_comment "$OUT")" "grep.allowedPaths" "M5l：失败评�
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "M5l：Kiro 未被启动（grep 无边界的 agent 不能拿去跑）"
 
 # --- M5m：删掉执行器第 3 步的自检调用（单变异）→ 「受信 agent 自检通过」那行日志消失（端到端断言它必须在）---
-pkg=$(make_mutant m5m-no-selfcheck '/kiro_agent_selfcheck "\$INSTALLED_AGENT"/d')
+pkg=$(make_mutant m5m-no-selfcheck '/^if kiro_agent_selfcheck "\$INSTALLED_AGENT"/,/^fi$/d')
 run_case m5m "$pkg"
 assert_rc "$RC" 0 "M5m：没有自检时评审照跑"
 assert_not_contains "$OUT" "受信 agent 自检通过" "M5m：自检留痕消失——端到端「第 3 步自检通过并留痕」断言会失败"
@@ -244,7 +244,7 @@ assert_not_contains "$attr5o" "TMPDIR=" "M5o：declare -rx TMPDIR 被丢——�
 
 # --- M5p：凭证形状的名字不再单独归类（当成普通名字放进名单）→ KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN 照跑，令牌进了 Kiro 进程环境（15-fix2 #13）---
 # 只删「拒绝」那一行的变异会把凭证名字静默丢掉（进不了名单也不报错）——那是另一种坏；这里模拟的是「忘了区分」
-pkg=$(make_mutant m5p-cred-names 's/) cred+=("$tok") ;;/) names+=("$tok") ;;/' scripts/lib/kiro-agent.sh)
+pkg=$(make_mutant m5p-cred-names 's/) cred+=("$(_kiro_env_mask_token "$tok")") ;;/) names+=("$tok") ;;/' scripts/lib/kiro-agent.sh)
 run_case m5p "$pkg" KIRO_ENV_PASSTHROUGH="YUNXIAO_TOKEN"
 assert_rc "$RC" 0 "M5p：凭证形状的名字不再拒绝——端到端「KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：拒绝运行」断言会失败"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "1" "M5p：YUNXIAO_TOKEN 进了 Kiro 进程环境（固定名单关掉的洞被一个变量名重新打开）"
@@ -267,10 +267,42 @@ run_case m5s "$pkg" MOCK_KIRO_VERSION=9.9.9
 assert_rc "$RC" 0 "M5s：变异体仍能跑完"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5s：汇总评论没有版本 notice——端到端「版本不在名单：汇总评论带 notice」断言会失败"
 
+# --- M5t：.kiro 匹配退回区分大小写 → .Kiro/ 幸存（15-fix3 #1）---
+mut_kiro_case() { mkdir -p src/.Kiro/settings && echo '{}' > src/.Kiro/settings/cli.json; rm -rf .kiro; printf 'plain' > .kiro; git add -A; git commit -qm case; }   # 大小写变体不同目录（APFS 大小写不敏感）
+pkg=$(make_mutant m5t-kiro-case 's/-o -iname .kiro -prune/-o -name .kiro -prune/' scripts/lib/isolation.sh)
+MUT_TWEAK=mut_kiro_case run_case m5t "$pkg"
+assert_rc "$RC" 0 "M5t：变异体仍能跑完"
+assert_eq "$([[ -d "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "kept" "M5t：src/.Kiro/ 幸存——端到端「src/.Kiro/ 目录被删」断言会失败"
+
+# --- M5u：.kiro 匹配退回只认目录/符号链接 → 根 .kiro 普通文件幸存（15-fix3 #2）---
+pkg=$(make_mutant m5u-kiro-type 's/-o -iname .kiro -prune/-o -iname .kiro \\( -type d -o -type l \\) -prune/' scripts/lib/isolation.sh)
+MUT_TWEAK=mut_kiro_case run_case m5u "$pkg"
+assert_rc "$RC" 0 "M5u：变异体仍能跑完"
+assert_eq "$([[ -f "$CASE/work/.kiro" ]] && echo kept || echo gone)" "kept" "M5u：根 .kiro 普通文件幸存——端到端「根 .kiro 普通文件被删」断言会失败"
+
+# --- M5v：降级评论不再接 --notice → 版本 notice 只在日志、评论里没有（15-fix3 #3）---
+pkg=$(make_mutant m5v-degraded-notice '/degraded_args+=(--notice "\$ALL_NOTICE")/d')
+run_case m5v "$pkg" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
+assert_rc "$RC" 0 "M5v：变异体仍能跑完"
+assert_contains "$OUT" "未经 P1-15 探测" "M5v：日志仍有警告"
+assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5v：降级评论丢了 notice——端到端「降级评论也带版本 notice」断言会失败"
+
+# --- M5w：被拒的凭证形状名字不再掩码 → 完整名字进失败评论（15-fix3 #6）---
+pkg=$(make_mutant m5w-cred-mask 's/cred+=("$(_kiro_env_mask_token "$tok")")/cred+=("$tok")/' scripts/lib/kiro-agent.sh)
+run_case m5w "$pkg" KIRO_ENV_PASSTHROUGH="svc_SECRET_9f3ab21c7de4"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5w：仍拒绝运行"
+assert_contains "$(posted_comment "$OUT")" "svc_SECRET_9f3ab21c7de4" "M5w：完整名字进了评论——端到端「完整名字不进评论」断言会失败"
+
+# --- M5x：--version 改回 2>/dev/null → 版本打到 stderr 的 CLI 让版本永远「未知」（15-fix3 #8）---
+pkg=$(make_mutant m5x-version-stderr 's/kiro-cli --version 2>&1 | head -1/kiro-cli --version 2>\/dev\/null | head -1/')
+run_case m5x "$pkg" MOCK_KIRO_VERSION_STDERR=1
+assert_rc "$RC" 0 "M5x：变异体仍能跑完"
+assert_contains "$(posted_comment "$OUT")" "未知" "M5x：版本永远「未知」、评论带 notice——端到端「--version 打到 stderr：无 notice」断言会失败"
+
 # --- M6：删掉任意深度 .kiro/ 的删除逻辑 → 子目录 .kiro/ 残留、Kiro 启动时能看到 ---
-# 模式只用 `-name .kiro`：任意深度 .kiro 的删除条件是 \( -type d -o -type l \)（覆盖符号链接），
-# 带 -type d 的旧模式会失配（make_mutant 会因此报错，这正是它存在的意义）。隔离逻辑在 scripts/lib/isolation.sh（15-fix2 #10/#15）
-pkg=$(make_mutant m6-kiro-dirs '/-name .kiro/d' scripts/lib/isolation.sh)
+# 模式只认 `-iname .kiro -prune` 这一行（15-fix3：不分大小写、任何类型）；实现改写后失配时 make_mutant 会报错，这正是它存在的意义。
+# 隔离逻辑在 scripts/lib/isolation.sh（15-fix2 #10/#15）
+pkg=$(make_mutant m6-kiro-dirs '/-iname .kiro -prune/d' scripts/lib/isolation.sh)
 run_case m6 "$pkg"
 assert_rc "$RC" 0 "M6：变异体仍能跑完"
 assert_eq "$([[ -d "$CASE/work/src/sub/.kiro" ]] && echo exists || echo gone)" "exists" "M6：子目录 .kiro/ 残留——端到端断言「.kiro 已移除」会失败"

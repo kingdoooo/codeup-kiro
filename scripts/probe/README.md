@@ -117,7 +117,9 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
   用例名，零调用）；3 = INCONCLUSIVE（门禁用例证据不全，**或** T5 正控不成立 / T6、T7 无法判定——那说明**探测本身不可信**，
   不是 allowedPaths 的结论）；4 = 门禁用例未全部运行（`PROBE_CASES` 子集，已跑的全 PASS，不作发布判定）；5 = 环境准备失败
   （缺 kiro-cli/jq/timeout、未登录、装探测 agent 失败、预检不符）。「实际运行」的集合从 `PROBE_CASES ∩ 已知用例` 推导，不手工记账。
-  T5 的正控 agent 由安装器的 `--allow-none` 装（唯一合法的第二调用方：file:// 改写、deny 检查、同名旧文件清理照做）。
+  T5 的正控 agent 由安装器的 `--allow-none` 装（唯一合法的第二调用方：file:// 改写、deny 检查、同名旧文件清理照做）；正控 agent
+  装不上时记为 T5 INCONCLUSIVE 进入汇总（不是 exit 5——门禁用例此时已跑完，直接退出会把真正的门禁 FAIL 降级成「环境准备失败」且不写 summary.json）。
+  多 canary 用例（T8/T9）的拒绝痕迹**按文件名逐项归因**（同 toolCallId 的 tool_call_update 或本身带路径的 update 事件），一条拒绝不能替四个文件作证。
   - **T1b/T1c**：去掉 `--trust-tools` 后 grep / glob 若落入权限申请，headless 下会被直接拒绝，评审员的搜索会静默降级成
     「读不到」——PASS 要求标记出现**且**事件流里有对应工具（`_meta.kiro.toolName` = grep / glob）的调用。
   - **T3** 读 `.git/logs/HEAD`（提交后必存在、含提交信息标记）：它只被新加的 `**/.git`、`**/.git/**` 覆盖，旧 deny 里的

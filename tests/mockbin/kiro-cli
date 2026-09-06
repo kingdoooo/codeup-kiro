@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 测试替身：模拟 kiro-cli 的几种用法，并把观察到的东西写进 $HOME/.kiro-mock/ 下固定名字的文件。
-#   kiro-cli --version          → 打印 "kiro-cli <版本>"（默认 2.21.1；MOCK_KIRO_VERSION 可换，测 KIRO_TESTED_VERSIONS 的 notice）
+#   kiro-cli --version          → 打印 "kiro-cli <版本>"（默认 2.21.1；MOCK_KIRO_VERSION 可换，测 KIRO_TESTED_VERSIONS 的 notice；
+#                                 MOCK_KIRO_VERSION_STDERR=1 打到 stderr）
 #   kiro-cli chat --help        → 打印支持的参数名（含 --agent、--agent-engine、--output-format）；环境变量名 → env-help
 #   kiro-cli settings KEY VALUE → 追加 "KEY VALUE" 到 settings；环境变量名 → env-settings
 #   kiro-cli chat ...           → 记录参数(args)与 stdin(stdin)；扫描启动时 cwd 里残留的 AGENTS.md（任意深度）/
@@ -66,7 +67,12 @@ source "$MOCK_DIR/../helpers.sh" || { echo "mock kiro-cli: 加载 tests/helpers.
 declare -F mock_config_load >/dev/null && declare -F injection_surface_scan >/dev/null \
   || { echo "mock kiro-cli: tests/helpers.sh 里缺少 mock_config_load / injection_surface_scan，替身拒绝运行" >&2; exit 97; }
 mock_config_load "$HOME"
-if [[ "${1:-}" == "--version" ]]; then echo "version" >> "$M/calls"; echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}"; exit 0; fi
+if [[ "${1:-}" == "--version" ]]; then
+  echo "version" >> "$M/calls"
+  # MOCK_KIRO_VERSION_STDERR=1：版本打到 stderr（有的 CLI 这么干）——脚本必须 2>&1 才取得到，否则每条评论永久带「版本未知」notice
+  if [[ "${MOCK_KIRO_VERSION_STDERR:-0}" == "1" ]]; then echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}" >&2; else echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}"; fi
+  exit 0
+fi
 if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$M/calls"; else printf '%s\n' "${1:-}" >> "$M/calls"; fi
 case "${1:-}" in
   settings)

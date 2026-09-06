@@ -1373,7 +1373,8 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" "KIRO_ENV_PASSTHROUGH" "KIRO_ENV_PASSTHROUGH 含 NAME=value：失败评论点名该变量"
 assert_contains "$comment" "非法变量名" "KIRO_ENV_PASSTHROUGH 含 NAME=value：失败评论说明原因"
 assert_not_contains "$OUT" "leakedvalue" "KIRO_ENV_PASSTHROUGH 含 NAME=value：取值既不进评论也不进日志"
-assert_contains "$comment" "YUNXIAO_TOKEN****" "KIRO_ENV_PASSTHROUGH 含 NAME=value：评论点名到名字、取值打码（15-fix2 #17 无条件掩码）"
+assert_contains "$comment" "YUNXIAO****" "KIRO_ENV_PASSTHROUGH 含 NAME=value：评论里只有首段掩码（15-fix2 #17 / 15-fix3 #6）"
+assert_not_contains "$comment" "YUNXIAO_TOKEN" "KIRO_ENV_PASSTHROUGH 含 NAME=value：完整名字不进评论"
 assert_eq "$(call_count "$MD/calls" help)" "0" "KIRO_ENV_PASSTHROUGH 非法：校验早于 kiro-cli 能力检查（没跑 --help）"
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "KIRO_ENV_PASSTHROUGH 非法：Kiro 未被启动"
 run_case badpass2 KIRO_ENV_PASSTHROUGH="bad-name"
@@ -1381,15 +1382,23 @@ assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH �
 assert_contains "$(posted_comment "$OUT")" "KIRO_ENV_PASSTHROUGH" "KIRO_ENV_PASSTHROUGH 含连字符名字：失败评论点名该变量"
 # 15-fix2 #17：不含 = 的非法 token 也无条件掩码——原来 `ghp-liveSecret123` 会原样进流水线日志
 run_case badpass3 KIRO_ENV_PASSTHROUGH="ghp-liveSecret123"
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 贴了一个像令牌的 token：非零退出"
-assert_not_contains "$OUT" "liveSecret" "像令牌的 token：原文不进日志也不进评论"
-assert_contains "$(posted_comment "$OUT")" "ghp****" "像令牌的 token：评论里只有掩码"
-# 15-fix2 #13：语法合法但凭证形状的名字（YUNXIAO_* / CODEUP_* / AWS_* / *TOKEN* / *SECRET* / *PASSWORD* / *CREDENTIAL* / *_KEY）→ 拒绝运行
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 贴了一个像令牌的非法 token：非零退出"
+assert_not_contains "$OUT" "liveSecret" "像令牌的非法 token：原文不进日志也不进评论"
+assert_contains "$(posted_comment "$OUT")" "ghp****" "像令牌的非法 token：评论里只有掩码"
+# 15-fix3 #6：`ghp_<36 位>` 是**合法标识符**，不带 = 也不带连字符——原来不匹配任何凭证形状、被静默接受并透传；现在按 GHP_* 前缀拒绝并掩码
+run_case badpass3b KIRO_ENV_PASSTHROUGH="ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 贴了一个真形态 ghp_ 令牌：拒绝运行"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "凭证形状" "ghp_ 令牌：按凭证形状拒绝"
+assert_contains "$comment" "ghp****" "ghp_ 令牌：评论里只有掩码"
+assert_not_contains "$OUT" "ABCDEFGHIJ" "ghp_ 令牌：原文不进日志也不进评论"
+# 15-fix2 #13：语法合法但凭证形状的名字（YUNXIAO_* / CODEUP_* / AWS_* / *TOKEN* / *SECRET* / *PASSWORD* / *CREDENTIAL* / *_KEY）→ 拒绝运行；名字掩码进评论
 run_case badpass4 KIRO_ENV_PASSTHROUGH="KIRO_FOO,YUNXIAO_TOKEN" KIRO_FOO=1
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：拒绝运行（固定名单刚关掉的洞不能被一个变量名重新打开）"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "凭证形状" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：失败评论说明原因"
-assert_contains "$comment" "YUNXIAO_TOKEN" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：失败评论列出被拒名字"
+assert_contains "$comment" "YUNXIAO****" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：失败评论列出被拒名字的掩码（15-fix3 #6）"
+assert_not_contains "$comment" "YUNXIAO_TOKEN" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：完整名字不进评论（svc_SECRET_… 这类名字本身就是密钥）"
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：Kiro 未被启动"
 run_case badpass5 KIRO_ENV_PASSTHROUGH="AWS_PROFILE"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH=AWS_PROFILE：AWS_* 一律拒绝"
@@ -1428,6 +1437,18 @@ assert_contains "$comment" "2.21.1" "kiro-cli 版本不在名单：notice 写出
 run_case nover MOCK_KIRO_VERSION=
 assert_rc "$RC" 0 "kiro-cli 版本取不到：评审照常完成"
 assert_contains "$(posted_comment "$OUT")" "未知" "kiro-cli 版本取不到：notice 写「未知」"
+# 15-fix3 #8：版本打到 stderr 的 CLI 也要取得到（否则每条评论永久带「版本未知」notice 且无法清除）
+run_case verstderr MOCK_KIRO_VERSION_STDERR=1
+assert_rc "$RC" 0 "kiro-cli --version 打到 stderr：评审照常完成"
+assert_contains "$OUT" "在 P1-15 探测过的版本名单内" "kiro-cli --version 打到 stderr：仍取得到版本、名单内"
+assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "kiro-cli --version 打到 stderr：无 notice"
+# 15-fix3 #3：降级路径（结构化解析失败）同样要带版本 notice——原来只在结构化分支并入
+run_case degnotice MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
+assert_rc "$RC" 0 "降级 + 版本不在名单：退出码 0"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "结构化解析失败" "降级 + 版本不在名单：是降级评论"
+assert_contains "$comment" "未经 P1-15 探测" "降级 + 版本不在名单：降级评论也带版本 notice"
+assert_contains "$comment" "9.9.9" "降级 + 版本不在名单：notice 写出实际版本"
 assert_not_contains "$(posted_comment "$out")" "未经 P1-15 探测" "成功路径（2.21.1）：汇总评论无版本 notice"
 
 # ---- 日志里的变量名清单按数组元素取名字（15-fix #7）：取值含换行时，换行后的半个取值不能进日志 ----
@@ -1471,6 +1492,24 @@ assert_eq "$([[ -L "$CASE/work/vendor/lib/link-outside-git" ]] && echo kept || e
 assert_eq "$(cat "$MD/cwdscan")" "" "嵌套 .git：Kiro 启动时扫描不到残留（扫描谓词同样剪掉嵌套 .git）"
 assert_contains "$OUT" "2 个符号链接" "嵌套 .git：只删了 sub/.git 与 link-outside-git 两个链接（计数 2）"
 
+# ---- .kiro 大小写不敏感 + 根 .kiro 普通文件（15-fix3 #1 #2）：macOS/Windows 执行器上 .Kiro/ 按 .kiro/ 读到；旧代码无条件 rm -rf ./.kiro 没搬进新库 ----
+# 大小写变体放在**不同目录**里：macOS APFS 默认大小写不敏感，同一目录下 .Kiro 与 .kiro 是同一个条目
+tweak_kiro_case() {
+  rm -rf .kiro && printf 'plain file named .kiro\n' > .kiro            # 根 .kiro 是普通文件
+  mkdir -p src/.Kiro/settings && echo '{"chat.disableInheritingDefaultResources": false}' > src/.Kiro/settings/cli.json
+  mkdir -p src/x && echo x > src/x/.KIRO                                 # 子目录里大写的普通文件
+  git add -A && git commit -qm "kiro case variants"
+}
+CASE_TWEAK=tweak_kiro_case run_case kirocase
+assert_rc "$RC" 0 ".kiro 变体：评审正常完成"
+assert_eq "$([[ -e "$CASE/work/.kiro" ]] && echo kept || echo gone)" "gone" ".kiro 变体：根 .kiro 普通文件被删"
+assert_eq "$([[ -e "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "gone" ".kiro 变体：src/.Kiro/ 目录被删（不分大小写）"
+assert_eq "$([[ -e "$CASE/work/src/x/.KIRO" ]] && echo kept || echo gone)" "gone" ".kiro 变体：子目录 .KIRO 文件被删"
+assert_eq "$([[ -e "$CASE/work/src/sub/.kiro" ]] && echo kept || echo gone)" "gone" ".kiro 变体：原有子目录 .kiro/ 照删"
+assert_eq "$(cat "$MD/cwdscan")" "" ".kiro 变体：Kiro 启动时扫描不到残留（扫描谓词同样不分大小写、不限类型）"
+assert_eq "$(leftovers)" "" ".kiro 变体：运行后无残留"
+assert_contains "$OUT" "4 个 .kiro/" ".kiro 变体：计数 4（根文件 + .Kiro + src/x/.KIRO + src/sub/.kiro）"
+
 # ---- 谓词等价（15-fix2 #23）：生产隔离函数实际删除的集合 == 测试谓词枚举的集合（在一棵刻意刁难的合成树上）----
 EQ="$tmp/eqtree"; mkdir -p "$EQ"
 ( cd "$EQ" && mkdir -p .git/hooks nested/repo/.git a/b c .kiro/settings d
@@ -1492,6 +1531,30 @@ assert_eq "$(cd "$EQ" && injection_surface_scan | wc -l | tr -d ' ')" "0" "谓�
 assert_eq "$([[ -L "$EQ/.git/rootgitlink" && -f "$EQ/.git/AGENTS.md" ]] && echo kept || echo gone)" "kept" "谓词等价：根 .git 内部不动"
 assert_eq "$([[ -L "$EQ/nested/repo/.git/innerlink" && -f "$EQ/nested/repo/.git/AGENTS.md" && -d "$EQ/nested/repo/.git/.kiro" ]] && echo kept || echo gone)" "kept" "谓词等价：嵌套 .git 内部不动"
 assert_eq "$([[ -d "$EQ/a/b/AGENTS.md" && -f "$EQ/a/lsp.json" ]] && echo kept || echo gone)" "kept" "谓词等价：同名目录 AGENTS.md/ 与非根 lsp.json 不动"
+# 第二棵树（15-fix3 #1 #2 #11）：根 .kiro 普通文件、.Kiro/ 目录、.KIRO 符号链接、**符号链接形态的根 lsp.json**（枚举版曾把它输出两次）
+EQ2="$tmp/eqtree2"; mkdir -p "$EQ2"
+( cd "$EQ2" && mkdir -p .git a/.Kiro/settings b c
+  printf 'plain' > .kiro; echo '{}' > a/.Kiro/settings/cli.json; ln -s ../nowhere b/.KIRO     # 大小写变体各在不同目录（APFS 大小写不敏感）
+  ln -s /etc/hosts lsp.json; printf 'x' > c/lsp.json )
+expected2=$(cd "$EQ2" && injection_surface_scan | sort)
+assert_eq "$(printf '%s\n' "$expected2" | grep -c .)" "4" "谓词等价 2：枚举版列出 4 条（.kiro 文件、a/.Kiro 目录、b/.KIRO 链接、lsp.json 链接）"
+assert_eq "$(printf '%s\n' "$expected2" | grep -c -x './lsp.json')" "1" "谓词等价 2：符号链接形态的根 lsp.json 只出现一次"
+counts2=$(cd "$EQ2" && review_isolate_workspace "$tmp/eq2-removed.txt")
+assert_eq "$(sort "$tmp/eq2-removed.txt")" "$expected2" "谓词等价 2：生产隔离函数删除的集合 == 枚举版集合"
+assert_eq "$counts2" "0 3 1 0" "谓词等价 2：计数 = 0 AGENTS.md、3 个 .kiro（文件/.Kiro/.KIRO 链接）、1 个符号链接（lsp.json 链接按链接计）、0 个普通 lsp.json"
+assert_eq "$(cd "$EQ2" && injection_surface_scan | wc -l | tr -d ' ')" "0" "谓词等价 2：隔离后枚举版扫描为空"
+assert_eq "$([[ -f "$EQ2/c/lsp.json" ]] && echo kept || echo gone)" "kept" "谓词等价 2：非根 lsp.json 不动"
+# 15-fix3 #10：计数按 find 匹配时的类别记账，不是按路径字符串回头重分类——路径含换行时不再算两次
+EQ3="$tmp/eqtree3"; mkdir -p "$EQ3/.git" && ( cd "$EQ3" && ln -s /etc/hosts "$(printf 'weird\nname')" )
+counts3=$(cd "$EQ3" && review_isolate_workspace "$tmp/eq3-removed.txt")
+assert_eq "$counts3" "0 0 1 0" "谓词等价 3：含换行的符号链接只算 1 个（按 find 匹配计数，不按列表行数、不按字符串重分类）"
+assert_eq "$(ls -A "$EQ3" | grep -v '^.git$' | wc -l | tr -d ' ')" "0" "谓词等价 3：含换行名字的符号链接已删除"
+
+# ---- 静态：scripts/ 里不得再有多字节分隔符的 paste（GNU coreutils 会截成单字节，产出非法 UTF-8；15-fix3 #4）与 --print-paths（#12）----
+# 只看 paste 的分隔符参数（-d'…' / -sd'…'），不看同一行别处的中文
+assert_eq "$(LC_ALL=C grep -rhoE "paste[[:space:]]+-[a-z]*d[[:space:]]*'[^']*'" "$ROOT/scripts" | LC_ALL=C grep -c "$(printf '[\x80-\xff]')")" "0" "静态：scripts/ 里 paste 的分隔符没有非 ASCII 字符（GNU coreutils 会截成单字节）"
+assert_eq "$(LC_ALL=C grep -rhoE "paste[[:space:]]+-[a-z]*d[[:space:]]*'[^']*'" "$ROOT/scripts" | wc -l | tr -d ' ')" "1" "静态前置：scripts/ 里确有 paste -d 调用（否则上一条恒真）"
+assert_eq "$(grep -rn -- '--print-paths\|print_paths' "$ROOT/scripts" | wc -l | tr -d ' ')" "0" "静态：--print-paths 协议已从 scripts/ 删除"
 
 run_case rerunhint REVIEW_RERUN_HINT='评论 `/kiro review` 可重新评审'
 assert_rc "$RC" 0 "REVIEW_RERUN_HINT：评审成功"

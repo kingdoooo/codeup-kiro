@@ -338,6 +338,11 @@ printf '# 代码评审报告\n\n发现硬编码密钥 src/app.py:2（值已掩�
 review_render_degraded --text "$tmp/raw.md" --sha 90fcb05 --src feature/user-search --dst master \
   --ts "2026-09-02 20:10:02" --diff-note "完整直传" --reason "输出中未找到契约标记" > "$tmp/degraded.md"
 assert_golden "$tmp/degraded.md" summary-degraded.md "渲染：降级评论"
+# 15-fix3 #3：降级评论也要输出调用方的 --notice（kiro-cli 版本未经探测这类），不能只在结构化分支出现
+deg_notice=$(review_render_degraded --text "$tmp/raw.md" --sha 90fcb05 --src f --dst m --ts "2026-09-02 20:10:02" --diff-note "完整直传" \
+  --reason "输出中未找到契约标记" --notice "注意：本次 kiro-cli 版本 9.9.9 未经 P1-15 探测")
+assert_contains "$deg_notice" "> ⚠️ 注意：本次 kiro-cli 版本 9.9.9 未经 P1-15 探测" "渲染：降级评论带 --notice 引用块"
+assert_not_contains "$(cat "$tmp/degraded.md")" "9.9.9" "渲染：不带 --notice 时降级评论没有 notice 行"
 body=$(cat "$tmp/degraded.md")
 assert_contains "$body" "结构化解析失败" "降级：标题含「结构化解析失败」"
 assert_contains "$body" "FAKE****0000" "降级：正文为原文全文（掩码由评审员按提示词完成，此处不改写）"

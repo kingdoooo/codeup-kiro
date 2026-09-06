@@ -1861,6 +1861,13 @@ review_render_degraded() {
   echo "> HTML 注释降级为普通文本——评论的结构只能来自脚本，否则原文里可以伪造标题与评审标记）。"
   # 「怎么重新评审」与页脚同一份取值：两处写死同一句话时，换档位只改一处会留下另一处的假承诺
   echo "> 结构化输出通常在下一次评审就能恢复——$(_review_rerun_hint)。"
+  # 调用方的一句话 notice（如 kiro-cli 版本未经探测）：与汇总评论同一个 --notice，降级路径不能把它丢掉（15-fix3 #3）
+  if [[ -n "$_RR_NOTICE" ]]; then
+    echo ""
+    printf '> ⚠️ '
+    printf '%s' "$_RR_NOTICE" | review_sanitize_md
+    echo ""
+  fi
   echo ""
   echo "---"
   echo ""

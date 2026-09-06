@@ -141,13 +141,10 @@ assert_contains "$err" '**/.git/**' "read.deniedPaths 不含 **/.git/**：报错
 # 对照：deniedPaths 三处完整时照常安装（就是上面 dest 那次）
 assert_eq "$(jq -r '.toolsSettings.glob.deniedPaths | index("**/.git/**") != null' "$dest")" "true" "对照：正常定义安装后 glob.deniedPaths 含 **/.git/**"
 
-# --- --print-paths（15-fix2 #16）：stdout 第 2/3 行打回实际写入的两条物理路径，供调用方与 pwd -P / $WORK/chunks 逐字比对 ---
-pp=$(kiro_install_agent "$A" "$tmp/agents-pp" --workspace "$WS" --chunks "$CH" --print-paths)
-assert_eq "$(printf '%s\n' "$pp" | wc -l | tr -d ' ')" "3" "--print-paths：恰好三行"
-assert_eq "$(printf '%s\n' "$pp" | sed -n 1p)" "$tmp/agents-pp/codeup-reviewer.json" "--print-paths：第 1 行安装路径"
-assert_eq "$(printf '%s\n' "$pp" | sed -n 2p)" "$WS_P" "--print-paths：第 2 行 workspace 物理路径"
-assert_eq "$(printf '%s\n' "$pp" | sed -n 3p)" "$CH_P" "--print-paths：第 3 行 chunks 物理路径"
-assert_eq "$(kiro_install_agent "$A" "$tmp/agents-pp" --workspace "$WS" --chunks "$CH" | wc -l | tr -d ' ')" "1" "不带 --print-paths：只有一行"
+# --print-paths 协议已删（15-fix3 #12）：安装结果的核对只有 kiro_agent_selfcheck 一条路
+rc=0; kiro_install_agent "$A" "$tmp/agents-pp" --workspace "$WS" --chunks "$CH" --print-paths >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--print-paths 不再是合法参数（未知参数 → 拒绝）"
+assert_eq "$(kiro_install_agent "$A" "$tmp/agents-pp" --workspace "$WS" --chunks "$CH" | wc -l | tr -d ' ')" "1" "安装器 stdout 只有一行安装路径"
 
 # --- --allow-none（15-fix2 #20）：探测正控 agent 的唯一合法安装路——删三处 allowedPaths，其余（prompt 改写、deny 检查、同名清理）照做 ---
 mkdir -p "$tmp/agents-none"; jq '.prompt = "旧版内联提示词"' "$A" > "$tmp/agents-none/agent-codeup-reviewer.json"
@@ -162,9 +159,7 @@ assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--allow-none 与 --wor
 assert_contains "$err" "互斥" "--allow-none 与路径参数互斥：报错说明"
 rc=0; kiro_install_agent "$tmp/no-glob.json" "$tmp/agents-none3" --allow-none >/dev/null 2>&1 || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--allow-none 下 deniedPaths 检查照做（缺 glob 仍拒装）"
-# $(...) 会吞掉尾部空行，所以直接接管道数行
-assert_eq "$(kiro_install_agent "$A" "$tmp/agents-none4" --allow-none --print-paths 2>/dev/null | wc -l | tr -d ' ')" "3" "--allow-none --print-paths：仍是三行（后两行为空）"
-assert_eq "$(kiro_install_agent "$A" "$tmp/agents-none4" --allow-none --print-paths 2>/dev/null | sed -n 2p)" "" "--allow-none --print-paths：workspace 行为空"
+assert_eq "$(kiro_install_agent "$A" "$tmp/agents-none4" --allow-none 2>/dev/null | wc -l | tr -d ' ')" "1" "--allow-none：stdout 同样只有一行"
 
 # --- kiro_agent_selfcheck（15-fix2 #16）：值比对 + 安全字段；执行器第 3 步用它把日志声称的事实变成断言 ---
 rc=0; kiro_agent_selfcheck "$dest" "$WS_P" "$CH_P" || rc=$?
@@ -361,20 +356,28 @@ for bad in 'KIRO_FOO=1' 'bad-name' '1ABC' 'A B' 'KIRO_FOO,$HOME'; do
 done
 err_var=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH='bad-name' bash -c 'source "$1"; kiro_env_allowlist 2>/dev/null; printf "%s" "$KIRO_ENV_ALLOW_ERROR"' _ "$LIB")
 assert_contains "$err_var" "非法变量名" "KIRO_ENV_ALLOW_ERROR 带失败原因（供 die_review 使用）"
-# 15-fix2 #17：非法 token **无条件掩码**——只留开头的合法标识符字符段 + ****。原来只在含 = 时掩码，`ghp-liveSecret123` 会原样进日志
-for pair in 'KIRO_FOO=s3cr3t|KIRO_FOO****|s3cr3t' 'ghp-liveSecret123|ghp****|liveSecret' '1ABC|****|1ABC' 'A B|A****|A B'; do
+# 15-fix2 #17 / 15-fix3 #6：非法 token **无条件掩码**——只留首段（第一个 _ 之前；没有 _ 就前 4 个字符）+ ****。
+# 原来只在含 = 时掩码，`ghp-liveSecret123` 会原样进日志；原来保留整个标识符前缀，`svc_deploy_9f3ab21c=…` 的标识符部分本身就像密钥
+for pair in 'KIRO_FOO=s3cr3t|KIRO****|s3cr3t' 'ghp-liveSecret123|ghp****|liveSecret' '1ABC|****|1ABC' 'A B|A****|A B' 'svc_deploy_9f3ab21c=zz|svc****|9f3ab21c'; do
   tok="${pair%%|*}"; rest="${pair#*|}"; want="${rest%%|*}"; leak="${rest#*|}"
   rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH="$tok" bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
   assert_contains "$err" "$want" "非法 token [${tok}]：掩码为 ${want}"
   assert_not_contains "${err#*非法变量名：}" "$leak" "非法 token [${tok}]：原文 ${leak} 不进报错"
 done
-# 15-fix2 #13：凭证形状的名字（语法合法）也拒绝——YUNXIAO_* / CODEUP_* / AWS_* / *TOKEN* / *SECRET* / *PASSWORD* / *CREDENTIAL* / *_KEY，大小写不敏感
-for cn in YUNXIAO_TOKEN yunxiao_org_id CODEUP_REPO_ID AWS_PROFILE AWS_SECRET_ACCESS_KEY GITHUB_TOKEN MY_SECRET DB_PASSWORD GCP_CREDENTIALS SIGNING_KEY KIRO_API_KEY; do
+# 15-fix2 #13 / 15-fix3 #6：凭证形状的名字（语法合法）也拒绝——YUNXIAO_* / CODEUP_* / AWS_* / *TOKEN* / *SECRET* / *PASSWORD* /
+# *CREDENTIAL* / *_KEY，加令牌前缀 GHP_* / GHO_* / GITHUB_PAT_* / AKIA* / XOX*，大小写不敏感；被拒名字**掩码**（首段 + ****）——
+# `svc_SECRET_9f3ab21c7de4` 这种合法标识符形态的密钥会进 MR 失败评论
+for pair in 'YUNXIAO_TOKEN|YUNXIAO****' 'yunxiao_org_id|yunxiao****' 'CODEUP_REPO_ID|CODEUP****' 'AWS_PROFILE|AWS****' 'AWS_SECRET_ACCESS_KEY|AWS****' \
+            'GITHUB_TOKEN|GITHUB****' 'MY_SECRET|MY****' 'DB_PASSWORD|DB****' 'GCP_CREDENTIALS|GCP****' 'SIGNING_KEY|SIGNING****' 'KIRO_API_KEY|KIRO****' \
+            'svc_SECRET_9f3ab21c7de4|svc****' 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij|ghp****' 'gho_16C7e42F292c6912E7710c838347Ae178B4a|gho****' \
+            'github_pat_11ABCDEFG_abcdef|github****' 'AKIAIOSFODNN7EXAMPLE|AKIA****' 'xoxb_123456_abcdef|xoxb****'; do
+  cn="${pair%%|*}"; want_mask="${pair#*|}"
   rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH="KIRO_FOO,${cn}" \
     bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
   assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：返回非零"
   assert_contains "$err" "凭证形状" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：报错说明"
-  assert_contains "$err" "$cn" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：被拒的名字原样列出（名字不是密钥）"
+  assert_contains "$err" "$want_mask" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：报错里是掩码 ${want_mask}"
+  assert_not_contains "${err#*拒绝透传：}" "$cn" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：原名不进报错"
 done
 # 正控：形状相近但不命中的名字照常透传（KEYBOARD 不是 *_KEY；TOKENIZER 命中 *TOKEN*——它就该被拒）
 ok_names=$(names_under HOME="$tmp/h" KEYBOARD=1 MONKEY_PATCH=1 KIRO_ENV_PASSTHROUGH='KEYBOARD,MONKEY_PATCH')

@@ -93,7 +93,8 @@
 | `scripts/lib/codeup-api.sh` | Codeup OpenAPI 薄封装：MR 反查、评论增删改查、版本列表、草稿一次提交；HTTP 状态码判成败，仅网络/429/5xx 重试（创建行内评论只重试 429，因为创建不幂等） |
 | `scripts/lib/review-render.sh` | 契约提取与校验、变更行集合、行内发布计划与区间去重、汇总/行内/降级/失败四类评论的渲染、超长截断 |
 | `scripts/lib/diff-compress.sh` | diff 超限压缩：按优先级取舍文件，省略文件落盘为 diff 片段并输出索引清单 |
-| `scripts/lib/kiro-agent.sh` | 受信 agent 安装：按 `name` 落盘、改写相对 `file://` 提示词引用、清理同名旧文件 |
+| `scripts/lib/kiro-agent.sh` | 受信 agent 安装（按 `name` 落盘、改写相对 `file://` 提示词引用、结构化写三处 allowedPaths、deniedPaths 检查、清理同名旧文件）、安装结果按值自检、Kiro 子进程环境固定名单 + `KIRO_ENV_PASSTHROUGH` 校验 |
+| `scripts/lib/isolation.sh` | 工作区隔离：一次 `find` 删除业务库工作树里任意深度的 AGENTS.md / `.kiro`（不分大小写、任何类型）/ 符号链接与根 lsp.json，任意深度 `.git` 目录内部不动；与 `tests/helpers.sh` 的枚举谓词等价 |
 | `scripts/probe/` | 环境探测脚本（真实 Codeup / 真实 kiro-cli），见下节与 `scripts/probe/README.md` |
 | `prompts/review-agent-prompt.md` | agent 提示词（稳定部分）：只读角色、不受信输入、P0/P1/P2 判定、掩码规则、输出契约 |
 | `prompts/review-prompt.md` | 运行时提示词（每次不同）：MR 元信息与本次契约标记随机串 `{{REVIEW_NONCE}}` |

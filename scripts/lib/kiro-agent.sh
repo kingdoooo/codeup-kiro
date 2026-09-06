@@ -20,13 +20,12 @@
 #     glob 能枚举 <业务库>/.git/**。
 #   · --allow-none（15-fix2 #20）：探测脚本的**正控** agent 要的是「没有 allowedPaths」的旧形态。这是唯一合法的第二调用方，
 #     走安装器而不是裸 cp：file:// 改写与同名旧文件清理照做，deny 检查照做；与 --workspace/--chunks 互斥。
-#   · --print-paths（15-fix2 #16）：stdout 在安装路径之后再打两行——实际写进定义的 workspace 与 chunks 物理路径，
-#     供调用方与 $(pwd -P)、$WORK/chunks 逐字比对（只看形状「三处相等」放行不了参数顺序反了 / 丢了 pwd -P 这类错）。
+#   · 安装结果的核对不在这里做：调用方用 kiro_agent_selfcheck 读安装文件按值比对（15-fix3 #12 删掉了与之冗余的「安装器打回路径」stdout 协议）。
 # 硬规则：宁可不跑评审，也不能带一份错误的定义跑（allow 为空在 headless 下等于每次读取都被拒、烧掉额度；deny 缺失等于该工具没有边界）。
 # 落盘文件名取定义中的 name（kiro 按 name 字段发现 agent；文件名与 name 一致最不易混淆）。
 #
-# 用法：kiro_install_agent <agent.json> <目标目录> ( --workspace <业务库目录> --chunks <chunk 目录> | --allow-none ) [--print-paths]
-#   成功：stdout 第 1 行安装后的文件路径；--print-paths 时第 2/3 行为写入的 workspace / chunks 物理路径（--allow-none 下为空行）；返回 0
+# 用法：kiro_install_agent <agent.json> <目标目录> ( --workspace <业务库目录> --chunks <chunk 目录> | --allow-none )
+#   成功：stdout 打印安装后的文件路径，返回 0
 #   失败（定义不可读/非法 JSON/缺 name/缺 prompt/file:// 指向不存在的文件/缺 --workspace 或 --chunks/路径参数不是已存在的目录/
 #        某工具 deniedPaths 缺失、为空或不含 **/.git/**/参数互斥/未知参数）：stderr 说明原因，返回非零，且不落盘半成品。
 #   安装后会清掉目标目录里其它声明同一 name 的文件。
@@ -39,24 +38,24 @@ _kiro_agent_physical_dir() {
   p=$(cd "$1" && pwd -P) || { echo "kiro_install_agent: 无法进入 $2 目录：$1" >&2; return 1; }
   printf '%s\n' "$p"
 }
-# 某工具的 deniedPaths 是否合格（存在、非空、含 **/.git/**）。$1=定义文件 $2=工具名
-_kiro_agent_deny_ok() {
-  jq -e --arg t "$2" '.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null' "$1" >/dev/null 2>&1
+# 三个工具的 deniedPaths 是否都合格（存在、非空、含 **/.git/**）——一次 jq 查完三处（15-fix3 #13）。
+# $1=定义文件；stdout 打出第一个不合格的工具名（都合格则为空）；文件不是合法 JSON 时返回非零
+_kiro_agent_deny_missing() {
+  jq -r '[("read","grep","glob") as $t | select((.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null) | not) | $t] | first // ""' "$1" 2>/dev/null
 }
 
 kiro_install_agent() {
   local src="$1" dest_dir="$2"; shift 2
-  local ws="" ch="" ws_set=0 ch_set=0 allow_none=0 print_paths=0
+  local ws="" ch="" ws_set=0 ch_set=0 allow_none=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --workspace) [[ $# -ge 2 ]] || { echo "kiro_install_agent: --workspace 缺少取值" >&2; return 1; }; ws="$2"; ws_set=1; shift 2 ;;
       --chunks)    [[ $# -ge 2 ]] || { echo "kiro_install_agent: --chunks 缺少取值" >&2; return 1; };    ch="$2"; ch_set=1; shift 2 ;;
       --allow-none)  allow_none=1; shift ;;
-      --print-paths) print_paths=1; shift ;;
-      *) echo "kiro_install_agent: 未知参数：$1（只接受 --workspace <目录> / --chunks <目录> / --allow-none / --print-paths）" >&2; return 1 ;;
+      *) echo "kiro_install_agent: 未知参数：$1（只接受 --workspace <目录> / --chunks <目录> / --allow-none）" >&2; return 1 ;;
     esac
   done
-  local src_dir name prompt dest rel abs prompt_new rendered stale stale_name t
+  local src_dir name prompt dest rel abs prompt_new rendered stale stale_name deny_missing
   [[ -r "$src" ]] || { echo "kiro_install_agent: agent 定义不可读：${src}" >&2; return 1; }
   if [[ "$allow_none" == "1" ]]; then
     [[ "$ws_set" == "0" && "$ch_set" == "0" ]] || { echo "kiro_install_agent: --allow-none 与 --workspace/--chunks 互斥（正控 agent 不能同时有 allowedPaths）：${src}" >&2; return 1; }
@@ -74,7 +73,7 @@ kiro_install_agent() {
   # prompt 是只读角色约束所在，缺失就等于让默认系统提示词跑评审——拒绝安装
   [[ -n "$prompt" ]] || { echo "kiro_install_agent: agent 定义缺少 prompt：${src}" >&2; return 1; }
   # deniedPaths 三处都必须合格（15-fix2 #11）：写成一行，变异测试删掉即模拟「忘了检查」
-  for t in read grep glob; do _kiro_agent_deny_ok "$src" "$t" || { echo "kiro_install_agent: 定义里 toolsSettings.${t}.deniedPaths 缺失、为空或不含 **/.git/**——该工具没有拒绝清单，拒绝安装：${src}" >&2; return 1; }; done
+  deny_missing=$(_kiro_agent_deny_missing "$src") || { echo "kiro_install_agent: 读取定义失败：${src}" >&2; return 1; }; [[ -z "$deny_missing" ]] || { echo "kiro_install_agent: 定义里 toolsSettings.${deny_missing}.deniedPaths 缺失、为空或不含 **/.git/**——该工具没有拒绝清单，拒绝安装：${src}" >&2; return 1; }
   dest="${dest_dir}/${name}.json"
   # prompt：相对 file:// 改写为绝对；绝对 file:// 与内联文本原样保留（prompt_new 为空 = 不改写）
   prompt_new=""
@@ -110,8 +109,6 @@ kiro_install_agent() {
     fi
   done
   printf '%s\n' "$dest"
-  [[ "$print_paths" == "1" ]] && printf '%s\n%s\n' "$ws" "$ch"
-  return 0
 }
 
 # ── kiro_agent_selfcheck ────────────────────────────────────────────────────────────────────────
@@ -120,20 +117,25 @@ kiro_install_agent() {
 #   · 三处 deniedPaths 存在、非空、含 **/.git/**
 #   · allowedTools == []（免确认只来自 allowedPaths）、includeMcpJson == false、includePowers == false
 # 失败返回 1，原因放进 KIRO_AGENT_SELFCHECK_ERROR。执行器第 3 步用它把「日志声称的事实」变成断言；单测直接对篡改过的定义调用。
+# 全部检查在**一次** jq 里完成（15-fix3 #13），输出第一条不符的原因（都符合则为空）。
 KIRO_AGENT_SELFCHECK_ERROR=""
 kiro_agent_selfcheck() {
-  local f="$1" ws="$2" ch="$3" t got want
+  local f="$1" ws="$2" ch="$3" reason
   KIRO_AGENT_SELFCHECK_ERROR=""
   [[ -r "$f" ]] || { KIRO_AGENT_SELFCHECK_ERROR="安装后的定义文件不可读：${f}"; return 1; }
-  want=$(jq -nc --arg a "$ws" --arg b "$ch" '[$a, $b]')
-  for t in read grep glob; do
-    got=$(jq -c --arg t "$t" '.toolsSettings[$t].allowedPaths' "$f" 2>/dev/null) || { KIRO_AGENT_SELFCHECK_ERROR="定义不是合法 JSON：${f}"; return 1; }
-    [[ "$got" == "$want" ]] || { KIRO_AGENT_SELFCHECK_ERROR="${t}.allowedPaths 写入的是 ${got}，预期 ${want}（业务库 checkout 物理路径 + chunks 物理路径，顺序固定）"; return 1; }
-    _kiro_agent_deny_ok "$f" "$t" || { KIRO_AGENT_SELFCHECK_ERROR="${t}.deniedPaths 缺失、为空或不含 **/.git/**"; return 1; }
-  done
-  [[ "$(jq -c '.allowedTools' "$f")" == "[]" ]] || { KIRO_AGENT_SELFCHECK_ERROR="allowedTools 不为空（$(jq -c .allowedTools "$f")）——免确认只能来自 allowedPaths"; return 1; }
-  [[ "$(jq -c '.includeMcpJson' "$f")" == "false" ]] || { KIRO_AGENT_SELFCHECK_ERROR="includeMcpJson 不是 false"; return 1; }
-  [[ "$(jq -c '.includePowers' "$f")" == "false" ]] || { KIRO_AGENT_SELFCHECK_ERROR="includePowers 不是 false"; return 1; }
+  reason=$(jq -r --arg ws "$ws" --arg ch "$ch" '
+      def want: [$ws, $ch];
+      def deny_ok($t): (.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null);
+      [ ("read","grep","glob") as $t
+        | ( if .toolsSettings[$t].allowedPaths != want
+            then "\($t).allowedPaths 写入的是 \(.toolsSettings[$t].allowedPaths | tojson)，预期 \(want | tojson)（业务库 checkout 物理路径 + chunks 物理路径，顺序固定）"
+            elif (deny_ok($t) | not) then "\($t).deniedPaths 缺失、为空或不含 **/.git/**"
+            else null end ),
+        (if .allowedTools != [] then "allowedTools 不为空（\(.allowedTools | tojson)）——免确认只能来自 allowedPaths" else null end),
+        (if .includeMcpJson != false then "includeMcpJson 不是 false" else null end),
+        (if .includePowers != false then "includePowers 不是 false" else null end)
+      ] | map(select(. != null)) | first // ""' "$f" 2>/dev/null) || { KIRO_AGENT_SELFCHECK_ERROR="定义不是合法 JSON：${f}"; return 1; }
+  [[ -z "$reason" ]] || { KIRO_AGENT_SELFCHECK_ERROR="$reason"; return 1; }
   return 0
 }
 
@@ -147,11 +149,12 @@ kiro_agent_selfcheck() {
 #   SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、XDG_CONFIG_HOME、XDG_DATA_HOME、XDG_CACHE_HOME、XDG_STATE_HOME、XDG_RUNTIME_DIR。
 # **逃生口** KIRO_ENV_PASSTHROUGH：逗号分隔的变量**名**（自建执行机可能需要 LD_LIBRARY_PATH / JAVA_HOME 这类；AWS_* 按凭证形状拒绝），
 #   只放名字不放值。两道校验，任一不过 → 返回 1、原因放进 KIRO_ENV_ALLOW_ERROR，调用方必须拒绝运行而不是静默忽略：
-#   ① 语法：不是 [A-Za-z_][A-Za-z0-9_]*（例如写成 NAME=value）→ 拒绝；报错里的非法 token **无条件掩码**（只留开头的合法
-#      标识符字符段 + ****）——写成 NAME=value 或直接贴了 ghp-… 的人多半把密钥放进去了，不能原样进日志（15-fix2 #17）。
-#   ② 凭证形状的名字 → 拒绝（15-fix2 #13）：YUNXIAO_*、CODEUP_*、AWS_*、*TOKEN*、*SECRET*、*PASSWORD*、*CREDENTIAL*、*_KEY
-#      （大小写不敏感）。固定名单刚把云效令牌关在门外，运维写一个 YUNXIAO_TOKEN 就又开了——只靠文档一句话拦不住。
-#      被拒的名字原样列出（名字不是密钥，取值从不出现在任何输出里）。
+#   ① 语法：不是 [A-Za-z_][A-Za-z0-9_]*（例如写成 NAME=value）→ 拒绝。
+#   ② 凭证形状的名字 → 拒绝（15-fix2 #13 / 15-fix3 #6）：YUNXIAO_*、CODEUP_*、AWS_*、*TOKEN*、*SECRET*、*PASSWORD*、*CREDENTIAL*、
+#      *_KEY，以及常见令牌前缀 GHP_*、GHO_*、GITHUB_PAT_*、AKIA*、XOX*（大小写不敏感；`ghp_<36 位>` 是合法标识符，没有这几条会被静默接受）。
+#      固定名单刚把云效令牌关在门外，运维写一个 YUNXIAO_TOKEN 就又开了——只靠文档一句话拦不住。
+#   两条路径的报错都**无条件掩码**（15-fix2 #17 / 15-fix3 #6）：只留首段（第一个 _ 之前；没有 _ 就前 4 个字符）+ ****——
+#   `svc_SECRET_9f3ab21c7de4` 这种合法标识符形态的密钥会进 MR 失败评论，不能原样出现；取值从不出现在任何输出里。
 #   名字对应的变量未设置 → 跳过。KIRO_ENV_PASSTHROUGH 自己不透传。
 # YUNXIAO_* / CODEUP_* 以及 Flow 注入的一切都不进 Kiro 进程（/proc 已在拒绝清单里，这是零成本的第二道）。
 # KIRO_LOG_NO_COLOR=1 固定追加（用户设成别的值也被覆盖）。只透传**已导出**的变量：未导出的本来也到不了子进程。
@@ -161,9 +164,12 @@ kiro_agent_selfcheck() {
 KIRO_ENV_FIXED_NAMES=(PATH HOME USER TERM TMPDIR LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES KIRO_API_KEY KIRO_LOG_NO_COLOR HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy ftp_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR)
 KIRO_ENV_ALLOW=()
 KIRO_ENV_ALLOW_ERROR=""
-# 非法 token 的掩码：只留开头的合法标识符字符段 + ****（没有合法开头就只有 ****）
+# 被拒 token / 名字的掩码：先取开头的合法标识符字符段（没有就只有 ****），再只留它的首段——第一个 _ 之前，
+# 没有 _ 就前 4 个字符——加 ****。`KIRO_FOO=s3cr3t`→KIRO****，`ghp-liveSecret123`→ghp****，`svc_SECRET_9f3a`→svc****，`1ABC`→****
 _kiro_env_mask_token() {
-  if [[ "$1" =~ ^([A-Za-z_][A-Za-z0-9_]*) ]]; then printf '%s****' "${BASH_REMATCH[1]}"; else printf '****'; fi
+  local id
+  if [[ "$1" =~ ^([A-Za-z_][A-Za-z0-9_]*) ]]; then id="${BASH_REMATCH[1]}"; else printf '****'; return 0; fi
+  if [[ "$id" == *_* ]]; then printf '%s****' "${id%%_*}"; else printf '%s****' "${id:0:4}"; fi
 }
 kiro_env_allowlist() {
   KIRO_ENV_ALLOW=(); KIRO_ENV_ALLOW_ERROR=""
@@ -178,12 +184,12 @@ kiro_env_allowlist() {
       if [[ ! "$tok" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then bad+=("$(_kiro_env_mask_token "$tok")"); continue; fi
       up=$(printf '%s' "$tok" | tr '[:lower:]' '[:upper:]')
       case "$up" in
-        YUNXIAO_*|CODEUP_*|AWS_*|*TOKEN*|*SECRET*|*PASSWORD*|*CREDENTIAL*|*_KEY) cred+=("$tok") ;;
+        YUNXIAO_*|CODEUP_*|AWS_*|*TOKEN*|*SECRET*|*PASSWORD*|*CREDENTIAL*|*_KEY|GHP_*|GHO_*|GITHUB_PAT_*|AKIA*|XOX*) cred+=("$(_kiro_env_mask_token "$tok")") ;;
         *) names+=("$tok") ;;
       esac
     done
     if [[ ${#bad[@]} -gt 0 ]]; then KIRO_ENV_ALLOW_ERROR="KIRO_ENV_PASSTHROUGH 含非法变量名：${bad[*]}（只接受逗号分隔的变量名，例如 LD_LIBRARY_PATH,JAVA_HOME；不能带 = 或取值；非法部分已掩码）"; echo "kiro_env_allowlist: ${KIRO_ENV_ALLOW_ERROR}" >&2; return 1; fi
-    if [[ ${#cred[@]} -gt 0 ]]; then KIRO_ENV_ALLOW_ERROR="KIRO_ENV_PASSTHROUGH 含凭证形状的变量名，拒绝透传：${cred[*]}（YUNXIAO_*、CODEUP_*、AWS_*、*TOKEN*、*SECRET*、*PASSWORD*、*CREDENTIAL*、*_KEY 一律不放行——这些正是固定名单要关在 Kiro 进程之外的东西）"; echo "kiro_env_allowlist: ${KIRO_ENV_ALLOW_ERROR}" >&2; return 1; fi
+    if [[ ${#cred[@]} -gt 0 ]]; then KIRO_ENV_ALLOW_ERROR="KIRO_ENV_PASSTHROUGH 含凭证形状的变量名，拒绝透传：${cred[*]}（已掩码；YUNXIAO_*、CODEUP_*、AWS_*、*TOKEN*、*SECRET*、*PASSWORD*、*CREDENTIAL*、*_KEY 与 GHP_*/GHO_*/GITHUB_PAT_*/AKIA*/XOX* 前缀一律不放行——这些正是固定名单要关在 Kiro 进程之外的东西）"; echo "kiro_env_allowlist: ${KIRO_ENV_ALLOW_ERROR}" >&2; return 1; fi
   fi
   for n in "${names[@]}"; do
     [[ "$seen" == *" $n "* ]] && continue

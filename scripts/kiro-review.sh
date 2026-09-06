@@ -52,7 +52,8 @@ PROMPT_FILE="${PROMPT_FILE:-${PKG_ROOT}/prompts/review-prompt.md}"
 AGENT_FILE="${PKG_ROOT}/kiro/agent-codeup-reviewer.json"
 REVIEW_REPO_DIR="${REVIEW_REPO_DIR:-$PWD}"
 # Kiro 进程环境许可清单之外要额外透传的变量**名**（逗号分隔，只放名字不放值；自建执行机可能需要 LD_LIBRARY_PATH /
-# AWS_PROFILE 这类）。固定名单与校验在 scripts/lib/kiro-agent.sh 的 kiro_env_allowlist；非法名字在第 1.6 步拒绝运行。
+# JAVA_HOME 这类；AWS_* 与其它凭证形状的名字按规则硬拒绝）。固定名单与校验在 scripts/lib/kiro-agent.sh 的 kiro_env_allowlist；
+# 非法名字在第 1.6 步拒绝运行。
 KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 # 探测 P1-15（T8：符号链接与 ../ 越界都是先解析再比对 allowedPaths）实测过的 kiro-cli 版本（空格分隔）。读取边界依赖 kiro-cli
 # 的路径解析行为；本次版本不在名单里时不失败（客户 curl 装的往往是最新版），但要在日志与汇总评论里留 notice（15-fix2 #24）。
@@ -545,17 +546,19 @@ fi
 # 三个工具的 deniedPaths 缺失/为空/不含 **/.git/** 同样拒装（否则结构化写入会凭空造出只有 allow 没有 deny 的工具）。
 mkdir -p "$WORK/chunks" || die_review "无法创建 diff chunk 目录：$WORK/chunks"
 WS_P=$(pwd -P); CH_P=$(cd "$WORK/chunks" && pwd -P) || die_review "无法进入 diff chunk 目录：$WORK/chunks"
-INSTALL_OUT=$(kiro_install_agent "$AGENT_FILE" "$HOME/.kiro/agents" --workspace "$WS_P" --chunks "$WORK/chunks" --print-paths) \
+INSTALLED_AGENT=$(kiro_install_agent "$AGENT_FILE" "$HOME/.kiro/agents" --workspace "$WS_P" --chunks "$WORK/chunks") \
   || die_review "受信 agent 安装失败：$AGENT_FILE"
-INSTALLED_AGENT=$(printf '%s\n' "$INSTALL_OUT" | sed -n 1p)
 AGENT_NAME=$(basename "$INSTALLED_AGENT" .json)
 log "已安装受信 custom agent：${AGENT_NAME}（${INSTALLED_AGENT}）"
-# 安装结果自检 = **值比对 + 安全字段**，不是只看形状：① 安装器打回的两条实际写入路径必须逐字等于本次的 pwd -P 与
-# $WORK/chunks 物理路径（参数顺序反了、丢了 pwd -P、写成逻辑路径都过不了）；② 再读安装文件本身：三处 allowedPaths 的值、
-# 三处 deniedPaths 非空且含 **/.git/**、allowedTools=[]、includeMcpJson/includePowers=false（kiro_agent_selfcheck）。
-# 任何一项不符都拒绝运行——某个工具没有边界的 agent 不能拿去跑。两条检查各写成一行：变异测试删任一行都能单独观察到。
-[[ "$(printf '%s\n' "$INSTALL_OUT" | sed -n 2p)" == "$WS_P" && "$(printf '%s\n' "$INSTALL_OUT" | sed -n 3p)" == "$CH_P" ]] || die_review "受信 agent 安装结果异常：安装器写入的许可路径（$(printf '%s\n' "$INSTALL_OUT" | sed -n '2,3p' | paste -sd'、' -)）与本次运行不符（预期 ${WS_P}、${CH_P}）（集成包缺陷，请报告）"
-kiro_agent_selfcheck "$INSTALLED_AGENT" "$WS_P" "$CH_P" && log "受信 agent 自检通过：allowedPaths 值比对（read/grep/glob 三处 = 业务库 checkout + chunks 物理路径）、allowedTools=[]、includeMcpJson/includePowers=false、deniedPaths 三处含 **/.git/**" || die_review "受信 agent 安装结果异常：${KIRO_AGENT_SELFCHECK_ERROR}（集成包缺陷，请报告）"
+# 安装结果自检 = **值比对 + 安全字段**，不是只看形状：读安装文件本身，三处 allowedPaths 的值必须逐字等于本次的 pwd -P 与
+# $WORK/chunks 物理路径（参数顺序反了、丢了 pwd -P、写成逻辑路径都过不了）、三处 deniedPaths 非空且含 **/.git/**、
+# allowedTools=[]、includeMcpJson/includePowers=false（kiro_agent_selfcheck，一次 jq）。任何一项不符都拒绝运行——某个工具
+# 没有边界的 agent 不能拿去跑。if/else 而不是 `a && log || die`：log 写 stderr 失败时后者会带着空原因走 die 分支（15-fix3 #7）。
+if kiro_agent_selfcheck "$INSTALLED_AGENT" "$WS_P" "$CH_P"; then
+  log "受信 agent 自检通过：allowedPaths 值比对（read/grep/glob 三处 = 业务库 checkout + chunks 物理路径）、allowedTools=[]、includeMcpJson/includePowers=false、deniedPaths 三处含 **/.git/**"
+else
+  die_review "受信 agent 安装结果异常：${KIRO_AGENT_SELFCHECK_ERROR}（集成包缺陷，请报告）"
+fi
 # 打出安装文件里**实际**的许可路径（不是打参数）：首次联调按 setup-guide §8 核对它们与本次 checkout 一致
 log "受信 agent 许可路径：$(jq -r '.toolsSettings.read.allowedPaths | join("、")' "$INSTALLED_AGENT")（read/grep/glob 三处一致）"
 # 四处 kiro-cli 调用（这里的 --help 与 --version、第 5.5 步的 settings、第 6 步的 chat）都以 env -i + 许可清单启动（15-fix #8）：
@@ -574,7 +577,8 @@ grep -q -- '--output-format' <<<"$KIRO_CHAT_HELP" \
 # kiro-cli 版本 vs 探测过的版本（15-fix2 #24）：读取边界（allowedPaths 之外的符号链接、../ 越界）靠 kiro-cli 先解析再比对，
 # 这是 P1-15 T8 在 KIRO_TESTED_VERSIONS 上实测的行为，不是文档承诺。版本不在名单里**不失败**（客户 curl 装的往往是最新版），
 # 但日志与汇总评论都要留一句 notice；取不到版本号同样 notice。生产的兜底不变：符号链接在隔离步骤里全部删除。
-KIRO_CLI_VERSION=$(cd "$PKG_ROOT" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli --version 2>/dev/null | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)
+# 2>&1（与 KIRO_CHAT_HELP 同款）：把版本打到 stderr 的 CLI 会让版本永远「未知」、每条评论永久带 notice 且无法清除（15-fix3 #8）
+KIRO_CLI_VERSION=$(cd "$PKG_ROOT" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli --version 2>&1 | head -1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -1 || true)
 if [[ -z "$KIRO_CLI_VERSION" || " $KIRO_TESTED_VERSIONS " != *" $KIRO_CLI_VERSION "* ]]; then
   REVIEW_NOTICE="注意：本次 kiro-cli 版本 ${KIRO_CLI_VERSION:-未知} 未经 P1-15 探测（已探测：${KIRO_TESTED_VERSIONS}），读取边界依赖未验证的路径解析行为（符号链接 / ../ 是否先解析再比对 allowedPaths）；请按 scripts/probe/README.md「升级 kiro-cli 之后」跑一次探测。"
   log "警告：${REVIEW_NOTICE}"
@@ -679,10 +683,11 @@ log "隔离：已设置 chat.disableInheritingDefaultResources=true"
 #   · **绝不传 --trust-all-tools**：拒绝信息里推荐的这个开关实测**绕过** allowedPaths（P1-15 T7）。
 #     端到端测试断言参数里没有任何 --trust-*。
 # 子进程环境：env -i + 许可清单（kiro_env_allowlist，scripts/lib/kiro-agent.sh）——**固定名单**（PATH / HOME（登录态与
-# agent 目录）/ USER / TERM / TMPDIR / LANG / LC_ALL / LC_CTYPE / KIRO_API_KEY / KIRO_LOG_NO_COLOR / 代理六个 / 证书三个 /
-# XDG 四个）加 KIRO_ENV_PASSTHROUGH 点名的变量。Kiro 进程看不到 YUNXIAO_* / CODEUP_* 与 Flow 注入的其它变量。
+# agent 目录）/ USER / TERM / TMPDIR / LANG / LANGUAGE / LC_ALL / LC_CTYPE / LC_MESSAGES / KIRO_API_KEY / KIRO_LOG_NO_COLOR /
+# 代理十个 / 证书三个 / XDG 五个，名单以 KIRO_ENV_FIXED_NAMES 为准）加 KIRO_ENV_PASSTHROUGH 点名的变量（凭证形状的名字硬拒绝）。
+# Kiro 进程看不到 YUNXIAO_* / CODEUP_* 与 Flow 注入的其它变量。
 # "$TIMEOUT_BIN" 放在 env -i **外面**（timeout 自身不需要清洗，PATH 已透传）。许可清单让 kiro-cli 起不来时走下面的
-# 退出码路径（I10 失败可见），绝不回退到继承完整环境。第 3 步的 --help 与第 5.5 步的 settings 用的是同一份清单。
+# 退出码路径（I10 失败可见），绝不回退到继承完整环境。第 3 步的 --help 与 --version、第 5.5 步的 settings 用的是同一份清单。
 # --output-format stream-json 只在 v2/v3 引擎上被接受（v1 直接报错），结构化输出契约依赖它：
 # 评审报告要从 runFinished.data.finalText 里取（spec §4.1、§4.7.1 P1-08）。
 # 本次运行的契约标记随机串。固定字面量标记可被业务库利用：提示词要求把注入企图作为 P0 报出来，
@@ -769,6 +774,8 @@ render_args=(--sha "$SHORT_SHA" --src "$SOURCE_BRANCH" --dst "$TARGET_BRANCH"
 # 上一条汇总里读回的历次记录：渲染器会在它后面追加本次那一行
 [[ -n "$PRIOR_HISTORY_FILE" ]] && render_args+=(--history "$PRIOR_HISTORY_FILE")
 
+# 汇总/降级评论共用的一句话 notice：kiro-cli 版本 notice 在前，行内评论的 notice 在后；降级路径也要带（15-fix3 #3）
+ALL_NOTICE="${REVIEW_NOTICE}${REVIEW_NOTICE:+${INLINE_NOTICE:+ }}${INLINE_NOTICE}"
 if [[ -n "$DEGRADE_REASON" ]]; then
   # 降级：评审已经产出、只是没按契约输出——贴清洗后的原文并在标题标明，退出码仍为 0。
   log "警告：结构化解析失败（${DEGRADE_REASON}），降级为贴出评审员输出原文"
@@ -777,7 +784,9 @@ if [[ -n "$DEGRADE_REASON" ]]; then
   [[ "$final_rc" == "0" ]] || die_review "结构化解析失败，且取评审员原文也失败（rc=${final_rc}）"
   review_clean_text < "$WORK/final.txt" > "$WORK/raw.md"
   [[ -s "$WORK/raw.md" ]] || die_review "结构化解析失败，且评审员输出为空"
-  review_render_degraded --text "$WORK/raw.md" --reason "$DEGRADE_REASON" "${render_args[@]}" \
+  degraded_args=()
+  [[ -n "$ALL_NOTICE" ]] && degraded_args+=(--notice "$ALL_NOTICE")
+  review_render_degraded --text "$WORK/raw.md" --reason "$DEGRADE_REASON" "${degraded_args[@]+"${degraded_args[@]}"}" "${render_args[@]}" \
     > "$WORK/comment.md" || die_review "降级评论渲染失败"
 else
   dropped=$(jq -r '.dropped_findings' "$WORK/validated.json")
@@ -794,6 +803,7 @@ else
     SUMMARY_JSON="$WORK/plan.json"
   fi
   summary_args=(--inline-comment "$INLINE_ACTIVE")
+  # INLINE_NOTICE 可能在 publish_inline_comments 里刚被追加，所以这里重算一次
   ALL_NOTICE="${REVIEW_NOTICE}${REVIEW_NOTICE:+${INLINE_NOTICE:+ }}${INLINE_NOTICE}"
   [[ -n "$ALL_NOTICE" ]] && summary_args+=(--notice "$ALL_NOTICE")
   review_render_summary --json "$SUMMARY_JSON" "${summary_args[@]}" "${render_args[@]}" \
