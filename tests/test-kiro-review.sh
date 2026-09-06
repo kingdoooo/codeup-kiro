@@ -1349,7 +1349,7 @@ assert_contains "$OUT" "契约字段级掩码或清洗失败（rc=4" "A10 掩码
 assert_contains "$OUT" "review_redact_json: 掩码失败" "16-fix4 第 13 条：校验日志里库函数自己写的行进了日志（不再只说「详见校验日志」）"
 assert_contains "$OUT" "review_validate: 字段级掩码失败" "第 13 条：review_validate 的说明行也在"
 assert_contains "$OUT" "行 jq 诊断已省略" "第 13 条：非库函数前缀的 stderr 行（替身的 badawk: …）只报条数"
-assert_not_contains "$OUT" "badawk: 模拟掩码程序失败" "第 13 条：非库函数行本身不进日志（它们可能回显模型取值）"
+assert_not_contains "$(printf '%s\n' "$OUT" | grep -a '契约字段级掩码或清洗失败' || true)" "badawk:" "第 13 条：非库函数行本身不进失败原因（它们可能回显模型取值；替身在别的调用点直接写 stderr 的那几行不算）"
 assert_no_secrets "$OUT" "A10 掩码失败（全部输出：汇总没发、失败评论与日志都不含原文）"
 assert_not_contains "$OUT" "$SEC_GHP_MASKED" "A10 掩码失败：掩码后的形态也不在（正控：掩码确实没跑成，不是替身没生效）"
 comment=$(posted_comment "$OUT")

@@ -719,8 +719,8 @@ assert_contains "$(mut_rd_multi "$ROOT" "$unclosed_in")" "没有配对的 END �
 # M41：分隔符改成从段末往回找 → base64 补位的 `=` 被当成分隔符、取值变空串，`api_key = "…dA=="` 全裸奔（单测「补位 == 结尾的取值被掩掉」会失败）
 pkg=$(make_mutant m41-assign-sep 's|^        for (i = 1; i <= length(seg); i++) {$|        for (i = length(seg); i >= 1; i--) {  # 变异 M41：反向扫描|' scripts/lib/review-render.sh)
 b64_pad="dGhpcyBpcyBh""IHNlY3JldA=="
-assert_contains "$(mut_rd "$pkg" "api_key = \"${b64_pad}\"")" "$b64_pad" "M41：补位 == 结尾的取值原样放出——单测「掩码①」断言会失败"
-assert_eq "$(mut_rd "$ROOT" "api_key = \"${b64_pad}\"")" 'api_key = "dGhp****dA=="' "M41 对照：未变异实现从键之后向前找分隔符、取值被掩"
+assert_contains "$(mut_rd_multi "$pkg" "api_key = \"${b64_pad}\"\n")" "$b64_pad" "M41：补位 == 结尾的取值原样放出——单测「掩码①」断言会失败"
+assert_eq "$(mut_rd_multi "$ROOT" "api_key = \"${b64_pad}\"\n")" 'api_key = "dGhp****dA=="' "M41 对照：未变异实现从键之后向前找分隔符、取值被掩"
 # M42：放出时不再掩夹在句子里的 base64 连片（redact_b64 的掩码换成原样）
 pkg=$(make_mutant m42-b64-runs 's|out = out substr(s, 1, RSTART - 1) (b64_material(m, minlen) ? (full ? "\*\*\*\*" : mask(m)) : m)|out = out substr(s, 1, RSTART - 1) m|' scripts/lib/review-render.sh)
 assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "$PEM_L64" "M42：句子里的私钥正文片段完整放出——单测「片段不进评论」断言会失败"
@@ -863,7 +863,7 @@ pkg=$(make_mutant m-f-no-guard 's|^    if (( rc == 1 )); then rm -f "\$new"; ech
 assert_eq "$(mut_guard "$pkg")" "0" "M-f：守卫拆掉后删了评审标记的输出照样 rc 0 写回——单测「rc 3」断言会失败"
 assert_eq "$(mut_guard "$ROOT")" "3" "M-f 对照：未变异实现 rc 3"
 # 第 11 条：守卫的标记正则从常量派生——把常量改掉，守卫探针文件也从常量生成，仍要抓到
-mut_guard_const() { ( set +e; source "$1/scripts/lib/review-render.sh"; REVIEW_HISTORY_PREFIX='<!-- kiro-hist:'
+mut_guard_const() { ( set +e; source "$1/scripts/lib/review-render.sh"; REVIEW_HISTORY_PREFIX='<!-- kiro-hist:'; REVIEW_MARKER_LINE_RE_ALL=$(_review_marker_line_re_build)   # 16-fix4 第 16 条：加载期常量，改常量后按派生公式重算
     printf '# T\n<!-- kiro-review:90fcb05 run:1 -->\n%s[] -->\n正文\n' "$REVIEW_HISTORY_PREFIX" > "$tmp/m-f2.md"
     review_redact_secrets() { sed 's/kiro-hist:\[\]/kiro-hist:[9]/'; }
     review_redact_file "$tmp/m-f2.md" 2>/dev/null; echo $? ); }
