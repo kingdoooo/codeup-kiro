@@ -194,6 +194,50 @@ assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "glob.deniedPaths" "selfcheck：�
 rc=0; kiro_agent_selfcheck "$tmp/does-not-exist.json" "$WS_P" "$CH_P" || rc=$?
 assert_eq "$rc" "1" "selfcheck：文件不存在 → 失败"
 
+# --- 15-fix4 #13：空 / 纯空白 / 非对象 / 多值的定义文件必须 fail-closed ---
+# 5462175 及之前：单次 jq 对空输入不输出且退出 0 → reason="" → 自检返回 0。--print-paths 交叉核对已删（15-fix3 #12），自检是**唯一**
+# 一道门：长驻构建机上一份被截断 / 清零 / 误编辑的 ~/.kiro/agents/codeup-reviewer.json 会通过自检，评审带着 kiro-cli 回退的 agent 跑——
+# 没有 allowedPaths、没有 deniedPaths。两个（各自合格的）定义拼在同一文件里同样放行（两行空 reason 被 $(…) 吃掉）。
+# 正控（对 5462175）：空文件、纯空白、双对象三条必须失败（实测 rc=0）。
+: > "$tmp/sc-empty.json"; printf ' \n\t \n' > "$tmp/sc-ws.json"; echo null > "$tmp/sc-null.json"; echo '{}' > "$tmp/sc-obj.json"
+echo '[]' > "$tmp/sc-arr.json"; cat "$dest" "$dest" > "$tmp/sc-two.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-empty.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：空文件（0 字节）→ 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "0 字节" "selfcheck：空文件的固定文案点明 0 字节"
+rc=0; kiro_agent_selfcheck "$tmp/sc-ws.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：纯空白文件 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "恰好一个 JSON 值" "selfcheck：纯空白的固定文案（0 个 JSON 值）"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "0 个" "selfcheck：纯空白的文案点明 0 个"
+rc=0; kiro_agent_selfcheck "$tmp/sc-null.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：null → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "不是 JSON 对象" "selfcheck：null 的固定文案（顶层不是对象）"
+rc=0; kiro_agent_selfcheck "$tmp/sc-obj.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：{} → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "read.allowedPaths" "selfcheck：{} 点名 read.allowedPaths（对象但什么都没有）"
+rc=0; kiro_agent_selfcheck "$tmp/sc-arr.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：[] → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "不是 JSON 对象" "selfcheck：[] 的固定文案（顶层不是对象）"
+rc=0; kiro_agent_selfcheck "$tmp/sc-two.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：两个各自合格的定义拼在一个文件里 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "2 个" "selfcheck：多值文件的固定文案点明 2 个"
+# 对照：正常安装结果仍通过（上面的 dest）
+rc=0; kiro_agent_selfcheck "$dest" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "0" "selfcheck 对照：正常安装结果仍通过"
+# 安装器侧的 deny 检查（_kiro_agent_deny_missing）同样 fail-closed：空 / 纯空白 / 非对象 / 多值 → 非零（不是「都合格」的空输出）
+for f in sc-empty sc-ws sc-null sc-arr sc-two; do
+  rc=0; out=$(_kiro_agent_deny_missing "$tmp/$f.json") || rc=$?
+  assert_eq "$([[ $rc -ne 0 ]] && echo nonzero || echo "rc0 out=[$out]")" "nonzero" "deny 检查：${f} → 非零（不能当成「三处都合格」）"
+done
+assert_eq "$(_kiro_agent_deny_missing "$tmp/sc-obj.json")" "read" "deny 检查：{} 是对象但 read 没有 deniedPaths → 点名 read"
+assert_eq "$(_kiro_agent_deny_missing "$A")" "" "deny 检查对照：仓库定义三处都合格 → 空输出"
+# 安装器整体：空源文件 / 双对象源文件都拒装、不落盘
+rc=0; kiro_install_agent "$tmp/sc-empty.json" "$tmp/agents-scempty" --workspace "$WS" --chunks "$CH" >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "安装器：空源文件拒装"
+assert_eq "$([[ -e "$tmp/agents-scempty" ]] && echo written || echo none)" "none" "安装器：空源文件不落盘"
+rc=0; err=$(kiro_install_agent "$tmp/sc-two.json" "$tmp/agents-sctwo" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "安装器：双对象源文件拒装（否则会写出一份两个 JSON 值的 agent 文件）"
+assert_eq "$([[ -e "$tmp/agents-sctwo" ]] && echo written || echo none)" "none" "安装器：双对象源文件不落盘"
+
 # --- 占位符注入：路径规范化与 JSON 转义 ---
 # 相对路径 → 绝对（安装函数自己 cd && pwd -P，不信任调用方给的形态）
 dest_rel=$(cd "$tmp" && kiro_install_agent "$A" "$tmp/agents-rel" --workspace "./ws dir" --chunks "./work/chunks")

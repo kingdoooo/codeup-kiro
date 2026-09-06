@@ -299,6 +299,24 @@ run_case m5x "$pkg" MOCK_KIRO_VERSION_STDERR=1
 assert_rc "$RC" 0 "M5x：变异体仍能跑完"
 assert_contains "$(posted_comment "$OUT")" "未知" "M5x：版本永远「未知」、评论带 notice——端到端「--version 打到 stderr：无 notice」断言会失败"
 
+# --- M5y：自检去掉 `[[ -s ]]` 0 字节检查（15-fix4 #13）→ 空文件仍被第二道（--slurp 恰好一个值）拦下，但固定文案不再点明「0 字节」---
+# 单测「selfcheck：空文件的固定文案点明 0 字节」断言会失败。两道都在才是 fail-closed 的纵深：这条变异证明第一道有单独的可观测结果。
+pkg=$(make_mutant m5y-selfcheck-size '/安装后的定义文件为空（0 字节）/d' scripts/lib/kiro-agent.sh)
+: > "$tmp/m5y-empty.json"
+rc5y=0; err5y=$( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_agent_selfcheck "$tmp/m5y-empty.json" /ws /ch; rc=$?; printf '%s' "$KIRO_AGENT_SELFCHECK_ERROR"; exit $rc ) || rc5y=$?
+assert_eq "$([[ $rc5y -ne 0 ]] && echo nonzero)" "nonzero" "M5y：空文件仍非零（第二道 --slurp 兜住）"
+assert_not_contains "$err5y" "0 字节" "M5y：文案不再点明 0 字节——单测「空文件的固定文案点明 0 字节」断言会失败"
+# --- M5z：自检去掉「恰好一个 JSON 值」这道（15-fix4 #13）→ 两个各自合格的定义拼在一个文件里通过自检（fail-open）---
+# 只看 .[0]：纯空白文件退化成「顶层不是对象（null）」仍被拒，但双对象文件的第二个对象被无视——单测「两个各自合格的定义拼在一个文件里 → 失败」会失败。
+pkg=$(make_mutant m5z-selfcheck-one 's/if length != 1 then "安装后的定义文件里不是恰好一个 JSON 值.*$/if false then ""/' scripts/lib/kiro-agent.sh)
+mkdir -p "$tmp/m5z-ws" "$tmp/m5z-ch"
+dest5z=$( set +e; source "$ROOT/scripts/lib/kiro-agent.sh"; kiro_install_agent "$ROOT/kiro/agent-codeup-reviewer.json" "$tmp/m5z-agents" --workspace "$tmp/m5z-ws" --chunks "$tmp/m5z-ch" 2>/dev/null )
+cat "$dest5z" "$dest5z" > "$tmp/m5z-two.json"
+rc5z=0; ( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_agent_selfcheck "$tmp/m5z-two.json" "$(cd "$tmp/m5z-ws" && pwd -P)" "$(cd "$tmp/m5z-ch" && pwd -P)" ) || rc5z=$?
+assert_eq "$rc5z" "0" "M5z：双对象定义文件通过自检——单测「两个各自合格的定义拼在一个文件里 → 失败」断言会失败"
+rc5zc=0; ( set +e; source "$ROOT/scripts/lib/kiro-agent.sh"; kiro_agent_selfcheck "$tmp/m5z-two.json" "$(cd "$tmp/m5z-ws" && pwd -P)" "$(cd "$tmp/m5z-ch" && pwd -P)" ) || rc5zc=$?
+assert_eq "$rc5zc" "1" "M5z 对照：未变异实现拒绝双对象定义文件"
+
 # --- M6：删掉任意深度 .kiro/ 的删除逻辑 → 子目录 .kiro/ 残留、Kiro 启动时能看到 ---
 # 模式只认 `-iname .kiro -prune` 这一行（15-fix3：不分大小写、任何类型）；实现改写后失配时 make_mutant 会报错，这正是它存在的意义。
 # 隔离逻辑在 scripts/lib/isolation.sh（15-fix2 #10/#15）

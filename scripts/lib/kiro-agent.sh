@@ -39,9 +39,14 @@ _kiro_agent_physical_dir() {
   printf '%s\n' "$p"
 }
 # 三个工具的 deniedPaths 是否都合格（存在、非空、含 **/.git/**）——一次 jq 查完三处（15-fix3 #13）。
-# $1=定义文件；stdout 打出第一个不合格的工具名（都合格则为空）；文件不是合法 JSON 时返回非零
+# $1=定义文件；stdout 打出第一个不合格的工具名（都合格则为空）；文件为空 / 不是恰好一个 JSON 对象 / 不是合法 JSON 时返回非零。
+# fail-closed（15-fix4 #13）：单次 jq 对空 / 纯空白输入**不输出且退出 0**，"" 会被调用方当成「三处都合格」；两个对象拼在一个文件里
+# 也只会各打一行。所以 ① 先 `-s` 拒 0 字节；② `--slurp` 把整个文件读成数组、要求恰好一个元素且是对象——「恰好一个 JSON 值」
+# 是被检查的条件而不是数输出行数；不满足输出 empty → `-e` 无结果退 4。
 _kiro_agent_deny_missing() {
-  jq -r '[("read","grep","glob") as $t | select((.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null) | not) | $t] | first // ""' "$1" 2>/dev/null
+  [[ -s "$1" ]] || return 1
+  jq -e -r --slurp 'if length != 1 or (.[0] | type) != "object" then empty else .[0]
+      | [("read","grep","glob") as $t | select((.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null) | not) | $t] | first // "" end' "$1" 2>/dev/null
 }
 
 kiro_install_agent() {
@@ -118,14 +123,23 @@ kiro_install_agent() {
 #   · allowedTools == []（免确认只来自 allowedPaths）、includeMcpJson == false、includePowers == false
 # 失败返回 1，原因放进 KIRO_AGENT_SELFCHECK_ERROR。执行器第 3 步用它把「日志声称的事实」变成断言；单测直接对篡改过的定义调用。
 # 全部检查在**一次** jq 里完成（15-fix3 #13），输出第一条不符的原因（都符合则为空）。
+# fail-closed（15-fix4 #13）：这是 --print-paths 交叉核对删掉后（15-fix3 #12）**唯一**的一道门。单次 jq 对空 / 纯空白文件不输出且
+# 退出 0 → reason="" → 自检通过——长驻构建机上一份被截断 / 清零 / 误编辑的 ~/.kiro/agents/codeup-reviewer.json 会放行，评审带着
+# kiro-cli 回退的 agent 跑（没有 allowedPaths、没有 deniedPaths）；两个各自合格的定义拼在一个文件里也放行（两行空 reason 被 $(…) 吃掉）。
+# 三道：① `-s` 拒 0 字节（固定文案）；② `--slurp` 把整个文件读成数组，要求恰好一个元素且是对象（固定文案点明个数 / 类型）——
+# 「恰好一个 JSON 值」是被检查的条件，不是数输出行数；③ `-e`：任何无输出的路径都退 4 而不是 0（有 --slurp 时不会发生，防有人删掉 --slurp）。
 KIRO_AGENT_SELFCHECK_ERROR=""
 kiro_agent_selfcheck() {
   local f="$1" ws="$2" ch="$3" reason
   KIRO_AGENT_SELFCHECK_ERROR=""
   [[ -r "$f" ]] || { KIRO_AGENT_SELFCHECK_ERROR="安装后的定义文件不可读：${f}"; return 1; }
-  reason=$(jq -r --arg ws "$ws" --arg ch "$ch" '
+  [[ -s "$f" ]] || { KIRO_AGENT_SELFCHECK_ERROR="安装后的定义文件为空（0 字节）：${f}"; return 1; }
+  reason=$(jq -e -r --slurp --arg ws "$ws" --arg ch "$ch" '
       def want: [$ws, $ch];
       def deny_ok($t): (.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null);
+      if length != 1 then "安装后的定义文件里不是恰好一个 JSON 值（\(length) 个；纯空白文件算 0 个）"
+      elif (.[0] | type) != "object" then "安装后的定义顶层不是 JSON 对象（是 \(.[0] | type)）"
+      else .[0] |
       [ ("read","grep","glob") as $t
         | ( if .toolsSettings[$t].allowedPaths != want
             then "\($t).allowedPaths 写入的是 \(.toolsSettings[$t].allowedPaths | tojson)，预期 \(want | tojson)（业务库 checkout 物理路径 + chunks 物理路径，顺序固定）"
@@ -134,7 +148,8 @@ kiro_agent_selfcheck() {
         (if .allowedTools != [] then "allowedTools 不为空（\(.allowedTools | tojson)）——免确认只能来自 allowedPaths" else null end),
         (if .includeMcpJson != false then "includeMcpJson 不是 false" else null end),
         (if .includePowers != false then "includePowers 不是 false" else null end)
-      ] | map(select(. != null)) | first // ""' "$f" 2>/dev/null) || { KIRO_AGENT_SELFCHECK_ERROR="定义不是合法 JSON：${f}"; return 1; }
+      ] | map(select(. != null)) | first // ""
+      end' "$f" 2>/dev/null) || { KIRO_AGENT_SELFCHECK_ERROR="定义不是合法 JSON（或 jq 没有产出任何结果）：${f}"; return 1; }
   [[ -z "$reason" ]] || { KIRO_AGENT_SELFCHECK_ERROR="$reason"; return 1; }
   return 0
 }
