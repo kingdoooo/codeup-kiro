@@ -1,6 +1,6 @@
 {
   "contract": "codeup-reviewer/1",
-  "summary": "票 17 C 复审：两条同标题同级别的 P0 落在两个**不同**文件上，两个路径都含反引号（按契约要求当作未定位处理）。",
+  "summary": "17-fix2 M56 用：两条 P0 落在两个**不同**文件上（两个路径都含反引号，按契约要求当作未定位处理），级别/标题/说明/修复建议逐字节相同——只有路径不同。",
   "verdict": "DO_NOT_MERGE",
   "verdict_reason": "两处硬编码凭证都必须移除。",
   "findings": [
@@ -12,8 +12,8 @@
       "file": "src/a`1.py",
       "line_start": 10,
       "line_end": 10,
-      "body": "第一个文件里的凭证：CANARY-DELOC-FIRST。",
-      "fix": "改从环境变量读取。"
+      "body": "CANARY-DELOC-SAMEBODY：源码里出现了疑似凭证。",
+      "fix": "改从环境变量或密钥管理服务读取。"
     },
     {
       "id": "U2",
@@ -21,10 +21,10 @@
       "category": "security",
       "title": "硬编码疑似应用密钥",
       "file": "src/b`2.py",
-      "line_start": 88,
-      "line_end": 90,
-      "body": "另一个文件里的凭证：CANARY-DELOC-SECOND。",
-      "fix": "改从密钥管理服务读取。"
+      "line_start": 10,
+      "line_end": 10,
+      "body": "CANARY-DELOC-SAMEBODY：源码里出现了疑似凭证。",
+      "fix": "改从环境变量或密钥管理服务读取。"
     }
   ]
 }

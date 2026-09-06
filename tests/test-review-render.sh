@@ -2057,18 +2057,20 @@ assert_contains "$(cat "$tmp/lgtm-hist.md")" '| 1 | `abc1234` | 评审员未给�
 assert_not_contains "$(grep -v '^<!-- kiro-history:' "$tmp/lgtm-hist.md")" "LGTM" "票 17 B 历次表：契约外原值不出现在评论的可见部分"
 
 # ============================================================================
-# 票 17 C：同一轮输出里完全重复的问题合并（file/line_start/line_end/severity/title 五元组逐字段相同）
+# 票 17 C（17-fix2 A① 定案）：同一轮里**全部有意义字段**逐字段相同的问题才合并
+# 判定键 = file / line_start / line_end（归一化前原值）+ severity / title / body / fix（归一化后的值）
 # ============================================================================
 cat > "$tmp/dup2.json" <<'JSON'
 {"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
- {"id":"D1","severity":"P0","category":"security","title":"拼接 SQL","file":"src/app.py","line_start":30,"line_end":31,"body":"第一份措辞。","fix":"参数化。"},
- {"id":"D2","severity":"P0","category":"logic","title":"拼接 SQL","file":"src/app.py","line_start":30,"line_end":31,"body":"第二份措辞（body/fix/category 不参与判定）。","fix":""}]}
+ {"id":"D1","severity":"P0","category":"security","title":"拼接 SQL","file":"src/app.py","line_start":30,"line_end":31,"body":"同一条被原样重发。","fix":"参数化。"},
+ {"id":"D2","severity":"P0","category":"logic","title":"拼接 SQL","file":"src/app.py","line_start":30,"line_end":31,"body":"同一条被原样重发。","fix":"参数化。"}]}
 JSON
 review_validate < "$tmp/dup2.json" > "$tmp/dup2-validated.json"
 assert_eq "$(jq -r '.findings | length' "$tmp/dup2-validated.json")" "1" "票 17 C：逐字段相同的两条并成一条"
 assert_eq "$(jq -r .duplicate_findings "$tmp/dup2-validated.json")" "1" "票 17 C：duplicate_findings=1"
 assert_eq "$(jq -r .dropped_findings "$tmp/dup2-validated.json")" "0" "票 17 C：合并不计入 dropped_findings（语义不变）"
-assert_eq "$(jq -r '.findings[0].body' "$tmp/dup2-validated.json")" "第一份措辞。" "票 17 C：保留首条（含它的正文）"
+assert_eq "$(jq -r '.findings[0].body' "$tmp/dup2-validated.json")" "同一条被原样重发。" "票 17 C：保留首条（含它的正文）"
+assert_eq "$(jq -r '.findings[0].category' "$tmp/dup2-validated.json")" "security" "票 17 C：category 不参与判定（两条 category 不同仍合并），保留首条的"
 review_plan_inline --json "$tmp/dup2-validated.json" --changed-lines "$CL" > "$tmp/plan-dup2.json"
 assert_eq "$(jq -r .inline_count "$tmp/plan-dup2.json")" "1" "票 17 C：INLINE_COMMENT=1 计划 inline_count=1（CodeX 复现时是 2）"
 # 顺序：合并保留原次序（jq 的 unique_by 会按键重排，这里不允许）
@@ -2076,7 +2078,7 @@ cat > "$tmp/dup3.json" <<'JSON'
 {"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
  {"id":"E1","severity":"P1","category":"logic","title":"乙","file":"src/db.py","line_start":12,"line_end":12,"body":"b","fix":""},
  {"id":"E2","severity":"P0","category":"security","title":"甲","file":"src/app.py","line_start":30,"line_end":31,"body":"b","fix":""},
- {"id":"E3","severity":"P1","category":"logic","title":"乙","file":"src/db.py","line_start":12,"line_end":12,"body":"b2","fix":""},
+ {"id":"E3","severity":"P1","category":"logic","title":"乙","file":"src/db.py","line_start":12,"line_end":12,"body":"b","fix":""},
  {"id":"E4","severity":"P2","category":"style","title":"丙","file":null,"line_start":null,"line_end":null,"body":"b","fix":""}]}
 JSON
 review_validate < "$tmp/dup3.json" > "$tmp/dup3-validated.json"
@@ -2105,10 +2107,8 @@ assert_eq "$(printf '%s' "$v" | jq -r '.findings | length')" "2" "票 17 C：只
 # 判定发生在字段归一化之后：级别大小写/空白、标题空白折叠后相同即视为相同
 v=$(jq -c '.findings[1].severity = " p0 " | .findings[1].title = "拼接  SQL"' "$tmp/dup2.json" | review_validate)
 assert_eq "$(printf '%s' "$v" | jq -r '.findings | length')" "1" "票 17 C：归一化后相同（' p0 '、双空格标题）也算重复"
-# 两条一样的未定位问题（file 不合规 → null）也合并，且未定位计数按合并后算。
-# 17-fix：未定位的问题判定键带 body，所以「一样」在这里必须连正文也一样——dup2 的两条正文不同，
-# 改成同一份正文再比（正文不同的那一半由下面 repo-level-dup 的用例覆盖）。
-v=$(jq -c '.findings[0].file = "a|b" | .findings[1].file = "a|b" | .findings[1].body = .findings[0].body' "$tmp/dup2.json" | review_validate)
+# 两条逐字段相同的未定位问题（file 不合规 → null）也合并，且未定位计数按合并后算
+v=$(jq -c '.findings[0].file = "a|b" | .findings[1].file = "a|b"' "$tmp/dup2.json" | review_validate)
 assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings, .delocated_findings] | join(",")')" "1,1,1" \
   "票 17 C：两条一样的未定位问题并成一条，delocated_findings 按合并后算"
 # 判定键取的是**归一化前**的路径与行号（复审发现）：输出字段把所有不可定位的问题都塌成
@@ -2136,21 +2136,34 @@ assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_finding
 assert_contains "$(printf '%s' "$v" | jq -r '[.findings[].body] | join("|")')" "CANARY-REPO-BILLING" "17-fix：第二条仓库级问题的正文还在"
 assert_contains "$(printf '%s' "$v" | jq -r '[.findings[].fix] | join("|")')" "重复扣费" "17-fix：第二条的修复建议也还在"
 # 正文逐字相同才算重复（tr 只去首尾空白）：同一条被模型重复输出两次仍然合并
-v=$(jq -c '.findings[1].body = ("  " + .findings[0].body + "  ") | .findings[1].fix = "另一种措辞的修复建议"' fixtures/contract/repo-level-dup.json | review_validate)
+v=$(jq -c '.findings[1].body = .findings[0].body | .findings[1].fix = .findings[0].fix' fixtures/contract/repo-level-dup.json | review_validate)
 assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "1,1" \
-  "17-fix：仓库级问题正文逐字相同（仅首尾空白不同）→ 仍按重复合并"
+  "17-fix2：仓库级问题正文与修复建议都逐字相同（模型原样重发）→ 仍按重复合并"
 # 路径不合规被按未定位处理的也走同一条规则（$file 为 null）
 v=$(jq -c '.findings[0].file = "a|b" | .findings[1].file = "a|b"' fixtures/contract/repo-level-dup.json | review_validate)
 assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings, .delocated_findings] | join(",")')" "2,0,2" \
   "17-fix：同一个不合规路径下正文不同的两条也不合并"
-# 可定位的问题**不**带 body：同文件同行同级别同标题的两份措辞仍按重复合并（票面 C 的原意，不改）
+# 17-fix2 A①：**可定位**的问题同样按正文区分——同文件同行同级别同标题、正文不同的两条是两条不同的意见
 v=$(jq -c '.findings[0].file = "src/app.py" | .findings[0].line_start = 30 | .findings[0].line_end = 30
            | .findings[1].file = "src/app.py" | .findings[1].line_start = 30 | .findings[1].line_end = 30' \
       fixtures/contract/repo-level-dup.json | review_validate)
-assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "1,1" \
-  "17-fix：可定位问题的判定键不带 body（同文件同行的两份措辞仍算重复）"
-# 判定键不能泄进输出（它只是内部字段）
-assert_eq "$(printf '%s' "$v" | jq -r '[.findings[] | has("dupkey")] | unique | join(",")')" "false" "票 17 C：内部判定键不出现在规范化输出里"
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "2,0" \
+  "17-fix2：同文件同行同标题、正文不同 → 2 条（不再按「两份措辞算重复」并掉）"
+assert_contains "$(printf '%s' "$v" | jq -r '[.findings[].body] | join("|")')" "CANARY-REPO-BILLING" "17-fix2：可定位问题的第二条正文也留住"
+# 整文件级问题（file 有、行号为 null，提示词允许）同样按正文区分
+v=$(jq -c '.findings[0].file = "src/app.py" | .findings[1].file = "src/app.py"' \
+      fixtures/contract/repo-level-dup.json | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "2,0" \
+  "17-fix2：整文件级（行号为 null）正文不同的两条不合并"
+# 只差 fix 的两条也不合并（fix 在键里）
+v=$(jq -c '.findings[1].body = .findings[0].body' fixtures/contract/repo-level-dup.json | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "2,0" \
+  "17-fix2：正文相同但修复建议不同 → 不合并（fix 也在判定键里）"
+# 判定键不能泄进输出（它只是内部字段）；对着 file 为 null 的那组用例跑
+v=$(review_validate < fixtures/contract/repo-level-dup.json)
+assert_eq "$(printf '%s' "$v" | jq -r '[.findings[] | has("dupkey")] | unique | join(",")')" "false" "票 17 C：内部判定键不出现在规范化输出里（file 为 null 的用例）"
+assert_eq "$(printf '%s' "$v" | jq -r '[.findings[] | keys] | flatten | unique | join(",")')" "body,category,file,fix,id,line_end,line_start,severity,title" \
+  "票 17 C：规范化输出的字段集合固定（dupkey/delocated 都已删掉）"
 # 渲染器的输入校验不强制 duplicate_findings（旧 plan.json 兼容）
 jq 'del(.duplicate_findings)' "$tmp/dup2-validated.json" > "$tmp/dup2-old.json"
 rc=0; review_render_summary --json "$tmp/dup2-old.json" --sha x --src a --dst b --ts t --diff-note n >/dev/null 2>&1 || rc=$?

@@ -371,21 +371,35 @@ jq -n --arg bot "$BOT" \
          content:("### P0 · 上一次发过的\n<!-- kiro-inline:" + .value + " -->\n")})' \
   > "$IFXR/list-comments-inline.json"
 
-# 每次运行前在 fixture 仓库里写版本列表：to = 真实 HEAD、from = 真实 merge-base（票 17 A：to≠HEAD 会 fail-closed，
-# from≠BASE 会多一句 notice——两者都不是本组要证明的东西）。用例自己的 MUT_TWEAK（可能再提交、改变 HEAD）先跑。
+# 版本列表 fixture 的唯一入口（票 17-fix2 C⑦：原先 head_mismatch / both_mismatch / no_commitid 各写一份）。
+# 默认 to = 真实 HEAD、from = 真实 merge-base——否则每个用例都会 fail-closed 或多一句 notice，
+# 而那不是本组要证明的东西。HEAD 只有在 fixture 仓库建好（用例自己的 MUT_TWEAK 可能再提交）之后才知道，
+# 所以内层 tweak 先跑、版本列表后写。取值语义与 test-kiro-review.sh 的 mk_patchsets 一致。
 _INLINE_FX=""; _INLINE_INNER_TWEAK=""
-_inline_patchsets_tweak() {
+PS_SRC="HEAD"; PS_TGT="BASE"; PS_SRC_ID="src-2"; PS_TGT_ID="tgt-1"
+mk_patchsets() {
+  local src tgt head base
   [[ -z "$_INLINE_INNER_TWEAK" ]] || "$_INLINE_INNER_TWEAK"
-  jq -n --arg sha "$(git rev-parse HEAD)" --arg base "$(git merge-base origin/master HEAD)" '[
-    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
-    {patchSetBizId:"src-2", versionNo:2, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  head=$(git rev-parse HEAD); base=$(git merge-base origin/master HEAD)
+  case "$PS_SRC" in
+    HEAD) src="$head" ;;
+    PARENT) src=$(git rev-parse 'HEAD^') ;;
+    *) src="$PS_SRC" ;;
+  esac
+  case "$PS_TGT" in BASE) tgt="$base" ;; *) tgt="$PS_TGT" ;; esac
+  jq -n --arg src "$src" --arg tgt "$tgt" --arg srcmode "$PS_SRC" \
+        --arg srcid "$PS_SRC_ID" --arg tgtid "$PS_TGT_ID" '[
+    {patchSetBizId:$tgtid, versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$tgt},
+    ({patchSetBizId:$srcid, versionNo:9, relatedMergeItemType:"MERGE_SOURCE"}
+     + (if $srcmode == "OMIT" then {} else {commitId:$src} end))
   ]' > "$_INLINE_FX/list-patchsets.json"
 }
-inline_case() { # <用例名> <集成包根> <fixture 目录> [VAR=值 …]
+inline_case() { # <用例名> <集成包根> <fixture 目录> [VAR=值 …]；版本列表形态走 PS_* 全局量
   local name="$1" pkg="$2" fx="$3"; shift 3
   _INLINE_FX="$fx"; _INLINE_INNER_TWEAK="${MUT_TWEAK:-}"; MUT_TWEAK=""   # 与 run_case 同理：赋值前缀是否残留取决于 bash 版本
-  MUT_TWEAK=_inline_patchsets_tweak run_case "$name" "$pkg" DRY_RUN_FIXTURE_DIR="$fx" CODEUP_BOT_USERNAME="$BOT" \
+  MUT_TWEAK=mk_patchsets run_case "$name" "$pkg" DRY_RUN_FIXTURE_DIR="$fx" CODEUP_BOT_USERNAME="$BOT" \
     INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2EC" "$@"
+  PS_SRC="HEAD"; PS_TGT="BASE"; PS_SRC_ID="src-2"; PS_TGT_ID="tgt-1"
 }
 
 # --- 对照：未变异实现上行内评论管线的四项可观测结果都成立 ---
@@ -767,31 +781,29 @@ assert_eq "$(mut_meta_row "$pkg" 'a|b|c' | tr -cd '|' | wc -c | tr -d ' ')" "5" 
 
 # ============ 票 17 的守卫 ============
 # --- M52（票 17 A / M-a）：to≠HEAD 从 fail-closed 改回「warn 然后继续」→ 旧 HEAD 的行号被绑到最新版本 ---
-# fixture：to 是评审期间新推上去的另一个提交，from 仍是 merge-base（只让 to 不一致）。
+# fixture：to 是评审期间新推上去的另一个提交（不在克隆里），from 仍是 merge-base（只让 to 异常）。
+# 三种成因与各自的处置见 docs/adr/0005-inline-comments-bind-to-reviewed-commit.md。
 IFXMIS="$tmp/ifx-headmismatch"
 mkdir -p "$IFXMIS"
 cp "$IFX"/create-comment-inline.*.json "$IFXMIS/"
-mk_head_mismatch() {
-  jq -n --arg base "$(git merge-base origin/master HEAD)" '[
-    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
-    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}
-  ]' > "$IFXMIS/list-patchsets.json"
-}
 head_mismatch_case() { # <用例名> <集成包根>
-  MUT_TWEAK=mk_head_mismatch run_case "$1" "$2" DRY_RUN_FIXTURE_DIR="$IFXMIS" CODEUP_BOT_USERNAME="$BOT" \
-    INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2EC"
+  PS_SRC=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 inline_case "$1" "$2" "$IFXMIS"
 }
 head_mismatch_case baseline-headmismatch "$ROOT"
-assert_rc "$RC" 0 "对照：to≠HEAD 时评审成功"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：to≠HEAD 时 0 条行内评论（fail-closed）"
+assert_rc "$RC" 0 "对照：to 解析不出时评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：to 解析不出时 0 条行内评论（fail-closed）"
 assert_contains "$(posted_comment "$OUT")" "## 问题清单" "对照：退回完整清单"
-# 只把 `return 1` 换成空语句：notice 与 warning 照旧写出，随后代码继续往下发草稿——正是票 17 之前的行为
-pkg=$(make_mutant m52-head-failclosed '/^    return 1  # fail-closed（提交号不一致）/ s/return 1/:/')
+# 变异锚在 inline_bail 那一行的文案上（票 17-fix2 C⑤：出口收敛成一个函数之后，锚点是 notice 而不是注释）：
+# 把 `; return 1` 换成空语句 → notice 与 warning 照旧写出，随后继续往下发草稿，正是票 17 之前的行为
+# 两条一起放开：只放开「新推送」那条，空的 to_norm 会被后面「不在同一条历史上」那条兜住，仍是 fail-closed。
+# 这正是出口收敛之后的事实——**几个出口合起来才守得住**，所以变异要把这条路径上的出口全放开。
+pkg=$(make_mutant m52-head-failclosed \
+  '/inline_bail "行内评论未发出：评审期间源分支有新推送/ s/; return 1/; :/; /inline_bail "行内评论未发出：Codeup 侧最新合并源版本/ s/; return 1/; :/')
 head_mismatch_case m52 "$pkg"
 assert_rc "$RC" 0 "M52：变异体仍能跑完"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
   "M52：改回 warn 然后继续之后 3 条行内评论绑到了另一个提交的版本上——端到端 A11「0 次创建」断言会失败"
-assert_eq "$(inline_bodies "$OUT" | jq -r '.to_patchset_biz_id' | sort -u | paste -sd, -)" "src-9" "M52：绑的正是那个与 HEAD 不一致的最新版本（I5 被违反）"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.to_patchset_biz_id' | sort -u | paste -sd, -)" "src-9" "M52：绑的正是那个不在克隆里的最新版本（I5 被违反）"
 assert_contains "$(posted_comment "$OUT")" "已标注在「文件改动」对应行" "M52：汇总还谎报「已标注」——端到端「不谎报行内计数」断言会失败"
 assert_not_contains "$(posted_comment "$OUT")" "## 问题清单" "M52：完整清单没有了——端到端「回落成完整清单」断言会失败"
 
@@ -843,53 +855,46 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "2" \
 assert_not_contains "$OUT" "完全重复的问题已合并" "M55：日志里也没有合并记录"
 assert_contains "$(posted_comment "$OUT")" "其中 2 条已标注在「文件改动」对应行" "M55：统计行按 2 条算——端到端「其中 1 条」断言会失败"
 
-# --- M56（票 17 C 复审）：去重判定键改回用归一化**后**的字段 → 不可定位的问题按（null,null,null,级别,标题）
-#     比较，两个不同文件上的同标题 P0 被并成一条，第二条的正文与修复建议在 MR 上无处落脚 ---
+# --- M56（票 17 C 复审，17-fix2 重锚）：判定键里的路径/行号改回用归一化**后**的字段 →
+#     不可定位的问题被塌成（null,null,null,…），两个**不同文件**上的问题被并成一条 ---
+# fixture 的两条只有路径不同（级别/标题/说明/修复建议逐字节相同），所以这条变异只证明「路径必须按原值比」——
+# body/fix 在键里那一半由 M59 单独守（子代理构造的「只改归一化」变异体曾经全绿，就是因为两条 fixture 正文不同、
+# 杀伤实际来自 body 那一半）。
 DELOCC="$ROOT/tests/fixtures/contract/deloc-dup.json"
 run_case baseline-delocdup "$ROOT" MOCK_KIRO_CONTRACT="$DELOCC"
-assert_rc "$RC" 0 "对照：两条路径不合规的同标题 P0 时评审成功"
-assert_contains "$OUT" "评审报告：P0 2" "对照：两条都留下了"
+assert_rc "$RC" 0 "对照：两条路径不合规、其余逐字节相同的 P0 时评审成功"
+assert_contains "$OUT" "评审报告：P0 2" "对照：两条都留下了（路径不同就是两条）"
 assert_not_contains "$OUT" "完全重复的问题已合并" "对照：不同文件不算重复"
-comment=$(posted_comment "$OUT")
-assert_contains "$comment" "CANARY-DELOC-FIRST" "对照：第一条的正文在评论里"
-assert_contains "$comment" "CANARY-DELOC-SECOND" "对照：第二条的正文也在评论里"
+assert_contains "$OUT" "2 条问题的 file 含" "对照：两条都按未定位处理（归一化后 file 为 null）"
 pkg=$(make_mutant m56-dupkey-normalized \
-  's#dupkey: (\[tr(.file), lineno(.line_start), lineno(.line_end), \$sev, \$title,#dupkey: ([$file, $ls, $le, $sev, $title] | tojson),#; /^                      (if \$file == null then tr(.body) else "" end)\] | tojson),$/d' \
+  's#dupkey: (\[tr(.file), lineno(.line_start), lineno(.line_end),#dupkey: ([$file, $ls, $le,#' \
   scripts/lib/review-render.sh)
 run_case m56 "$pkg" MOCK_KIRO_CONTRACT="$DELOCC"
 assert_rc "$RC" 0 "M56：变异体仍能跑完"
-assert_contains "$OUT" "评审报告：P0 1" "M56：一条 P0 被静默并掉——单测「三条同标题问题不合并」断言会失败"
+assert_contains "$OUT" "评审报告：P0 1" "M56：一条 P0 被静默并掉——单测「路径不同的两条不合并」断言会失败"
 assert_contains "$OUT" "1 条完全重复的问题已合并" "M56：日志还把两个不同文件说成完全重复"
-comment=$(posted_comment "$OUT")
-assert_contains "$comment" "CANARY-DELOC-FIRST" "M56：只剩首条"
-assert_not_contains "$comment" "CANARY-DELOC-SECOND" "M56：第二条的正文在 MR 上彻底消失——单测「三条的正文都还在」断言会失败"
+assert_contains "$OUT" "1 条问题的 file 含" "M56：未定位计数也跟着少算一条"
 
 # --- M57（票 17 A 复审）：from 侧的探针警告挪回 fail-closed 之后 → 两个核对同时不成立时它被一起吞掉 ---
 # from 侧那条警告是「P1-14 的结论失效了」的探针；to 侧 return 1 在前的话，最需要它的那种运行里反而没有它。
 IFXBOTH="$tmp/ifx-bothmismatch"
 mkdir -p "$IFXBOTH"
 cp "$IFX"/create-comment-inline.*.json "$IFXBOTH/"
-mk_both_mismatch() {
-  jq -n '[
-    {patchSetBizId:"tgt-9", versionNo:9, relatedMergeItemType:"MERGE_TARGET", commitId:"feedfacefeedfacefeedfacefeedfacefeedface"},
-    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}
-  ]' > "$IFXBOTH/list-patchsets.json"
-}
 both_mismatch_case() { # <用例名> <集成包根>
-  MUT_TWEAK=mk_both_mismatch run_case "$1" "$2" DRY_RUN_FIXTURE_DIR="$IFXBOTH" CODEUP_BOT_USERNAME="$BOT" \
-    INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2EC"
+  PS_SRC=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 \
+    PS_TGT=feedfacefeedfacefeedfacefeedfacefeedface PS_TGT_ID=tgt-9 inline_case "$1" "$2" "$IFXBOTH"
 }
 both_mismatch_case baseline-bothmismatch "$ROOT"
 assert_rc "$RC" 0 "对照：两个核对都不成立时评审仍成功"
 assert_contains "$OUT" "不等于本地 merge-base" "对照：from 侧探针警告在日志里"
-assert_contains "$OUT" "与当前 HEAD" "对照：to 侧警告也在"
+assert_contains "$OUT" "不在本地克隆里" "对照：to 侧警告也在"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：仍然一条行内评论都不发"
 pkg=$(make_mutant m57-from-canary '/不等于本地 merge-base（/ s/^    log /    : /')
 both_mismatch_case m57 "$pkg"
 assert_rc "$RC" 0 "M57：变异体仍能跑完"
 assert_not_contains "$OUT" "不等于本地 merge-base" \
   "M57：from 侧探针被 fail-closed 吞掉——端到端「两个核对都不成立时 from 侧警告仍在日志里」断言会失败"
-assert_contains "$OUT" "与当前 HEAD" "M57：to 侧警告不受影响（证明变异只动了探针那一行）"
+assert_contains "$OUT" "不在本地克隆里" "M57：to 侧警告不受影响（证明变异只动了探针那一行）"
 
 # --- M58（票 17 B 复审）：只塌掉渲染器边界那一层 → 没走 review_validate 的调用方能把任意文本写进隐藏历史 ---
 # 隐藏历史里的结论下一轮会被读回来渲染；结论行本身有固定文案兜底，标记没有。所以这一层单独也要有变异守卫。
@@ -904,49 +909,39 @@ assert_contains "$(mut_bypass_marker "$pkg")" "伪造标题" \
   "M58：边界一塌，绕过校验的原值进了隐藏历史标记——单测「原值不出现在评论任何位置」断言会失败"
 assert_not_contains "$(mut_bypass_marker "$ROOT")" "伪造标题" "M58 对照：未变异实现把它按未给出结论处理"
 
-# --- M59（17-fix）：判定键里去掉 body → 两条仓库级同标题问题被并掉，第二条正文在 MR 上消失 ---
-# 契约允许仓库级问题省略 file，此时路径为空串、行号全 null，只靠级别+标题分不出身份。
+# --- M59（17-fix，17-fix2 重锚）：判定键里去掉 body/fix → 同一处（这里是仓库级）说法不同的两条被并掉，
+#     第二条的正文与修复建议在评论里彻底消失 ---
+# 走库级（review_validate | review_render_summary）而不是端到端：这条守的是 jq 判定键，
+# 端到端多跑一遍 kiro 替身与回写只是重复覆盖（票 17-fix2 C⑦）。
 REPODUPC="$ROOT/tests/fixtures/contract/repo-level-dup.json"
-run_case baseline-repodup "$ROOT" MOCK_KIRO_CONTRACT="$REPODUPC"
-assert_rc "$RC" 0 "对照：两条仓库级同标题问题时评审成功"
-assert_contains "$OUT" "评审报告：P0 0 · P1 0 · P2 2" "对照：两条都留下了"
-assert_not_contains "$OUT" "完全重复的问题已合并" "对照：正文不同不算重复"
-comment=$(posted_comment "$OUT")
-assert_contains "$comment" "CANARY-REPO-AUTH" "对照：第一条正文在评论里"
-assert_contains "$comment" "CANARY-REPO-BILLING" "对照：第二条正文也在评论里"
+mut_repodup_comment() { ( set +e; source "$1/scripts/lib/review-render.sh"
+  review_validate < "$REPODUPC" > "$tmp/m59-validated.json" 2>/dev/null
+  review_render_summary --json "$tmp/m59-validated.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n 2>/dev/null ); }
+mut_repodup_count() { ( set +e; source "$1/scripts/lib/review-render.sh"
+  review_validate < "$REPODUPC" 2>/dev/null \
+    | jq -r '[(.findings | length), .duplicate_findings] | join(",")' ); }
+assert_eq "$(mut_repodup_count "$ROOT")" "2,0" "对照：两条仓库级同标题、说法不同的问题不合并"
+assert_contains "$(mut_repodup_comment "$ROOT")" "CANARY-REPO-BILLING" "对照：第二条正文在评论里"
 pkg=$(make_mutant m59-dupkey-nobody \
-  's#                      (if \$file == null then tr(.body) else "" end)\] | tojson),#                      ""] | tojson),#' \
+  's#\$title, \$bodykey, \$fixkey\] | tojson),#$title, "", ""] | tojson),#' \
   scripts/lib/review-render.sh)
-run_case m59 "$pkg" MOCK_KIRO_CONTRACT="$REPODUPC"
-assert_rc "$RC" 0 "M59：变异体仍能跑完"
-assert_contains "$OUT" "评审报告：P0 0 · P1 0 · P2 1" "M59：一条 P2 被静默并掉——单测「两条仓库级同标题问题不合并」断言会失败"
-assert_contains "$OUT" "1 条完全重复的问题已合并" "M59：日志把两个不同模块的问题说成完全重复"
-comment=$(posted_comment "$OUT")
-assert_contains "$comment" "CANARY-REPO-AUTH" "M59：只剩首条"
-assert_not_contains "$comment" "CANARY-REPO-BILLING" "M59：第二条正文在 MR 上彻底消失——单测「第二条正文还在」断言会失败"
+assert_eq "$(mut_repodup_count "$pkg")" "1,1" "M59：body/fix 一出键就并成一条——单测「正文不同 → 不合并」断言会失败"
+assert_not_contains "$(mut_repodup_comment "$pkg")" "CANARY-REPO-BILLING" \
+  "M59：第二条正文在评论里彻底消失——单测「第二条正文还在」断言会失败"
 
 # --- M60（17-fix）：缺 commitId 改回 fail-open → 拿不到提交号也照发，放弃了 I5 的绑定证明 ---
 IFXNC="$tmp/ifx-nocommitid"
 mkdir -p "$IFXNC"
 cp "$IFX"/create-comment-inline.*.json "$IFXNC/"
-mk_no_commitid() {
-  jq -n --arg base "$(git merge-base origin/master HEAD)" '[
-    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
-    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE"}
-  ]' > "$IFXNC/list-patchsets.json"
-}
 no_commitid_case() { # <用例名> <集成包根>
-  MUT_TWEAK=mk_no_commitid run_case "$1" "$2" DRY_RUN_FIXTURE_DIR="$IFXNC" CODEUP_BOT_USERNAME="$BOT" \
-    INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2EC"
+  PS_SRC=OMIT PS_SRC_ID=src-9 inline_case "$1" "$2" "$IFXNC"
 }
-no_commitid_case baseline-nocommitid "$ROOT"
-assert_rc "$RC" 0 "对照：缺 commitId 时评审成功"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：缺 commitId 时 0 条行内评论（fail-closed）"
-assert_contains "$(posted_comment "$OUT")" "未给出该版本的提交号" "对照：汇总单列这个成因"
-# 变异 = 把两处一起改回票 17 的形态：空提交号那条分支不再进入，「不一致」那条分支重新带上 `-n` 前提
-# （只改一处不够：光让第一条分支落空，空串 != HEAD 仍会被第二条分支拦住——票 17 的 fail-open 正是
-# 由那个 `-n` 前提造成的，这条变异要证明的就是「两半合起来才是 fail-closed」）。
-pkg=$(make_mutant m60-nocommitid-failopen 's|^  if \[\[ -z "\$to_commit" \]\]; then$|  if false; then|; s|^  if \[\[ "\$to_commit" != "\$head_full" \]\]; then$|  if [[ -n "$to_commit" \&\& "$to_commit" != "$head_full" ]]; then|')
+# 对照不另跑一次：端到端 nocommitid 用例已经把「0 条 + notice + 完整清单」全钉住了（票 17-fix2 C⑦），
+# 这里只需要变异体的行为。变异 = 让「没有提交号」那条 fail-closed 出口落空（锚在 inline_bail 的文案上）：
+# 后面那条 `!= HEAD` 的判定拿空串去 `git rev-parse` 会解析失败，所以还要把解析失败那条出口也一起放开，
+# 才回到票 17 的 fail-open —— 这条变异要证明的就是「几个出口合起来才守得住」。
+pkg=$(make_mutant m60-nocommitid-failopen \
+  '/inline_bail "行内评论未发出：Codeup 版本列表未给出该版本/ s/; return 1/; :/; /inline_bail "行内评论未发出：评审期间源分支有新推送/ s/; return 1/; :/; /inline_bail "行内评论未发出：Codeup 侧最新合并源版本/ s/; return 1/; :/')
 no_commitid_case m60 "$pkg"
 assert_rc "$RC" 0 "M60：变异体仍能跑完"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \

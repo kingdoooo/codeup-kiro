@@ -1,6 +1,6 @@
 {
   "contract": "codeup-reviewer/1",
-  "summary": "票 17 C：同一轮输出里两条逐字段相同（file/line_start/line_end/severity/title）的问题，只有 body 措辞不同。",
+  "summary": "票 17 C（17-fix2 定案）：同一轮输出里两条**逐字段相同**的问题（模型把同一条原样重发，只有 id 与 category 不同）。",
   "verdict": "DO_NOT_MERGE",
   "verdict_reason": "硬编码凭证必须先移除。",
   "findings": [
@@ -18,13 +18,13 @@
     {
       "id": "H2",
       "severity": "P0",
-      "category": "security",
+      "category": "logic",
       "title": "硬编码疑似应用密钥",
       "file": "src/app.py",
       "line_start": 2,
       "line_end": 2,
-      "body": "同一问题的第二份措辞：源码里出现了疑似凭证 `FAKE****0000`（body 不参与重复判定）。",
-      "fix": ""
+      "body": "`SECRET_KEY` 直接写入源码，疑似凭证为 `FAKE****0000`。",
+      "fix": "从环境变量或密钥管理服务读取。"
     }
   ]
 }

@@ -285,15 +285,25 @@ assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN GET')" "3" "list_patchsets:
 
 # ---- 选版本对：from = 最新 MERGE_TARGET，to = 最新 MERGE_SOURCE（按 versionNo）----
 out=$(codeup_select_patchset_pair < "$IFX/normal/list-patchsets.json")
-assert_eq "$out" "$(printf 'tgt-v1\tsrc-v6\td97b8017eeee\ta12311be11112222333344445555666677778888')" \
+assert_eq "$out" "$(printf 'tgt-v1\tsrc-v6\td97b8017eeee9999888877776666555544443333\ta12311be11112222333344445555666677778888')" \
   "select_patchset_pair: 取 versionNo 最大的一对，并带上 to 与 from 两侧的 commitId"
 # from 侧的 commitId 排在最后（追加而不是插入）：调用方 cut -f1..3 的老写法不受影响。
 # 它用来核对 Codeup 侧的比较基准与本地 merge-base 是否一致（R8 的告警）。
 assert_eq "$(printf '%s' "$out" | cut -f4)" "a12311be11112222333344445555666677778888" "select_patchset_pair: 第 4 列是 from 侧 commitId"
-assert_eq "$(printf '%s' "$out" | cut -f1,2,3)" "$(printf 'tgt-v1\tsrc-v6\td97b8017eeee')" "select_patchset_pair: 前三列语义不变"
-# 缺 commitId 时对应列为空串，不能整体选不出来
+assert_eq "$(printf '%s' "$out" | cut -f1,2,3)" "$(printf 'tgt-v1\tsrc-v6\td97b8017eeee9999888877776666555544443333')" "select_patchset_pair: 前三列语义不变"
+# 缺 commitId 时对应列为空串，不能整体选不出来。**两侧都要钉**（票 17-fix2 B③）：第 3 列（to 侧）的空串
+# 正是脚本「没给出提交号」那条 fail-closed 分支的入口，它一旦变成别的东西（null 字面量、整体选不出来），
+# 那条分支就再也走不到，而端到端的 fixture 又是自己造的、发现不了这种映射漂移。
 assert_eq "$(jq -c 'map(if .relatedMergeItemType == "MERGE_TARGET" then del(.commitId) else . end)' "$IFX/normal/list-patchsets.json" \
   | codeup_select_patchset_pair | cut -f4)" "" "select_patchset_pair: from 缺 commitId 时第 4 列为空串"
+assert_eq "$(jq -c 'map(if .patchSetBizId == "src-v6" then del(.commitId) else . end)' "$IFX/normal/list-patchsets.json" \
+  | codeup_select_patchset_pair | cut -f3)" "" "select_patchset_pair: to 缺 commitId 时第 3 列为空串"
+assert_eq "$(jq -c 'map(if .patchSetBizId == "src-v6" then .commitId = null else . end)' "$IFX/normal/list-patchsets.json" \
+  | codeup_select_patchset_pair | cut -f3)" "" "select_patchset_pair: to 的 commitId 为 null 时第 3 列为空串（不是字面量 null）"
+assert_eq "$(jq -c 'map(if .patchSetBizId == "src-v6" then .commitId = 12345 else . end)' "$IFX/normal/list-patchsets.json" \
+  | codeup_select_patchset_pair | cut -f3)" "" "select_patchset_pair: to 的 commitId 是数字时第 3 列为空串"
+assert_eq "$(jq -c 'map(if .patchSetBizId == "src-v6" then .commitId = 12345 else . end)' "$IFX/normal/list-patchsets.json" \
+  | codeup_select_patchset_pair | cut -f2)" "src-v6" "select_patchset_pair: to 的 commitId 不合形不影响仍选出该版本"
 # versionNo 乱序、类型不合形都不能选错
 out=$(codeup_select_patchset_pair < "$IFX/shuffled/list-patchsets.json")
 assert_eq "$(printf '%s' "$out" | cut -f2)" "src-v6" "select_patchset_pair: 顺序打乱后仍取 versionNo 最大的合并源版本"

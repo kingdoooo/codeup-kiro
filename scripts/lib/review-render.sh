@@ -335,10 +335,8 @@ REVIEW_CONTRACT_ID="codeup-reviewer/1"
 # verdict（票 17 B）：归一（去空白、大写）后只允许 MERGE / MERGE_AFTER_FIX / DO_NOT_MERGE；契约外一律置空串，
 #   原值清洗后折成一行、截 80 字放进 verdict_raw——**只给日志用**，渲染器对空串有固定文案，绝不把原值带进评论
 #   （结论行是读者第一眼看的位置，不是模型的自由文本槽位）。缺 verdict 时两者都为空。
-# duplicate_findings（票 17 C）：同一轮里 file/line_start/line_end/severity/title 五元组逐字段相同的问题只留首条
-#   （原顺序），被并掉的条数记在这里；dropped_findings 语义不变（只算不合契约被丢弃的）。判定取**归一化前**的
-#   路径与行号（见下面 dupkey 处的注释）：输出字段把所有不可定位的问题都塌成全 null，按它们比较会把不同文件
-#   上的同标题问题并掉。`file` 为 null 的问题没有位置可区分身份，键里额外带 `body` 的归一化前原文。
+# duplicate_findings（票 17 C，判定键见下面 dupkey 处）：同一轮里**全部有意义字段**逐字段相同的问题只留首条
+#   （原顺序），被并掉的条数记在这里；dropped_findings 语义不变（只算不合契约被丢弃的）。
 # 丢弃规则（spec §4.1「字段校验失败的 finding 丢弃并计数」）：
 #   - 不是 JSON 对象
 #   - severity 规范化（去首尾空白 + 大写）后不是 P0/P1/P2
@@ -399,29 +397,20 @@ review_validate() {
         | (if $file == null then null else lineno(.line_start) end) as $ls
         | (if $ls == null then null
            else (lineno(.line_end)) as $le | (if $le == null or $le < $ls then $ls else $le end) end) as $le
+        | (if (.body | type) == "string" then (.body | _sanitize_md) else "" end) as $bodykey
+        | (if (.fix | type) == "string" then (.fix | _sanitize_md) else "" end) as $fixkey
         | { id: (oneline(.id)), severity: $sev, category: (oneline(.category)), title: $title,
             file: $file, line_start: $ls, line_end: $le, delocated: $delocated,
-            # 同轮去重的判定键（票 17 C）：**取归一化前的**路径与行号，而不是上面那三个输出字段。
-            # 输出字段把「不可定位」全部塌成 file=null / line_start=null / line_end=null——按它们比较的话
-            # 判定键退化成（null, null, null, 级别, 标题），于是「路径不合规的两个**不同**文件」、
-            # 「同一个不合规文件里的两处」都会被并掉，第二条的正文与修复建议在 MR 上无处落脚（复审实测：
-            # 三条同标题 P0 只剩一条）。这里 tr(.file) 保留原始路径串（缺失/非字符串为 ""）、lineno(…) 只做
-            # 合法性归一，两条真正逐字段相同的问题仍然得到同一个键。
-            # 代价：`line_end` 非法（归一成 line_start）与显式等于 line_start 的两条不会合并——宁可重复，
-            # 不吞掉问题，与仓库其他去重的取向一致。
-            # `$file == null`（契约允许省略 file 的仓库级问题、以及路径不合规被按未定位处理的）**没有位置可以
-            # 区分身份**，只靠级别+标题会把两个不同的问题认成重复：实测两条 P2「缺少测试覆盖」（一条说
-            # src/auth、一条说 src/billing）被并成一条，第二条正文在 MR 上无处落脚（协调者复审改判，方案 ②）。
-            # 所以这一类的键额外带 `body` 的**归一化前原文**（tr 只去首尾空白，不过 _sanitize_md）：措辞逐字
-            # 相同才算重复。可定位的问题不带 body——同文件同行同标题的两份措辞仍按重复合并（票面 C 的原意）。
-            dupkey: ([tr(.file), lineno(.line_start), lineno(.line_end), $sev, $title,
-                      (if $file == null then tr(.body) else "" end)] | tojson),
-            body: (if (.body | type) == "string" then (.body | _sanitize_md) else "" end),
-            fix: (if (.fix | type) == "string" then (.fix | _sanitize_md) else "" end) }
+            # 同轮去重的判定键（票 17 C，17-fix2 A① 定案）：**全部有意义字段**，只有逐字段相同（模型把同一条
+            # 原样重发）才合并——差一个字就是两条不同的意见，宁可重复，绝不吞掉第二条的正文与 fix（I10）。
+            # 路径与行号取**归一化前**的原值：输出字段把不可定位的问题全塌成 null，按它们比较会把不同文件、
+            # 同文件不同行的问题并掉（fixture/unit 实测：三条同标题问题只剩一条）。title/body/fix 取**归一化后**
+            # 的值：「重复」的定义是「渲染出来一模一样」——按清洗后比，才不会因为清洗前差一个未闭合围栏就漏判。
+            dupkey: ([tr(.file), lineno(.line_start), lineno(.line_end), $sev, $title, $bodykey, $fixkey] | tojson),
+            body: $bodykey,
+            fix: $fixkey }
       ] as $kept
-    # 同一轮里逐字段相同的问题只留首条（票 17 C；CodeX 复审 P1-3 末段）。判定键 = file/line_start/line_end/
-    # severity/title 五元组，在上面归一化**之后**比较；body/fix/category 不参与——同一问题两份措辞算重复。
-    # 五元组任一不同都不合并：相邻两行上的两条不同问题归区间去重管（Q8，已裁决维持），不在这里动。
+    # 只留首条（票 17 C；CodeX 复审 P1-3 末段）。相邻两行上的两条不同问题归区间去重管（Q8，已裁决维持）。
     # 用 reduce + 已见集合而不是 unique_by：后者按键重排，会打乱「按原始次序编号」的稳定性。
     | ($kept | reduce .[] as $f ({seen: {}, out: []};
           $f.dupkey as $k
