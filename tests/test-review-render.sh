@@ -2105,8 +2105,10 @@ assert_eq "$(printf '%s' "$v" | jq -r '.findings | length')" "2" "票 17 C：只
 # 判定发生在字段归一化之后：级别大小写/空白、标题空白折叠后相同即视为相同
 v=$(jq -c '.findings[1].severity = " p0 " | .findings[1].title = "拼接  SQL"' "$tmp/dup2.json" | review_validate)
 assert_eq "$(printf '%s' "$v" | jq -r '.findings | length')" "1" "票 17 C：归一化后相同（' p0 '、双空格标题）也算重复"
-# 两条一样的未定位问题（file 不合规 → null）也合并，且未定位计数按合并后算
-v=$(jq -c '.findings[0].file = "a|b" | .findings[1].file = "a|b"' "$tmp/dup2.json" | review_validate)
+# 两条一样的未定位问题（file 不合规 → null）也合并，且未定位计数按合并后算。
+# 17-fix：未定位的问题判定键带 body，所以「一样」在这里必须连正文也一样——dup2 的两条正文不同，
+# 改成同一份正文再比（正文不同的那一半由下面 repo-level-dup 的用例覆盖）。
+v=$(jq -c '.findings[0].file = "a|b" | .findings[1].file = "a|b" | .findings[1].body = .findings[0].body' "$tmp/dup2.json" | review_validate)
 assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings, .delocated_findings] | join(",")')" "1,1,1" \
   "票 17 C：两条一样的未定位问题并成一条，delocated_findings 按合并后算"
 # 判定键取的是**归一化前**的路径与行号（复审发现）：输出字段把所有不可定位的问题都塌成
@@ -2125,6 +2127,28 @@ assert_eq "$(printf '%s' "$v" | jq -r '[.findings[].body] | join(",")')" "甲,�
 v=$(jq -c '.findings[1].file = .findings[0].file' "$tmp/dup-deloc.json" | review_validate)
 assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "3,0" \
   "票 17 C：同一个不合规路径、行号不同的两条不合并（归一化后都是 null，按原值才分得开）"
+# 17-fix（协调者复审改判，方案 ②）：`file` 为 null 的问题没有位置可区分身份，判定键额外带 body 的归一化前原文。
+# 契约允许仓库级问题省略 file，此时路径为空串、两个行号都是 null——只靠级别+标题会把两个不同的问题认成重复，
+# 第二条正文在 MR 上无处落脚（统计行加一句也救不回正文，所以不走那条路）。
+v=$(review_validate < fixtures/contract/repo-level-dup.json)
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings, .delocated_findings] | join(",")')" "2,0,0" \
+  "17-fix：两条仓库级同标题问题正文不同 → 不合并"
+assert_contains "$(printf '%s' "$v" | jq -r '[.findings[].body] | join("|")')" "CANARY-REPO-BILLING" "17-fix：第二条仓库级问题的正文还在"
+assert_contains "$(printf '%s' "$v" | jq -r '[.findings[].fix] | join("|")')" "重复扣费" "17-fix：第二条的修复建议也还在"
+# 正文逐字相同才算重复（tr 只去首尾空白）：同一条被模型重复输出两次仍然合并
+v=$(jq -c '.findings[1].body = ("  " + .findings[0].body + "  ") | .findings[1].fix = "另一种措辞的修复建议"' fixtures/contract/repo-level-dup.json | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "1,1" \
+  "17-fix：仓库级问题正文逐字相同（仅首尾空白不同）→ 仍按重复合并"
+# 路径不合规被按未定位处理的也走同一条规则（$file 为 null）
+v=$(jq -c '.findings[0].file = "a|b" | .findings[1].file = "a|b"' fixtures/contract/repo-level-dup.json | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings, .delocated_findings] | join(",")')" "2,0,2" \
+  "17-fix：同一个不合规路径下正文不同的两条也不合并"
+# 可定位的问题**不**带 body：同文件同行同级别同标题的两份措辞仍按重复合并（票面 C 的原意，不改）
+v=$(jq -c '.findings[0].file = "src/app.py" | .findings[0].line_start = 30 | .findings[0].line_end = 30
+           | .findings[1].file = "src/app.py" | .findings[1].line_start = 30 | .findings[1].line_end = 30' \
+      fixtures/contract/repo-level-dup.json | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "1,1" \
+  "17-fix：可定位问题的判定键不带 body（同文件同行的两份措辞仍算重复）"
 # 判定键不能泄进输出（它只是内部字段）
 assert_eq "$(printf '%s' "$v" | jq -r '[.findings[] | has("dupkey")] | unique | join(",")')" "false" "票 17 C：内部判定键不出现在规范化输出里"
 # 渲染器的输入校验不强制 duplicate_findings（旧 plan.json 兼容）

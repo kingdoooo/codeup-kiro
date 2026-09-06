@@ -786,7 +786,7 @@ assert_rc "$RC" 0 "对照：to≠HEAD 时评审成功"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：to≠HEAD 时 0 条行内评论（fail-closed）"
 assert_contains "$(posted_comment "$OUT")" "## 问题清单" "对照：退回完整清单"
 # 只把 `return 1` 换成空语句：notice 与 warning 照旧写出，随后代码继续往下发草稿——正是票 17 之前的行为
-pkg=$(make_mutant m52-head-failclosed '/^    return 1  # fail-closed/ s/return 1/:/')
+pkg=$(make_mutant m52-head-failclosed '/^    return 1  # fail-closed（提交号不一致）/ s/return 1/:/')
 head_mismatch_case m52 "$pkg"
 assert_rc "$RC" 0 "M52：变异体仍能跑完"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
@@ -854,7 +854,7 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" "CANARY-DELOC-FIRST" "对照：第一条的正文在评论里"
 assert_contains "$comment" "CANARY-DELOC-SECOND" "对照：第二条的正文也在评论里"
 pkg=$(make_mutant m56-dupkey-normalized \
-  's#dupkey: (\[tr(.file), lineno(.line_start), lineno(.line_end), \$sev, \$title\] | tojson),#dupkey: ([$file, $ls, $le, $sev, $title] | tojson),#' \
+  's#dupkey: (\[tr(.file), lineno(.line_start), lineno(.line_end), \$sev, \$title,#dupkey: ([$file, $ls, $le, $sev, $title] | tojson),#; /^                      (if \$file == null then tr(.body) else "" end)\] | tojson),$/d' \
   scripts/lib/review-render.sh)
 run_case m56 "$pkg" MOCK_KIRO_CONTRACT="$DELOCC"
 assert_rc "$RC" 0 "M56：变异体仍能跑完"
@@ -903,5 +903,54 @@ pkg=$(make_mutant m58-render-boundary 's|^    \*) echo "review_render_summary: �
 assert_contains "$(mut_bypass_marker "$pkg")" "伪造标题" \
   "M58：边界一塌，绕过校验的原值进了隐藏历史标记——单测「原值不出现在评论任何位置」断言会失败"
 assert_not_contains "$(mut_bypass_marker "$ROOT")" "伪造标题" "M58 对照：未变异实现把它按未给出结论处理"
+
+# --- M59（17-fix）：判定键里去掉 body → 两条仓库级同标题问题被并掉，第二条正文在 MR 上消失 ---
+# 契约允许仓库级问题省略 file，此时路径为空串、行号全 null，只靠级别+标题分不出身份。
+REPODUPC="$ROOT/tests/fixtures/contract/repo-level-dup.json"
+run_case baseline-repodup "$ROOT" MOCK_KIRO_CONTRACT="$REPODUPC"
+assert_rc "$RC" 0 "对照：两条仓库级同标题问题时评审成功"
+assert_contains "$OUT" "评审报告：P0 0 · P1 0 · P2 2" "对照：两条都留下了"
+assert_not_contains "$OUT" "完全重复的问题已合并" "对照：正文不同不算重复"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "CANARY-REPO-AUTH" "对照：第一条正文在评论里"
+assert_contains "$comment" "CANARY-REPO-BILLING" "对照：第二条正文也在评论里"
+pkg=$(make_mutant m59-dupkey-nobody \
+  's#                      (if \$file == null then tr(.body) else "" end)\] | tojson),#                      ""] | tojson),#' \
+  scripts/lib/review-render.sh)
+run_case m59 "$pkg" MOCK_KIRO_CONTRACT="$REPODUPC"
+assert_rc "$RC" 0 "M59：变异体仍能跑完"
+assert_contains "$OUT" "评审报告：P0 0 · P1 0 · P2 1" "M59：一条 P2 被静默并掉——单测「两条仓库级同标题问题不合并」断言会失败"
+assert_contains "$OUT" "1 条完全重复的问题已合并" "M59：日志把两个不同模块的问题说成完全重复"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "CANARY-REPO-AUTH" "M59：只剩首条"
+assert_not_contains "$comment" "CANARY-REPO-BILLING" "M59：第二条正文在 MR 上彻底消失——单测「第二条正文还在」断言会失败"
+
+# --- M60（17-fix）：缺 commitId 改回 fail-open → 拿不到提交号也照发，放弃了 I5 的绑定证明 ---
+IFXNC="$tmp/ifx-nocommitid"
+mkdir -p "$IFXNC"
+cp "$IFX"/create-comment-inline.*.json "$IFXNC/"
+mk_no_commitid() {
+  jq -n --arg base "$(git merge-base origin/master HEAD)" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE"}
+  ]' > "$IFXNC/list-patchsets.json"
+}
+no_commitid_case() { # <用例名> <集成包根>
+  MUT_TWEAK=mk_no_commitid run_case "$1" "$2" DRY_RUN_FIXTURE_DIR="$IFXNC" CODEUP_BOT_USERNAME="$BOT" \
+    INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2EC"
+}
+no_commitid_case baseline-nocommitid "$ROOT"
+assert_rc "$RC" 0 "对照：缺 commitId 时评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：缺 commitId 时 0 条行内评论（fail-closed）"
+assert_contains "$(posted_comment "$OUT")" "未给出该版本的提交号" "对照：汇总单列这个成因"
+# 变异 = 把两处一起改回票 17 的形态：空提交号那条分支不再进入，「不一致」那条分支重新带上 `-n` 前提
+# （只改一处不够：光让第一条分支落空，空串 != HEAD 仍会被第二条分支拦住——票 17 的 fail-open 正是
+# 由那个 `-n` 前提造成的，这条变异要证明的就是「两半合起来才是 fail-closed」）。
+pkg=$(make_mutant m60-nocommitid-failopen 's|^  if \[\[ -z "\$to_commit" \]\]; then$|  if false; then|; s|^  if \[\[ "\$to_commit" != "\$head_full" \]\]; then$|  if [[ -n "$to_commit" \&\& "$to_commit" != "$head_full" ]]; then|')
+no_commitid_case m60 "$pkg"
+assert_rc "$RC" 0 "M60：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
+  "M60：拿不到提交号也发了 3 条行内评论——端到端「0 次创建」断言会失败"
+assert_contains "$(posted_comment "$OUT")" "已标注在「文件改动」对应行" "M60：汇总还谎报「已标注」"
 
 report

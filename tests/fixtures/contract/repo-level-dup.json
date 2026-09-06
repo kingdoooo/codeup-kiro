@@ -1,0 +1,24 @@
+{
+  "contract": "codeup-reviewer/1",
+  "summary": "17-fix：两条仓库级问题（契约允许省略 file）级别与标题相同，正文说的是两个不同模块。",
+  "verdict": "MERGE_AFTER_FIX",
+  "verdict_reason": "两个模块都缺测试。",
+  "findings": [
+    {
+      "id": "R1",
+      "severity": "P2",
+      "category": "testing",
+      "title": "缺少测试覆盖",
+      "body": "CANARY-REPO-AUTH：src/auth 模块没有任何单元测试。",
+      "fix": "补上登录失败与令牌过期两条路径的用例。"
+    },
+    {
+      "id": "R2",
+      "severity": "P2",
+      "category": "testing",
+      "title": "缺少测试覆盖",
+      "body": "CANARY-REPO-BILLING：src/billing 模块没有任何单元测试。",
+      "fix": "补上退款与重复扣费两条路径的用例。"
+    }
+  ]
+}

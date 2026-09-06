@@ -338,7 +338,7 @@ REVIEW_CONTRACT_ID="codeup-reviewer/1"
 # duplicate_findings（票 17 C）：同一轮里 file/line_start/line_end/severity/title 五元组逐字段相同的问题只留首条
 #   （原顺序），被并掉的条数记在这里；dropped_findings 语义不变（只算不合契约被丢弃的）。判定取**归一化前**的
 #   路径与行号（见下面 dupkey 处的注释）：输出字段把所有不可定位的问题都塌成全 null，按它们比较会把不同文件
-#   上的同标题问题并掉。
+#   上的同标题问题并掉。`file` 为 null 的问题没有位置可区分身份，键里额外带 `body` 的归一化前原文。
 # 丢弃规则（spec §4.1「字段校验失败的 finding 丢弃并计数」）：
 #   - 不是 JSON 对象
 #   - severity 规范化（去首尾空白 + 大写）后不是 P0/P1/P2
@@ -409,7 +409,13 @@ review_validate() {
             # 合法性归一，两条真正逐字段相同的问题仍然得到同一个键。
             # 代价：`line_end` 非法（归一成 line_start）与显式等于 line_start 的两条不会合并——宁可重复，
             # 不吞掉问题，与仓库其他去重的取向一致。
-            dupkey: ([tr(.file), lineno(.line_start), lineno(.line_end), $sev, $title] | tojson),
+            # `$file == null`（契约允许省略 file 的仓库级问题、以及路径不合规被按未定位处理的）**没有位置可以
+            # 区分身份**，只靠级别+标题会把两个不同的问题认成重复：实测两条 P2「缺少测试覆盖」（一条说
+            # src/auth、一条说 src/billing）被并成一条，第二条正文在 MR 上无处落脚（协调者复审改判，方案 ②）。
+            # 所以这一类的键额外带 `body` 的**归一化前原文**（tr 只去首尾空白，不过 _sanitize_md）：措辞逐字
+            # 相同才算重复。可定位的问题不带 body——同文件同行同标题的两份措辞仍按重复合并（票面 C 的原意）。
+            dupkey: ([tr(.file), lineno(.line_start), lineno(.line_end), $sev, $title,
+                      (if $file == null then tr(.body) else "" end)] | tojson),
             body: (if (.body | type) == "string" then (.body | _sanitize_md) else "" end),
             fix: (if (.fix | type) == "string" then (.fix | _sanitize_md) else "" end) }
       ] as $kept

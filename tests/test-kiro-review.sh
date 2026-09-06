@@ -999,9 +999,10 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "选不出版本对�
 assert_contains "$(posted_comment "$OUT")" "## 问题清单" "选不出版本对：回落成完整清单"
 
 # ---- A11（票 17）：最新合并源版本的提交 ≠ HEAD → fail-closed：0 条行内评论、完整清单 + notice ----
-# 评审期间有新推送时 Kiro 评的是旧 HEAD、变更行集合也按旧 HEAD 算，评论却会绑到最新版本——同一行号在新版本里
-# 可能是完全不同的代码（I5）。「行号可能有偏移」补救不了挂错位置的 P0，所以一条都不发；新推送本来就会触发
-# 新一轮评审把行内评论放对，fail-closed 没有信息损失（完整清单仍在汇总里，I10）。
+# 行号是按本次评审的提交算的，绑到另一个版本上同一行号可能是完全不同的代码（I5）；「行号可能有偏移」补救不了
+# 挂错位置的 P0，所以一条都不发，问题以完整清单形式留在汇总里（信息不丢，I10）。
+# 判定是对称的（to 可能比 HEAD 新，也可能因版本列表滞后而比 HEAD 旧），本票不区分方向，所以 notice 文案中性：
+# 陈述「不一致」，把「如果是新推送」写成条件（17-fix，协调者复审第 3 条）。
 IFX_DIR="$tmp/ifx-shamismatch"; mkdir -p "$IFX_DIR"
 mk_mismatch() {
   local base
@@ -1026,8 +1027,10 @@ assert_eq "$(req_count "$OUT" DELETE)" "0" "A11 to≠HEAD：没有任何删除�
 # 判定在草稿创建之前——也在拉现有行内评论（第 5 步）之前：除了查版本列表，一个副作用都没有
 assert_eq "$(printf '%s\n' "$OUT" | grep -cF 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}')" "0" "A11 to≠HEAD：连现有行内评论都不查"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "行内评论未发出：本次评审的提交（$(cd "$CASE/work" && git rev-parse HEAD | cut -c1-12)）已不是 Codeup 侧最新的合并源版本（deadbeefdead，评审期间有新推送），下面是完整问题清单。" \
-  "A11 to≠HEAD：notice 文案带 12 位 HEAD、12 位最新版本提交与成因"
+assert_contains "$comment" "行内评论未发出：本次评审的提交（$(cd "$CASE/work" && git rev-parse HEAD | cut -c1-12)）与 Codeup 侧最新合并源版本（deadbeefdead）不一致，下面是完整问题清单；若这是评审期间的新推送，新推送触发的评审会补上行内评论。" \
+  "A11 to≠HEAD：notice 文案中性——带两个 12 位提交号，把新推送写成条件而不是结论"
+assert_not_contains "$comment" "已不是 Codeup 侧最新的合并源版本" "A11 to≠HEAD：不再断言方向（可能是版本列表滞后，不是新推送）"
+assert_not_contains "$OUT" "（评审期间有新推送）" "A11 to≠HEAD：日志也不把成因写成结论"
 assert_contains "$comment" "## 问题清单" "A11 to≠HEAD：回落成完整展开的问题清单（INLINE_COMMENT=0 形态）"
 assert_contains "$comment" "硬编码疑似应用密钥" "A11 to≠HEAD：问题明细仍在汇总里（信息不丢，I10）"
 assert_contains "$comment" "仓库级问题：没有统一的密钥管理" "A11 to≠HEAD：未定位问题也在完整清单里"
@@ -1039,7 +1042,7 @@ assert_not_contains "$comment" "<details><summary>折叠区" "A11 to≠HEAD：�
 run_inline_case a11control ifx-a11control
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "A11 正控：to = HEAD 时行内照发 3 条"
 assert_not_contains "$OUT" "fail-closed" "A11 正控：日志没有 fail-closed"
-assert_not_contains "$(posted_comment "$OUT")" "已不是 Codeup 侧最新的合并源版本" "A11 正控：没有 fail-closed 的 notice"
+assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出" "A11 正控：没有 fail-closed 的 notice"
 
 # ---- A11 复审补充：两个核对同时不成立（to≠HEAD 且 from≠BASE）----
 # from 侧那条警告是「P1-14 的结论失效了」的探针，必须先于 fail-closed 落进日志：否则最需要它的那种运行
@@ -1060,9 +1063,42 @@ assert_contains "$OUT" "不等于本地 merge-base" "A11 两者都不一致：fr
 assert_contains "$OUT" "与当前 HEAD" "A11 两者都不一致：to 侧警告也在"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "A11 两者都不一致：仍然 0 次创建行内评论"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "已不是 Codeup 侧最新的合并源版本" "A11 两者都不一致：汇总写 fail-closed 的成因"
+assert_contains "$comment" "与 Codeup 侧最新合并源版本（deadbeefdead）不一致" "A11 两者都不一致：汇总写 fail-closed 的成因"
 assert_not_contains "$comment" "行号可能有偏移" "A11 两者都不一致：汇总不提行号偏移（一条行内评论都没发）"
 assert_contains "$comment" "## 问题清单" "A11 两者都不一致：回落成完整清单"
+
+# ---- A11（17-fix）：版本列表没给出最新合并源版本的提交号 → 同样 fail-closed ----
+# `codeup_select_patchset_pair` 把缺失/非字符串的 commitId 映射成空串（tests/test-codeup-api.sh 钉住），
+# 票 17 原实现在这里 fail-open：拿不到提交号照样发，等于放弃了「行内评论绑定它所评审的提交」这条证明（I5）。
+# 协调者复审改判：绑不上就不发，notice 单列这个成因（读者要能区分「对不上」与「没给」）。
+IFX_DIR="$tmp/ifx-nocommitid"; mkdir -p "$IFX_DIR"
+mk_nocommitid() {
+  local base
+  mkdir -p "$IFX_DIR"
+  # from 侧仍是真实 merge-base：只让 to 侧缺 commitId，隔离成因
+  base=$(git merge-base origin/master HEAD)
+  jq -n --arg base "$base" '[{patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+          {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE"}]' \
+    > "$IFX_DIR/list-patchsets.json"
+  jq -n '{comment_biz_id:"draft-1"}' > "$IFX_DIR/create-comment-inline.json"
+}
+CASE_TWEAK=mk_nocommitid run_case nocommitid DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+assert_rc "$RC" 0 "A11 缺 commitId：评审仍成功（退出码 0）"
+assert_contains "$OUT" "没有提交号" "A11 缺 commitId：日志点名缺的是提交号"
+assert_contains "$OUT" "src-9" "A11 缺 commitId：日志点名是哪个版本缺"
+assert_contains "$OUT" "fail-closed" "A11 缺 commitId：日志点明是 fail-closed"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "A11 缺 commitId：0 次创建行内评论（绑不上就不发）"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "A11 缺 commitId：不调提交接口"
+assert_eq "$(req_count "$OUT" DELETE)" "0" "A11 缺 commitId：没有任何删除请求"
+assert_eq "$(printf '%s\n' "$OUT" | grep -cF 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}')" "0" "A11 缺 commitId：连现有行内评论都不查"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "行内评论未发出：Codeup 版本列表未给出该版本的提交号，无法确认行内评论会绑到本次评审的提交上，下面是完整问题清单。" \
+  "A11 缺 commitId：notice 单列这个成因"
+assert_not_contains "$comment" "不一致" "A11 缺 commitId：不谎称「对不上」（没给号 ≠ 号不同）"
+assert_contains "$comment" "## 问题清单" "A11 缺 commitId：回落成完整清单"
+assert_contains "$comment" "硬编码疑似应用密钥" "A11 缺 commitId：问题明细仍在汇总里（I10）"
+assert_not_contains "$comment" "已标注在" "A11 缺 commitId：不谎报行内计数"
 
 # ---- 查现有行内评论失败 → 跳过去重但照常发布，并留痕 ----
 run_inline_case nodedup ifx-nodedup DRY_RUN_FAIL_ROUTES="list-comments-inline:500" CODEUP_RETRY_BACKOFF=0

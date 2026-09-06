@@ -204,20 +204,30 @@ publish_inline_comments() {
     from_offset=1
     log "警告：最新合并目标版本的提交（${from_commit:0:12}）不等于本地 merge-base（${BASE:0:12}）——按 P1-14 的结论 MERGE_TARGET 应冻结在 merge-base，这不该发生；行号是新文件侧的（P1-02），所以这条只留痕、不拒发"
   fi
-  # to 侧核对（spec §4.5 第 1 步，2026-09-06 修订，票 17 A）：最新合并源版本的提交 ≠ HEAD ⇒ 评审期间有新推送。
-  # 此时 Kiro 评的是旧 HEAD、变更行集合也按旧 HEAD 算，而评论只能绑 Codeup 侧最新的版本——同一行号在新版本里
-  # 可能是完全不同的代码（违反 I5「定位可信」），「行号可能有偏移」的提醒补救不了挂错位置的 P0。
-  # 所以 **fail-closed**：一条行内评论都不发，退回 INLINE_COMMENT=0 形态的完整清单（信息不丢，I10 可见）；
-  # 新推送本来就会触发新一轮评审把行内评论放对。判定在草稿创建之前、也在拉现有行内评论（第 5 步）之前：
-  # 除了上面那次版本列表查询，不留任何副作用。
+  # to 侧核对（spec §4.5 第 1 步，2026-09-06 修订，票 17 A + 17-fix）：I5 要求行内评论只绑定它所评审的那个提交。
+  # 证明不了这一点就不发——两种情形同样处置，**都 fail-closed**：
+  #   ① 版本列表没给出该版本的提交号（`to_commit` 为空）：无从证明绑定，不能拿「大概是它」去挂 P0；
+  #   ② 提交号与当前 HEAD 不一致：Kiro 评的是本次 checkout 的提交、变更行集合也按它算，而评论只能绑 Codeup 侧
+  #      最新的版本，同一行号在另一个版本里可能是完全不同的代码，「行号可能有偏移」的提醒补救不了挂错位置的 P0。
+  # fail-closed 的代价是本轮退回 INLINE_COMMENT=0 形态的完整清单（信息不丢，I10 可见），不是丢问题。
+  # 判定在草稿创建之前、也在拉现有行内评论（第 5 步）之前：除了上面那次版本列表查询，不留任何副作用。
   # 阿里云侧开发者看不到流水线日志，原因必须写进汇总评论（notice）。
   # 「绑与 HEAD 匹配的旧 MERGE_SOURCE 版本」需要探测 Codeup 是否接受非最新 patchset_biz_id（P1-16，可选后续）。
-  if [[ -n "$to_commit" && "$to_commit" != "$head_full" ]]; then
-    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论未发出：本次评审的提交（${head_full:0:12}）已不是 Codeup 侧最新的合并源版本（${to_commit:0:12}，评审期间有新推送），下面是完整问题清单。"
-    log "警告：最新合并源版本的提交（${to_commit:0:12}）与当前 HEAD（${head_full:0:12}）不一致（评审期间有新推送）——本次不发任何行内评论（fail-closed，spec §4.5 第 1 步）：行号是按本次评审的提交算的，绑到新版本上会挂错位置；新推送触发的那次评审会补上行内评论"
+  if [[ -z "$to_commit" ]]; then
+    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论未发出：Codeup 版本列表未给出该版本的提交号，无法确认行内评论会绑到本次评审的提交上，下面是完整问题清单。"
+    log "警告：版本列表里最新合并源版本（${to_ps}）没有提交号——本次不发任何行内评论（fail-closed，spec §4.5 第 1 步）：绑不上就不能发，I5 要求行内评论只绑定它所评审的那个提交"
+    return 1  # fail-closed（没有提交号）：INLINE_ACTIVE 仍为 0，调用方按 INLINE_COMMENT=0 渲染完整清单；变异 M60 把这行换成空语句
+  fi
+  # 判定是对称的：`to_commit` 可能比 HEAD 新（评审期间源分支又推送了），也可能比 HEAD 旧（Codeup 还没为本次
+  # 推送建出版本，版本列表滞后）。两个方向都不该把行号绑过去，但**成因不同、自愈前景也不同**（前者下一轮评审
+  # 会补上，后者不会），本票不区分方向（区分要靠 `git merge-base --is-ancestor` 之类的本地判定，另开一票），
+  # 所以文案保持中性：陈述「不一致」这个事实，把「如果是新推送」写成条件而不是结论。
+  if [[ "$to_commit" != "$head_full" ]]; then
+    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论未发出：本次评审的提交（${head_full:0:12}）与 Codeup 侧最新合并源版本（${to_commit:0:12}）不一致，下面是完整问题清单；若这是评审期间的新推送，新推送触发的评审会补上行内评论。"
+    log "警告：最新合并源版本的提交（${to_commit:0:12}）与当前 HEAD（${head_full:0:12}）不一致——本次不发任何行内评论（fail-closed，spec §4.5 第 1 步）：行号是按本次评审的提交算的，绑到另一个版本上会挂错位置。成因可能是评审期间的新推送（下一轮评审会补上行内评论），也可能是 Codeup 的版本列表还没为本次推送建出版本；本票不区分方向"
     # 调用方按 `if publish_inline_comments`：rc 1 → SUMMARY_JSON 仍是 validated.json，INLINE_ACTIVE 在本函数里
     # 只在两处成功返回前置 1，此处仍为初始值 0 ⇒ 汇总以完整清单形态渲染。变异测试 M52 把下面这行换成空语句。
-    return 1  # fail-closed：INLINE_ACTIVE 仍为 0，调用方按 INLINE_COMMENT=0 渲染完整清单
+    return 1  # fail-closed（提交号不一致）：INLINE_ACTIVE 仍为 0，调用方按 INLINE_COMMENT=0 渲染完整清单
   fi
   # from 侧的 notice 留在这里（警告已在上面打过）：它说的是「**发出去的**行内评论的行号可能有偏移」，
   # 而 fail-closed 那条路径一条都没发——那时把这句话写进汇总只会让读者去找不存在的行内评论（I10 要求
