@@ -873,7 +873,7 @@ assert_eq "$(mut_guard_const "$ROOT")" "3" "第 11 条：常量改名后守卫�
 pkg=$(make_mutant m-g-log-redact 's|^  log "错误：\${reason_fixed}\${detail:+：\$(_untrusted_for_log "\$detail")}"$|  log "错误：${reason_fixed}${detail:+：$detail}"  # 变异 M-g：不受信取值不掩码|')
 run_case m-g "$pkg" MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP}"
 assert_nonzero "$RC" "M-g：变异体仍以非零退出"
-assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status 取值见后）：error ${SEC_GHP}" "M-g：日志行带 ghp_ 原文——端到端「日志不含原文」断言会失败"
+assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status 取值见后）：status=error ${SEC_GHP}" "M-g：日志行带 ghp_ 原文——端到端「日志不含原文」断言会失败"
 assert_not_contains "$(posted_comment "$OUT")" "$SEC_GHP" "M-g 对照：失败评论仍被文档级兜底掩掉（差别只在日志）"
 run_case m-g-control "$ROOT" MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP}"
 assert_not_contains "$OUT" "$SEC_GHP" "M-g 对照：未变异实现日志与评论都不含原文"
