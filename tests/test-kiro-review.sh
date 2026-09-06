@@ -1417,11 +1417,11 @@ assert_eq "$(grep -c '超过上限 ${REVIEW_MAX_FINDINGS}，仅展示前' "$ROOT
 # jq 报错不会回显模型取值，所以降级原因目前没有能带出完整 token 的端到端向量——只断言那行日志仍在、没被包坏）。
 run_case statusleak MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP} ${SEC_AKIA}"
 assert_nonzero "$RC" "16-fix 日志：status 非 success → 非零退出"
-assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status 取值见后）：error ${SEC_GHP_MASKED} ${SEC_AKIA_MASKED}" \
+assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status 取值见后）：status=error ${SEC_GHP_MASKED} ${SEC_AKIA_MASKED}" \
   "16-fix 日志：die_review 的日志行带掩码后的 status（固定文案与取值都在，只有 token 变掩码）"
 assert_no_secrets "$OUT" "16-fix 日志（全部输出：日志 + 失败评论）"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "取值见后）：error ${SEC_GHP_MASKED}" "16-fix 日志对照：失败评论里同样是掩码后的 status（出口掩码兜住）"
+assert_contains "$comment" "取值见后）：status=error ${SEC_GHP_MASKED}" "16-fix 日志对照：失败评论里同样是掩码后的 status（出口掩码兜住）"
 # 掩码程序不可用时的日志退回：不打原文，只留固定文案（第 20 条：不再有第二套「粗掩」词汇）
 run_case statusleak-badawk PATH="$tmp/badawk:$PATH" MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP}"
 assert_nonzero "$RC" "16-fix 日志退回：非零退出"
