@@ -40,9 +40,9 @@ run_case() {
   if [[ -n "${MUT_TWEAK:-}" ]]; then (cd "$CASE/work" && "$MUT_TWEAK"); fi
   MUT_TWEAK=""
   export HOME="$CASE/home"; mkdir -p "$HOME"
-  # 替身只认 KIRO_MOCK_DIR（由 KIRO_ENV_PASSTHROUGH 透传，与 test-kiro-review.sh 同一约定）；行为开关写进 $CASE/mock.env
-  export REVIEW_REPO_DIR="$CASE/work" KIRO_MOCK_DIR="$CASE" KIRO_ENV_PASSTHROUGH=KIRO_MOCK_DIR
-  mock_config_write "$CASE" "$@"
+  # 替身只从 $HOME/.kiro-mock/ 取配置与写记录（与 test-kiro-review.sh 同一约定；不借道 KIRO_ENV_PASSTHROUGH）
+  export REVIEW_REPO_DIR="$CASE/work"
+  mock_config_write "$HOME" "$@"; MD="$HOME/.kiro-mock"
   RC=0; OUT=$(env "$@" "$pkg/scripts/kiro-review.sh" 2>&1) || RC=$?
 }
 
@@ -75,70 +75,72 @@ except Exception:
 run_case baseline "$ROOT"
 assert_rc "$RC" 0 "对照：未变异实现成功"
 assert_eq "$([[ -e "$CASE/work/AGENTS.md" || -e "$CASE/work/src/sub/AGENTS.md" ]] && echo exists || echo gone)" "gone" "对照：AGENTS.md 已移除"
-assert_eq "$(cat "$CASE/cwdscan")" "" "对照：Kiro 启动时工作区干净"
+assert_eq "$(cat "$MD/cwdscan")" "" "对照：Kiro 启动时工作区干净"
 assert_eq "$([[ -e "$CASE/work/src/sub/.kiro" || -e "$CASE/work/lsp.json" ]] && echo exists || echo gone)" "gone" "对照：子目录 .kiro/ 与根 lsp.json 已移除"
-assert_contains "$(paste -sd' ' "$CASE/args")" "--agent codeup-reviewer" "对照：参数含 --agent codeup-reviewer"
-assert_eq "$(grep -c -- '^--trust' "$CASE/args")" "0" "对照：参数里没有任何 --trust-* 开关"
-assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$CASE/env")" "0" "对照：Kiro 进程环境里没有 YUNXIAO_TOKEN"
-assert_eq "$(grep -c -x -- 'KIRO_API_KEY' "$CASE/env")" "1" "对照：Kiro 进程环境里有 KIRO_API_KEY"
-assert_contains "$(paste -sd' ' "$CASE/args")" "--agent-engine v2" "对照：参数含 --agent-engine v2"
-assert_contains "$(paste -sd' ' "$CASE/args")" "--output-format stream-json" "对照：参数含 --output-format stream-json"
-assert_contains "$(cat "$CASE/settings")" "chat.disableInheritingDefaultResources true" "对照：settings 已调用"
+assert_contains "$(paste -sd' ' "$MD/args")" "--agent codeup-reviewer" "对照：参数含 --agent codeup-reviewer"
+assert_eq "$(grep -c -- '^--trust' "$MD/args")" "0" "对照：参数里没有任何 --trust-* 开关"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "0" "对照：Kiro 进程环境里没有 YUNXIAO_TOKEN"
+assert_eq "$(grep -c -x -- 'KIRO_API_KEY' "$MD/env")" "1" "对照：Kiro 进程环境里有 KIRO_API_KEY"
+assert_contains "$(paste -sd' ' "$MD/args")" "--agent-engine v2" "对照：参数含 --agent-engine v2"
+assert_contains "$(paste -sd' ' "$MD/args")" "--output-format stream-json" "对照：参数含 --output-format stream-json"
+assert_contains "$(cat "$MD/settings")" "chat.disableInheritingDefaultResources true" "对照：settings 已调用"
 assert_contains "$OUT" "P0 1 · P1 1 · P2 1" "对照：评论按契约渲染出分级统计"
 assert_contains "$OUT" "Kiro 用量：credits=0.2609" "对照：credits 用量写进日志"
 assert_not_contains "$OUT" "结构化解析失败" "对照：未变异实现不降级"
 
 # --- M1：删掉 AGENTS.md 移除逻辑 → AGENTS.md 残留、Kiro 启动时仍能看到 ---
-pkg=$(make_mutant m1-agentsmd '/-iname AGENTS.md/d')
+pkg=$(make_mutant m1-agentsmd '/-iname AGENTS.md -not -type d/d' scripts/lib/isolation.sh)
 run_case m1 "$pkg"
 assert_rc "$RC" 0 "M1：变异体仍能跑完（只是失去防护）"
 assert_eq "$([[ -e "$CASE/work/AGENTS.md" && -e "$CASE/work/src/sub/AGENTS.md" ]] && echo exists || echo gone)" "exists" \
   "M1：移除逻辑被删后根与子目录 AGENTS.md 残留——端到端断言「AGENTS.md 已移除」会失败"
-assert_contains "$(cat "$CASE/cwdscan")" "AGENTS.md" "M1：Kiro 启动时工作区扫描到 AGENTS.md——端到端断言「工作区干净」会失败"
-assert_contains "$(cat "$CASE/stdin")" "CANARY-AGENTSMD-ROOT" "M1：diff 内容不受移除逻辑影响（对照两侧一致）"
+assert_contains "$(cat "$MD/cwdscan")" "AGENTS.md" "M1：Kiro 启动时工作区扫描到 AGENTS.md——端到端断言「工作区干净」会失败"
+assert_contains "$(cat "$MD/stdin")" "CANARY-AGENTSMD-ROOT" "M1：diff 内容不受移除逻辑影响（对照两侧一致）"
 
 # --- M2：删掉 --agent-engine 参数 → 引擎不再钉死 ---
 pkg=$(make_mutant m2-engine 's/--agent-engine "\$KIRO_ENGINE"//')
 run_case m2 "$pkg"
 assert_rc "$RC" 0 "M2：变异体仍能跑完"
-assert_not_contains "$(paste -sd' ' "$CASE/args")" "--agent-engine v2" "M2：参数中不再有 --agent-engine v2——端到端断言会失败"
+assert_not_contains "$(paste -sd' ' "$MD/args")" "--agent-engine v2" "M2：参数中不再有 --agent-engine v2——端到端断言会失败"
 
 # --- M4：删掉 --agent 参数 → 以默认 agent 运行（无拒绝路径、无只读提示词）---
 pkg=$(make_mutant m4-agent 's/ --agent "\$AGENT_NAME"//')
 run_case m4 "$pkg"
 assert_rc "$RC" 0 "M4：变异体仍能跑完"
-assert_not_contains "$(paste -sd' ' "$CASE/args")" "--agent codeup-reviewer" "M4：参数中不再有 --agent codeup-reviewer——端到端断言会失败"
+assert_not_contains "$(paste -sd' ' "$MD/args")" "--agent codeup-reviewer" "M4：参数中不再有 --agent codeup-reviewer——端到端断言会失败"
 
 # --- M5a：把 --trust-tools=read,grep,glob 加回调用行 → 「没有任何 --trust-*」断言必须失败（票 15）---
 pkg=$(make_mutant m5a-trust-tools 's/--agent "\$AGENT_NAME"/--trust-tools=read,grep,glob --agent "$AGENT_NAME"/')
 run_case m5a "$pkg"
 assert_rc "$RC" 0 "M5a：变异体仍能跑完（只是失去边界语义）"
-assert_eq "$(grep -c -x -- '--trust-tools=read,grep,glob' "$CASE/args")" "1" "M5a：参数里出现 --trust-tools——端到端断言「没有任何 --trust-*」会失败"
-assert_eq "$(grep -c -- '^--trust' "$CASE/args")" "1" "M5a：行首匹配同样抓到它"
+assert_eq "$(grep -c -x -- '--trust-tools=read,grep,glob' "$MD/args")" "1" "M5a：参数里出现 --trust-tools——端到端断言「没有任何 --trust-*」会失败"
+assert_eq "$(grep -c -- '^--trust' "$MD/args")" "1" "M5a：行首匹配同样抓到它"
 
 # --- M5b：加上拒绝信息里推荐的 --trust-all-tools（实测绕过 allowedPaths，P1-15 T7）→ 断言必须失败 ---
 pkg=$(make_mutant m5b-trust-all 's/--agent "\$AGENT_NAME"/--trust-all-tools --agent "$AGENT_NAME"/')
 run_case m5b "$pkg"
 assert_rc "$RC" 0 "M5b：变异体仍能跑完"
-assert_eq "$(grep -c -x -- '--trust-all-tools' "$CASE/args")" "1" "M5b：参数里出现 --trust-all-tools——端到端断言「绝不传 --trust-all-tools」会失败"
+assert_eq "$(grep -c -x -- '--trust-all-tools' "$MD/args")" "1" "M5b：参数里出现 --trust-all-tools——端到端断言「绝不传 --trust-all-tools」会失败"
 
 # --- M5c：去掉 env -i 许可清单 → Kiro 进程继承完整环境，YUNXIAO_TOKEN 可见（票 15）---
 pkg=$(make_mutant m5c-env-i 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" kiro-cli chat --no-interactive/kiro-cli chat --no-interactive/')
 run_case m5c "$pkg"
 assert_rc "$RC" 0 "M5c：变异体仍能跑完"
-assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$CASE/env")" "1" "M5c：Kiro 进程环境里出现 YUNXIAO_TOKEN——端到端断言「没有 YUNXIAO_TOKEN」会失败"
-assert_eq "$(grep -c -x -- 'CODEUP_REPO_ID' "$CASE/env")" "1" "M5c：CODEUP_REPO_ID 同样泄入"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "1" "M5c：Kiro 进程环境里出现 YUNXIAO_TOKEN——端到端断言「没有 YUNXIAO_TOKEN」会失败"
+assert_eq "$(grep -c -x -- 'CODEUP_REPO_ID' "$MD/env")" "1" "M5c：CODEUP_REPO_ID 同样泄入"
 
-# --- M5d：拿掉安装函数里「--workspace/--chunks 必填」的检查 → 不传路径也能装出一份 allowedPaths=["",""] 的 agent（15-fix #3）---
-# 单测层的可观测结果（端到端里执行器总是传两条路径）：装出来的定义 allowedPaths 是两个空串，kiro-cli 会把它当成
-# 不存在的路径 → allow 形同为空，headless 下每次读取都被拒、评审在读第一个文件时失败并烧掉额度。
+# --- M5d：拿掉安装函数里「--workspace/--chunks 必填」的检查（15-fix #3 / 15-fix2 #7）---
+# 15-fix2 #7 删掉了后面那两个恒真的 ws_set/ch_set 守卫，所以没了必填检查之后，缺参数会在「取物理路径」处以另一个理由失败
+# （`--workspace 取值为空`），不再装出坏 agent；这道检查现在的价值是**报错把两个必填参数都点名**（含 --chunks 与 --allow-none 提示）。
+# 可观测结果：缺参数时的报错不再点名 --chunks——单测「缺参数：报错点名 --chunks」断言会失败。
 pkg=$(make_mutant m5d-required '/缺少必填参数/d' scripts/lib/kiro-agent.sh)
-rc5d=0; dest5d=$( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_install_agent "$pkg/kiro/agent-codeup-reviewer.json" "$tmp/m5d-agents" 2>/dev/null ) || rc5d=$?
-assert_eq "$rc5d" "0" "M5d：不传 --workspace/--chunks 仍安装成功——单测断言「缺参数：安装失败」会失败"
-assert_eq "$(jq -c '.toolsSettings.read.allowedPaths' "$tmp/m5d-agents/codeup-reviewer.json")" '["",""]' "M5d：落盘的定义里 allowedPaths 是两个空串（形同 allow 为空）"
-rc5d=0; ( set +e; source "$ROOT/scripts/lib/kiro-agent.sh"; kiro_install_agent "$ROOT/kiro/agent-codeup-reviewer.json" "$tmp/m5d-control" >/dev/null 2>&1 ) || rc5d=$?
-assert_eq "$([[ $rc5d -ne 0 ]] && echo nonzero)" "nonzero" "M5d 对照：未变异实现缺参数时拒绝安装"
-assert_eq "$([[ -e "$tmp/m5d-control" ]] && echo written || echo none)" "none" "M5d 对照：未变异实现不落盘"
+rc5d=0; err5d=$( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_install_agent "$pkg/kiro/agent-codeup-reviewer.json" "$tmp/m5d-agents" 2>&1 >/dev/null ) || rc5d=$?
+assert_eq "$([[ $rc5d -ne 0 ]] && echo nonzero)" "nonzero" "M5d：缺参数仍失败（在取物理路径处）——不会装出坏 agent"
+assert_not_contains "$err5d" "--chunks" "M5d：报错不再点名 --chunks——单测「缺参数：报错点名 --chunks」断言会失败"
+assert_not_contains "$err5d" "必填" "M5d：报错不再说明「必填」"
+assert_eq "$([[ -e "$tmp/m5d-agents" ]] && echo written || echo none)" "none" "M5d：仍不落盘"
+rc5d=0; err5dc=$( set +e; source "$ROOT/scripts/lib/kiro-agent.sh"; kiro_install_agent "$ROOT/kiro/agent-codeup-reviewer.json" "$tmp/m5d-control" 2>&1 >/dev/null ) || rc5d=$?
+assert_contains "$err5dc" "--chunks" "M5d 对照：未变异实现的报错点名 --chunks"
 
 # --- M5e：build_review_input 里 chunk 目录改回逻辑路径（pwd 而非 pwd -P）→ 索引里的 chunk 目录与 allowedPaths[1] 形态不一致（票 15）---
 # 要让「逻辑 ≠ 物理」在任何平台成立：macOS 的 mktemp -d 落在 /var/folders（→ /private/var/folders，且不理 TMPDIR）；
@@ -151,7 +153,7 @@ idx_dir_of() { awk 'index($0, "=== 未直传的变更文件索引") == 1 {on=1; 
 phys_of_parent() { local d; d=$(dirname "$(dirname "$1")"); (cd "$d" && pwd -P); }   # <WORK>/chunks → <WORK> 的父目录
 run_case m5e "$pkg" DIFF_SIZE_LIMIT=1 TMPDIR="$tmp/m5e-tmp-link"
 assert_rc "$RC" 0 "M5e：变异体仍能跑完"
-idx5e_dir=$(idx_dir_of "$CASE/stdin")
+idx5e_dir=$(idx_dir_of "$MD/stdin")
 assert_eq "$([[ -n "$idx5e_dir" ]] && echo nonempty)" "nonempty" "M5e：索引非空"
 assert_eq "$([[ "$(dirname "$(dirname "$idx5e_dir")")" == "$(phys_of_parent "$idx5e_dir")" ]] && echo physical || echo logical)" "logical" \
   "M5e 前提自检：变异体写出的索引 chunk 目录是逻辑形态（${idx5e_dir}）——此主机上逻辑≠物理成立"
@@ -160,7 +162,7 @@ assert_eq "$([[ "$idx5e_dir" == "$allow5e" ]] && echo same || echo differs)" "di
   "M5e：索引里的 chunk 目录（${idx5e_dir}）与 allowedPaths[1]（${allow5e}）形态不一致——端到端「逐字相同」断言会失败"
 # 对照：未变异实现下两者逐字相同，且都是物理形态
 run_case m5e-control "$ROOT" DIFF_SIZE_LIMIT=1 TMPDIR="$tmp/m5e-tmp-link"
-idx5ec_dir=$(idx_dir_of "$CASE/stdin")
+idx5ec_dir=$(idx_dir_of "$MD/stdin")
 allow5ec=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$CASE/home/.kiro/agents/codeup-reviewer.json")
 assert_eq "$idx5ec_dir" "$allow5ec" "M5e 对照：未变异实现下索引 chunk 目录与 allowedPaths[1] 逐字相同"
 assert_eq "$([[ "$(dirname "$(dirname "$idx5ec_dir")")" == "$(phys_of_parent "$idx5ec_dir")" ]] && echo physical || echo logical)" "physical" \
@@ -172,84 +174,114 @@ mut_add_symlinks() {
   mkdir -p src/sub2 && ln -s /etc src/sub2/link-to-etc-dir
   git add -A && git commit -qm "add symlinks"
 }
-pkg=$(make_mutant m5f-symlinks '/-type l -print -exec rm -f {} +/d')
+pkg=$(make_mutant m5f-symlinks '/-o -type l -print -exec rm -f {} +/d' scripts/lib/isolation.sh)
 MUT_TWEAK=mut_add_symlinks run_case m5f "$pkg"
 assert_rc "$RC" 0 "M5f：变异体仍能跑完"
-assert_contains "$(cat "$CASE/cwdscan")" "link-to-hosts" "M5f：Kiro 启动时符号链接仍在——端到端「工作区里没有任何符号链接」断言会失败"
-assert_contains "$(cat "$CASE/cwdscan")" "link-to-etc-dir" "M5f：指向目录的符号链接同样残留"
-MUT_TWEAK=mut_add_symlinks run_case m5f-control "$ROOT"
-assert_eq "$(cat "$CASE/cwdscan")" "" "M5f 对照：未变异实现下 Kiro 启动时没有符号链接"
-assert_contains "$OUT" "2 个符号链接" "M5f 对照：日志计数 2 个"
+assert_contains "$(cat "$MD/cwdscan")" "link-to-hosts" "M5f：Kiro 启动时符号链接仍在——端到端「工作区里没有任何符号链接」断言会失败"
+assert_contains "$(cat "$MD/cwdscan")" "link-to-etc-dir" "M5f：指向目录的符号链接同样残留"
+# 对照见 test-kiro-review.sh 的 symlinks 用例（15-fix2 #8：不在这里重复跑一遍未变异实现）
 
 # --- M5g / M5h：另两处 kiro-cli 调用（chat --help、settings）去掉 env -i → 那次调用继承完整环境（15-fix #8）---
 pkg=$(make_mutant m5g-help-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" kiro-cli chat --help/kiro-cli chat --help/')
 run_case m5g "$pkg"
 assert_rc "$RC" 0 "M5g：变异体仍能跑完"
-assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$CASE/env-help")" "1" "M5g：--help 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-help 没有 YUNXIAO_TOKEN」断言会失败"
-assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$CASE/env")" "0" "M5g：chat 那次仍干净（变异只动了 --help）"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-help")" "1" "M5g：--help 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-help 没有 YUNXIAO_TOKEN」断言会失败"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "0" "M5g：chat 那次仍干净（变异只动了 --help）"
 pkg=$(make_mutant m5h-settings-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" kiro-cli settings/kiro-cli settings/')
 run_case m5h "$pkg"
 assert_rc "$RC" 0 "M5h：变异体仍能跑完"
-assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$CASE/env-settings")" "1" "M5h：settings 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-settings 没有 YUNXIAO_TOKEN」断言会失败"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-settings")" "1" "M5h：settings 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-settings 没有 YUNXIAO_TOKEN」断言会失败"
 
 # --- M5i：日志里的变量名清单改回按行 cut → 取值含换行时半个取值进日志（15-fix #7）---
 pkg=$(make_mutant m5i-names-cut 's/"\${KIRO_ENV_ALLOW\[@\]%%=\*}"/"${KIRO_ENV_ALLOW[@]}" | cut -d= -f1/' scripts/lib/kiro-agent.sh)
 run_case m5i "$pkg" KIRO_API_KEY="$(printf 'k\nSECRETFRAG=leaked')"
 assert_rc "$RC" 0 "M5i：变异体仍能跑完"
 assert_contains "$OUT" "SECRETFRAG" "M5i：换行后的半个取值进了日志——端到端「日志里不出现 SECRETFRAG」断言会失败"
-run_case m5i-control "$ROOT" KIRO_API_KEY="$(printf 'k\nSECRETFRAG=leaked')"
-assert_not_contains "$OUT" "SECRETFRAG" "M5i 对照：未变异实现不泄出"
+# 对照见 test-kiro-review.sh 的 nlkey 用例（15-fix2 #8）
 
 # --- M5j：去掉 KIRO_ENV_PASSTHROUGH 的名字校验 → 非法名字被静默忽略、评审照跑（15-fix #11）---
 pkg=$(make_mutant m5j-passthrough-check '/含非法变量名/d' scripts/lib/kiro-agent.sh)
-run_case m5j "$pkg" KIRO_ENV_PASSTHROUGH="KIRO_MOCK_DIR,YUNXIAO_TOKEN=leakedvalue"
+run_case m5j "$pkg" KIRO_ENV_PASSTHROUGH="YUNXIAO_TOKEN=leakedvalue"
 assert_rc "$RC" 0 "M5j：非法名字不再拒绝运行——端到端「KIRO_ENV_PASSTHROUGH 含 NAME=value：非零退出」断言会失败"
 assert_not_contains "$(posted_comment "$OUT")" "非法变量名" "M5j：没有失败评论"
-run_case m5j-control "$ROOT" KIRO_ENV_PASSTHROUGH="KIRO_MOCK_DIR,YUNXIAO_TOKEN=leakedvalue"
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5j 对照：未变异实现拒绝运行"
+# 对照见 test-kiro-review.sh 的 badpass 用例（15-fix2 #8）
 
 # --- M5k：固定名单里塞进一个 KIRO_FOO（模拟回到 KIRO_* 形状匹配）→ 名单外的 KIRO_FOO 被透传（15-fix #12）---
 pkg=$(make_mutant m5k-fixed-list 's/KIRO_API_KEY KIRO_LOG_NO_COLOR/KIRO_API_KEY KIRO_FOO KIRO_LOG_NO_COLOR/' scripts/lib/kiro-agent.sh)
 run_case m5k "$pkg" KIRO_FOO=1
 assert_rc "$RC" 0 "M5k：变异体仍能跑完"
-assert_eq "$(grep -c -x -- 'KIRO_FOO' "$CASE/env")" "1" "M5k：KIRO_FOO 被透传——端到端「Kiro 进程看不到 KIRO_FOO」断言会失败"
+assert_eq "$(grep -c -x -- 'KIRO_FOO' "$MD/env")" "1" "M5k：KIRO_FOO 被透传——端到端「Kiro 进程看不到 KIRO_FOO」断言会失败"
 
-# --- M5l：安装函数漏写 grep 那一处 allowedPaths → grep 没有边界（15-fix #3）---
-# 单测层：三处不再相等；端到端层：执行器第 3 步的「三处一致」自检拦下来、回写失败评论（这就是那道自检存在的理由）
+# --- M5l：安装函数漏写 grep 那一处 allowedPaths → grep 没有边界（15-fix #3 / 15-fix2 #16：单变异可杀）---
+# 单测层：三处不再相等；端到端层：执行器第 3 步的 kiro_agent_selfcheck **按值**比对三处 allowedPaths，拦下来并回写失败评论
 pkg=$(make_mutant m5l-grep-allow '/\.toolsSettings\.grep\.allowedPaths = \[\$ws, \$ch\]/d' scripts/lib/kiro-agent.sh)
 mkdir -p "$tmp/m5l-ws" "$tmp/m5l-ch"
 dest5l=$( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_install_agent "$pkg/kiro/agent-codeup-reviewer.json" "$tmp/m5l-agents" --workspace "$tmp/m5l-ws" --chunks "$tmp/m5l-ch" 2>/dev/null )
 assert_eq "$([[ "$(jq -c .toolsSettings.grep.allowedPaths "$dest5l")" == "$(jq -c .toolsSettings.read.allowedPaths "$dest5l")" ]] && echo same || echo differs)" "differs" \
   "M5l：安装后 grep.allowedPaths ≠ read.allowedPaths——单测「三处相等」断言会失败"
 run_case m5l "$pkg"
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5l：执行器的「三处一致」自检拒绝运行"
-assert_contains "$(posted_comment "$OUT")" "三处不一致" "M5l：失败评论说明三处不一致"
-assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "M5l：Kiro 未被启动（grep 无边界的 agent 不能拿去跑）"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5l：执行器的自检（值比对）拒绝运行"
+assert_contains "$(posted_comment "$OUT")" "grep.allowedPaths" "M5l：失败评论点名 grep.allowedPaths"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "M5l：Kiro 未被启动（grep 无边界的 agent 不能拿去跑）"
 
-# --- M5m：再拿掉执行器的「三处一致」自检（双重变异：安装函数漏写 grep + 自检删除）→ 带着 grep 无边界的 agent 照跑 ---
-pkg=$(make_mutant m5m-no-selfcheck '/三处不一致/d')
-sed -e '/\.toolsSettings\.grep\.allowedPaths = \[\$ws, \$ch\]/d' "$ROOT/scripts/lib/kiro-agent.sh" > "$pkg/scripts/lib/kiro-agent.sh"
-cmp -s "$ROOT/scripts/lib/kiro-agent.sh" "$pkg/scripts/lib/kiro-agent.sh" && { echo "FAIL: M5m 第二处变异没有改变 kiro-agent.sh" >&2; exit 1; }
+# --- M5m：删掉执行器第 3 步的自检调用（单变异）→ 「受信 agent 自检通过」那行日志消失（端到端断言它必须在）---
+pkg=$(make_mutant m5m-no-selfcheck '/kiro_agent_selfcheck "\$INSTALLED_AGENT"/d')
 run_case m5m "$pkg"
-assert_rc "$RC" 0 "M5m：没有自检时评审照跑——端到端「三处一致」相关断言与 M5l 的拦截都会失效"
-assert_eq "$([[ "$(jq -c .toolsSettings.grep.allowedPaths "$CASE/home/.kiro/agents/codeup-reviewer.json")" == "$(jq -c .toolsSettings.read.allowedPaths "$CASE/home/.kiro/agents/codeup-reviewer.json")" ]] && echo same || echo differs)" "differs" \
-  "M5m：跑的就是 grep 无边界的 agent（grep.allowedPaths ≠ read.allowedPaths）"
+assert_rc "$RC" 0 "M5m：没有自检时评审照跑"
+assert_not_contains "$OUT" "受信 agent 自检通过" "M5m：自检留痕消失——端到端「第 3 步自检通过并留痕」断言会失败"
+
+# --- M5n：安装器去掉 deniedPaths 三处检查 → 缺 toolsSettings.glob 的定义照样装成功、glob 只有 allow 没有 deny（15-fix2 #11）---
+pkg=$(make_mutant m5n-deny-check '/deniedPaths 缺失、为空或不含/d' scripts/lib/kiro-agent.sh)
+jq --arg p "file://$ROOT/prompts/review-agent-prompt.md" '.prompt = $p | del(.toolsSettings.glob)' "$ROOT/kiro/agent-codeup-reviewer.json" > "$tmp/m5n-noglob.json"
+rc5n=0; dest5n=$( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_install_agent "$tmp/m5n-noglob.json" "$tmp/m5n-agents" --workspace "$tmp/m5l-ws" --chunks "$tmp/m5l-ch" 2>/dev/null ) || rc5n=$?
+assert_eq "$rc5n" "0" "M5n：缺 glob.deniedPaths 的定义装成功——单测「定义缺 toolsSettings.glob：拒绝安装」断言会失败"
+assert_eq "$(jq -c '.toolsSettings.glob | has("deniedPaths")' "$dest5n")" "false" "M5n：装出来的 glob 没有 deniedPaths（只有 allowedPaths）"
+
+# --- M5o：导出判定改回只认 `declare -x` 前缀 → declare -rx 的变量被丢（15-fix2 #12）---
+pkg=$(make_mutant m5o-declare-prefix 's/=~ \^declare\\ -\[a-zA-Z\]\*x \]\]/== "declare -x"* ]]/' scripts/lib/kiro-agent.sh)
+attr5o=$(env -i PATH="$PATH" HOME="$tmp/h5o" bash -c 'set -euo pipefail; declare -rx TMPDIR=/ro-tmp; source "$1"; kiro_env_allowlist; printf "%s\n" "${KIRO_ENV_ALLOW[@]}"' _ "$pkg/scripts/lib/kiro-agent.sh")
+assert_not_contains "$attr5o" "TMPDIR=" "M5o：declare -rx TMPDIR 被丢——单测「declare -rx 的变量透传」断言会失败"
+
+# --- M5p：凭证形状的名字不再单独归类（当成普通名字放进名单）→ KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN 照跑，令牌进了 Kiro 进程环境（15-fix2 #13）---
+# 只删「拒绝」那一行的变异会把凭证名字静默丢掉（进不了名单也不报错）——那是另一种坏；这里模拟的是「忘了区分」
+pkg=$(make_mutant m5p-cred-names 's/) cred+=("$tok") ;;/) names+=("$tok") ;;/' scripts/lib/kiro-agent.sh)
+run_case m5p "$pkg" KIRO_ENV_PASSTHROUGH="YUNXIAO_TOKEN"
+assert_rc "$RC" 0 "M5p：凭证形状的名字不再拒绝——端到端「KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：拒绝运行」断言会失败"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "1" "M5p：YUNXIAO_TOKEN 进了 Kiro 进程环境（固定名单关掉的洞被一个变量名重新打开）"
+
+# --- M5q：.git 剪枝退回只剪根目录 → 嵌套 .git 内部的符号链接被删（15-fix2 #15）---
+mut_nested_git() { mkdir -p vendor/lib/.git && ln -s /etc/hosts vendor/lib/.git/nestedlink; }
+pkg=$(make_mutant m5q-nested-git 's/ -o \\( -name \.git -type d \\)//' scripts/lib/isolation.sh)
+MUT_TWEAK=mut_nested_git run_case m5q "$pkg"
+assert_rc "$RC" 0 "M5q：变异体仍能跑完"
+assert_eq "$([[ -L "$CASE/work/vendor/lib/.git/nestedlink" ]] && echo kept || echo gone)" "gone" "M5q：嵌套 .git 内部的符号链接被删——端到端「嵌套 .git：目录内部的符号链接不动」断言会失败"
+
+# --- M5r：非法 token 不再掩码 → 像令牌的 token 原文进日志与评论（15-fix2 #17）---
+pkg=$(make_mutant m5r-no-mask 's/bad+=("$(_kiro_env_mask_token "$tok")")/bad+=("$tok")/' scripts/lib/kiro-agent.sh)
+run_case m5r "$pkg" KIRO_ENV_PASSTHROUGH="ghp-liveSecret123"
+assert_contains "$OUT" "liveSecret123" "M5r：像令牌的 token 原文进了输出——端到端「原文不进日志也不进评论」断言会失败"
+
+# --- M5s：去掉 kiro-cli 版本 notice → 版本不在名单也没有任何提示（15-fix2 #24）---
+pkg=$(make_mutant m5s-version-notice '/REVIEW_NOTICE="注意：本次 kiro-cli 版本/d')
+run_case m5s "$pkg" MOCK_KIRO_VERSION=9.9.9
+assert_rc "$RC" 0 "M5s：变异体仍能跑完"
+assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5s：汇总评论没有版本 notice——端到端「版本不在名单：汇总评论带 notice」断言会失败"
 
 # --- M6：删掉任意深度 .kiro/ 的删除逻辑 → 子目录 .kiro/ 残留、Kiro 启动时能看到 ---
-# 模式只用 `-name .kiro`：任意深度 .kiro 的删除条件已改为 \( -type d -o -type l \)（覆盖符号链接），
-# 带 -type d 的旧模式会失配（make_mutant 会因此报错，这正是它存在的意义）
-pkg=$(make_mutant m6-kiro-dirs '/-name .kiro/d')
+# 模式只用 `-name .kiro`：任意深度 .kiro 的删除条件是 \( -type d -o -type l \)（覆盖符号链接），
+# 带 -type d 的旧模式会失配（make_mutant 会因此报错，这正是它存在的意义）。隔离逻辑在 scripts/lib/isolation.sh（15-fix2 #10/#15）
+pkg=$(make_mutant m6-kiro-dirs '/-name .kiro/d' scripts/lib/isolation.sh)
 run_case m6 "$pkg"
 assert_rc "$RC" 0 "M6：变异体仍能跑完"
 assert_eq "$([[ -d "$CASE/work/src/sub/.kiro" ]] && echo exists || echo gone)" "exists" "M6：子目录 .kiro/ 残留——端到端断言「.kiro 已移除」会失败"
-assert_contains "$(cat "$CASE/cwdscan")" "src/sub/.kiro" "M6：Kiro 启动时工作区扫描到子目录 .kiro——端到端断言「工作区干净」会失败"
+assert_contains "$(cat "$MD/cwdscan")" "src/sub/.kiro" "M6：Kiro 启动时工作区扫描到子目录 .kiro——端到端断言「工作区干净」会失败"
 
 # --- M7：删掉根 lsp.json 的删除逻辑 → lsp.json 残留 ---
-pkg=$(make_mutant m7-lspjson '/rm -rf .\/lsp.json/d')
+pkg=$(make_mutant m7-lspjson '/rm -rf .\/lsp.json/d' scripts/lib/isolation.sh)
 run_case m7 "$pkg"
 assert_rc "$RC" 0 "M7：变异体仍能跑完"
 assert_eq "$([[ -e "$CASE/work/lsp.json" ]] && echo exists || echo gone)" "exists" "M7：根 lsp.json 残留——端到端断言「lsp.json 已移除」会失败"
-assert_contains "$(cat "$CASE/cwdscan")" "./lsp.json" "M7：Kiro 启动时工作区扫描到 lsp.json——端到端断言「工作区干净」会失败"
+assert_contains "$(cat "$MD/cwdscan")" "./lsp.json" "M7：Kiro 启动时工作区扫描到 lsp.json——端到端断言「工作区干净」会失败"
 
 # --- M8：删掉 --output-format stream-json → 替身回到纯文本，事件流里没有 runFinished ---
 # 证明：结构化契约路径真的依赖这个参数，缺了会「评审失败」而不是静默降级或静默通过。
@@ -692,7 +724,7 @@ assert_contains "$(posted_comment "$OUT")" "**行内发布失败（3）**" \
 pkg=$(make_mutant m3-settings '/chat.disableInheritingDefaultResources true/d')
 run_case m3 "$pkg"
 assert_rc "$RC" 0 "M3：变异体仍能跑完"
-assert_eq "$([[ -s "$CASE/settings" ]] && echo called || echo none)" "none" "M3：settings 未被调用——端到端断言会失败"
+assert_eq "$([[ -s "$MD/settings" ]] && echo called || echo none)" "none" "M3：settings 未被调用——端到端断言会失败"
 
 # --- M35：让「整行加粗 → 转义」失效 → 模型文本能逐字节冒充问题分组行 / 问题标题行 ---
 # 2026-09-04 起分组与每条问题都是整行加粗（Codeup 不渲染 ### 以下标题），这条清洗是它们唯一的防伪造手段。
@@ -854,14 +886,14 @@ assert_eq "$(printf '%s\n' "$comment" | grep -c '^\\---$')" "1" "M45 对照：�
 pkg=$(make_mutant m48-index-title 's|=== 未直传的变更文件索引|=== 省略清单|' scripts/kiro-review.sh)
 run_case m48 "$pkg" DIFF_SIZE_LIMIT=1
 assert_rc "$RC" 0 "M48：变异体仍能跑完"
-assert_eq "$(grep -c -F '=== 未直传的变更文件索引' "$CASE/stdin")" "0" "M48：stdin 里找不到提示词引用的节标题——端到端「恰好一个标题」断言会失败"
+assert_eq "$(grep -c -F '=== 未直传的变更文件索引' "$MD/stdin")" "0" "M48：stdin 里找不到提示词引用的节标题——端到端「恰好一个标题」断言会失败"
 
 # --- M49：省略清单退回 `- 名字 (+a / -b) => chunk` 分隔文本 → 文件名能伪造第二个路径（票 06 P0 复发路径）---
 pkg=$(make_mutant m49-omitted-format \
   "s|'{chunk: \$chunk, file: \$file, added: \$added, removed: \$removed}'|-r '\"- \" + \$file + \" (+\" + (\$added\|tostring) + \" / -\" + (\$removed\|tostring) + \") => \" + \$chunk'|" scripts/lib/diff-compress.sh)
 run_case m49 "$pkg" DIFF_SIZE_LIMIT=1
 assert_rc "$RC" 0 "M49：变异体仍能跑完"
-idx49=$(awk 'index($0, "=== 未直传的变更文件索引") == 1 {on=1; next} on && $0 == "" {exit} on {print}' "$CASE/stdin")
+idx49=$(awk 'index($0, "=== 未直传的变更文件索引") == 1 {on=1; next} on && $0 == "" {exit} on {print}' "$MD/stdin")
 assert_contains "$idx49" "=> " "M49：索引行回到了分隔文本形态——端到端「每行是 JSON 对象」断言会失败"
 assert_eq "$(printf '%s\n' "$idx49" | jq -e . >/dev/null 2>&1 && echo json || echo notjson)" "notjson" "M49：索引行不再是 JSON"
 

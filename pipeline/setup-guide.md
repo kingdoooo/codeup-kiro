@@ -186,6 +186,9 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 
    因此建议用**评审专用的构建机或专用系统账号**跑本流水线；若必须与人共用，
    请事先告知使用者这两点（尤其不要在该账号下自建名为 `codeup-reviewer` 的 agent）。
+6. **脚本会改动业务库工作树**（第 12 节隔离步骤）：在 diff 算好之后、Kiro 启动之前，删除工作树里任意深度的
+   `AGENTS.md`、`.kiro/`、**全部符号链接**与根 `lsp.json`（任意深度的 `.git` 目录内部不动）。本流水线只有评审这一个任务；
+   若要在**同一工作区**追加别的任务（构建、测试、打包），必须先重新 checkout，否则那些任务拿到的是被改过的工作树。
 
 ## 8. 首次联调核对清单
 以下各点在本地测试里**无法验证**（依赖真实 kiro-cli 行为或真实 Codeup 接口），
@@ -215,7 +218,13 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    HTTP_PROXY/HTTPS_PROXY/NO_PROXY（及小写）、SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、
    XDG_CONFIG_HOME/XDG_DATA_HOME/XDG_CACHE_HOME/XDG_STATE_HOME——外加 `KIRO_ENV_PASSTHROUGH` 点名的那几个；
    **没有** YUNXIAO_TOKEN、YUNXIAO_ORG_ID、CODEUP_REPO_ID、CODEUP_BOT_USERNAME，也没有名单外任何形状像 `KIRO_*` /
-   `*_PROXY` 的变量（这行只打名字、不打取值）。同一份名单也用于 `chat --help` 与 `settings` 那两次 kiro-cli 调用。
+   `*_PROXY` 的变量（这行只打名字、不打取值）。同一份名单也用于 `chat --help`、`--version` 与 `settings` 那几次 kiro-cli 调用。
+   紧接着核对两行：「受信 agent 自检通过：allowedPaths 值比对…」（第 3 步把安装文件按值核对过——三处 allowedPaths 逐字等于
+   本次 checkout 与 chunks 的物理路径、`allowedTools=[]`、`includeMcpJson/includePowers=false`、三处 `deniedPaths` 含
+   `**/.git/**`），以及「kiro-cli 版本 X：在 P1-15 探测过的版本名单内」。若是「警告：本次 kiro-cli 版本 X 未经 P1-15 探测…」，
+   评审照常完成但汇总评论会带同一句 notice——读取边界依赖 kiro-cli「先解析符号链接与 `../` 再比对 allowedPaths」这一实测行为，
+   新版本要按 `scripts/probe/README.md`「升级 kiro-cli 之后」跑一次探测、把版本加进 `scripts/kiro-review.sh` 的
+   `KIRO_TESTED_VERSIONS`（生产的兜底不变：符号链接在隔离步骤里全部删除）。
    **注意 `tools` 里的工具短名（read/grep/glob）不会以报错的形式暴露问题**：实测 kiro-cli 对未知名字
    静默接受，所以升级 CLI 后短名若改名，评审不会报错，只会表现为评审员读不到文件、
    结论变泛化。核对方式只有两种：看评审报告是否真的引用了 diff 之外的上下文文件（第 11 项），
@@ -373,9 +382,11 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
     grep / glob 都正常（T1 / T1b / T1c——去掉 `--trust-tools` 后 grep/glob 不能落入权限申请）、allow 外且不在拒绝清单里的
     `$HOME` canary 被 CLI **拒绝而不是等待确认到超时**（T2）、deny 先于 allow（T3，读 `.git/logs/HEAD`，只被新加的
     `**/.git/**` 覆盖）、`env -i` 许可清单下 kiro-cli 能启动（T4）、业务库里指向 `$HOME` 的符号链接与 `<业务库>/../`
-    越界路径都被拒（T8）。正控 T5 用票 15 之前的旧形态 + `--trust-tools`，canary **应被读出**——正控不成立说明探测本身
-    不可信（INCONCLUSIVE），不是 allowedPaths 的结论。门禁用例任一 FAIL = **不得上线**（退出码 1）；「走主方案」的结论
-    只在七个门禁用例**全部实际运行**时打印，`PROBE_CASES` 跑子集时打「不作发布判定」。退出码含义见 `scripts/probe/README.md`。
+    越界路径都被拒（T8）、业务库里提交的 `.ssh/config`、`.aws/config`、`keys/id_rsa.pub`、`keys/id_ed25519.pub` 都被拒（T9——拒绝清单里的
+    绝对路径落在 allow 之外永远测不到，这几条仓库相对形状是唯一能在 allow 内证明 deny 仍被解析的用例）。正控 T5 用票 15
+    之前的旧形态 + `--trust-tools`，canary **应被读出**——正控不成立说明探测本身不可信（INCONCLUSIVE），不是 allowedPaths 的结论。
+    **退出码分级**：0 = 八个门禁用例全部实际运行且全 PASS（走主方案）；1 = 门禁 FAIL（**不得上线**）；2 = 参数错；
+    3 = INCONCLUSIVE；4 = 门禁用例未全部运行（`PROBE_CASES` 子集，不作发布判定）；5 = 环境准备失败。
 
 以上 9.1–9.3 全部为**人工验收**，需要真实 Codeup 测试库与真实 kiro-cli，本地测试套件覆盖不到。
 本地可自动化的部分（渲染、去重、排序、上限、降级、截断、变更行解析）见第 13 节。
@@ -463,7 +474,7 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 | `CI_COMMIT_REF_NAME` | 由 Flow 注入 | 未注入时取 `git rev-parse --abbrev-ref HEAD` | 多代码源下须显式 `export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"`（带下标的内置变量，见第 5.1 节与 flow-pipeline.yaml） | 不带下标的取值在多代码源下不可预期（可能是集成包的分支） | Flow |
 | `REVIEW_REPO_DIR` | `$PWD` | 把当前目录当业务库 | 多代码源下必须显式指向业务库 checkout 目录 | 不得与集成包目录互相包含（隔离步骤会删文件，脚本直接拒绝运行） | Flow |
 | `KIRO_INSTALL_URL` | 官方安装脚本 | 云托管构建机上按需 `curl \| bash` 安装 | 指向内部镜像源 | 自建构建机预装固定版本时不会触发安装 | Flow |
-| `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LC_ALL/LC_CTYPE/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理六个/证书三个/XDG 四个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行机可能需要 `LD_LIBRARY_PATH`、`AWS_PROFILE` 这类；例：`AWS_PROFILE,LD_LIBRARY_PATH` | 任一名字不合法（写成 `NAME=value`、带连字符/空格）时**拒绝运行**并回写「评审未完成」，不静默忽略；点名的变量未设置时跳过。**不要**把 `YUNXIAO_TOKEN` 这类凭证放进去——那等于主动把令牌交给评审员进程 | Flow |
+| `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行机可能需要 `LD_LIBRARY_PATH`、`JAVA_HOME` 这类；例：`LD_LIBRARY_PATH,JAVA_HOME` | 任一名字不合法（写成 `NAME=value`、带连字符/空格、或直接贴了个令牌）时**拒绝运行**并回写「评审未完成」，评论与日志里只出现掩码（`ghp****`）；**凭证形状的名字也拒绝**：`YUNXIAO_*`、`CODEUP_*`、`AWS_*`、含 `TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`、以 `_KEY` 结尾的名字一律不放行（失败评论列出被拒名字）——固定名单刚把令牌关在门外，不能被一个变量名重新打开；点名的变量未设置时跳过 | Flow |
 
 ### 11.2.1 测试/高级变量（生产流水线不要设）
 这些变量脚本确实会读，但它们是给本仓库的测试与排障用的。**生产流水线里一个都不要配**——
@@ -479,6 +490,16 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 | `CODEUP_API_BASE` | 中心站 OpenAPI 域名 | 换 OpenAPI 站点 | 指错域名时所有请求 4xx/连不上，评审在回写阶段失败 |
 | `PROMPT_FILE` | 集成包内 `prompts/review-prompt.md` | 换掉**运行时提示词**文件 | 只有一道守卫：文件里必须保留 `{{REVIEW_NONCE}}` 占位符，否则脚本拒绝运行。**除此之外内容不受校验**——指向业务库里的文件等于让 MR 作者写评审提示词（agent 提示词仍在集成包内，只读与掩码规则不受影响，但评审重点、语言、输出取舍会被操纵）。绝不要指向业务库路径 |
 | `BUILD_NUMBER` | 空 | 由 Flow 注入，只用于失败评论里那句「请查看流水线日志（构建号 …）」 | 未注入时那句写成「构建号 ?」，不影响评审 |
+
+### 11.2.2 升级说明：Kiro 进程环境改为固定名单
+票 15 之前 Kiro 进程继承执行器的完整环境；票 15 起改为 `env -i` + **固定名单**（第 12 节）。升级后以下变量**不再透传**——
+构建机若依赖它们，评审会在网络层或启动层失败（表现为「Kiro 评审失败（kiro-cli 退出码 N）」或超时）：
+- 形状匹配时代放行、现在不在名单里的：`LC_*` 中除 `LC_ALL`/`LC_CTYPE`/`LC_MESSAGES` 以外的（如 `LC_TIME`）、`XDG_*` 中除
+  `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_CACHE_HOME`/`XDG_STATE_HOME`/`XDG_RUNTIME_DIR` 以外的、`KIRO_*` 中除 `KIRO_API_KEY`/
+  `KIRO_LOG_NO_COLOR` 以外的、`*_PROXY` 中除 `HTTP/HTTPS/FTP/ALL/NO_PROXY`（及小写）以外的；
+- 以及所有其它变量（`JAVA_HOME`、`LD_LIBRARY_PATH`、`GIT_*`、`SSH_AUTH_SOCK`、`AWS_*`……）。
+需要的用 `KIRO_ENV_PASSTHROUGH` 按名字加回（凭证形状的名字除外，见上表）。`ALL_PROXY`/`all_proxy`、`FTP_PROXY`/`ftp_proxy`、
+`XDG_RUNTIME_DIR`、`LC_MESSAGES`、`LANGUAGE` 已在 15-fix2 补进固定名单——用 `ALL_PROXY` 出网的构建机不用再配。
 
 ### 11.3 与「评论全部解决才可合并」门禁的相互影响
 实测：评审员以机器人账号发出的行内评论在 MR 上带**「待解决」徽标**，并计入 MR 顶部的「待解决」计数。
@@ -531,16 +552,21 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   （实测验证过的是工作区 `AGENTS.md`）。局限有三点：① **只对 v2 引擎有效**；② 它写在执行账号
   `$HOME` 的**全局**设置里且不回滚（常驻构建机注意事项见第 7 节第 5 条）；
   ③ 它依赖业务库的 `.kiro/` 已被移除——业务库放一份 `.kiro/settings/cli.json` 就能把这个全局设置顶掉。
-- **纵深防御（不依赖引擎行为）**：每次运行在生成 diff **之后**、启动 Kiro **之前**，
+- **纵深防御（不依赖引擎行为）**：每次运行在生成 diff **之后**、启动 Kiro **之前**，一次遍历
   从业务库工作树中删除任意深度的 `AGENTS.md`（大小写不敏感）、任意深度的 `.kiro/`
-  （含指向别处的符号链接）与根目录 `lsp.json`。diff 已从 git 对象算好，删文件不影响评审输入，
-  这些文件的**改动本身**照样会被评审。
+  （含指向别处的符号链接）、任意深度的**全部符号链接**（含指向目录的、悬空的）与根目录 `lsp.json`；
+  任意深度的 `.git` 目录内部不动（旧写法只剪根目录 `.git`，嵌套的 vendored clone / fixture 仓库内部会被改）。
+  diff 已从 git 对象算好，删文件不影响评审输入，这些文件的**改动本身**照样会被评审。**这一步改动的是业务库工作树**：
+  同一工作区里不要再追加别的任务，要追加就先重新 checkout（第 7 节第 6 项）。
 - **受信 agent 与读取边界（许可清单）**：`kiro/agent-codeup-reviewer.json` 只给 read/grep/glob，禁 shell/write/web/MCP。
   三个工具的读取范围由 `toolsSettings.*.allowedPaths` **许可清单**决定，只含两条运行时路径：业务库 checkout
   与本次 diff 片段目录（`$WORK/chunks`）。脚本安装时把 read/grep/glob 三处 allowedPaths **结构化写成**这两条
   **物理路径**（符号链接已解析；kiro-cli 按解析后的路径比对，写逻辑路径会让全部读取落在 allow 之外；定义文件里的
   占位符只是文档，与定义文件里写了什么无关——靠「占位符还在不在」判断会漏掉 grep 那一处没写 allowedPaths 的定义）；
-  两条路径缺任一就拒绝安装，安装后三处不一致就拒绝运行。喂给模型的省略清单里的 chunk 路径同样按物理路径写出（`build_review_input`），
+  两条路径缺任一就拒绝安装；三个工具的 `deniedPaths` 缺失、为空或不含 `**/.git/**` 也拒绝安装（否则结构化写入会凭空造出
+  只有 allow 没有 deny 的工具）。安装后脚本**按值**自检：三处 allowedPaths 逐字等于本次 checkout 与 chunks 的物理路径、
+  `allowedTools=[]`、`includeMcpJson/includePowers=false`、三处 `deniedPaths` 含 `**/.git/**`，任一不符拒绝运行。
+  喂给模型的省略清单里的 chunk 路径同样按物理路径写出（`build_review_input`），
   两侧形态逐字一致——kiro-cli 会不会先解析符号链接再比对未经实测，脚本不依赖它（macOS 的 `/var/folders`、
   或 TMPDIR 本身是符号链接时，这一点决定评审员能不能读到 chunk）。kiro-cli 2.21.1 v2 headless 实测（`scripts/probe/probe-kiro-allowlist.sh`，P1-15）：
   allow 内的读取免确认；allow 外的读取被 CLI 直接拒绝（`Permission request failed … not supported in
@@ -549,7 +575,8 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   评审员读出来了）——拒绝清单枚举不完（`.npmrc`、`.pypirc`、临时凭证、Flow 注入的任何文件）。
   拒绝清单**仍在、且先于 allow 判定**，作为第二道：敏感路径（`~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、
   `/var/run/secrets` 等）加 `**/.git`、`**/.git/**`（`.git/FETCH_HEAD`、`.git/logs/*` 可能带凭证 URL；
-  diff 已在输入里，模型没有理由读 `.git`）。v2 走 `toolsSettings`，v3 走 `permissions.rules`；V3 不上生产
+  diff 已在输入里，模型没有理由读 `.git`），以及仓库相对形状 `**/.aws/**`、`**/.ssh/**`、`**/id_rsa*`、`**/id_ed25519*`
+  （绝对条目落在 allow 之外永远测不到；这几条在 allow 内也能被探测 T9 打到，某版 kiro-cli 静默不再解析 deny 时能被发现）。v2 走 `toolsSettings`，v3 走 `permissions.rules`；V3 不上生产
   （ADR-0004），只同步 deny 规则、不为它设计 allow 规则。
   **`allowedTools` 为空、调用行不传 `--trust-tools`**：免确认只能来自路径边界，不能来自「整个工具免审」
   （两者叠加时读者会以为 trust 才是免确认的来源）。**绝不能传 `--trust-all-tools`**——被拒时 kiro-cli 的
@@ -559,12 +586,13 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   **业务库里的符号链接在 Kiro 启动前全部删除**（隔离步骤，与 AGENTS.md / `.kiro/` 同一步）：MR 提交一个
   `payload -> /root/.aws/credentials`，请求路径字面上就在 allowedPaths 之内，而 kiro-cli 是否先解析链接再比对未经实测
   （探测 P1-15 T8 记录事实，生产不依赖它）。diff 已从 git 对象算好，删链接不影响评审输入——链接本身的改动在 diff 里照样可见。
-- **Kiro 进程环境只含固定名单变量**：三处 kiro-cli 调用（能力检查 `chat --help`、隔离 `settings`、评审 `chat`）都以
-  `env -i` 启动，只透传**固定名单**：PATH、HOME（登录态与 agent 目录）、USER、TERM、TMPDIR、LANG、LC_ALL、LC_CTYPE、
-  KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY / HTTPS_PROXY / NO_PROXY（及小写）、SSL_CERT_FILE、SSL_CERT_DIR、
-  CURL_CA_BUNDLE、XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_CACHE_HOME / XDG_STATE_HOME。**不做形状匹配**（`KIRO_*`、`*_PROXY`
-  这类模式会放行 `CORP_SECRET_PROXY`、客户自定义的 `KIRO_…`）。自建执行机需要别的变量时用 `KIRO_ENV_PASSTHROUGH`
-  点名（第 11 节；只放名字，非法名字拒绝运行）。云效令牌、`CODEUP_*` 与 Flow 注入的其它变量都不进 Kiro 进程
+- **Kiro 进程环境只含固定名单变量**：四处 kiro-cli 调用（能力检查 `chat --help` 与 `--version`、隔离 `settings`、评审 `chat`）
+  都以 `env -i` 启动，只透传**固定名单**：PATH、HOME（登录态与 agent 目录）、USER、TERM、TMPDIR、LANG、LANGUAGE、LC_ALL、
+  LC_CTYPE、LC_MESSAGES、KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY / HTTPS_PROXY / FTP_PROXY / ALL_PROXY / NO_PROXY（及小写）、
+  SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_CACHE_HOME / XDG_STATE_HOME / XDG_RUNTIME_DIR。
+  **不做形状匹配**（`KIRO_*`、`*_PROXY` 这类模式会放行 `CORP_SECRET_PROXY`、客户自定义的 `KIRO_…`）。自建执行机需要别的变量时
+  用 `KIRO_ENV_PASSTHROUGH` 点名（第 11 节；只放名字，非法名字拒绝运行且掩码；`YUNXIAO_*`/`CODEUP_*`/`AWS_*`/含 TOKEN、SECRET、
+  PASSWORD、CREDENTIAL、以 `_KEY` 结尾的凭证形状名字也拒绝——固定名单刚关掉的洞不能被一个变量名重新打开）。云效令牌、`CODEUP_*` 与 Flow 注入的其它变量都不进 Kiro 进程
   （`/proc` 已在拒绝清单里，这是零成本的第二道）。清单是一份库函数（`kiro_env_allowlist`），探测脚本复用同一份；
   日志只打透传的变量名（按变量取名字，取值里的换行不会把半个取值带进日志）。清单让 kiro-cli 起不来时评审按
   「kiro-cli 退出码 N」失败并回写评论，不会退回继承完整环境。

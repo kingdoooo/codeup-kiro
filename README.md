@@ -22,14 +22,19 @@
          此后任何失败（含第 3 步的安装失败与能力检查不通过）都会在 MR 上回写「评审未完成」
       3. 安装/检测 kiro-cli；安装只读受信 agent（read/grep/glob，禁 shell/write/web/MCP；
          读取**许可清单** allowedPaths = 业务库 checkout + 本次 diff chunk 目录，安装时把三处结构化写成物理路径，
-         两条路径缺任一拒绝安装、三处不一致拒绝运行；敏感路径与 .git 的拒绝清单是第二道）
-         + 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行；--help 同样以 env -i 许可清单启动）
+         两条路径缺任一或某工具 deniedPaths 缺失即拒绝安装，安装后按值自检（三处路径、allowedTools=[]、
+         includeMcpJson/includePowers=false、deniedPaths 含 **/.git/**）不符即拒绝运行；敏感路径、.git 与仓库相对形状
+         （**/.ssh/**、**/.aws/**、**/id_rsa*、**/id_ed25519*）的拒绝清单是第二道）
+         + 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行）+ kiro-cli 版本核对（不在 P1-15 探测过的
+         KIRO_TESTED_VERSIONS 里不失败、但日志与汇总评论带 notice）；这几次 kiro-cli 调用同样以 env -i 固定名单启动
       4. merge-base 三点 diff；>300KB 按优先级压缩，省略文件以 diff 片段索引供 Kiro 自读；
          开启行内评论时同时算出「本次变更行集合」（零上下文 diff，与评审输入同源）
-      5. 隔离（必须在 diff 算完之后、启动 Kiro 之前）：移除业务库工作树中任意深度的
-         AGENTS.md、.kiro/、**全部符号链接**及根 lsp.json，设置 chat.disableInheritingDefaultResources=true
-      6. timeout 强制限时、`env -i` **固定名单**环境（PATH/HOME/USER/TERM/TMPDIR/LANG/LC_ALL/LC_CTYPE/KIRO_API_KEY/
-         KIRO_LOG_NO_COLOR/代理/证书/XDG 四个，外加 KIRO_ENV_PASSTHROUGH 点名的变量；云效令牌与 Flow 变量不进 Kiro 进程）执行
+      5. 隔离（必须在 diff 算完之后、启动 Kiro 之前）：一次遍历移除业务库工作树中任意深度的
+         AGENTS.md、.kiro/、**全部符号链接**及根 lsp.json（任意深度的 .git 目录内部不动），
+         设置 chat.disableInheritingDefaultResources=true
+      6. timeout 强制限时、`env -i` **固定名单**环境（PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/
+         KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个，外加 KIRO_ENV_PASSTHROUGH 点名的变量——凭证形状的名字拒绝；
+         云效令牌与 Flow 变量不进 Kiro 进程）执行
          kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json
                        --agent codeup-reviewer
          不传 --trust-tools（免确认只来自 allowedPaths），绝不传会绕过 allowedPaths 的 --trust-all-tools；

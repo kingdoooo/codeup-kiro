@@ -51,7 +51,9 @@ assert_eq "$(jq -r '.toolsSettings.read.deniedPaths | length > 0' "$A")" "true" 
 assert_eq "$(jq -c .toolsSettings.grep.deniedPaths "$A")" "$denied" "V2 grep.deniedPaths 与 read 同组"
 assert_eq "$(jq -c .toolsSettings.glob.deniedPaths "$A")" "$denied" "V2 glob.deniedPaths 与 read 同组"
 # `**/.git` 与 `**/.git/**`：.git/FETCH_HEAD、.git/logs/* 可能带凭证 URL；diff 已在输入里，模型没有理由读 .git（票 15）
-for p in '~/.aws' '~/.aws/**' '~/.ssh' '~/.ssh/**' '~/.kiro' '~/.kiro/**' '~/.config/**' '~/.git-credentials' '/root/.aws/**' '**/.netrc' '**/.git/config' '**/.git' '**/.git/**'; do
+# 仓库相对形状 `**/.aws/**` `**/.ssh/**` `**/id_rsa*` `**/id_ed25519*`（15-fix2 #21）：绝对条目落在 allow 之外永远测不到，这几条在
+# allow 内也能被探测 T9 打到——某版 kiro-cli 静默不再解析 deniedPaths 时能被发现
+for p in '~/.aws' '~/.aws/**' '~/.ssh' '~/.ssh/**' '~/.kiro' '~/.kiro/**' '~/.config/**' '~/.git-credentials' '/root/.aws/**' '**/.netrc' '**/.git/config' '**/.git' '**/.git/**' '**/.aws/**' '**/.ssh/**' '**/id_rsa*' '**/id_ed25519*'; do
   assert_eq "$(jq -r --arg p "$p" '.toolsSettings.read.deniedPaths | index($p) != null' "$A")" "true" "V2 deniedPaths 含 $p"
 done
 
@@ -117,10 +119,85 @@ dest_j=$(kiro_install_agent "$tmp/junk-allow.json" "$tmp/agents-junk" --workspac
 assert_eq "$(allowed_of "$dest_j" read)" "$INJECTED" "定义多写一条 /**：安装后 read 恰好两条注入值"
 assert_eq "$(allowed_of "$dest_j" glob)" "$INJECTED" "定义把 glob 写成 /：安装后 glob 仍是注入值（不是 /）"
 assert_eq "$(leftover_count "$dest_j")" "0" "覆盖后没有残留占位符"
-# ④ 定义里没有 toolsSettings 对象 → 安装器把它建出来
+# ④（15-fix2 #11 改为负向）结构化写入会把不存在的 toolsSettings.<tool> 凭空建出来——那一处只有 allow 没有 deny，
+# glob 能枚举 <业务库>/.git/**。所以三个工具的 deniedPaths 都必须存在、非空且含 **/.git/**，缺一拒装、不落盘。
 jq --arg p "$ABS_PROMPT" '.prompt = $p | del(.toolsSettings)' "$A" > "$tmp/no-ts.json"
-dest_nt=$(kiro_install_agent "$tmp/no-ts.json" "$tmp/agents-nt" --workspace "$WS" --chunks "$CH")
-assert_eq "$(allowed_of "$dest_nt" grep)" "$INJECTED" "定义无 toolsSettings：安装后 grep.allowedPaths 仍是注入值"
+rc=0; err=$(kiro_install_agent "$tmp/no-ts.json" "$tmp/agents-nt" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "定义无 toolsSettings：拒绝安装（三处都没有 deniedPaths）"
+assert_contains "$err" "deniedPaths" "定义无 toolsSettings：报错点名 deniedPaths"
+assert_eq "$([[ -e "$tmp/agents-nt" ]] && echo written || echo none)" "none" "定义无 toolsSettings：不落盘"
+jq --arg p "$ABS_PROMPT" '.prompt = $p | del(.toolsSettings.glob)' "$A" > "$tmp/no-glob.json"
+rc=0; err=$(kiro_install_agent "$tmp/no-glob.json" "$tmp/agents-noglob" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "定义缺 toolsSettings.glob：拒绝安装（glob 会只有 allow 没有 deny）"
+assert_contains "$err" "glob.deniedPaths" "定义缺 toolsSettings.glob：报错点名 glob.deniedPaths"
+assert_eq "$([[ -e "$tmp/agents-noglob" ]] && echo written || echo none)" "none" "定义缺 toolsSettings.glob：不落盘"
+jq --arg p "$ABS_PROMPT" '.prompt = $p | .toolsSettings.grep.deniedPaths = []' "$A" > "$tmp/empty-deny.json"
+rc=0; kiro_install_agent "$tmp/empty-deny.json" "$tmp/agents-emptydeny" --workspace "$WS" --chunks "$CH" >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "grep.deniedPaths 为空数组：拒绝安装"
+jq --arg p "$ABS_PROMPT" '.prompt = $p | .toolsSettings.read.deniedPaths -= ["**/.git/**"]' "$A" > "$tmp/no-gitdeny.json"
+rc=0; err=$(kiro_install_agent "$tmp/no-gitdeny.json" "$tmp/agents-nogitdeny" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "read.deniedPaths 不含 **/.git/**：拒绝安装"
+assert_contains "$err" '**/.git/**' "read.deniedPaths 不含 **/.git/**：报错点名"
+# 对照：deniedPaths 三处完整时照常安装（就是上面 dest 那次）
+assert_eq "$(jq -r '.toolsSettings.glob.deniedPaths | index("**/.git/**") != null' "$dest")" "true" "对照：正常定义安装后 glob.deniedPaths 含 **/.git/**"
+
+# --- --print-paths（15-fix2 #16）：stdout 第 2/3 行打回实际写入的两条物理路径，供调用方与 pwd -P / $WORK/chunks 逐字比对 ---
+pp=$(kiro_install_agent "$A" "$tmp/agents-pp" --workspace "$WS" --chunks "$CH" --print-paths)
+assert_eq "$(printf '%s\n' "$pp" | wc -l | tr -d ' ')" "3" "--print-paths：恰好三行"
+assert_eq "$(printf '%s\n' "$pp" | sed -n 1p)" "$tmp/agents-pp/codeup-reviewer.json" "--print-paths：第 1 行安装路径"
+assert_eq "$(printf '%s\n' "$pp" | sed -n 2p)" "$WS_P" "--print-paths：第 2 行 workspace 物理路径"
+assert_eq "$(printf '%s\n' "$pp" | sed -n 3p)" "$CH_P" "--print-paths：第 3 行 chunks 物理路径"
+assert_eq "$(kiro_install_agent "$A" "$tmp/agents-pp" --workspace "$WS" --chunks "$CH" | wc -l | tr -d ' ')" "1" "不带 --print-paths：只有一行"
+
+# --- --allow-none（15-fix2 #20）：探测正控 agent 的唯一合法安装路——删三处 allowedPaths，其余（prompt 改写、deny 检查、同名清理）照做 ---
+mkdir -p "$tmp/agents-none"; jq '.prompt = "旧版内联提示词"' "$A" > "$tmp/agents-none/agent-codeup-reviewer.json"
+dest_none=$(kiro_install_agent "$A" "$tmp/agents-none" --allow-none 2>/dev/null)
+assert_eq "$dest_none" "$tmp/agents-none/codeup-reviewer.json" "--allow-none：按 name 落盘"
+assert_eq "$(jq -c '[.toolsSettings[] | has("allowedPaths")] | unique' "$dest_none")" "[false]" "--allow-none：三处 allowedPaths 都删掉"
+assert_eq "$(jq -r .prompt "$dest_none")" "file://$ROOT/prompts/review-agent-prompt.md" "--allow-none：prompt 仍改写为绝对 file://"
+assert_eq "$(jq -r '.toolsSettings.read.deniedPaths | index("**/.git/**") != null' "$dest_none")" "true" "--allow-none：deniedPaths 原样保留"
+assert_eq "$([[ -e "$tmp/agents-none/agent-codeup-reviewer.json" ]] && echo kept || echo removed)" "removed" "--allow-none：同名旧文件照样清理"
+rc=0; err=$(kiro_install_agent "$A" "$tmp/agents-none2" --allow-none --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--allow-none 与 --workspace/--chunks 同给：拒绝"
+assert_contains "$err" "互斥" "--allow-none 与路径参数互斥：报错说明"
+rc=0; kiro_install_agent "$tmp/no-glob.json" "$tmp/agents-none3" --allow-none >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--allow-none 下 deniedPaths 检查照做（缺 glob 仍拒装）"
+# $(...) 会吞掉尾部空行，所以直接接管道数行
+assert_eq "$(kiro_install_agent "$A" "$tmp/agents-none4" --allow-none --print-paths 2>/dev/null | wc -l | tr -d ' ')" "3" "--allow-none --print-paths：仍是三行（后两行为空）"
+assert_eq "$(kiro_install_agent "$A" "$tmp/agents-none4" --allow-none --print-paths 2>/dev/null | sed -n 2p)" "" "--allow-none --print-paths：workspace 行为空"
+
+# --- kiro_agent_selfcheck（15-fix2 #16）：值比对 + 安全字段；执行器第 3 步用它把日志声称的事实变成断言 ---
+rc=0; kiro_agent_selfcheck "$dest" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "0" "selfcheck：正常安装结果通过"
+assert_eq "$KIRO_AGENT_SELFCHECK_ERROR" "" "selfcheck：通过时无错误文案"
+rc=0; kiro_agent_selfcheck "$dest" "$CH_P" "$WS_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：参数顺序反了 → 失败（只看形状的自检放行不了）"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "read.allowedPaths" "selfcheck：顺序反了点名 read.allowedPaths"
+rc=0; kiro_agent_selfcheck "$dest" "$WS" "$CH_P" || rc=$?
+assert_eq "$([[ "$WS" == "$WS_P" ]] && echo 0 || echo "$rc")" "$([[ "$WS" == "$WS_P" ]] && echo 0 || echo 1)" "selfcheck：逻辑路径（未 pwd -P）与物理路径不同时 → 失败"
+jq '.toolsSettings.grep.allowedPaths = ["/"]' "$dest" > "$tmp/sc-grep.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-grep.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：grep.allowedPaths 被改成 / → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "grep.allowedPaths" "selfcheck：点名 grep.allowedPaths"
+jq 'del(.toolsSettings.grep.allowedPaths)' "$dest" > "$tmp/sc-nogrep.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-nogrep.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：grep 缺 allowedPaths → 失败"
+jq '.allowedTools = ["read"]' "$dest" > "$tmp/sc-at.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-at.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：allowedTools 非空 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "allowedTools" "selfcheck：点名 allowedTools"
+jq '.includeMcpJson = true' "$dest" > "$tmp/sc-mcp.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-mcp.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：includeMcpJson=true → 失败"
+jq '.includePowers = true' "$dest" > "$tmp/sc-pow.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-pow.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：includePowers=true → 失败"
+jq '.toolsSettings.glob.deniedPaths -= ["**/.git/**"]' "$dest" > "$tmp/sc-deny.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-deny.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：glob.deniedPaths 少了 **/.git/** → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "glob.deniedPaths" "selfcheck：点名 glob.deniedPaths"
+rc=0; kiro_agent_selfcheck "$tmp/does-not-exist.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：文件不存在 → 失败"
 
 # --- 占位符注入：路径规范化与 JSON 转义 ---
 # 相对路径 → 绝对（安装函数自己 cd && pwd -P，不信任调用方给的形态）
@@ -217,17 +294,20 @@ LIB="$ROOT/scripts/lib/kiro-agent.sh"
 names_under() { # 在可控环境里跑 kiro_env_allowlist，输出透传的变量名（每行一个）；$@ = VAR=值
   env -i PATH="$PATH" "$@" bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; kiro_env_allowlist_names' _ "$LIB"
 }
-env_names=$(names_under HOME="$tmp/h" USER=u TERM=dumb TMPDIR="$tmp" LANG=C.UTF-8 LC_ALL=C LC_CTYPE=C.UTF-8 LC_TIME=C \
+env_names=$(names_under HOME="$tmp/h" USER=u TERM=dumb TMPDIR="$tmp" LANG=C.UTF-8 LANGUAGE=zh_CN LC_ALL=C LC_CTYPE=C.UTF-8 LC_MESSAGES=C LC_TIME=C \
   KIRO_API_KEY=k KIRO_FOO=1 KIRO_LOG_NO_COLOR=0 \
-  HTTP_PROXY=http://p:1 HTTPS_PROXY=http://p:1 NO_PROXY=localhost http_proxy=http://p:1 https_proxy=http://p:1 no_proxy=localhost \
+  HTTP_PROXY=http://p:1 HTTPS_PROXY=http://p:1 FTP_PROXY=http://p:1 ALL_PROXY=socks5://p:1 NO_PROXY=localhost \
+  http_proxy=http://p:1 https_proxy=http://p:1 ftp_proxy=http://p:1 all_proxy=socks5://p:1 no_proxy=localhost \
   CORP_SECRET_PROXY=s PROXY_USER=pu SSL_CERT_FILE=/c.pem SSL_CERT_DIR=/certs CURL_CA_BUNDLE=/b.pem \
-  XDG_CONFIG_HOME=/x1 XDG_DATA_HOME=/x2 XDG_CACHE_HOME=/x3 XDG_STATE_HOME=/x4 XDG_RUNTIME_DIR=/x5 \
+  XDG_CONFIG_HOME=/x1 XDG_DATA_HOME=/x2 XDG_CACHE_HOME=/x3 XDG_STATE_HOME=/x4 XDG_RUNTIME_DIR=/x5 XDG_SESSION_TYPE=tty \
   YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=o CODEUP_REPO_ID=r CODEUP_BOT_USERNAME=b AWS_SECRET_ACCESS_KEY=a GIT_ASKPASS=/g CI_COMMIT_REF_NAME=x LD_LIBRARY_PATH=/l)
-for v in PATH HOME USER TERM TMPDIR LANG LC_ALL LC_CTYPE KIRO_API_KEY HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy \
-         SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME KIRO_LOG_NO_COLOR; do
+# 15-fix2 #14：ALL_PROXY/all_proxy、FTP_PROXY/ftp_proxy、XDG_RUNTIME_DIR、LC_MESSAGES、LANGUAGE 补进固定名单（A/B 实测用 ALL_PROXY 的构建机升级后评审全部在网络层失败）
+for v in PATH HOME USER TERM TMPDIR LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES KIRO_API_KEY \
+         HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy ftp_proxy all_proxy no_proxy \
+         SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR KIRO_LOG_NO_COLOR; do
   assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "1" "固定名单透传 ${v}（恰好一次）"
 done
-for v in LC_TIME KIRO_FOO CORP_SECRET_PROXY PROXY_USER XDG_RUNTIME_DIR LD_LIBRARY_PATH \
+for v in LC_TIME KIRO_FOO CORP_SECRET_PROXY PROXY_USER XDG_SESSION_TYPE LD_LIBRARY_PATH \
          YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID CODEUP_BOT_USERNAME AWS_SECRET_ACCESS_KEY GIT_ASKPASS CI_COMMIT_REF_NAME; do
   assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "0" "固定名单不透传 ${v}（名单之外，即使形状像 KIRO_* / *_PROXY / XDG_*）"
 done
@@ -242,6 +322,16 @@ assert_contains "$env_pairs" "HOME=$tmp/h" "HOME 原样透传（登录态与 age
 # 只透传已导出的变量：未导出的 shell 变量本来也到不了子进程
 seen_unexported=$(env -i PATH="$PATH" HOME="$tmp/h" bash -c 'set -euo pipefail; source "$1"; KIRO_API_KEY=notexported; kiro_env_allowlist; kiro_env_allowlist_names' _ "$LIB")
 assert_eq "$(printf '%s\n' "$seen_unexported" | grep -c -x KIRO_API_KEY)" "0" "未导出的同名 shell 变量不透传"
+# 15-fix2 #12：带额外属性的导出变量（declare -rx / -ix / -ax）也是导出——bash 3.2 上 `declare -rx TMPDIR` 曾被丢掉，
+# env -i 起 kiro 时没有 TMPDIR/PATH/HOME
+attr_pairs=$(env -i PATH="$PATH" HOME="$tmp/h" bash -c 'set -euo pipefail; declare -rx TMPDIR=/ro-tmp; declare -ix XDG_RUNTIME_DIR=7; declare -ax XDG_DATA_HOME=(/d1 /d2); declare -rx LC_ALL=C; source "$1"; kiro_env_allowlist; printf "%s\n" "${KIRO_ENV_ALLOW[@]}"' _ "$LIB")
+assert_contains "$attr_pairs" "TMPDIR=/ro-tmp" "declare -rx 的变量透传"
+assert_contains "$attr_pairs" "XDG_RUNTIME_DIR=7" "declare -ix 的变量透传"
+assert_contains "$attr_pairs" "XDG_DATA_HOME=/d1" "declare -ax 的变量透传（取首元素，与 env 看到的一致）"
+assert_contains "$attr_pairs" "LC_ALL=C" "declare -rx 的 LC_ALL 透传"
+# 正控：同一批变量若只是 declare -r（未导出）则不透传
+ro_pairs=$(env -i PATH="$PATH" HOME="$tmp/h" bash -c 'set -euo pipefail; declare -r TMPDIR=/ro-tmp; source "$1"; kiro_env_allowlist; printf "%s\n" "${KIRO_ENV_ALLOW[@]}"' _ "$LIB")
+assert_not_contains "$ro_pairs" "TMPDIR=" "declare -r（未导出）的变量不透传"
 # 真跑一次 env -i：子进程只看得到清单里的变量
 seen=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_API_KEY=k YUNXIAO_TOKEN=t KIRO_FOO=1 \
   bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; env -i "${KIRO_ENV_ALLOW[@]}" bash -c "compgen -e" | sort' _ "$LIB")
@@ -250,29 +340,46 @@ assert_eq "$(printf '%s\n' "$seen" | grep -c -x -- "YUNXIAO_TOKEN")" "0" "env -i
 assert_eq "$(printf '%s\n' "$seen" | grep -c -x -- "KIRO_FOO")" "0" "env -i 后子进程看不到 KIRO_FOO（不在固定名单）"
 
 # --- KIRO_ENV_PASSTHROUGH：逗号分隔的变量名，只放名字不放值 ---
-pt_names=$(names_under HOME="$tmp/h" KIRO_FOO=1 LD_LIBRARY_PATH=/opt/lib AWS_PROFILE=dev YUNXIAO_TOKEN=t \
-  KIRO_ENV_PASSTHROUGH=' KIRO_FOO, LD_LIBRARY_PATH ,,AWS_PROFILE,NOT_SET_ANYWHERE,')
-for v in KIRO_FOO LD_LIBRARY_PATH AWS_PROFILE; do
+pt_names=$(names_under HOME="$tmp/h" KIRO_FOO=1 LD_LIBRARY_PATH=/opt/lib JAVA_HOME=/jdk YUNXIAO_TOKEN=t \
+  KIRO_ENV_PASSTHROUGH=' KIRO_FOO, LD_LIBRARY_PATH ,,JAVA_HOME,NOT_SET_ANYWHERE,')
+for v in KIRO_FOO LD_LIBRARY_PATH JAVA_HOME; do
   assert_eq "$(printf '%s\n' "$pt_names" | grep -c -x -- "$v")" "1" "KIRO_ENV_PASSTHROUGH 透传 ${v}（空白与空项被忽略）"
 done
 assert_eq "$(printf '%s\n' "$pt_names" | grep -c -x -- "NOT_SET_ANYWHERE")" "0" "KIRO_ENV_PASSTHROUGH 里未设置的名字：跳过、不报错"
 assert_eq "$(printf '%s\n' "$pt_names" | grep -c -x -- "YUNXIAO_TOKEN")" "0" "KIRO_ENV_PASSTHROUGH 不影响名单外的其它变量"
 assert_eq "$(printf '%s\n' "$pt_names" | grep -c -x -- "KIRO_ENV_PASSTHROUGH")" "0" "KIRO_ENV_PASSTHROUGH 自己不透传"
 # 名字重复（固定名单里已有 / 列了两次）→ 只透传一次
-dup_names=$(names_under HOME="$tmp/h" KIRO_API_KEY=k KIRO_FOO=1 KIRO_ENV_PASSTHROUGH='KIRO_API_KEY,KIRO_FOO,KIRO_FOO')
-assert_eq "$(printf '%s\n' "$dup_names" | grep -c -x -- "KIRO_API_KEY")" "1" "与固定名单重复的名字只透传一次"
+dup_names=$(names_under HOME="$tmp/h" TMPDIR="$tmp" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH='TMPDIR,KIRO_FOO,KIRO_FOO')
+assert_eq "$(printf '%s\n' "$dup_names" | grep -c -x -- "TMPDIR")" "1" "与固定名单重复的名字只透传一次"
 assert_eq "$(printf '%s\n' "$dup_names" | grep -c -x -- "KIRO_FOO")" "1" "列两次的名字只透传一次"
-# 非法名字 → 返回非零并点名（取值部分打码：写成 NAME=value 的人多半把密钥放进去了，不能原样进日志）
+# 非法名字 → 返回非零并点名；KIRO_ENV_ALLOW_ERROR 带同一段文案（执行器的 die_review 用它，文案只有一处）
 for bad in 'KIRO_FOO=1' 'bad-name' '1ABC' 'A B' 'KIRO_FOO,$HOME'; do
-  rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH="KIRO_MOCK_DIR,${bad}" \
+  rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH="KIRO_FOO,${bad}" \
     bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
   assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含非法名字 [${bad}]：返回非零"
   assert_contains "$err" "非法变量名" "KIRO_ENV_PASSTHROUGH 含非法名字 [${bad}]：报错说明"
 done
-rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH='KIRO_FOO=s3cr3t' \
-  bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
-assert_contains "$err" "KIRO_FOO=" "非法名字 NAME=value：报错点名到名字"
-assert_not_contains "$err" "s3cr3t" "非法名字 NAME=value：取值不进报错"
+err_var=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH='bad-name' bash -c 'source "$1"; kiro_env_allowlist 2>/dev/null; printf "%s" "$KIRO_ENV_ALLOW_ERROR"' _ "$LIB")
+assert_contains "$err_var" "非法变量名" "KIRO_ENV_ALLOW_ERROR 带失败原因（供 die_review 使用）"
+# 15-fix2 #17：非法 token **无条件掩码**——只留开头的合法标识符字符段 + ****。原来只在含 = 时掩码，`ghp-liveSecret123` 会原样进日志
+for pair in 'KIRO_FOO=s3cr3t|KIRO_FOO****|s3cr3t' 'ghp-liveSecret123|ghp****|liveSecret' '1ABC|****|1ABC' 'A B|A****|A B'; do
+  tok="${pair%%|*}"; rest="${pair#*|}"; want="${rest%%|*}"; leak="${rest#*|}"
+  rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH="$tok" bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
+  assert_contains "$err" "$want" "非法 token [${tok}]：掩码为 ${want}"
+  assert_not_contains "${err#*非法变量名：}" "$leak" "非法 token [${tok}]：原文 ${leak} 不进报错"
+done
+# 15-fix2 #13：凭证形状的名字（语法合法）也拒绝——YUNXIAO_* / CODEUP_* / AWS_* / *TOKEN* / *SECRET* / *PASSWORD* / *CREDENTIAL* / *_KEY，大小写不敏感
+for cn in YUNXIAO_TOKEN yunxiao_org_id CODEUP_REPO_ID AWS_PROFILE AWS_SECRET_ACCESS_KEY GITHUB_TOKEN MY_SECRET DB_PASSWORD GCP_CREDENTIALS SIGNING_KEY KIRO_API_KEY; do
+  rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH="KIRO_FOO,${cn}" \
+    bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
+  assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：返回非零"
+  assert_contains "$err" "凭证形状" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：报错说明"
+  assert_contains "$err" "$cn" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：被拒的名字原样列出（名字不是密钥）"
+done
+# 正控：形状相近但不命中的名字照常透传（KEYBOARD 不是 *_KEY；TOKENIZER 命中 *TOKEN*——它就该被拒）
+ok_names=$(names_under HOME="$tmp/h" KEYBOARD=1 MONKEY_PATCH=1 KIRO_ENV_PASSTHROUGH='KEYBOARD,MONKEY_PATCH')
+assert_eq "$(printf '%s\n' "$ok_names" | grep -c -x KEYBOARD)" "1" "KEYBOARD 不命中 *_KEY：正常透传"
+assert_eq "$(printf '%s\n' "$ok_names" | grep -c -x MONKEY_PATCH)" "1" "MONKEY_PATCH 不命中：正常透传"
 # 空值 / 只有空白 → 等于没配
 empty_names=$(names_under HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH='  ')
 assert_eq "$(printf '%s\n' "$empty_names" | grep -c -x -- "KIRO_FOO")" "0" "KIRO_ENV_PASSTHROUGH 只有空白：等于没配"

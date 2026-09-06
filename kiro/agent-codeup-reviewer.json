@@ -1,6 +1,6 @@
 {
   "name": "codeup-reviewer",
-  "description": "Codeup MR 自动评审专用只读 agent：仅允许读文件与搜索，不加载任何工作区 MCP/Powers/资源。读取边界是许可清单：三个工具的 toolsSettings.*.allowedPaths 只含业务库 checkout 与 diff chunk 目录两个运行时路径，定义里的 REVIEW_WORKSPACE / REVIEW_CHUNKS 占位符只是文档，安装时由 kiro_install_agent --workspace/--chunks 把 read/grep/glob 三处 allowedPaths 结构化写成物理路径（与定义里写了什么无关），缺任一路径参数则拒绝安装；allowedTools 为空，免确认只来自 allowedPaths（调用方不得传 --trust-tools，更不得传会绕过 allowedPaths 的 --trust-all-tools）。deniedPaths 是第二道且先于 allow 判定（含 **/.git/**）。V2 引擎读 toolsSettings，V3 引擎读 permissions.rules：V3 不上生产（ADR-0004），只同步 deny 规则、不为它设计 allow 规则。model 指定 GPT-5.6 Sol；ID 不匹配或组织策略限制时 Kiro 自动回退默认模型并打警告（见 setup-guide §8）",
+  "description": "Codeup MR 自动评审专用只读 agent：仅允许读文件与搜索，不加载任何工作区 MCP/Powers/资源。读取边界是许可清单：三个工具的 toolsSettings.*.allowedPaths 只含业务库 checkout 与 diff chunk 目录两个运行时路径，定义里的 REVIEW_WORKSPACE / REVIEW_CHUNKS 占位符只是文档，安装时由 kiro_install_agent --workspace/--chunks 把 read/grep/glob 三处 allowedPaths 结构化写成物理路径（与定义里写了什么无关），缺任一路径参数则拒绝安装；allowedTools 为空，免确认只来自 allowedPaths（调用方不得传 --trust-tools，更不得传会绕过 allowedPaths 的 --trust-all-tools）。deniedPaths 是第二道且先于 allow 判定（含 **/.git/**，以及 allow 内也能测到的仓库相对形状 **/.aws/**、**/.ssh/**、**/id_rsa*、**/id_ed25519*）。V2 引擎读 toolsSettings，V3 引擎读 permissions.rules：V3 不上生产（ADR-0004），只同步 deny 规则、不为它设计 allow 规则。model 指定 GPT-5.6 Sol；ID 不匹配或组织策略限制时 Kiro 自动回退默认模型并打警告（见 setup-guide §8）",
   "model": "gpt-5.6-sol",
   "prompt": "file://../prompts/review-agent-prompt.md",
   "tools": ["read", "grep", "glob"],
@@ -8,22 +8,22 @@
   "toolsSettings": {
     "read": {
       "allowedPaths": ["{{REVIEW_WORKSPACE}}", "{{REVIEW_CHUNKS}}"],
-      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc", "**/.git", "**/.git/**"]
+      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc", "**/.git", "**/.git/**", "**/.aws/**", "**/.ssh/**", "**/id_rsa*", "**/id_ed25519*"]
     },
     "grep": {
       "allowedPaths": ["{{REVIEW_WORKSPACE}}", "{{REVIEW_CHUNKS}}"],
-      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc", "**/.git", "**/.git/**"]
+      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc", "**/.git", "**/.git/**", "**/.aws/**", "**/.ssh/**", "**/id_rsa*", "**/id_ed25519*"]
     },
     "glob": {
       "allowedPaths": ["{{REVIEW_WORKSPACE}}", "{{REVIEW_CHUNKS}}"],
-      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc", "**/.git", "**/.git/**"]
+      "deniedPaths": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc", "**/.git", "**/.git/**", "**/.aws/**", "**/.ssh/**", "**/id_rsa*", "**/id_ed25519*"]
     }
   },
   "permissions": {
     "rules": [
       {
         "capability": "fs_read",
-        "match": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc", "**/.git", "**/.git/**"],
+        "match": ["/proc", "/proc/**", "/sys", "/sys/**", "/dev", "/dev/**", "~/.ssh", "~/.ssh/**", "~/.aws", "~/.aws/**", "~/.kiro", "~/.kiro/**", "~/.config", "~/.config/**", "~/.docker", "~/.docker/**", "~/.git-credentials", "/root/.ssh", "/root/.ssh/**", "/root/.aws", "/root/.aws/**", "/root/.git-credentials", "/var/run/secrets", "/var/run/secrets/**", "**/.git/config", "**/.netrc", "**/.git", "**/.git/**", "**/.aws/**", "**/.ssh/**", "**/id_rsa*", "**/id_ed25519*"],
         "effect": "deny"
       },
       {

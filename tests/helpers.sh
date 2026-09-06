@@ -63,27 +63,42 @@ meta_row() { printf '%s\n' "$1" | { grep -F '| `' || true; } | { grep -F ' → '
 # 端到端 fixture 里机器人账号的用户名（取自 spec §4.7.1 P1-00 实测值）
 TEST_BOT_USERNAME='aliyun:kingdooo_hvFXC'
 
-# ---- 替身 kiro-cli 的配置通道（15-fix #14）----
-# 生产脚本以 env -i + 许可清单启动 kiro-cli，MOCK_* 环境变量到不了替身；替身只认 KIRO_MOCK_DIR（测试把它放进
-# KIRO_ENV_PASSTHROUGH——顺带真实覆盖了逃生口机制）。该目录下：
-#   mock.env   行为开关，每行 MOCK_X=值。由 mock_config_write 写、mock_config_load 读——解析与写入只有这一份
-#   args stdin settings cwdscan calls helpcwd env env-help env-settings allowscan nonce   替身的记录文件（固定名字）
-# 拿不到 KIRO_MOCK_DIR 时替身**非零退出并报错**：漏配要变成红测试，而不是「记不了 args 于是『Kiro 未启动』恒真」。
-mock_config_write() { # <目录> [MOCK_X=值 ...]（非 MOCK_ 开头的参数忽略，便于把 run_case 的 "$@" 原样传进来）
-  local dir="$1"; shift
+# ---- 替身 kiro-cli 的配置通道（15-fix #14 / 15-fix2 #19）----
+# 生产脚本以 env -i + 许可清单启动 kiro-cli，MOCK_* 环境变量到不了替身。替身只从 **$HOME/.kiro-mock/** 取配置与写记录：
+# HOME 在固定名单里（真实 kiro-cli 的登录态与 agent 目录也靠它），每个用例都有自己的 $CASE/home，所以不需要借道
+# KIRO_ENV_PASSTHROUGH——那是一个安全控制，端到端与变异测试不该与它耦合（收紧它就全红）；passthrough/badpass 是仅有的逃生口用例。
+# 目录下：mock.env  行为开关，每行 MOCK_X=值（由 mock_config_write 写、mock_config_load 读——解析与写入只有这一份）
+#         args stdin settings cwdscan calls helpcwd env env-help env-settings allowscan nonce   替身的记录文件（固定名字）
+# 拿不到该目录时替身**非零退出（97）并报错**：漏配要变成红测试，而不是「记不了 args 于是『Kiro 未启动』恒真」。
+mock_dir_of_home() { printf '%s/.kiro-mock' "$1"; }
+mock_config_write() { # <HOME 目录> [MOCK_X=值 ...]（非 MOCK_ 开头的参数忽略，便于把 run_case 的 "$@" 原样传进来）
+  local dir; dir=$(mock_dir_of_home "$1"); shift
   local a
   mkdir -p "$dir"; : > "$dir/mock.env"
   for a in "$@"; do [[ "$a" == MOCK_* ]] && printf '%s\n' "$a" >> "$dir/mock.env"; done
   return 0
 }
-mock_config_load() { # <目录>：把 mock.env 里的 MOCK_X=值 导出到当前 shell（同名后者覆盖前者，与 env 的语义一致）
-  local dir="$1" line n v
+mock_config_load() { # <HOME 目录>：把 .kiro-mock/mock.env 里的 MOCK_X=值 导出到当前 shell（同名后者覆盖前者，与 env 的语义一致）
+  local dir line n v; dir=$(mock_dir_of_home "$1")
   [[ -r "$dir/mock.env" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(MOCK_[A-Z0-9_]+)=(.*)$ ]] || continue
     n="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
     export "$n=$v"
   done < "$dir/mock.env"
+}
+
+# ---- 注入面扫描谓词（15-fix2 #23）：与生产 scripts/lib/isolation.sh 的 review_isolate_workspace **同一条谓词的枚举版** ----
+# 在 cwd（业务库根）执行，每行一个相对路径：任意深度的 AGENTS.md（不分大小写、非目录）、.kiro（目录或符号链接；命中即不下钻）、
+# 符号链接，以及根 lsp.json；任意深度的 .git 目录与根 ./.git 一律剪枝（不进、不报）。
+# 替身 kiro-cli 启动时的 cwdscan、端到端的 leftovers() 都用它；改这里必须同步改生产那条，等价性由端到端的合成树用例守卫。
+injection_surface_scan() {
+  [[ -e lsp.json || -L lsp.json ]] && echo "./lsp.json"
+  find . \( -path ./.git -o \( -name .git -type d \) \) -prune \
+       -o \( -name .kiro \( -type d -o -type l \) \) -prune -print \
+       -o \( -iname AGENTS.md -not -type d \) -print \
+       -o -type l -print
+  return 0
 }
 
 report() { echo "OK: ${TESTS_PASSED} 个断言通过（$0）"; }

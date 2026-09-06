@@ -33,7 +33,7 @@
 | `probe-codeup-inline.sh` | P1-00 身份/MR · P1-01 版本列表 · P1-02 行号侧向 · P1-03 必填字段 · P1-04 草稿一次提交 · P1-05 原地更新 · P1-06 评论列表 · P1-09 `<details>` 渲染 | 令牌：代码只读 + 合并请求读写；一个打开的测试 MR |
 | `probe-flow-run.sh` | P1-07 `CreatePipelineRun` 的 `envs` / `runningBranchs` 覆写 | 令牌：流水线读写；已配置的评审流水线 |
 | `probe-kiro-headless.sh` | P1-08 `stream-json` 事件形态 · P1-10 AGENTS.md 继承隔离 · P1-11 禁止路径 · P1-12 `--engine v3` 对照 | 装有 kiro-cli 的机器 + `KIRO_API_KEY`（或本机已 `kiro-cli login`） |
-| `probe-kiro-allowlist.sh` | P1-15 读取**许可清单**（`allowedPaths`）在 headless 下是不是边界。门禁用例：T1 allow 内 read 可读 · T1b/T1c allow 内 grep/glob 可用（不带 `--trust-tools`）· T2 allow 外/deny 外的 canary 被**拒绝**（不是等确认到超时）· T3 deny 先于 allow（`.git/logs/HEAD`）· T4 `env -i` 许可清单下能启动 · T8 业务库内指向 `$HOME` 的符号链接与 `<业务库>/../` 越界路径都被拒。非门禁：T5 正控（无 allowedPaths 的旧形态 + `--trust-tools` 读出 canary）· T6/T7 INFO（`--trust-tools` 不覆盖 allow；`--trust-all-tools` **绕过** allow） | 同上；每用例一次调用（约 0.3 credit） |
+| `probe-kiro-allowlist.sh` | P1-15 读取**许可清单**（`allowedPaths`）在 headless 下是不是边界。门禁用例：T1 allow 内 read 可读 · T1b/T1c allow 内 grep/glob 可用（不带 `--trust-tools`）· T2 allow 外/deny 外的 canary 被**拒绝**（不是等确认到超时）· T3 deny 先于 allow（`.git/logs/HEAD`）· T4 `env -i` 许可清单下能启动 · T8 业务库内指向 `$HOME` 的符号链接与 `<业务库>/../` 越界路径都被拒 · T9 业务库里提交的 `.ssh/config`、`.aws/config`、`keys/id_rsa.pub`、`keys/id_ed25519.pub` 都被拒（allow 内的仓库相对 deny 形状，四条各一）。非门禁：T5 正控（无 allowedPaths 的旧形态 + `--trust-tools` 读出 canary；默认跑）· T6/T7 INFO（`--trust-tools` 不覆盖 allow；`--trust-all-tools` **绕过** allow；要跑得显式 `PROBE_CASES`） | 同上；每用例一次调用（约 0.3 credit） |
 
 ## 用法
 
@@ -65,8 +65,11 @@ KIRO_ENGINE=v3 bash scripts/probe/probe-kiro-headless.sh
 
 # 5) 读取许可清单边界（P1-15；票 15 主方案的前提，改动 agent 定义 / kiro_install_agent / 许可清单函数后重跑）
 bash scripts/probe/probe-kiro-allowlist.sh
+# 默认 = 八个门禁用例 + T5 正控（9 次调用）；T6/T7 是 INFO，要跑得显式列出
 # 只跑子集省额度：PROBE_CASES="T1 T2 T4" bash scripts/probe/probe-kiro-allowlist.sh
-#   用例名逐个校验（写错 → 退出码 2、零调用）；子集运行时结论打「不作发布判定」，只有七个门禁用例全跑才打「走主方案」
+#   用例名逐个校验（写错 → 退出码 2、零调用）；子集运行时结论打「不作发布判定」并以 4 退出，只有八个门禁用例全跑才打「走主方案」
+# 升级 kiro-cli 之后：跑一次（至少 T8）→ 全 PASS 后把新版本号加进 scripts/kiro-review.sh 的 KIRO_TESTED_VERSIONS，
+#   否则每次评审的日志与汇总评论都会带「本次 kiro-cli 版本未经 P1-15 探测」的 notice
 # 原始输出默认留在 /tmp/kiro-probe-allowlist-<时间>（每用例 .jsonl/.err、agent-installed.json、
 # env-allowlist-names.txt、summary.json）
 ```
@@ -109,17 +112,24 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
 
 - `probe-kiro-allowlist.sh`：探测 agent 就是**生产定义**改名换成中性提示词，三处 allowedPaths 由生产的 `kiro_install_agent
   --workspace/--chunks` 结构化写入、`env -i` 许可清单用生产的 `kiro_env_allowlist`——测的就是生产要跑的那份规则。
-  **退出码**：门禁用例（T1 T1b T1c T2 T3 T4 T8）任一 FAIL → 1（`allowedPaths` 不能作为 headless 读取边界、或 `../` 越界未被拒，
-  不得上线）；无 FAIL 但有 INCONCLUSIVE → 3（门禁用例证据不全，**或** T5 正控不成立 / T6、T7 无法判定——那说明**探测本身不可信**，
-  不是 allowedPaths 的结论）；否则 0。「走主方案」只在七个门禁用例**全部实际运行**时打印；`PROBE_CASES` 子集运行打
-  「不作发布判定」（退出码仍是 0）。`PROBE_CASES` 里的用例名逐个校验，写错 → 退出码 2、零调用。
+  **退出码分级**：0 = 八个门禁用例（T1 T1b T1c T2 T3 T4 T8 T9）全部实际运行且全 PASS（走主方案）；1 = 门禁 FAIL
+  （`allowedPaths` 不能作为 headless 读取边界 / deny 未生效 / `../` 越界未被拒，**不得上线**）；2 = 参数错（`PROBE_CASES` 含未知
+  用例名，零调用）；3 = INCONCLUSIVE（门禁用例证据不全，**或** T5 正控不成立 / T6、T7 无法判定——那说明**探测本身不可信**，
+  不是 allowedPaths 的结论）；4 = 门禁用例未全部运行（`PROBE_CASES` 子集，已跑的全 PASS，不作发布判定）；5 = 环境准备失败
+  （缺 kiro-cli/jq/timeout、未登录、装探测 agent 失败、预检不符）。「实际运行」的集合从 `PROBE_CASES ∩ 已知用例` 推导，不手工记账。
+  T5 的正控 agent 由安装器的 `--allow-none` 装（唯一合法的第二调用方：file:// 改写、deny 检查、同名旧文件清理照做）。
   - **T1b/T1c**：去掉 `--trust-tools` 后 grep / glob 若落入权限申请，headless 下会被直接拒绝，评审员的搜索会静默降级成
     「读不到」——PASS 要求标记出现**且**事件流里有对应工具（`_meta.kiro.toolName` = grep / glob）的调用。
   - **T3** 读 `.git/logs/HEAD`（提交后必存在、含提交信息标记）：它只被新加的 `**/.git`、`**/.git/**` 覆盖，旧 deny 里的
     `**/.git/config` 管不到，所以测的确实是新规则。
   - **T8** 是 kiro-cli 路径解析语义的事实记录：① 业务库内一个指向 `$HOME` canary 的符号链接（请求路径字面上在 allow 内）
     ② `<业务库>/../<canary>` 越界路径。两者都必须被拒。①生产另有兜底（隔离步骤删光业务库里的符号链接），②没有别的兜底，
-    所以 T8 FAIL 仍算门禁 FAIL。2026-09-06 实测两者都被拒。
+    所以 T8 FAIL 仍算门禁 FAIL。2026-09-06 实测两者都被拒（kiro-cli 2.21.1，即 `KIRO_TESTED_VERSIONS` 里的版本）。
+  - **T9**（15-fix2 #21）：拒绝清单里约 20 条绝对路径（`~/.ssh`、`/root/.aws`…）都落在 allow 之外，永远测不到——某版 kiro-cli
+    静默不再解析 deniedPaths 时只有 `.git` 两条会发现。所以定义里另加了仓库相对形状 `**/.aws/**`、`**/.ssh/**`、`**/id_rsa*`、
+    `**/id_ed25519*`，T9 在业务库里**提交**四个对应 canary（配置/公钥这类无害文件名——用 id_rsa / credentials 时模型会自己拒读、零工具调用，
+    测不到 CLI 层）并要求读取 → 都必须被拒。每种形状一条正控：临时从
+    `kiro/agent-codeup-reviewer.json` 删掉对应条目重跑 T9 → 应 FAIL（读出 canary）；看完 `git checkout` 还原。
   - **T2 的判据**：canary 未出现 **且** 事件流里有对该文件的读取尝试 **且** 有拒绝痕迹
     （`tool_call_update.status=failed`、`Permission request failed … not supported in non-interactive mode`、
     stderr `[denied]`），运行正常结束——**超时（124/137）算 FAIL**：「等待确认到超时」正是要排除的行为。
