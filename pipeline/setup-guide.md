@@ -187,7 +187,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    因此建议用**评审专用的构建机或专用系统账号**跑本流水线；若必须与人共用，
    请事先告知使用者这两点（尤其不要在该账号下自建名为 `codeup-reviewer` 的 agent）。
 6. **脚本会改动业务库工作树**（第 12 节隔离步骤）：在 diff 算好之后、Kiro 启动之前，删除工作树里任意深度的
-   `AGENTS.md`、`.kiro/`、**全部符号链接**与根 `lsp.json`（任意深度的 `.git` 目录内部不动）。本流水线只有评审这一个任务；
+   `AGENTS.md`、`.kiro`（任何类型、不分大小写）、**全部符号链接**与根 `lsp.json`（任意深度的 `.git` 目录内部不动）。本流水线只有评审这一个任务；
    若要在**同一工作区**追加别的任务（构建、测试、打包），必须先重新 checkout，否则那些任务拿到的是被改过的工作树。
 
 ## 8. 首次联调核对清单
@@ -210,7 +210,10 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    走失败评论而**不**把模型内容贴到 MR 上（因为那份输出的拒绝路径与掩码规则都没生效）。
    MR 上出现这条失败评论 = agent 没加载，先查第 1 项的日志行。
 3. 启动前能力检查：脚本先跑 `kiro-cli chat --help`，`--agent-engine`、`--agent`、
-   `--output-format` 三者缺任一即**硬失败**（回写「评审未完成」评论），不再降级运行。
+   `--output-format` 三者缺任一即**硬失败**（回写「评审未完成」评论），不再降级运行。`kiro-cli --version` 跑不起来（退出码非零）
+   同样硬失败；版本号取不到只是 notice。**紧接着的「Kiro 运行目录：<路径>/cwd（空目录；业务库 <路径> 只在 allowedPaths 里…）」**：
+   四处 kiro-cli 调用（`chat --help`、`--version`、`settings`、`chat`）都在本次 `mktemp` 工作目录下的空目录 `cwd` 里运行，**绝不在**
+   业务库 checkout 里——第一段路径必须与第 1 项第二条许可路径（`…/chunks`）同一个父目录，第二段必须等于第 1 项的第一条许可路径。
 4. 引擎已钉死：日志出现「Kiro 引擎：v2（--agent-engine v2」。原因见第 12 节。
 5. 调用行**没有** `--trust-tools`、更没有 `--trust-all-tools`（第 12 节）：免确认只来自受信 agent 的
    `allowedPaths`。核对方式：日志「Kiro 进程环境许可清单（只透传这些变量）：…」那一行列出的变量名必须是**固定名单**
@@ -551,13 +554,21 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 - **`chat.disableInheritingDefaultResources=true` 的作用与局限**：让 Kiro 不继承工作区的默认资源
   （实测验证过的是工作区 `AGENTS.md`）。局限有三点：① **只对 v2 引擎有效**；② 它写在执行账号
   `$HOME` 的**全局**设置里且不回滚（常驻构建机注意事项见第 7 节第 5 条）；
-  ③ 它依赖业务库的 `.kiro/` 已被移除——业务库放一份 `.kiro/settings/cli.json` 就能把这个全局设置顶掉。
-- **纵深防御（不依赖引擎行为）**：每次运行在生成 diff **之后**、启动 Kiro **之前**，一次遍历
-  从业务库工作树中删除任意深度的 `AGENTS.md`（大小写不敏感）、任意深度的 `.kiro/`
-  （含指向别处的符号链接）、任意深度的**全部符号链接**（含指向目录的、悬空的）与根目录 `lsp.json`；
+  ③ 工作区级 `.kiro/settings/cli.json` 能把它顶掉——所以 kiro-cli 从不在业务库里运行（下一条）。
+- **kiro-cli 从不在业务库里运行（第一道）**：四处 kiro-cli 调用（`chat --help`、`--version`、`settings`、`chat`）都在本次
+  工作目录下的**空目录** `$WORK/cwd` 里执行，业务库只出现在受信 agent 的 `allowedPaths` 里，模型按运行时提示词给出的
+  **绝对路径**读取（相对路径会落在空目录里被拒；提示词缺 `{{REVIEW_WORKSPACE}}` 占位符时脚本拒绝运行）。kiro-cli 相对 cwd
+  发现的每一个面——`$CWD/.kiro/agents/<同名>.json` 顶替受信 agent（工作区优先于全局，kiro-cli 2.21 实测）、`.kiro/settings/cli.json`
+  覆盖全局设置、`AGENTS.md` steering、`lsp.json`——都落在一个没有文件的目录里，不必再追一份永远关不上的删除清单。
+  日志「Kiro 运行目录：…」供核对（第 8 节第 3 项）。
+- **纵深防御（第二道，不依赖引擎行为）**：每次运行在生成 diff **之后**、启动 Kiro **之前**，一次遍历
+  从业务库工作树中删除任意深度的 `AGENTS.md`（大小写不敏感）、任意深度的 `.kiro`
+  （任何类型——目录、符号链接或普通文件，不分大小写）、任意深度的**全部符号链接**（含指向目录的、悬空的）与根目录 `lsp.json`；
   任意深度的 `.git` 目录内部不动（旧写法只剪根目录 `.git`，嵌套的 vendored clone / fixture 仓库内部会被改）。
   diff 已从 git 对象算好，删文件不影响评审输入，这些文件的**改动本身**照样会被评审。**这一步改动的是业务库工作树**：
-  同一工作区里不要再追加别的任务，要追加就先重新 checkout（第 7 节第 6 项）。
+  同一工作区里不要再追加别的任务，要追加就先重新 checkout（第 7 节第 6 项）。业务库在 allowedPaths 里，这些文件若被
+  kiro-cli 按别的途径发现（未来版本、v3 的子目录 steering）仍不该在，所以第一道之外仍保留这一步。**已知局限**：执行账号
+  `~/.kiro/hooks`、`~/.kiro/steering` 里别的任务残留的文件不在删除范围（Flow 构建机是一次性容器；共用长驻构建机的客户见第 7 节第 5 条）。
 - **受信 agent 与读取边界（许可清单）**：`kiro/agent-codeup-reviewer.json` 只给 read/grep/glob，禁 shell/write/web/MCP。
   三个工具的读取范围由 `toolsSettings.*.allowedPaths` **许可清单**决定，只含两条运行时路径：业务库 checkout
   与本次 diff 片段目录（`$WORK/chunks`）。脚本安装时把 read/grep/glob 三处 allowedPaths **结构化写成**这两条

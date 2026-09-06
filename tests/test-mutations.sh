@@ -27,7 +27,8 @@ make_mutant() {
   if cmp -s "$ROOT/$target" "$dst/$target"; then
     echo "FAIL: 变异 ${name} 没有改变 ${target}——sed 模式 [${expr}] 已与实现失配" >&2; exit 1
   fi
-  bash -n "$dst/$target" || { echo "FAIL: 变异 ${name} 让 ${target} 产生语法错误" >&2; exit 1; }
+  # 只对 shell 文件做语法检查（提示词 .md 也可以是变异对象，15-fix4 M5ac）
+  [[ "$target" == *.md || "$target" == *.json ]] || bash -n "$dst/$target" || { echo "FAIL: 变异 ${name} 让 ${target} 产生语法错误" >&2; exit 1; }
   echo "$dst"
 }
 # $1=用例名 $2=集成包根目录 → 新建 fixture 并运行；结果写入全局 CASE(目录) / RC / OUT
@@ -326,6 +327,19 @@ rc5z=0; ( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_agent_selfcheck 
 assert_eq "$rc5z" "0" "M5z：双对象定义文件通过自检——单测「两个各自合格的定义拼在一个文件里 → 失败」断言会失败"
 rc5zc=0; ( set +e; source "$ROOT/scripts/lib/kiro-agent.sh"; kiro_agent_selfcheck "$tmp/m5z-two.json" "$(cd "$tmp/m5z-ws" && pwd -P)" "$(cd "$tmp/m5z-ch" && pwd -P)" ) || rc5zc=$?
 assert_eq "$rc5zc" "1" "M5z 对照：未变异实现拒绝双对象定义文件"
+
+# --- M5ab：chat 改回在业务库 checkout 下运行（15-fix4 #1）→ 替身记录的 chatcwd 就是业务库、目录非空 ---
+pkg=$(make_mutant m5ab-chat-in-repo 's|( cd "\$KIRO_CWD" \&\& "\$TIMEOUT_BIN" -k 30|( cd "$REVIEW_REPO_DIR" \&\& "$TIMEOUT_BIN" -k 30|')
+run_case m5ab "$pkg"
+assert_rc "$RC" 0 "M5ab：变异体仍能跑完"
+assert_eq "$(cat "$MD/chatcwd")" "$(cd "$CASE/work" && pwd -P)" "M5ab：chat 的 cwd 是业务库 checkout——端到端「Kiro 运行目录不是业务库」断言会失败"
+assert_eq "$([[ "$(cat "$MD/chatcwd-entries")" -gt 0 ]] && echo nonempty || echo empty)" "nonempty" "M5ab：cwd 非空——端到端「chat 启动时运行目录为空」断言会失败"
+# --- M5ac：运行时提示词丢了 {{REVIEW_WORKSPACE}} 占位符 → 脚本拒绝运行（模型拿不到业务库绝对路径，相对路径读取会全部被拒）---
+pkg=$(make_mutant m5ac-no-ws-placeholder 's/{{REVIEW_WORKSPACE}}/REVIEW_WORKSPACE/g' prompts/review-prompt.md)
+run_case m5ac "$pkg"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5ac：缺占位符 → 拒绝运行"
+assert_contains "$(posted_comment "$OUT")" "REVIEW_WORKSPACE" "M5ac：失败评论点名 {{REVIEW_WORKSPACE}} 占位符"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "M5ac：Kiro 未被启动"
 
 # --- M6：删掉任意深度 .kiro/ 的删除逻辑 → 子目录 .kiro/ 残留、Kiro 启动时能看到 ---
 # 模式只认 `-iname .kiro -prune` 这一行（15-fix3：不分大小写、任何类型）；实现改写后失配时 make_mutant 会报错，这正是它存在的意义。

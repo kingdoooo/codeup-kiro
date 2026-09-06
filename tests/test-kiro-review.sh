@@ -194,7 +194,24 @@ assert_eq "$([[ -n "$diff_ln" && -n "$iso_ln" && "$iso_ln" -gt "$diff_ln" ]] && 
 assert_contains "$(cat "$MD/settings")" "chat.disableInheritingDefaultResources true" "Kiro 启动前设置 chat.disableInheritingDefaultResources=true"
 assert_eq "$(awk '/^settings$/{s=NR} /^chat$/{c=NR} END{print (s && c && s<c) ? "ok" : "bad"}' "$MD/calls")" "ok" \
   "调用顺序：settings 先于 chat"
-assert_eq "$(cat "$MD/helpcwd")" "$ROOT" "kiro-cli chat --help 在集成包目录下执行，而不是尚未隔离的业务库 checkout"
+# 15-fix4 #1：四处 kiro-cli 调用（--help / --version / settings / chat）都在 $WORK/cwd 空目录下运行——kiro-cli 相对 cwd 发现的每一个面
+# （$CWD/.kiro/agents 顶替同名受信 agent、.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、lsp.json）都落在没有文件的目录里；
+# 业务库只在 allowedPaths 里。三个 cwd 记录必须相同、名为 cwd、与 chunks 同父目录（同一个 $WORK）、不是业务库也不是集成包、chat 时为空。
+ws_p=$(cd "$CASE/work" && pwd -P)
+kcwd=$(cat "$MD/chatcwd")
+assert_eq "$(cat "$MD/helpcwd")" "$kcwd" "kiro-cli chat --help 与 chat 在同一个运行目录下执行"
+assert_eq "$(cat "$MD/settingscwd")" "$kcwd" "kiro-cli settings 与 chat 在同一个运行目录下执行"
+assert_eq "$(basename "$kcwd")" "cwd" "Kiro 运行目录是 \$WORK/cwd（实际：${kcwd}）"
+assert_eq "$([[ "$kcwd" == "$ws_p" || "$kcwd" == "$ws_p"/* ]] && echo in-repo || echo outside)" "outside" "Kiro 运行目录不是业务库 checkout、也不在其内"
+assert_eq "$([[ "$kcwd" == "$ROOT" || "$kcwd" == "$ROOT"/* ]] && echo in-pkg || echo outside)" "outside" "Kiro 运行目录不在集成包内"
+assert_eq "$(cat "$MD/chatcwd-entries")" "0" "chat 启动时运行目录为空（没有任何文件可被 kiro-cli 相对 cwd 发现）"
+assert_contains "$out" "Kiro 运行目录：${kcwd}" "日志打出 Kiro 运行目录"
+# 业务库绝对路径穿进运行时提示词：模型在空目录下必须按绝对路径读文件（相对路径会被拒、静默降低评审质量）
+prompt_arg=$(cat "$MD/args")   # 提示词是最后一个位置参数、多行；args 文件按参数逐行落盘，整份看即可（别的参数里没有路径）
+assert_contains "$prompt_arg" "$ws_p" "运行时提示词含业务库 checkout 的物理路径"
+assert_contains "$prompt_arg" "${ws_p}/src/app.py" "运行时提示词用业务库路径举例绝对路径的写法"
+assert_not_contains "$prompt_arg" "{{REVIEW_WORKSPACE}}" "运行时提示词里的 {{REVIEW_WORKSPACE}} 已替换"
+assert_not_contains "$prompt_arg" "{{" "运行时提示词里没有任何占位符残留"
 
 # --- 受信 agent 安装：按 name 落盘，prompt 改写为集成包内提示词的绝对 file:// 路径 ---
 inst="$CASE/home/.kiro/agents/codeup-reviewer.json"
@@ -207,12 +224,12 @@ assert_eq "$(jq -c '[.includeMcpJson, .includePowers]' "$inst")" "[false,false]"
 assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths)' "$inst")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths)' "$ROOT/kiro/agent-codeup-reviewer.json")" \
   "安装只改写 prompt 与 allowedPaths 占位符，其余字段与集成包一致"
 # --- 读取边界（票 15）：allowedPaths = 业务库 checkout 物理路径 + 本次 $WORK/chunks；allowedTools 为空 ---
-ws_p=$(cd "$CASE/work" && pwd -P)
 assert_eq "$(jq -r '.toolsSettings.read.allowedPaths | length' "$inst")" "2" "安装后 allowedPaths 恰好两条"
 assert_eq "$(jq -r '.toolsSettings.read.allowedPaths[0]' "$inst")" "$ws_p" "allowedPaths[0] = 业务库 checkout 的物理路径"
 chunks_p=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$inst")
 assert_eq "$([[ "$chunks_p" == /*/chunks ]] && echo y || echo n)" "y" "allowedPaths[1] 是绝对路径下的 chunks 目录（实际：${chunks_p}）"
 assert_eq "$([[ "$chunks_p" == "$ws_p"/* ]] && echo inside || echo outside)" "outside" "chunks 目录不在业务库 checkout 之内（是 mktemp 出来的工作目录）"
+assert_eq "$(dirname "$chunks_p")" "$(dirname "$kcwd")" "Kiro 运行目录与 chunks 同在本次 \$WORK 下"
 assert_eq "$(jq -c '.toolsSettings | [.read.allowedPaths, .grep.allowedPaths, .glob.allowedPaths] | unique | length' "$inst")" "1" "read/grep/glob 的 allowedPaths 同组"
 assert_eq "$(jq -c .allowedTools "$inst")" "[]" "安装后 allowedTools 为空"
 assert_eq "$(jq '[.. | strings | select(contains("{{"))] | length' "$inst")" "0" "安装后没有残留占位符"

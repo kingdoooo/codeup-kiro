@@ -5,10 +5,11 @@
 #                                 MOCK_KIRO_VERSION_RC=<n> 以退出码 n 失败）
 #   kiro-cli chat --help        → 打印支持的参数名（含 --agent、--agent-engine、--output-format）；环境变量名 → env-help
 #   kiro-cli settings KEY VALUE → 追加 "KEY VALUE" 到 settings；环境变量名 → env-settings
-#   kiro-cli chat ...           → 记录参数(args)与 stdin(stdin)；扫描启动时 cwd 里残留的 AGENTS.md（任意深度）/
-#                                 根 lsp.json/.kiro（任意深度）/**符号链接**（任意深度）写入 cwdscan；环境变量名 → env；
+#   kiro-cli chat ...           → 记录参数(args)与 stdin(stdin)；扫描启动时**业务库**（agent 定义 allowedPaths[0]）里残留的
+#                                 AGENTS.md（任意深度）/根 lsp.json/.kiro（任意深度）/**符号链接**（任意深度）写入 cwdscan；环境变量名 → env；
 #                                 再输出评审结果
-# 每次调用把子命令名（help 调用记为 "help"）追加到 calls，用于断言调用顺序；help 调用时的 cwd 写入 helpcwd。
+# 每次调用把子命令名（help 调用记为 "help"）追加到 calls，用于断言调用顺序；help / settings / chat 三次调用的 cwd（pwd -P）分别写入
+# helpcwd / settingscwd / chatcwd，chat 时 cwd 的条目数写入 chatcwd-entries（生产四处调用都在 $WORK/cwd 空目录下，15-fix4 #1）。
 #
 # 输出形态跟着参数走，与真实 kiro-cli 2.21.0 一致：
 #   带 `--output-format stream-json` → JSON Lines 事件流（runStarted / sessionUpdate / metadata /
@@ -85,13 +86,14 @@ case "${1:-}" in
     shift
     printf '%s\n' "$*" >> "$M/settings"
     printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-settings"
+    pwd -P > "$M/settingscwd"   # 断言 settings 不在业务库目录里跑（15-fix4 #1）
     if [[ "${MOCK_SETTINGS_FAIL:-0}" == "1" ]]; then echo "mock: 模拟 settings 失败" >&2; exit 1; fi
     exit 0 ;;
   chat) ;;
   *) echo "mock kiro-cli: 不支持的子命令: $*" >&2; exit 2 ;;
 esac
 if [[ "${2:-}" == "--help" ]]; then
-  pwd > "$M/helpcwd"   # 断言 --help 不在未隔离的业务库目录里跑
+  pwd -P > "$M/helpcwd"   # 断言 --help 不在业务库目录里跑（四处调用都在 $WORK/cwd 空目录下，15-fix4 #1）
   printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-help"
   if [[ "${MOCK_KIRO_NO_ENGINE_FLAG:-0}" == "1" ]]; then
     echo "--no-interactive --trust-tools --agent"
@@ -119,6 +121,8 @@ MOCK_NONCE=$({ printf '%s\n' "$@" | grep -oE '<<<KIRO_REVIEW_JSON:[0-9a-f]+>>>' 
 [[ -n "$MOCK_NONCE" ]] || MOCK_NONCE="nononcefound000"
 printf '%s\n' "$@" > "$M/args"
 printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env"
+# chat 时的运行目录与其内容数（15-fix4 #1：生产在 $WORK/cwd 空目录下运行；cwd 里有东西 = 又回到了业务库、或空目录被写脏）
+pwd -P > "$M/chatcwd"; ls -A | wc -l | tr -d ' ' > "$M/chatcwd-entries"
 # --agent X → $HOME/.kiro/agents/X.json 必须存在（真实 kiro-cli 按 name 在 agent 目录里找）
 AGENT_ARG=""; prev=""
 for a in "$@"; do [[ "$prev" == "--agent" ]] && AGENT_ARG="$a"; prev="$a"; done
@@ -135,8 +139,13 @@ if [[ -n "$AGENT_ARG" ]]; then
 fi
 printf '%s\n' "$MOCK_NONCE" > "$M/nonce"
 cat > "$M/stdin"
-# 启动时 cwd 里残留的注入面：与生产隔离谓词等价的枚举版（tests/helpers.sh injection_surface_scan，15-fix2 #23）
-injection_surface_scan > "$M/cwdscan"
+# 启动时**业务库**（allowedPaths[0]）里残留的注入面：与生产隔离谓词等价的枚举版（tests/helpers.sh injection_surface_scan，15-fix2 #23）。
+# 生产的 cwd 是 $WORK/cwd 空目录（15-fix4 #1），扫 cwd 会恒空；要扫的是模型能读到的那棵树。没装 agent（变异 M4 删掉 --agent）时退回扫 cwd。
+if [[ -n "$AGENT_ARG" ]] && ws_scan=$(jq -r '.toolsSettings.read.allowedPaths[0] // empty' "$AGENT_JSON") && [[ -n "$ws_scan" && -d "$ws_scan" ]]; then
+  ( cd "$ws_scan" && injection_surface_scan ) > "$M/cwdscan"
+else
+  injection_surface_scan > "$M/cwdscan"
+fi
 [[ "${MOCK_KIRO_HANG:-0}" == "1" ]] && sleep 300
 if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
   echo "mock: 模拟 kiro 失败" >&2; exit 1

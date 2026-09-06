@@ -26,7 +26,7 @@
 # 而本探测要测的是 CLI 层边界，不是模型的配合度。生产上两层都在。
 # 与生产**相同**的部分（票 15 落地后）：探测 agent 就是生产定义 kiro/agent-codeup-reviewer.json 改名换提示词，
 #   allowedPaths 三处由同一个 kiro_install_agent --workspace/--chunks 结构化写入，env -i 许可清单用同一个
-#   kiro_env_allowlist——规则只有一份，探测过的就是生产跑的。
+#   kiro_env_allowlist，kiro-cli 在 $WORK/cwd **空目录**下运行、业务库只在 allowedPaths 里（15-fix4 #1）——规则只有一份，探测过的就是生产跑的。
 #
 # 可逆：agent 装成独立名字 codeup-reviewer-probe-allowlist（kiro_install_agent 只清理**同名**旧文件，
 #   所以不碰生产 agent）；不改任何全局设置；canary 放 $HOME/probe-allowlist-canary-<ts>.txt——
@@ -80,7 +80,7 @@ echo "[probe] 输出目录 $KEEP" >&2
 # ---------- 可逆的环境准备 ----------
 source "$PKG_ROOT/scripts/lib/kiro-agent.sh"
 WORK=$(mktemp -d)
-REPO="$WORK/repo"; CHUNKS="$WORK/chunks"; mkdir -p "$REPO/src" "$CHUNKS"
+REPO="$WORK/repo"; CHUNKS="$WORK/chunks"; KIRO_CWD="$WORK/cwd"; mkdir -p "$REPO/src" "$CHUNKS" "$KIRO_CWD"
 CANARY_PATH="$HOME/probe-allowlist-canary-${TS}.txt"
 AGENT_DIR="$HOME/.kiro/agents"; AGENT_DST="$AGENT_DIR/${PROBE_AGENT}.json"
 # kiro-cli 2.21 加载 agent 时会在同目录写 <name>.json.backup 与带时间戳的 .backup.<ts>（内容就是定义本身）——
@@ -152,6 +152,8 @@ echo "[probe] kiro-cli 版本：${KIRO_CLI_VERSION:-未知（--version 输出里
 
 # ---------- 运行与判定 ----------
 # run_case <名> <trust|notrust> <fullenv|allowenv> <提示词>：事件流 $KEEP/<名>.jsonl，stderr $KEEP/<名>.err；返回 kiro 退出码
+# 运行目录与生产一致（15-fix4 #1）：$WORK/cwd **空目录**，业务库只在 allowedPaths 里；所有提示词都给**绝对路径**（P_* 用 $REPO_P / $CHUNKS_P），
+# 事件流里的 path 也是绝对的，所以 read_tried 按文件名子串匹配不受 cwd 影响。
 run_case() {
   local name="$1" trust="$2" envmode="$3" prompt="$4" rc=0
   local -a cmd=(kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json --agent "$PROBE_AGENT")
@@ -159,10 +161,10 @@ run_case() {
   cmd+=("$prompt")
   local start; start=$(date +%s)
   if [[ "$envmode" == "allowenv" ]]; then
-    ( cd "$REPO" && "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" env -i "${KIRO_ENV_ALLOW[@]}" "${cmd[@]}" ) \
+    ( cd "$KIRO_CWD" && "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" env -i "${KIRO_ENV_ALLOW[@]}" "${cmd[@]}" ) \
       > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
   else
-    ( cd "$REPO" && KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "${cmd[@]}" ) \
+    ( cd "$KIRO_CWD" && KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "${cmd[@]}" ) \
       > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
   fi
   echo "[$name] kiro-cli 退出码 ${rc}（124/137=超时），耗时 $(( $(date +%s) - start ))s，trust=${trust} env=${envmode}" >&2
@@ -314,7 +316,7 @@ run_case_agent() {
   local -a cmd=(kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json --agent "$agent")
   cmd+=("${extra[@]+"${extra[@]}"}" "$prompt")
   local start; start=$(date +%s)
-  ( cd "$REPO" && KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "${cmd[@]}" ) \
+  ( cd "$KIRO_CWD" && KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "${cmd[@]}" ) \
     > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
   echo "[$name] kiro-cli 退出码 ${rc}（124/137=超时），耗时 $(( $(date +%s) - start ))s，agent=${agent} extra=${extra[*]:-无}" >&2
   [[ $rc -ne 0 ]] && { echo "[$name] stderr 尾部：" >&2; tail -n 6 "$KEEP/$name.err" | cut -c1-200 | sed 's/^/          /' >&2; }
