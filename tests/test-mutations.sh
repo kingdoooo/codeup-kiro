@@ -946,8 +946,10 @@ assert_contains "$(mut_rd_multi "$pkg" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "�
 assert_eq "$(mut_rd_multi "$ROOT" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "$(printf '%s\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）' "$PEM_PLACEHOLDER")" "M-q 对照：未变异实现整块丢弃、占位 + 提示"
 # --- M-t：第 10 条兜底——「含 BEGIN 且下一行像正文」不再当块起始 ---
 pkg=$(make_mutant m-t-pend 's|    pend != "" { if (!inpem \&\& (pem_body_key(\$0, 20) \|\| pem_is_hdr(\$0))) { begin_block(pend); pend = "" } else emit_pending() }|    pend != "" { emit_pending() }  # 变异 M-t：兜底失效|' scripts/lib/review-render.sh)
-assert_contains "$(mut_rd_multi "$pkg" "私钥如下 $PEM_B\n$PEM_L64\n$PEM_E\n")" "$PEM_L64" "M-t：兜底失效后正文裸奔——单测「兜底当块起始」断言会失败"
-assert_not_contains "$(mut_rd_multi "$ROOT" "私钥如下 $PEM_B\n$PEM_L64\n$PEM_E\n")" "$PEM_L64" "M-t 对照：未变异实现兜底开块"
+# 载荷用 28 位正文：≥ 40 位的整行会被第 17 条的整行规则另行掩掉（两道防线叠着），只有兜底能兜住 20–39 位的正文行
+PEM_L28="MIIEvQIBADANBgkq""1hkiG9w0BAQE"
+assert_contains "$(mut_rd_multi "$pkg" "私钥如下 $PEM_B\n$PEM_L28\n$PEM_E\n")" "$PEM_L28" "M-t：兜底失效后 28 位正文行裸奔——单测「兜底当块起始」断言会失败"
+assert_not_contains "$(mut_rd_multi "$ROOT" "私钥如下 $PEM_B\n$PEM_L28\n$PEM_E\n")" "$PEM_L28" "M-t 对照：未变异实现兜底开块、整块丢弃"
 # --- M-r：第 11 / 14 条——保行模式正文行不再换占位（原样打出）→ 降级评论 / kiro stderr 泄露正文 ---
 pkg=$(make_mutant m-r-keep-body 's|      if (pem_body_like(\$0) \|\| pem_is_hdr(\$0)) { print PEM_BODY_PH; next }   # 正文行 / RFC 1421 头：等行数替换（第 11 条）|      if (pem_body_like($0) \|\| pem_is_hdr($0)) { print; next }  # 变异 M-r：保行模式正文原样|' scripts/lib/review-render.sh)
 run_case m-r "$pkg" MOCK_KIRO_LEAK_SECRET=1
