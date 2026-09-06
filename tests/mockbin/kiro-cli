@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# 测试替身：模拟 kiro-cli 的三种用法，并把观察到的东西写进 MOCK_* 指定的文件。
-#   kiro-cli chat --help        → 打印支持的参数名（含 --agent、--agent-engine、--output-format）
-#   kiro-cli settings KEY VALUE → 追加 "KEY VALUE" 到 MOCK_SETTINGS_FILE
-#   kiro-cli chat ...           → 记录参数(MOCK_ARGS_FILE)与 stdin(MOCK_STDIN_FILE)；扫描启动时 cwd
-#                                 里残留的 AGENTS.md（任意深度）/根 lsp.json/.kiro（任意深度）写入
-#                                 MOCK_CWD_SCAN_FILE；再输出评审结果
-# 每次调用把子命令名（help 调用记为 "help"）追加到 MOCK_CALLS_FILE，用于断言调用顺序；
-# help 调用时的 cwd 写入 MOCK_HELP_CWD_FILE。
+# 测试替身：模拟 kiro-cli 的三种用法，并把观察到的东西写进 $KIRO_MOCK_DIR 下固定名字的文件。
+#   kiro-cli chat --help        → 打印支持的参数名（含 --agent、--agent-engine、--output-format）；环境变量名 → env-help
+#   kiro-cli settings KEY VALUE → 追加 "KEY VALUE" 到 settings；环境变量名 → env-settings
+#   kiro-cli chat ...           → 记录参数(args)与 stdin(stdin)；扫描启动时 cwd 里残留的 AGENTS.md（任意深度）/
+#                                 根 lsp.json/.kiro（任意深度）/**符号链接**（任意深度）写入 cwdscan；环境变量名 → env；
+#                                 再输出评审结果
+# 每次调用把子命令名（help 调用记为 "help"）追加到 calls，用于断言调用顺序；help 调用时的 cwd 写入 helpcwd。
 #
 # 输出形态跟着参数走，与真实 kiro-cli 2.21.0 一致：
 #   带 `--output-format stream-json` → JSON Lines 事件流（runStarted / sessionUpdate / metadata /
@@ -39,42 +38,40 @@
 #   MOCK_KIRO_LEAK_SECRET=1     无标记且原文里带未掩码的真实形态密钥（→ 脚本侧掩码应生效）
 #   MOCK_KIRO_NO_STREAM_FLAG=1  模拟 --help 不列出 --output-format 的版本（→ 脚本应拒绝运行）
 #
-# 配置的来路（票 15）：生产脚本用 `env -i` + 许可清单启动 kiro-cli，MOCK_* 这类变量到不了本替身。
-# 所以替身先 source "$HOME/.kiro-mock.env"（测试把 MOCK_* 写在那里；HOME 在许可清单内，真实 kiro-cli 的
-# 登录态与 agent 目录也靠它），环境里已有的同名变量优先（变异测试去掉 env -i 后两边一致）。
+# 配置的来路（票 15 / 15-fix #14）：生产脚本用 `env -i` + 许可清单启动 kiro-cli，MOCK_* 这类变量到不了本替身。
+# 替身只认 **KIRO_MOCK_DIR**（测试把它放进 KIRO_ENV_PASSTHROUGH，顺带真实覆盖了逃生口机制）：行为开关从
+# $KIRO_MOCK_DIR/mock.env 读（解析器在 tests/helpers.sh 的 mock_config_load，与写入方同一份），记录文件全部落在
+# $KIRO_MOCK_DIR 下固定名字。环境里的 MOCK_* 一律不认。拿不到 KIRO_MOCK_DIR 时**非零退出（97）并报错**——漏配要变成
+# 红测试，而不是「记不了 args 于是『Kiro 未启动』类断言恒真」（fail-closed）。
 # 与真实 kiro-cli 一致的一点：`--agent X` 必须能在 $HOME/.kiro/agents/X.json 找到定义，找不到就失败退出——
 # HOME 没透传或 agent 没装到位时，评审不能「静默用默认 agent 跑」。
-# 额外记录：MOCK_ENV_FILE ← chat 时环境里的变量名（每行一个，只记名字不记值）；
-#           MOCK_ALLOW_SCAN_FILE ← agent 定义里 read.allowedPaths 每条路径在 chat 时是否为目录及目录内容
+# 额外记录：env / env-help / env-settings ← 三种调用各自收到的环境变量名（每行一个，只记名字不记值）；
+#           allowscan ← agent 定义里 read.allowedPaths 每条路径在 chat 时是否为目录及目录内容
 #           （`路径<TAB>dir|MISSING<TAB>逗号分隔的目录内容`），用于断言 chunks 目录就是 diff chunk 的落盘目录。
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 先记下**收到的**环境里的变量名（再往下会从配置文件导出 MOCK_*，那些不算 kiro-cli 收到的环境）
 MOCK_RECEIVED_ENV=$(compgen -e | sort)
-if [[ -n "${HOME:-}" && -r "$HOME/.kiro-mock.env" ]]; then
-  # 文件里每行 `NAME=VALUE`（NAME 限 MOCK_*）；收到的环境里已有的名字不覆盖，文件内同名后者覆盖前者（与 env 的语义一致：
-  # 测试的 run_case 会把默认值与本次用例的覆盖值先后写进去）
-  while IFS= read -r _line || [[ -n "$_line" ]]; do
-    [[ "$_line" =~ ^(MOCK_[A-Z0-9_]+)=(.*)$ ]] || continue
-    _n="${BASH_REMATCH[1]}"; _v="${BASH_REMATCH[2]}"
-    printf '%s\n' "$MOCK_RECEIVED_ENV" | grep -qx -- "$_n" && continue
-    export "$_n=$_v"
-  done < "$HOME/.kiro-mock.env"
-  unset _line _n _v
+if [[ -z "${KIRO_MOCK_DIR:-}" || ! -d "${KIRO_MOCK_DIR:-/nonexistent}" ]]; then
+  echo "mock kiro-cli: 拿不到 KIRO_MOCK_DIR（未设置或不是目录：'${KIRO_MOCK_DIR:-}'）——测试没有把它放进 KIRO_ENV_PASSTHROUGH？替身拒绝运行（fail-closed），不会假装成功" >&2
+  exit 97
 fi
-if [[ -n "${MOCK_CALLS_FILE:-}" ]]; then
-  if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$MOCK_CALLS_FILE"; else printf '%s\n' "${1:-}" >> "$MOCK_CALLS_FILE"; fi
-fi
+source "$MOCK_DIR/../helpers.sh"
+mock_config_load "$KIRO_MOCK_DIR"
+M="$KIRO_MOCK_DIR"
+if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$M/calls"; else printf '%s\n' "${1:-}" >> "$M/calls"; fi
 case "${1:-}" in
   settings)
     shift
-    [[ -n "${MOCK_SETTINGS_FILE:-}" ]] && printf '%s\n' "$*" >> "$MOCK_SETTINGS_FILE"
+    printf '%s\n' "$*" >> "$M/settings"
+    printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-settings"
     if [[ "${MOCK_SETTINGS_FAIL:-0}" == "1" ]]; then echo "mock: 模拟 settings 失败" >&2; exit 1; fi
     exit 0 ;;
   chat) ;;
   *) echo "mock kiro-cli: 不支持的子命令: $*" >&2; exit 2 ;;
 esac
 if [[ "${2:-}" == "--help" ]]; then
-  [[ -n "${MOCK_HELP_CWD_FILE:-}" ]] && pwd > "$MOCK_HELP_CWD_FILE"   # 断言 --help 不在未隔离的业务库目录里跑
+  pwd > "$M/helpcwd"   # 断言 --help 不在未隔离的业务库目录里跑
+  printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-help"
   if [[ "${MOCK_KIRO_NO_ENGINE_FLAG:-0}" == "1" ]]; then
     echo "--no-interactive --trust-tools --agent"
   elif [[ "${MOCK_KIRO_NO_STREAM_FLAG:-0}" == "1" ]]; then
@@ -99,8 +96,8 @@ done
 # 取不到就用一个占位串：脚本会因为标记对不上而降级，正好暴露「提示词没带 nonce」这种回归。
 MOCK_NONCE=$(printf '%s\n' "$@" | grep -oE '<<<KIRO_REVIEW_JSON:[0-9a-f]+>>>' | head -1 | sed -E 's/^<<<KIRO_REVIEW_JSON:([0-9a-f]+)>>>$/\1/')
 [[ -n "$MOCK_NONCE" ]] || MOCK_NONCE="nononcefound000"
-[[ -n "${MOCK_ARGS_FILE:-}" ]] && printf '%s\n' "$@" > "$MOCK_ARGS_FILE"
-[[ -n "${MOCK_ENV_FILE:-}" ]] && printf '%s\n' "$MOCK_RECEIVED_ENV" > "$MOCK_ENV_FILE"
+printf '%s\n' "$@" > "$M/args"
+printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env"
 # --agent X → $HOME/.kiro/agents/X.json 必须存在（真实 kiro-cli 按 name 在 agent 目录里找）
 AGENT_ARG=""; prev=""
 for a in "$@"; do [[ "$prev" == "--agent" ]] && AGENT_ARG="$a"; prev="$a"; done
@@ -109,22 +106,19 @@ if [[ -n "$AGENT_ARG" ]]; then
   if [[ ! -r "$AGENT_JSON" ]]; then
     echo "mock kiro-cli: agent '${AGENT_ARG}' not found under ${HOME:-<HOME 未设置>}/.kiro/agents" >&2; exit 1
   fi
-  if [[ -n "${MOCK_ALLOW_SCAN_FILE:-}" ]]; then
-    : > "$MOCK_ALLOW_SCAN_FILE"
-    while IFS= read -r p; do
-      if [[ -d "$p" ]]; then printf '%s\tdir\t%s\n' "$p" "$(ls -A "$p" | paste -sd, -)"
-      else printf '%s\tMISSING\t\n' "$p"; fi
-    done < <(jq -r '.toolsSettings.read.allowedPaths[]?' "$AGENT_JSON") >> "$MOCK_ALLOW_SCAN_FILE"
-  fi
+  : > "$M/allowscan"
+  while IFS= read -r p; do
+    if [[ -d "$p" ]]; then printf '%s\tdir\t%s\n' "$p" "$(ls -A "$p" | paste -sd, -)"
+    else printf '%s\tMISSING\t\n' "$p"; fi
+  done < <(jq -r '.toolsSettings.read.allowedPaths[]?' "$AGENT_JSON") >> "$M/allowscan"
 fi
-[[ -n "${MOCK_NONCE_FILE:-}" ]] && printf '%s\n' "$MOCK_NONCE" > "$MOCK_NONCE_FILE"
-if [[ -n "${MOCK_STDIN_FILE:-}" ]]; then cat > "$MOCK_STDIN_FILE"; else cat > /dev/null; fi
-if [[ -n "${MOCK_CWD_SCAN_FILE:-}" ]]; then
-  {
-    [[ -e lsp.json ]] && echo "./lsp.json"
-    find . -not -path './.git/*' \( -iname AGENTS.md -not -type d \) -o \( -name .kiro -not -path './.git/*' \)
-  } > "$MOCK_CWD_SCAN_FILE"
-fi
+printf '%s\n' "$MOCK_NONCE" > "$M/nonce"
+cat > "$M/stdin"
+# 启动时 cwd 里残留的注入面：AGENTS.md / .kiro（任意深度）、根 lsp.json，以及任意深度的符号链接（15-fix #1；.git 不算）
+{
+  [[ -e lsp.json ]] && echo "./lsp.json"
+  find . -not -path './.git/*' \( -iname AGENTS.md -not -type d \) -o \( -name .kiro -not -path './.git/*' \) -o \( -type l -not -path './.git/*' \)
+} > "$M/cwdscan"
 [[ "${MOCK_KIRO_HANG:-0}" == "1" ]] && sleep 300
 if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
   echo "mock: 模拟 kiro 失败" >&2; exit 1

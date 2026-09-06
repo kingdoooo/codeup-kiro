@@ -28,18 +28,11 @@ export MR_LOCAL_ID=7 MR_TARGET_BRANCH=master CI_COMMIT_REF_NAME=feature/x
 # 回退与 `cd "$PKG_ROOT"` 保护都处在真实条件下）。
 # 用法：run_case <名字> [VAR=值 ...]   额外的 VAR=值 只作用于这一次调用（VAR= 表示置空）。
 # 可选：CASE_TWEAK=<函数名> 在运行前于 checkout 目录内执行，用来改造 fixture。
-# 结果：CASE（用例目录）、RC、OUT；替身记录在 $CASE/{args,stdin,settings,cwdscan,calls,helpcwd}。
-# 替身 kiro-cli 的配置文件（票 15）：生产脚本以 `env -i` + 许可清单启动 kiro-cli，MOCK_* 变量到不了替身，
-# 替身改从 $HOME/.kiro-mock.env 读配置（HOME 在许可清单内）。所以每个用例都要把 MOCK_* 写进该文件——
-# 包括 run_case 之外直接调用脚本的用例：否则「Kiro 未被启动」这类断言会因为替身根本记不了 args 而恒真。
-# 用法：mock_env_file <HOME 目录> [MOCK_X=值 ...]（非 MOCK_ 开头的参数忽略，便于把 run_case 的 "$@" 原样传进来）
-mock_env_file() {
-  local home="$1"; shift
-  local a
-  : > "$home/.kiro-mock.env"
-  for a in "$@"; do [[ "$a" == MOCK_* ]] && printf '%s\n' "$a" >> "$home/.kiro-mock.env"; done
-  return 0
-}
+# 结果：CASE（用例目录）、RC、OUT；替身记录在 $CASE/{args,stdin,settings,cwdscan,calls,helpcwd,env,env-help,env-settings,allowscan}。
+# 替身 kiro-cli 的配置通道（票 15 / 15-fix #14）：生产脚本以 `env -i` + 许可清单启动 kiro-cli 的**三次**调用，MOCK_*
+# 环境变量到不了替身。替身只认 KIRO_MOCK_DIR（= $CASE），由 KIRO_ENV_PASSTHROUGH 透传——这同时是逃生口机制的真实覆盖；
+# 行为开关写在 $CASE/mock.env（helpers.sh 的 mock_config_write，与替身的解析器同一份）。拿不到 KIRO_MOCK_DIR 的替身
+# 非零退出，所以漏配会让用例变红，而不是让「Kiro 未被启动」类断言恒真。直接调用脚本的用例同样要给这两个变量。
 run_case() {
   local name="$1"; shift
   CASE="$tmp/case-$name"; mkdir -p "$CASE/home"
@@ -48,22 +41,17 @@ run_case() {
   # 显式清空：`CASE_TWEAK=f run_case x` 这种赋值前缀是否在函数返回后仍然生效，POSIX 未定义
   # （bash 3.2 不保留，POSIX 模式下保留）。不清掉的话，后面每个用例都会跑在被改造过的 fixture 上。
   CASE_TWEAK=""
-  # 替身配置同时走环境（settings/--help 这两次调用不在 env -i 之下）与配置文件（chat 那次在 env -i 之下）
-  mock_env_file "$CASE/home" MOCK_ARGS_FILE="$CASE/args" MOCK_STDIN_FILE="$CASE/stdin" MOCK_SETTINGS_FILE="$CASE/settings" \
-        MOCK_CWD_SCAN_FILE="$CASE/cwdscan" MOCK_CALLS_FILE="$CASE/calls" MOCK_HELP_CWD_FILE="$CASE/helpcwd" \
-        MOCK_ENV_FILE="$CASE/env" MOCK_ALLOW_SCAN_FILE="$CASE/allowscan" "$@"
+  mock_config_write "$CASE" "$@"
   RC=0
   OUT=$(cd "$CASE/work" && env HOME="$CASE/home" REVIEW_REPO_DIR="$CASE/work" \
-        MOCK_ARGS_FILE="$CASE/args" MOCK_STDIN_FILE="$CASE/stdin" MOCK_SETTINGS_FILE="$CASE/settings" \
-        MOCK_CWD_SCAN_FILE="$CASE/cwdscan" MOCK_CALLS_FILE="$CASE/calls" MOCK_HELP_CWD_FILE="$CASE/helpcwd" \
-        MOCK_ENV_FILE="$CASE/env" MOCK_ALLOW_SCAN_FILE="$CASE/allowscan" \
+        KIRO_MOCK_DIR="$CASE" KIRO_ENV_PASSTHROUGH=KIRO_MOCK_DIR \
         "$@" "$ROOT/scripts/kiro-review.sh" 2>&1) || RC=$?
 }
 # 某个 kiro-cli 子命令被调用了几次。calls 文件在「脚本还没调过任何 kiro-cli 子命令」时
 # 根本不存在（例如变量校验在安装/能力检查之前就失败了），所以缺文件按 0 处理。
 call_count() { local f="$1" name="$2"; [[ -f "$f" ]] || { echo 0; return 0; }; grep -c "^${name}$" "$f" || true; }
 # 注入面文件是否还在（任意深度 AGENTS.md / 任意深度 .kiro / 根 lsp.json）
-leftovers() { (cd "$CASE/work" && { [[ -e lsp.json ]] && echo ./lsp.json; find . -not -path './.git/*' \( -iname AGENTS.md -not -type d \) -o \( -name .kiro -not -path './.git/*' \); } | sort | paste -sd' ' -); }
+leftovers() { (cd "$CASE/work" && { [[ -e lsp.json ]] && echo ./lsp.json; find . -not -path './.git/*' \( -iname AGENTS.md -not -type d \) -o \( -name .kiro -not -path './.git/*' \) -o \( -type l -not -path './.git/*' \); } | sort | paste -sd' ' -); }
 
 # 从 DRY_RUN 输出里取出将要回写的评论正文（OUT 同时含日志与超长时回显的全文，
 # 有些断言必须只看评论本身）。用法：posted_comment "$OUT"
@@ -105,12 +93,24 @@ assert_not_contains "$args_line" "--trust-tools" "kiro 参数：不传 --trust-t
 assert_not_contains "$args_line" "--trust-all-tools" "kiro 参数：绝不传 --trust-all-tools（它绕过 allowedPaths）"
 # Kiro 子进程环境 = env -i + 许可清单：替身记下 chat 时环境里的变量名
 env_names=$(cat "$CASE/env")
-for v in YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID DRY_RUN MR_LOCAL_ID MR_TARGET_BRANCH CI_COMMIT_REF_NAME MOCK_ARGS_FILE REVIEW_REPO_DIR; do
+for v in YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID DRY_RUN MR_LOCAL_ID MR_TARGET_BRANCH CI_COMMIT_REF_NAME KIRO_ENV_PASSTHROUGH REVIEW_REPO_DIR; do
   assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "0" "Kiro 进程环境：没有 $v"
 done
-for v in PATH HOME KIRO_API_KEY KIRO_LOG_NO_COLOR; do
+for v in PATH HOME KIRO_API_KEY KIRO_LOG_NO_COLOR KIRO_MOCK_DIR; do
   assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "1" "Kiro 进程环境：有 $v"
 done
+# 另两处 kiro-cli 调用（chat --help、settings）同样走 env -i + 许可清单（15-fix #8）：README 与指南的「Kiro 进程看不到…」
+# 才是绝对表述。替身把三次调用各自收到的环境变量名分别记在 env-help / env-settings / env。
+for f in env-help env-settings; do
+  names_f=$(cat "$CASE/$f")
+  for v in YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID KIRO_ENV_PASSTHROUGH; do
+    assert_eq "$(printf '%s\n' "$names_f" | grep -c -x -- "$v")" "0" "${f}：这次 kiro-cli 调用的环境里没有 $v"
+  done
+  for v in PATH HOME KIRO_API_KEY KIRO_MOCK_DIR; do
+    assert_eq "$(printf '%s\n' "$names_f" | grep -c -x -- "$v")" "1" "${f}：这次 kiro-cli 调用的环境里有 $v"
+  done
+done
+assert_eq "$(cat "$CASE/cwdscan")" "" "Kiro 启动时工作区里没有残留的注入面文件与符号链接"
 assert_contains "$out" "Kiro 进程环境许可清单" "日志打出透传的变量名清单"
 env_log_line=$(printf '%s\n' "$out" | grep -F "Kiro 进程环境许可清单" | head -1)
 assert_contains "$env_log_line" "KIRO_API_KEY" "许可清单日志行列出 KIRO_API_KEY（只有名字）"
@@ -238,9 +238,9 @@ sentinel_intact() {
 }
 assert_eq "$(sentinel_intact)" "intact" "前置：哨兵文件已就位（否则下面的断言恒真）"
 
-RC=0; CASE="$tmp/case-selftarget"; mkdir -p "$CASE/home"; mock_env_file "$CASE/home" MOCK_ARGS_FILE="$CASE/args"
+RC=0; CASE="$tmp/case-selftarget"; mkdir -p "$CASE/home"; mock_config_write "$CASE"
 OUT=$(cd "$PKGCOPY" && env HOME="$CASE/home" REVIEW_REPO_DIR="$PKGCOPY" \
-      MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
+      KIRO_MOCK_DIR="$CASE" KIRO_ENV_PASSTHROUGH=KIRO_MOCK_DIR "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=集成包：非零退出"
 assert_contains "$OUT" "互相包含" "REVIEW_REPO_DIR=集成包：报错说明"
 assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "REVIEW_REPO_DIR=集成包：Kiro 未被启动"
@@ -248,17 +248,17 @@ assert_eq "$(sentinel_intact)" "intact" "REVIEW_REPO_DIR=集成包：集成包�
 
 # 符号链接不能绕过这道保护（R10①：路径规范化必须用 pwd -P）
 ln -s "$PKGCOPY" "$tmp/pkglink"
-RC=0; CASE="$tmp/case-selflink"; mkdir -p "$CASE/home"; mock_env_file "$CASE/home" MOCK_ARGS_FILE="$CASE/args"
+RC=0; CASE="$tmp/case-selflink"; mkdir -p "$CASE/home"; mock_config_write "$CASE"
 OUT=$(cd "$tmp" && env HOME="$CASE/home" REVIEW_REPO_DIR="$tmp/pkglink" \
-      MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
+      KIRO_MOCK_DIR="$CASE" KIRO_ENV_PASSTHROUGH=KIRO_MOCK_DIR "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=指向集成包的符号链接：非零退出"
 assert_contains "$OUT" "互相包含" "符号链接：同样被这道保护拦住"
 assert_eq "$(sentinel_intact)" "intact" "符号链接：集成包内的哨兵文件仍在"
 
 # REVIEW_REPO_DIR 在集成包**内部**同样会删到集成包的文件，反向包含也要拦
-RC=0; CASE="$tmp/case-selfinner"; mkdir -p "$CASE/home" "$PKGCOPY/nested"; mock_env_file "$CASE/home" MOCK_ARGS_FILE="$CASE/args"
+RC=0; CASE="$tmp/case-selfinner"; mkdir -p "$CASE/home" "$PKGCOPY/nested"; mock_config_write "$CASE"
 OUT=$(cd "$tmp" && env HOME="$CASE/home" REVIEW_REPO_DIR="$PKGCOPY/nested" \
-      MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
+      KIRO_MOCK_DIR="$CASE" KIRO_ENV_PASSTHROUGH=KIRO_MOCK_DIR "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=集成包内的子目录：非零退出"
 assert_contains "$OUT" "互相包含" "反向包含：同样被拦住"
 assert_eq "$(sentinel_intact)" "intact" "反向包含：集成包内的哨兵文件仍在"
@@ -1331,20 +1331,82 @@ assert_rc "$RC" 0 "合法的秒数/字节数：评审照常成功"
 
 # ---- REVIEW_RERUN_HINT：AWS 档位可把提示语换成评论命令（Flow 默认不承诺它）----
 # ============ Kiro 子进程环境许可清单（票 15）：Flow 注入的任何东西都不进 Kiro 进程 ============
-# 许可清单内的变量各放一个（区域设置、代理、证书、XDG、KIRO_*），清单外放几个像凭证的 canary。
+# 固定名单内的变量各放一个（区域设置、代理、证书、XDG），名单外放几个像凭证的 canary，以及几个**形状像**名单但不在名单里的
+# （KIRO_FOO、LC_TIME、CORP_SECRET_PROXY——15-fix #12：名单是固定名字，不是 KIRO_* / *_PROXY 这类模式）。
 run_case envscrub CODEUP_BOT_USERNAME=bot-x FLOW_CANARY_SECRET=s3cr3t AWS_SECRET_ACCESS_KEY=aws GIT_ASKPASS=/askpass \
-  LC_TIME=C HTTPS_PROXY=http://proxy.example:3128 http_proxy=http://proxy.example:3128 no_proxy=localhost \
-  XDG_CACHE_HOME=/tmp/xdg-canary SSL_CERT_FILE=/etc/ssl/cert.pem SSL_CERT_DIR=/etc/ssl/certs CURL_CA_BUNDLE=/etc/ssl/cert.pem KIRO_FOO=1
-assert_rc "$RC" 0 "环境许可清单：评审正常完成（清单内的变量足够 kiro-cli 启动）"
+  LC_ALL=C LC_TIME=C HTTPS_PROXY=http://proxy.example:3128 http_proxy=http://proxy.example:3128 no_proxy=localhost CORP_SECRET_PROXY=s \
+  XDG_CACHE_HOME=/tmp/xdg-canary XDG_CONFIG_HOME=/tmp/xdg-cfg SSL_CERT_FILE=/etc/ssl/cert.pem SSL_CERT_DIR=/etc/ssl/certs CURL_CA_BUNDLE=/etc/ssl/cert.pem KIRO_FOO=1
+assert_rc "$RC" 0 "环境许可清单：评审正常完成（名单内的变量足够 kiro-cli 启动）"
 env_names=$(cat "$CASE/env")
-for v in CODEUP_BOT_USERNAME FLOW_CANARY_SECRET AWS_SECRET_ACCESS_KEY GIT_ASKPASS YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID; do
+for v in CODEUP_BOT_USERNAME FLOW_CANARY_SECRET AWS_SECRET_ACCESS_KEY GIT_ASKPASS YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID KIRO_FOO LC_TIME CORP_SECRET_PROXY; do
   assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "0" "环境许可清单：Kiro 进程看不到 $v"
 done
-for v in PATH HOME KIRO_API_KEY KIRO_FOO KIRO_LOG_NO_COLOR LC_TIME HTTPS_PROXY http_proxy no_proxy XDG_CACHE_HOME SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE; do
+for v in PATH HOME KIRO_API_KEY KIRO_LOG_NO_COLOR LC_ALL HTTPS_PROXY http_proxy no_proxy XDG_CACHE_HOME XDG_CONFIG_HOME SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE KIRO_MOCK_DIR; do
   assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "1" "环境许可清单：Kiro 进程看得到 $v"
 done
 # 替身按 --agent 在 $HOME/.kiro/agents 下找定义、找不到就失败：rc 0 已证明 HOME 透传的是安装 agent 的那个 HOME
 assert_contains "$(paste -sd' ' "$CASE/args")" "--agent codeup-reviewer" "环境许可清单：仍以受信 agent 运行"
+
+# ---- KIRO_ENV_PASSTHROUGH：名单之外要额外透传的变量**名**（逗号分隔；自建执行机的 LD_LIBRARY_PATH / AWS_PROFILE 这类）----
+run_case passthrough KIRO_ENV_PASSTHROUGH="KIRO_MOCK_DIR, KIRO_FOO,LD_LIBRARY_PATH" KIRO_FOO=1 LD_LIBRARY_PATH=/opt/lib
+assert_rc "$RC" 0 "KIRO_ENV_PASSTHROUGH：评审正常完成"
+env_names=$(cat "$CASE/env")
+for v in KIRO_FOO LD_LIBRARY_PATH KIRO_MOCK_DIR PATH HOME KIRO_API_KEY; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "1" "KIRO_ENV_PASSTHROUGH：点名的 $v 透传了"
+done
+for v in YUNXIAO_TOKEN CODEUP_REPO_ID KIRO_ENV_PASSTHROUGH; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "0" "KIRO_ENV_PASSTHROUGH：没点名的 $v 仍看不到"
+done
+env_log_line=$(printf '%s\n' "$OUT" | grep -F "Kiro 进程环境许可清单" | head -1)
+assert_contains "$env_log_line" "LD_LIBRARY_PATH" "KIRO_ENV_PASSTHROUGH：日志的变量名清单里列出了额外透传的名字"
+# 非法名字（写成 NAME=value / 带连字符）→ 拒绝运行并回写失败评论；取值不进评论也不进日志；校验早于 --help、Kiro 未启动
+run_case badpass KIRO_ENV_PASSTHROUGH="KIRO_MOCK_DIR,YUNXIAO_TOKEN=leakedvalue"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含 NAME=value：非零退出"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "KIRO_ENV_PASSTHROUGH" "KIRO_ENV_PASSTHROUGH 含 NAME=value：失败评论点名该变量"
+assert_contains "$comment" "非法变量名" "KIRO_ENV_PASSTHROUGH 含 NAME=value：失败评论说明原因"
+assert_not_contains "$OUT" "leakedvalue" "KIRO_ENV_PASSTHROUGH 含 NAME=value：取值既不进评论也不进日志"
+assert_contains "$OUT" "YUNXIAO_TOKEN=" "KIRO_ENV_PASSTHROUGH 含 NAME=value：日志点名到名字（取值打码）"
+assert_eq "$(call_count "$CASE/calls" help)" "0" "KIRO_ENV_PASSTHROUGH 非法：校验早于 kiro-cli 能力检查（没跑 --help）"
+assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "KIRO_ENV_PASSTHROUGH 非法：Kiro 未被启动"
+run_case badpass2 KIRO_ENV_PASSTHROUGH="KIRO_MOCK_DIR,bad-name"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含连字符名字：非零退出"
+assert_contains "$(posted_comment "$OUT")" "KIRO_ENV_PASSTHROUGH" "KIRO_ENV_PASSTHROUGH 含连字符名字：失败评论点名该变量"
+
+# ---- 替身通道是 fail-closed（15-fix #14）：拿不到 KIRO_MOCK_DIR 的替身非零退出并报错，而不是默默记不了 args ----
+rc=0; err=$(cd "$tmp" && env -i PATH="$PATH" HOME="$tmp" kiro-cli chat --help 2>&1 >/dev/null) || rc=$?
+assert_eq "$rc" "97" "替身拿不到 KIRO_MOCK_DIR：以 97 退出"
+assert_contains "$err" "KIRO_MOCK_DIR" "替身拿不到 KIRO_MOCK_DIR：报错点名"
+mkdir -p "$tmp/mockdir-ok"
+rc=0; help_out=$(env -i PATH="$PATH" HOME="$tmp" KIRO_MOCK_DIR="$tmp/mockdir-ok" kiro-cli chat --help 2>&1) || rc=$?
+assert_rc "$rc" 0 "替身正控：给了 KIRO_MOCK_DIR 就正常工作"
+assert_contains "$help_out" "--agent-engine" "替身正控：--help 输出正常"
+# 端到端层面：测试忘了透传 KIRO_MOCK_DIR → 第一次 kiro-cli 调用（--help）就失败 → 用例红（不是假绿）
+run_case nopass KIRO_ENV_PASSTHROUGH=
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "漏配 KIRO_ENV_PASSTHROUGH：评审失败（替身拒绝运行）"
+assert_eq "$([[ -e "$CASE/args" || -e "$CASE/calls" ]] && echo recorded || echo none)" "none" "漏配 KIRO_ENV_PASSTHROUGH：替身什么都没记（而不是记了一半）"
+
+# ---- 日志里的变量名清单按数组元素取名字（15-fix #7）：取值含换行时，换行后的半个取值不能进日志 ----
+run_case nlkey KIRO_API_KEY="$(printf 'k\nSECRETFRAG=leaked')"
+assert_rc "$RC" 0 "取值含换行：评审正常完成"
+assert_not_contains "$OUT" "SECRETFRAG" "取值含换行：日志里不出现换行后的半个取值"
+assert_contains "$(printf '%s\n' "$OUT" | grep -F "Kiro 进程环境许可清单" | head -1)" "KIRO_API_KEY" "取值含换行：清单里仍列出 KIRO_API_KEY 这个名字"
+
+# ---- 业务库里的符号链接在 Kiro 启动前全部删除（15-fix #1）：`payload -> /root/.aws/credentials` 的请求路径字面上在 allow 内 ----
+tweak_symlinks() {
+  ln -s /etc/hosts link-to-hosts
+  mkdir -p src/sub2 && ln -s /etc src/sub2/link-to-etc-dir
+  ln -s ../outside-target src/link-rel-dangling
+  git add -A && git commit -qm "add symlinks"
+}
+CASE_TWEAK=tweak_symlinks run_case symlinks
+assert_rc "$RC" 0 "符号链接：评审正常完成"
+assert_eq "$(cat "$CASE/cwdscan")" "" "符号链接：Kiro 启动时工作区里没有任何符号链接（含指向目录的、悬空的）"
+assert_contains "$OUT" "3 个符号链接" "符号链接：日志计数 3 个"
+assert_contains "$(cat "$CASE/stdin")" "link-to-hosts" "符号链接：链接本身的改动仍在 diff 里（diff 先算好，删链接不影响评审输入）"
+assert_eq "$([[ -d "$CASE/work/src/sub2" ]] && echo kept || echo gone)" "kept" "符号链接：只删链接，普通目录保留"
+assert_eq "$([[ -e "$CASE/work/src/app.py" ]] && echo kept || echo gone)" "kept" "符号链接：普通文件保留"
+assert_eq "$(git -C "$CASE/work" rev-parse --is-inside-work-tree 2>/dev/null)" "true" "符号链接：.git 未被触碰"
 
 run_case rerunhint REVIEW_RERUN_HINT='评论 `/kiro review` 可重新评审'
 assert_rc "$RC" 0 "REVIEW_RERUN_HINT：评审成功"

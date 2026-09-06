@@ -21,15 +21,15 @@
          找出本评审员上一次的汇总评论（原地更新与 run 计数的前提）。
          此后任何失败（含第 3 步的安装失败与能力检查不通过）都会在 MR 上回写「评审未完成」
       3. 安装/检测 kiro-cli；安装只读受信 agent（read/grep/glob，禁 shell/write/web/MCP；
-         读取**许可清单** allowedPaths = 业务库 checkout + 本次 diff chunk 目录，安装时注入物理路径，
-         占位符没替换干净就拒绝安装；敏感路径与 .git 的拒绝清单是第二道）
-         + 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行）
+         读取**许可清单** allowedPaths = 业务库 checkout + 本次 diff chunk 目录，安装时把三处结构化写成物理路径，
+         两条路径缺任一拒绝安装、三处不一致拒绝运行；敏感路径与 .git 的拒绝清单是第二道）
+         + 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行；--help 同样以 env -i 许可清单启动）
       4. merge-base 三点 diff；>300KB 按优先级压缩，省略文件以 diff 片段索引供 Kiro 自读；
          开启行内评论时同时算出「本次变更行集合」（零上下文 diff，与评审输入同源）
       5. 隔离（必须在 diff 算完之后、启动 Kiro 之前）：移除业务库工作树中任意深度的
-         AGENTS.md 与 .kiro/ 及根 lsp.json，设置 chat.disableInheritingDefaultResources=true
-      6. timeout 强制限时、`env -i` 许可清单环境（只透传 PATH/HOME/KIRO_*/代理与证书/区域设置，
-         云效令牌与 Flow 变量不进 Kiro 进程）执行
+         AGENTS.md、.kiro/、**全部符号链接**及根 lsp.json，设置 chat.disableInheritingDefaultResources=true
+      6. timeout 强制限时、`env -i` **固定名单**环境（PATH/HOME/USER/TERM/TMPDIR/LANG/LC_ALL/LC_CTYPE/KIRO_API_KEY/
+         KIRO_LOG_NO_COLOR/代理/证书/XDG 四个，外加 KIRO_ENV_PASSTHROUGH 点名的变量；云效令牌与 Flow 变量不进 Kiro 进程）执行
          kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json
                        --agent codeup-reviewer
          不传 --trust-tools（免确认只来自 allowedPaths），绝不传会绕过 allowedPaths 的 --trust-all-tools；
@@ -50,9 +50,10 @@
 - MR 源分支全部内容视为不受信数据：运行 Kiro 前移除业务库中任意深度的
   `AGENTS.md`、`.kiro/`（含符号链接）与根目录 `lsp.json`；custom agent 关闭工作区
   MCP/Powers 加载（`includeMcpJson: false`、`includePowers: false`），工具仅 read/grep/glob，
-  读取边界是**许可清单**（`allowedPaths`：业务库 checkout 与本次 diff chunk 目录，其它路径 headless 下直接被拒），
+  读取边界是**许可清单**（`allowedPaths`：业务库 checkout 与本次 diff chunk 目录，其它路径 headless 下直接被拒；
+  业务库里的符号链接在启动前全部删除，免得 `payload -> /root/.aws/credentials` 借 allow 内的路径名读到 allow 外），
   `~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、`/var/run/secrets`、`**/.git/**` 等拒绝清单是第二道；
-  Kiro 进程以 `env -i` 许可清单环境启动，看不到云效令牌与 Flow 注入的其它变量。
+  Kiro 进程的三次 kiro-cli 调用都以 `env -i` 固定名单环境启动，看不到云效令牌与 Flow 注入的其它变量。
 - Kiro 固定以 `--agent-engine v2` 运行：实测 headless 的默认引擎（v1）与预览版 v3 都不阻断
   工作区 `AGENTS.md` 注入，只有 v2 配合 `chat.disableInheritingDefaultResources` 才阻断
   （见 [docs/adr/0004-pin-kiro-cli-v2-engine.md](docs/adr/0004-pin-kiro-cli-v2-engine.md)）。

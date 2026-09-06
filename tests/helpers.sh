@@ -63,4 +63,27 @@ meta_row() { printf '%s\n' "$1" | { grep -F '| `' || true; } | { grep -F ' → '
 # 端到端 fixture 里机器人账号的用户名（取自 spec §4.7.1 P1-00 实测值）
 TEST_BOT_USERNAME='aliyun:kingdooo_hvFXC'
 
+# ---- 替身 kiro-cli 的配置通道（15-fix #14）----
+# 生产脚本以 env -i + 许可清单启动 kiro-cli，MOCK_* 环境变量到不了替身；替身只认 KIRO_MOCK_DIR（测试把它放进
+# KIRO_ENV_PASSTHROUGH——顺带真实覆盖了逃生口机制）。该目录下：
+#   mock.env   行为开关，每行 MOCK_X=值。由 mock_config_write 写、mock_config_load 读——解析与写入只有这一份
+#   args stdin settings cwdscan calls helpcwd env env-help env-settings allowscan nonce   替身的记录文件（固定名字）
+# 拿不到 KIRO_MOCK_DIR 时替身**非零退出并报错**：漏配要变成红测试，而不是「记不了 args 于是『Kiro 未启动』恒真」。
+mock_config_write() { # <目录> [MOCK_X=值 ...]（非 MOCK_ 开头的参数忽略，便于把 run_case 的 "$@" 原样传进来）
+  local dir="$1"; shift
+  local a
+  mkdir -p "$dir"; : > "$dir/mock.env"
+  for a in "$@"; do [[ "$a" == MOCK_* ]] && printf '%s\n' "$a" >> "$dir/mock.env"; done
+  return 0
+}
+mock_config_load() { # <目录>：把 mock.env 里的 MOCK_X=值 导出到当前 shell（同名后者覆盖前者，与 env 的语义一致）
+  local dir="$1" line n v
+  [[ -r "$dir/mock.env" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^(MOCK_[A-Z0-9_]+)=(.*)$ ]] || continue
+    n="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
+    export "$n=$v"
+  done < "$dir/mock.env"
+}
+
 report() { echo "OK: ${TESTS_PASSED} 个断言通过（$0）"; }
