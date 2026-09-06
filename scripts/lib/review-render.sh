@@ -139,6 +139,28 @@ _REVIEW_JQ_SANITIZE='
     end;
 '
 
+# --- 不受信取值进表格单元格 / code span 时要剔掉的字符集（票 13：三处只此一份；仓库里习惯把这条规则叫「字符许可清单」，
+#     指的是「除这几个字符和控制字符外全部放行」）---
+# 用在：① review_history_append 的 safe()（上一条评论里的隐藏历史，人可编辑）；② review_validate 的 fpath()
+# （模型给的 file——命中即按未定位处理而不是剔字符，它要把「不可定位」计数出来）；③ _review_meta_cell（分支名）。
+#   `|`      —— GFM 先按 | 切单元格再解析行内，撑出幻影列，把时间与 diff 挤出表格
+#   反引号   —— 逃出脚本包的 code span，其后的原始 HTML 直接进评论；定位串的反引号失配
+#   `<` `>`  —— 逃出 code span 后就是原始 HTML；也让 `<!--`/`-->` 构不成（隐藏标记不被提前闭合）
+#   反斜杠   —— 纵深防御（git ref 已拒；流水线变量那条路不过 git 校验）
+#   控制字符 —— 另按 [[:cntrl:]] 类处理（bash 与 jq 都有这个 POSIX 类，不必列举）：换行会造出第二行、
+#              \x1f 会让历次表的字段分隔错位
+# bash 侧用 ${v//["$REVIEW_CELL_DENY_CHARS"]/}（引号让括号里的字符按字面量匹配，bash 3.2 实测）；jq 侧经
+# --arg deny 注入、按码点比对（不拼正则，省掉反斜杠转义的坑）。长度上限按槽位各自定义（历次表字段 40/16、
+# 元信息单元格 200）：那是列宽语义，不是同一个概念。
+REVIEW_CELL_DENY_CHARS='<>|`\'
+REVIEW_META_CELL_MAX_LEN=200
+_REVIEW_JQ_CELL='
+  def _deny_codes: ($deny | explode);
+  def _cell_strip(s): ((s | explode) as $cs | _deny_codes as $d
+                       | [$cs[] | select(. as $c | ($d | index($c)) == null)] | implode | gsub("[[:cntrl:]]"; ""));
+  def _cell_has_deny(s): (_cell_strip(s) != s);
+'
+
 # 用法：review_sanitize_md < 文件 → stdout（降级原文走这条；契约字段在 review_validate 里用同一个 jq def）
 # -j（join output，不额外补换行）：输入文件末尾本来就有换行，split/join 会原样保留它；
 # 用 -r 的话 jq 还会再补一个，降级评论的正文与页脚之间就多出一个空行。
@@ -336,7 +358,7 @@ review_validate() {
     || { echo "review_validate: 契约的 findings 不是数组" >&2; return 1; }
   printf '%s' "$input" | jq -e --arg id "$REVIEW_CONTRACT_ID" '(.contract // "") == $id' >/dev/null 2>&1 \
     || { echo "review_validate: 契约缺少 contract=\"${REVIEW_CONTRACT_ID}\" 字段（该字段只在受信 agent 提示词里要求，说明受信 agent 未生效）" >&2; return 3; }
-  printf '%s' "$input" | jq -c "${_REVIEW_JQ_SANITIZE}"'
+  printf '%s' "$input" | jq -c --arg deny "$REVIEW_CELL_DENY_CHARS" "${_REVIEW_JQ_SANITIZE}${_REVIEW_JQ_CELL}"'
     # \A / \z 是显式的「字符串首/尾」锚点：jq 的 ^ / $ 在不同版本可能被当行锚点，
     # 那会连多行字符串里每一行的缩进都裁掉。
     def tr(v): if (v | type) == "string"
@@ -349,10 +371,11 @@ review_validate() {
     # 字符串以反斜杠开头，不会再被 _sanitize_md 的整行加粗规则二次转义。
     def boldsafe(v): (tr(v) | gsub("[[:space:]]+"; " ") | gsub("\\*"; "\\*") | _sanitize_md);
     def lineno(v): if (v | type) == "number" and (v | floor) == v and v >= 1 then (v | floor) else null end;
-    # 文件路径：非空字符串，且不含换行/回车/`|`/反引号（否则按未定位处理）
+    # 文件路径：非空字符串，且不含许可清单外的字符（REVIEW_CELL_DENY_CHARS 与控制字符；否则按未定位处理——
+    # 与另两处的差别只在处置：这里不剔字符，因为「不可定位」要计数并写进统计行）
     def fpath(v): (tr(v)) as $t
                   | if ($t | length) == 0 then null
-                    elif ($t | test("[\n\r|`]")) then null
+                    elif _cell_has_deny($t) then null
                     else $t end;
     . as $root
     | ((.findings // []) | length) as $total
@@ -974,16 +997,14 @@ review_parse_history() {
 review_history_append() {
   local hist="$1" run="$2" sha="$3" verdict="$4" status="$5" p0="$6" p1="$7" p2="$8" base
   if [[ "$hist" == "-" || ! -r "$hist" ]]; then base='[]'; else base=$(cat "$hist"); fi
-  printf '%s' "$base" | jq -c --argjson max "$REVIEW_HISTORY_MAX" \
+  printf '%s' "$base" | jq -c --argjson max "$REVIEW_HISTORY_MAX" --arg deny "$REVIEW_CELL_DENY_CHARS" \
     --arg run "$run" --arg sha "$sha" --arg verdict "$verdict" --arg status "$status" \
-    --arg p0 "$p0" --arg p1 "$p1" --arg p2 "$p2" '
+    --arg p0 "$p0" --arg p1 "$p1" --arg p2 "$p2" "${_REVIEW_JQ_CELL}"'
     def num(v): if (v | test("^[0-9]+$")) then (v | tonumber) else null end;
     def numj(v): if (v | type) == "number" then (v | floor) else null end;
-    # 字符许可清单：剔掉 < 与 >，过滤后的取值不可能构成 `-->`／`<!--`，隐藏注释不会被提前闭合；
-    # 剔掉 | 与反引号，历次表的单元格不会被撑出幻影列、定位串的反引号不会失配；
-    # 剔掉控制字符，历次表的行渲染用 \x1f 作字段分隔符，混进控制字符会错位。
-    # 非 ASCII 一律保留（中文结论要能显示）。
-    def safe(v; n): ((v // "") | tostring | gsub("[<>|`\\\\]"; "") | gsub("[[:cntrl:]]"; "") | .[0:n]);
+    # 字符许可清单 = REVIEW_CELL_DENY_CHARS + 控制字符（定义与理由见那里）：过滤后的取值不可能构成
+    # `-->`／`<!--`，历次表的单元格不会被撑出幻影列，\x1f 字段分隔不会错位。非 ASCII 一律保留（中文结论要能显示）。
+    def safe(v; n): (_cell_strip((v // "") | tostring) | .[0:n]);
     # 旧记录同样过一遍过滤与字段规范化：汇总评论在 Codeup 上是人可编辑的，隐藏 JSON 里的取值
     # 不能当作可信输入（只做「追加时过滤新行」的话，被手工改过的历史会原样渲染进表格）。
     (if type == "array" then . else [] end)
@@ -1224,21 +1245,21 @@ _review_render_header() {
 #              也让 `<!--`/`-->` 再也构不成 HTML 注释（隐藏标记不会被提前闭合）；
 #   控制字符 —— 换行是关键的一个：`--dst $'x\n<!-- kiro-review:… run:9 -->'` 会让评论出现第二行
 #              评审标记，review_select_prior_comment 的「标记恰好一个」不成立 → 每次评审新建汇总（破 I4）。
-# 字符集与 review_history_append 的 `safe()` 保持一致（三份同类规则的收敛见票 13）。
+# 字符集就是 REVIEW_CELL_DENY_CHARS（与 review_history_append 的 `safe()`、review_validate 的 `fpath()` 同一份定义，票 13）。
 # **只处理这两个**：`--sha` 来自 `git rev-parse`，`--ts` 由脚本 date 生成，`--diff-note` 是脚本常量，
 # 三者都不含不受信输入；过滤它们只会掩盖「脚本自己传错了」这类问题。
 # 全部用参数展开完成（bash 3.2 实测支持 `${v//[[:cntrl:]]/}`）：渲染路径每次评审都要走，不为两个
 # 单元格起六个进程。只有真的需要截断时才起一次 iconv。
 _review_meta_cell() {
   local v="${1-}" orig="${1-}"
-  v=${v//[<>|\`\\]/}
+  v=${v//["$REVIEW_CELL_DENY_CHARS"]/}
   v=${v//[[:cntrl:]]/}
-  # 截断到 200 字符：分支名上限远小于此，超长只会撑坏表格。
+  # 截断到 REVIEW_META_CELL_MAX_LEN 字符：分支名上限远小于此，超长只会撑坏表格。
   # `${v:0:200}` 在 POSIX locale（CI 容器常见 LANG 未设置）下按**字节**切，会切在 UTF-8 序列中间，
   # 于是评论正文里出现非法字节、jq 静默替换成 U+FFFD、页面上一个乱码方块且无任何日志。
   # 与 kiro-review.sh 的评论截断同一处置：截完用 iconv -c 清掉残缺序列。
-  if [[ "${#v}" -gt 200 ]]; then
-    v=${v:0:200}
+  if [[ "${#v}" -gt "$REVIEW_META_CELL_MAX_LEN" ]]; then
+    v=${v:0:$REVIEW_META_CELL_MAX_LEN}
     v=$(printf '%s' "$v" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null) || true
   fi
   # 过滤成空串时不能直接渲染成一对相邻反引号：GFM 找不到配对会按字面量显示两个裸反引号，

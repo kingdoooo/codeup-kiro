@@ -1183,6 +1183,23 @@ assert_contains "$comment" "<details><summary>历次评审（2）</summary>" "�
 # ============================================================================
 # 票 05 复审修复
 # ============================================================================
+# ============ 票 13 ④ ============
+# ---- 失败评论的 reason 里带分支名：`<summary>` 是合法 ref 字符，fetch 失败时它随 reason 进评论正文 ----
+# 票 14 让 review_sanitize_md 转义所有像标签的 `<`，这里是那条链路在真实失败路径上的负向用例：
+# 目标分支名 `feat/a<summary>b` 在 fixture 里不存在 → fetch 失败 → die_review → 失败评论。
+run_case fetchfail MR_TARGET_BRANCH='feat/a<summary>b'
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "票 13 ④：fetch 失败 → 非零退出"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "无法 fetch 目标分支" "票 13 ④：失败评论说明是 fetch 失败"
+# 只查载荷本身：失败评论自己的历次表就是 `<details><summary>`，不能查裸 `<summary`
+assert_not_contains "$comment" "a<summary>b" "票 13 ④：分支名里的 <summary> 不以原始 HTML 进入失败评论正文"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^<details><summary>历次评审')" "1" "票 13 ④：评论里的 <summary> 只有脚本自己的历次表那一个"
+assert_contains "$comment" "feat/a&lt;summary>b" "票 13 ④：reason 里的分支名转义后仍可读"
+assert_not_contains "$(meta_row "$comment")" "<" "票 13 ④：元信息单元格里的分支名照旧剔掉 <"
+# 正控：普通的不存在分支名原样出现在 reason 里
+run_case fetchfail2 MR_TARGET_BRANCH='no-such-branch'
+assert_contains "$(posted_comment "$OUT")" "无法 fetch 目标分支 no-such-branch" "票 13 ④ 正控：普通分支名原样进 reason"
+
 # ============ 票 12 ============
 # ---- ⑤ 超限路径的端到端契约——喂给 Kiro 的 stdin 里有索引节，每行一个含 chunk/file 的 JSON ----
 # 这是「脚本节标题」与 prompts/review-prompt.md 契约不漂移的唯一守卫：任一侧退回 `- 名字 => 路径` 的分隔文本

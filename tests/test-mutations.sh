@@ -608,12 +608,13 @@ assert_eq "$(mut_keys "$pkg" "$UNKNOWN_DIFF")" "xqy.py" "M36：变异体反而�
 
 # --- M37：让元信息表的分支名过滤失效 → MR 作者的分支名撑破表格并把原始 HTML 带进评论 ---
 # 分支名是 MR 作者可控输入（票 07）。单测粒度：把变异体的库 source 进子壳直接渲染一次。
-# 变异点 = 许可清单那一行（控制字符那半由 M38 单独覆盖）。用地址 `/\[<>/` 选行、再整行替换：
-# 那一行里有转义反引号与双反斜杠，直接写进 sed 模式在不同 sed 实现下含义不同（GNU 把 \` 当
-# 缓冲区起始锚），而地址里只用 `[<>` 三个字节，稳。
+# 变异点 = 许可清单那一行（控制字符那半由 M38 单独覆盖）。用地址选行、再整行替换：票 13 之后那一行是
+# `v=${v//["$REVIEW_CELL_DENY_CHARS"]/}`，地址锚在行首的 `  v=${v//["$REVIEW_CELL_DENY_CHARS"]`——恰好一行
+# （常量定义处的注释也含这个名字，不加行首锚会选中两行）；不碰反引号与反斜杠（直接写进 sed 模式在不同
+# sed 实现下含义不同，GNU 把 \` 当缓冲区起始锚）。
 # 提醒：改 `_review_meta_cell` 的实现时这条 sed 会失配，make_mutant 的「必须改动文件」检查会
 # 立刻报出来（本票就是这样被抓到的），按新实现重新选点即可，别删掉这条变异。
-pkg=$(make_mutant m37-metacell '/\[<>/ s@v=${v//.*@: # 变异：不过滤危险字符@' scripts/lib/review-render.sh)
+pkg=$(make_mutant m37-metacell '/^  v=\${v\/\/\["\$REVIEW_CELL_DENY_CHARS"\]/ s@v=${v//.*@: # 变异：不过滤危险字符@' scripts/lib/review-render.sh)
 mut_meta_row() { # $1=集成包根 $2=分支名 → stdout 元信息行（提取器用 helpers.sh 的 meta_row，只有一份）
   local pkg_root="$1" branch="$2" out
   ( set +e; source "$pkg_root/scripts/lib/review-render.sh"
@@ -740,5 +741,25 @@ assert_rc "$RC" 0 "M49：变异体仍能跑完"
 idx49=$(awk 'index($0, "=== 未直传的变更文件索引") == 1 {on=1; next} on && $0 == "" {exit} on {print}' "$CASE/stdin")
 assert_contains "$idx49" "=> " "M49：索引行回到了分隔文本形态——端到端「每行是 JSON 对象」断言会失败"
 assert_eq "$(printf '%s\n' "$idx49" | jq -e . >/dev/null 2>&1 && echo json || echo notjson)" "notjson" "M49：索引行不再是 JSON"
+
+# --- M50：把共享的字符许可清单常量清空 → bash 侧（元信息单元格）与 jq 侧（历次表）同时失守（票 13）---
+# 三处规则收敛成一份定义之后，这一份就是单点：清空它，分支名撑破表格、隐藏历史里的 < 原样回到评论。
+pkg=$(make_mutant m50-deny-empty "s|^REVIEW_CELL_DENY_CHARS=.*\$|REVIEW_CELL_DENY_CHARS=''|" scripts/lib/review-render.sh)
+assert_eq "$(mut_meta_row "$pkg" 'a|b|c' | tr -cd '|' | wc -c | tr -d ' ')" "7" \
+  "M50：常量清空后 a|b|c 撑成 7 个竖线——单测「表格列数恒 5」断言会失败"
+mut_hist_sha() { ( set +e; source "$1/scripts/lib/review-render.sh"; review_history_append - 1 'ab<c>|d' MERGE "" 0 0 0 | jq -r '.[0].sha' ); }
+assert_eq "$(mut_hist_sha "$pkg")" 'ab<c>|d' "M50：常量清空后历次表 sha 里的 < > | 原样保留——单测「剔掉」断言会失败"
+assert_eq "$(mut_hist_sha "$ROOT")" "abcd" "M50 对照：未变异实现两侧都剔掉"
+# 第三个消费者 review_validate 的 fpath：常量清空后 `docs/<draft>.md` 不再按未定位处理
+mut_delocated() { ( set +e; source "$1/scripts/lib/review-render.sh"
+  printf '{"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"r","findings":[{"id":"E","severity":"P0","title":"t","file":"docs/<draft>.md","line_start":1,"line_end":1,"body":"b","fix":""}]}' \
+    | review_validate | jq -r .delocated_findings ); }
+assert_eq "$(mut_delocated "$pkg")" "0" "M50：常量清空后 fpath 放行 docs/<draft>.md——单测「3 条按未定位处理」断言会失败"
+assert_eq "$(mut_delocated "$ROOT")" "1" "M50 对照：未变异实现按未定位处理"
+
+# --- M51：只让 jq 侧的 _cell_strip 变成恒等（bash 侧不动）→ 历次表失守而元信息单元格仍正常（票 13「任一半」）---
+pkg=$(make_mutant m51-cell-strip 's|^  def _cell_strip(s): .*$|  def _cell_strip(s): (s \| gsub("[[:cntrl:]]"; ""));|; /^                       | \[\$cs\[\] | select/d' scripts/lib/review-render.sh)
+assert_eq "$(mut_hist_sha "$pkg")" 'ab<c>|d' "M51：jq 侧恒等后历次表 sha 不再过滤——单测断言会失败"
+assert_eq "$(mut_meta_row "$pkg" 'a|b|c' | tr -cd '|' | wc -c | tr -d ' ')" "5" "M51 对照：bash 侧不受影响，元信息行仍 5 个竖线（证明两侧确实是同一份定义的两个消费者）"
 
 report

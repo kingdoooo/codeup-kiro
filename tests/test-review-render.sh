@@ -470,6 +470,17 @@ assert_eq "$(printf '%s' "$v" | jq -r .delocated_findings)" "3" "validate：3 �
 assert_eq "$(printf '%s' "$v" | jq -r '[.findings[].file] | join(",")')" "src/ok.py,,," "validate：不合规的 file 置 null，合规的保留"
 assert_eq "$(printf '%s' "$v" | jq -r '[.findings[] | select(.file == null) | .line_start] | unique | join(",")')" "" "validate：file 置 null 时行号一并置 null"
 assert_eq "$(printf '%s' "$v" | jq -r .dropped_findings)" "0" "validate：file 不合规不算丢弃（问题本身仍然有效）"
+# 票 13：fpath 与另两处共用同一份字符集（REVIEW_CELL_DENY_CHARS + 控制字符）——< > 反斜杠 Tab 也按未定位处理
+cat > "$tmp/badfile2.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
+ {"id":"E","severity":"P0","title":"尖括号","file":"docs/<draft>.md","line_start":1,"line_end":1,"body":"b","fix":""},
+ {"id":"F","severity":"P0","title":"反斜杠","file":"src\\a.py","line_start":2,"line_end":2,"body":"b","fix":""},
+ {"id":"G","severity":"P1","title":"Tab","file":"a\tb.py","line_start":3,"line_end":3,"body":"b","fix":""},
+ {"id":"H","severity":"P2","title":"中文路径正常","file":"文档/说明.md","line_start":4,"line_end":4,"body":"b","fix":""}]}
+JSON
+v=$(review_validate < "$tmp/badfile2.json")
+assert_eq "$(printf '%s' "$v" | jq -r .delocated_findings)" "3" "票 13：< > 反斜杠 Tab 三条按未定位处理（与历次表/元信息单元格同一份字符集）"
+assert_eq "$(printf '%s' "$v" | jq -r '[.findings[].file] | join(",")')" ",,,文档/说明.md" "票 13：非 ASCII 路径不受影响"
 render "$tmp/badfile.json" "$tmp/badfile.md"
 body=$(cat "$tmp/badfile.md")
 assert_contains "$body" "文件路径不合规" "渲染：统计行说明有多少条按未定位处理"
@@ -748,6 +759,11 @@ assert_eq "$(printf '%s' "$h2" | jq -r '.[1].p0')" "null" "history_append：计�
 h3=$(review_history_append - 1 'a>b--<!--x' 'MERGE --> 伪造' "" 0 0 0)
 assert_eq "$(printf '%s' "$h3" | jq -r '.[0].sha')" "ab--!--x" "history_append：sha 里的 < > 被剔掉"
 assert_eq "$(printf '%s' "$h3" | jq -r '.[0].verdict')" "MERGE -- 伪造" "history_append：verdict 过滤掉 > 与 <（保留中文）"
+# 票 13：五个字符 + 控制字符一次到齐，与 _review_meta_cell 结果逐字节一致（同一份定义）
+h4=$(review_history_append - 1 $'ab<c>|d`e\\f\x1fg' $'MERGE\n伪' "" 0 0 0)
+assert_eq "$(printf '%s' "$h4" | jq -r '.[0].sha')" "abcdefg" "票 13：history sha 剔掉 < > | 反引号 反斜杠 与控制字符"
+assert_eq "$(printf '%s' "$h4" | jq -r '.[0].verdict')" "MERGE伪" "票 13：history verdict 剔掉换行"
+assert_eq "$(_review_meta_cell $'ab<c>|d`e\\f\x1fg' 2>/dev/null)" "abcdefg" "票 13：元信息单元格对同一输入给出同一结果"
 assert_not_contains "$(printf '%s' "$h3")" "-->" "history_append：过滤后不可能出现 -->"
 # 行数上限：避免历史无限增长把评论撑爆
 long='[]'
