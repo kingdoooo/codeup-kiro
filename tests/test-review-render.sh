@@ -2522,7 +2522,8 @@ _review_redact_to "$tmp/rt.in" "$tmp/rt.out" who "" --keep-lines; assert_eq "$(c
 assert_eq "$REVIEW_MARKER_LINE_RE_ALL" "$(_review_marker_line_re)" "第 16 条：_review_marker_line_re 只是常量的取值口"
 printf 'a\nb\nc' > "$tmp/lc3.md"; assert_eq "$(_review_line_counts "$tmp/lc.md" "$tmp/lc3.md")" "2 3" "第 17 条：_review_line_counts 一次给出两份文件的记录数（末行无换行也算）"
 # 第 29 条：截断的替换文件建在目标同目录、不残留
-cp "$GOLDEN/summary-full.md" "$tmp/tr29.md"; review_truncate_comment "$tmp/tr29.md" 3000
+cp "$GOLDEN/summary-full.md" "$tmp/tr29.md"; rc=0; review_truncate_comment "$tmp/tr29.md" 1200 || rc=$?
+assert_rc "$rc" 0 "第 29 条：1980 字节的 golden 截到 1200 成功（标记仍在）"
 assert_eq "$(ls "$tmp"/tr29.md.trunc.* 2>/dev/null | wc -l | tr -d ' ')" "0" "第 29 条：截断成功后目标同目录不残留 .trunc 临时文件"
 assert_contains "$(tail -1 "$tmp/tr29.md")" "报告超长已截断" "第 29 条：截断结果已就地写回"
 # 第 23 条：同一行两把钥匙
