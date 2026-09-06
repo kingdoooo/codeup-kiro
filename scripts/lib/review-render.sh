@@ -1360,8 +1360,9 @@ _REVIEW_JQ_FIRSTSENT='
 # _review_render_fold_section <计划文件> <标题模板> <桶名> <是否未定位桶 0|1> [是否完整渲染 0|1]
 # 标题模板里的 `{levels}` 会替换成该桶里实际出现的级别列表（`P0/P1`）。替换刻意放在
 # 「桶为空就直接返回」之后：空桶时那个标题根本不会渲染，先算它等于白跑一个 jq。
-# 完整渲染（full=1）只给「行内发布失败」用：那些问题一条行内评论都没发出去，说明与修复建议
-# 在 MR 上再没有别的地方能看到（I10 失败可见），只给标题 + 首句等于把 P0 的内容丢了。
+# 完整渲染（full=1）给「行内发布失败」与「未定位问题」两个桶用：这两类问题一条行内评论都没发出去，
+# 说明与修复建议在 MR 上再没有别的地方能看到（I10 失败可见），只给标题 + 首句等于把 P0 的内容丢了。
+# 档位桶（profile）与超限桶（overflow）仍只给首句：它们是「本轮有意不发行内」的问题，读者要的是一眼扫过去。
 _review_render_fold_section() {
   local plan="$1" title="$2" bucket="$3" unloc="${4:-0}" full="${5:-0}" n
   n=$(jq -r --arg b "$bucket" '(.folded[$b] // []) | length' "$plan")
@@ -1401,7 +1402,10 @@ _review_render_folded() {
   printf '<details><summary>折叠区：未展开的问题（%s）</summary>\n' "$n"
   _review_render_fold_section "$plan" '{levels} 建议'          profile   0
   _review_render_fold_section "$plan" '超出行内上限的 {levels}' overflow  0
-  _review_render_fold_section "$plan" '未定位问题'              unlocated 1
+  # 未定位问题也完整渲染（票 17-fix3 ⑦）：这些问题没有可绑定的行，INLINE_COMMENT=1 的评论里除了折叠区
+  # 再没有第二个落脚点（「问题清单」那一节在 inline 形态下根本不渲染）。只给标题 + 首句等于把说明后半段
+  # 与修复建议丢掉，而同一轮里说明不同的两条未定位问题（A① 的键改动特意保住了它们）在页面上会看起来一样。
+  _review_render_fold_section "$plan" '未定位问题'              unlocated 1 1
   # 发布失败的那些问题完整渲染：一条行内评论都没发出去，说明与修复建议在 MR 上没有第二个落点
   _review_render_fold_section "$plan" '行内发布失败'            failed    0 1
   echo "</details>"

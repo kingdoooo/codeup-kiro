@@ -795,10 +795,11 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：to 解析�
 assert_contains "$(posted_comment "$OUT")" "## 问题清单" "对照：退回完整清单"
 # 变异锚在 inline_bail 那一行的文案上（票 17-fix2 C⑤：出口收敛成一个函数之后，锚点是 notice 而不是注释）：
 # 把 `; return 1` 换成空语句 → notice 与 warning 照旧写出，随后继续往下发草稿，正是票 17 之前的行为
-# 两条一起放开：只放开「新推送」那条，空的 to_norm 会被后面「不在同一条历史上」那条兜住，仍是 fail-closed。
-# 这正是出口收敛之后的事实——**几个出口合起来才守得住**，所以变异要把这条路径上的出口全放开。
+# 按 `# fail-closed:<名字>` 标签锚定（票 17-fix3：文案挪进 inline_bail_to 之后，按 notice 锚会失配）。
+# 这条路径上有两个出口：预采样先判定（fail-closed:pre），放开它之后发布前再判定一次（fail-closed:to）。
+# **两个都得放开**才回到「拿旧 HEAD 的行号去绑另一个版本」——出口是合起来守住这条不变量的。
 pkg=$(make_mutant m52-head-failclosed \
-  '/inline_bail "行内评论未发出：评审期间源分支有新推送/ s/; return 1/; :/; /inline_bail "行内评论未发出：Codeup 侧最新合并源版本/ s/; return 1/; :/')
+  '/# fail-closed:pre$/ s/return 1/:/; /# fail-closed:to$/ s/return 1/:/')
 head_mismatch_case m52 "$pkg"
 assert_rc "$RC" 0 "M52：变异体仍能跑完"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
@@ -889,7 +890,7 @@ assert_rc "$RC" 0 "对照：两个核对都不成立时评审仍成功"
 assert_contains "$OUT" "不等于本地 merge-base" "对照：from 侧探针警告在日志里"
 assert_contains "$OUT" "不在本地克隆里" "对照：to 侧警告也在"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：仍然一条行内评论都不发"
-pkg=$(make_mutant m57-from-canary '/不等于本地 merge-base（/ s/^    log /    : /')
+pkg=$(make_mutant m57-from-canary '/不等于本地 merge-base（/ s/^  log /  : /')
 both_mismatch_case m57 "$pkg"
 assert_rc "$RC" 0 "M57：变异体仍能跑完"
 assert_not_contains "$OUT" "不等于本地 merge-base" \
@@ -941,11 +942,70 @@ no_commitid_case() { # <用例名> <集成包根>
 # 后面那条 `!= HEAD` 的判定拿空串去 `git rev-parse` 会解析失败，所以还要把解析失败那条出口也一起放开，
 # 才回到票 17 的 fail-open —— 这条变异要证明的就是「几个出口合起来才守得住」。
 pkg=$(make_mutant m60-nocommitid-failopen \
-  '/inline_bail "行内评论未发出：Codeup 版本列表未给出该版本/ s/; return 1/; :/; /inline_bail "行内评论未发出：评审期间源分支有新推送/ s/; return 1/; :/; /inline_bail "行内评论未发出：Codeup 侧最新合并源版本/ s/; return 1/; :/')
+  '/# fail-closed:pre$/ s/return 1/:/; /# fail-closed:to$/ s/return 1/:/')
 no_commitid_case m60 "$pkg"
 assert_rc "$RC" 0 "M60：变异体仍能跑完"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
   "M60：拿不到提交号也发了 3 条行内评论——端到端「0 次创建」断言会失败"
 assert_contains "$(posted_comment "$OUT")" "已标注在「文件改动」对应行" "M60：汇总还谎报「已标注」"
+
+# --- M61（17-fix3 ④）：把 to 侧的祖先判定反过来 → 滞后被报成「新推送」，处置从「重跑流水线」变成
+#     「等下一轮」，而下一轮永远不会来（没有新推送去触发它）---
+IFXLAG="$tmp/ifx-lagging"
+mkdir -p "$IFXLAG"
+cp "$IFX"/create-comment-inline.*.json "$IFXLAG/"
+lag_case() { # <用例名> <集成包根>
+  PS_SRC=PARENT PS_SRC_ID=src-9 inline_case "$1" "$2" "$IFXLAG" CODEUP_RETRY_BACKOFF=0
+}
+lag_case baseline-lag "$ROOT"
+assert_rc "$RC" 0 "对照：版本列表滞后时评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：滞后时 0 条行内评论（fail-closed）"
+assert_contains "$(posted_comment "$OUT")" "尚未包含本次提交" "对照：notice 说滞后"
+assert_contains "$(posted_comment "$OUT")" "重跑流水线即可" "对照：给出「重跑流水线」的处置"
+# 变异：交换 is-ancestor 的两个参数 → 祖先被认成后代
+pkg=$(make_mutant m61-ancestor-direction \
+  's|if git merge-base --is-ancestor "\$INLINE_TO_NORM" "\$head" 2>/dev/null; then INLINE_TO_STATUS=lag|if git merge-base --is-ancestor "$head" "$INLINE_TO_NORM" 2>/dev/null; then INLINE_TO_STATUS=lag|')
+lag_case m61 "$pkg"
+assert_rc "$RC" 0 "M61：变异体仍能跑完"
+comment=$(posted_comment "$OUT")
+assert_not_contains "$comment" "尚未包含本次提交" \
+  "M61：方向反了之后滞后不再被认出——端到端「notice 点名滞后」断言会失败"
+assert_contains "$comment" "评审期间源分支有新推送" "M61：滞后被报成新推送（给出「等下一轮」这条等不到的建议）"
+assert_not_contains "$OUT" "按退避重查" "M61：既然不认为是滞后，重查也不会发生（本该重查 3 次）"
+
+# --- M62（17-fix3 ④）：拆掉**滞后重查收尾**那个 fail-closed 出口 → 重查用尽仍滞后却继续发布，
+#     行内评论绑到一个旧版本上（I5 被违反）---
+# 这个出口只在「发布前才滞后」时走到（预采样滞后的话在 Kiro 之前就判定完了），所以 fixture 让第 1 次 GET
+# （预采样）返回本次提交、之后每次都返回旧版本：发布前采样判定 lag → 重查 3 次都还是旧版本 → 收尾出口。
+IFXLAG2="$tmp/ifx-lag-late"
+mkdir -p "$IFXLAG2"
+cp "$IFX"/create-comment-inline.*.json "$IFXLAG2/"
+mk_lag_late() {
+  local base head
+  base=$(git merge-base origin/master HEAD); head=$(git rev-parse HEAD)
+  jq -n --arg sha "$head" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-2", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFXLAG2/list-patchsets.1.json"
+  jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFXLAG2/list-patchsets.json"
+}
+lag_late_case() { # <用例名> <集成包根>
+  MUT_TWEAK=mk_lag_late inline_case "$1" "$2" "$IFXLAG2" CODEUP_RETRY_BACKOFF=0
+}
+lag_late_case baseline-lag-late "$ROOT"
+assert_rc "$RC" 0 "对照：发布前才滞后时评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "对照：发布前才滞后 → 0 条行内评论（走收尾出口）"
+assert_contains "$OUT" "两次采样：checkout 时判定=ok" "对照：两次采样比对写进日志"
+pkg=$(make_mutant m62-lag-exit '/# fail-closed:lag-end$/ s/return 1/:/')
+lag_late_case m62 "$pkg"
+assert_rc "$RC" 0 "M62：变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
+  "M62：出口一拆，重查用尽仍滞后却发了 3 条行内评论——端到端「滞后时 0 条」断言会失败"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.to_patchset_biz_id' | sort -u | paste -sd, -)" "src-9" \
+  "M62：绑的正是那个滞后的旧版本（I5 被违反）"
+assert_not_contains "$(posted_comment "$OUT")" "尚未包含本次提交" "M62：汇总里也没有滞后的说明"
 
 report

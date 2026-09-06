@@ -1711,18 +1711,23 @@ assert_contains "$body" "**未定位问题（4）**" "渲染：折叠区小节�
 assert_not_contains "$body" "**超出行内上限" "渲染：没有超限时省略该小节"
 assert_not_contains "$body" "**行内发布失败" "渲染：没有发布失败时省略该小节"
 assert_contains "$body" '- `src/db.py:12` **变量命名过于笼统** — `data` 这个名字看不出装的是什么。' "渲染：折叠区条目 = 定位串 + 标题 + body 首句"
-# 未定位条目只给文件、刻意不给行号（spec §4.3 模板）：那个行号恰恰是「不在变更行集合里」的，
-# 摆出来只会让读者按一个不可信的行号去找问题
-assert_contains "$body" '- `src/db.py`（无法定位到变更行） **循环内重复建立数据库连接**' "渲染：未定位条目注明无法定位到变更行"
+# 未定位桶（票 17-fix3 ⑦）：与「行内发布失败」同款完整渲染——编号 + 定位串 + 标题 + 完整说明 + 修复建议。
+# 这些问题没有可绑定的行，inline 形态下折叠区是它们**唯一**的落脚点（没有「问题清单」那一节）。
+# 定位串仍只给文件、刻意不给行号（spec §4.3）：那个行号恰恰是「不在变更行集合里」的，摆出来只会让读者
+# 按一个不可信的行号去找问题。
+assert_contains "$body" '**2. `src/db.py`（无法定位到变更行） — 循环内重复建立数据库连接**' "渲染：未定位条目完整渲染且注明无法定位到变更行"
 assert_not_contains "$body" 'src/db.py:99' "渲染：未定位条目不摆出那个不可信的行号"
-assert_contains "$body" '- （未定位） **缺少统一的鉴权中间件**' "渲染：没有 file 的问题标注（未定位）"
-# R1：折叠区条目只取 body 的**第一句**。原来用 jq 的 index("。") 找句子边界，它返回的是**字节**偏移，
-# 而 `.[a:b]` 按**码点**切片——中文正文里两者差三倍，切出来既不是首句也不是完整字符。
+assert_contains "$body" '**1. （未定位） — 缺少统一的鉴权中间件**' "渲染：没有 file 的问题标注（未定位）"
+assert_contains "$body" "第三句不应该出现在折叠区的条目里。" "票 17-fix3 ⑦：未定位问题的说明完整渲染（不再只有首句）"
+assert_contains "$body" "引入一层鉴权中间件。" "票 17-fix3 ⑦：未定位问题的修复建议也渲染出来"
+# R1：**首句渲染的那些桶**（档位桶/超限桶）只取 body 的第一句。原来用 jq 的 index("。") 找句子边界，
+# 它返回的是**字节**偏移，而 `.[a:b]` 按**码点**切片——中文正文里两者差三倍，切出来既不是首句也不是完整字符。
 # 短句时字节偏移超过码点长度、被切片夹住而「恰好」返回整行，所以单句 fixture 完全测不出这个 bug。
-assert_contains "$body" '**缺少统一的鉴权中间件** — 本仓库没有任何统一鉴权入口，新增接口全靠各自记得校验。' \
+# 守卫钉在档位桶的 F3 上（未定位桶自 17-fix3 起完整渲染，用它就测不到首句逻辑了）。
+assert_contains "$body" '**变量命名过于笼统** — `data` 这个名字看不出装的是什么。' \
   "R1：多句正文只取到完整的第一句（不是按字节切出来的半截）"
-assert_not_contains "$body" "第二句解释影响面" "R1：第二句不进折叠区条目"
-assert_not_contains "$body" "第三句不应该出现" "R1：第三句同样不进"
+assert_not_contains "$body" "档位桶第二句" "R1：第二句不进折叠区条目"
+assert_not_contains "$body" "档位桶第三句" "R1：第三句同样不进"
 # 行内评论承载明细，汇总里不再展开问题清单（否则同一条问题出现两次，违反 I4）
 assert_not_contains "$body" "## 问题清单" "渲染：INLINE_COMMENT=1 不再有展开的问题清单"
 assert_not_contains "$body" "**P0 必须修复（" "渲染：INLINE_COMMENT=1 不按级别展开分组清单"
@@ -1755,7 +1760,9 @@ assert_contains "$body" "其中 2 条已标注在「文件改动」对应行" "�
 assert_contains "$body" '**1. `src/app.py:27` — 分页参数缺少上界校验**' "R4：发布失败小节按「编号 + 定位串 + 标题」渲染"
 assert_contains "$body" "\`per_page\` 直接取自查询串，传入 100000 会一次性把整表读进内存。" "R4：发布失败的问题说明完整可见"
 assert_contains "$body" "限制 \`per_page\` 上界（如 100），超出时取上界值。" "R4：发布失败的问题修复建议完整可见"
-assert_eq "$(printf '%s\n' "$body" | grep -c '^\*\*修复建议\*\*$')" "1" "R4：修复建议小节渲染成独立行"
+# 「修复建议」只在完整渲染的两个桶里出现，且必须是**独立一行**（不是缀在正文后面）。
+# 这一份 plan 里：发布失败桶 1 条带 fix + 未定位桶（票 17-fix3 ⑦ 起也完整渲染）3 条里 2 条带 fix = 3 行。
+assert_eq "$(printf '%s\n' "$body" | grep -c '^\*\*修复建议\*\*$')" "3" "R4：修复建议小节渲染成独立行（发布失败 1 + 未定位 2）"
 
 # 无问题：折叠区整体省略，并明确说明未发现问题
 review_validate < fixtures/contract/empty.json > "$tmp/empty-validated.json"
@@ -1789,13 +1796,15 @@ assert_not_contains "$(cat "$tmp/plan-as-inline0.md")" "已标注在" "渲染：
 # 评审员的 body 很常以 ```python 开头。取到那一行的话条目里什么信息都没有；更糟的是那 3 个
 # 连续反引号是 Markdown 的行内代码定界符，它会一直找下一个 3 连来配对，把两个条目之间的
 # 定位串与标题全吃进代码 span。
+# 三条都放在**变更行集合内**的位置（quiet 档位下 P2 进档位桶）：首句逻辑只剩档位桶与超限桶在用，
+# 未定位桶自票 17-fix3 ⑦ 起完整渲染，摆在那里就测不到首句了。
 cat > "$tmp/fencebody.json" <<'JSON'
 {"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
- {"id":"H1","severity":"P2","category":"style","title":"围栏开头一","file":"docs/readme.md","line_start":3,"line_end":3,
+ {"id":"H1","severity":"P2","category":"style","title":"围栏开头一","file":"src/db.py","line_start":12,"line_end":12,
   "body":"```python\nbad_code()\n```\n这一句才是真正的说明。","fix":""},
- {"id":"H2","severity":"P2","category":"style","title":"围栏开头二","file":"unknown/file.py","line_start":1,"line_end":1,
+ {"id":"H2","severity":"P2","category":"style","title":"围栏开头二","file":"src/app.py","line_start":27,"line_end":27,
   "body":"~~~\nalso bad\n~~~\n第二条的说明。","fix":""},
- {"id":"H3","severity":"P2","category":"style","title":"反引号数为奇数","file":"unknown/other.py","line_start":2,"line_end":2,
+ {"id":"H3","severity":"P2","category":"style","title":"反引号数为奇数","file":"src/app.py","line_start":30,"line_end":31,
   "body":"这里有一个没配对的 `反引号 在句子里。","fix":""}]}
 JSON
 review_validate < "$tmp/fencebody.json" > "$tmp/fencebody-validated.json"

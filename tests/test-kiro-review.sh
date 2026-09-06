@@ -681,8 +681,18 @@ mk_patchsets() {
   case "$PS_SRC" in
     HEAD) src="$head" ;;
     HEAD12) src="${head:0:12}" ;;
+    HEAD6) src="${head:0:6}" ;;                     # 短于 git 短 sha 下限（7 位）
     HEADUP) src=$(printf '%s' "$head" | tr 'a-f' 'A-F') ;;
     PARENT) src=$(git rev-parse 'HEAD^') ;;
+    # 后代：在 HEAD 之上再造一个提交，然后把工作树退回 HEAD（对象仍在克隆里，模拟「新推送已被 fetch 到」）
+    CHILD) echo "child of head" >> src/app.py; git commit -qam "child commit"
+           src=$(git rev-parse HEAD); git reset -q --hard 'HEAD^'; head=$(git rev-parse HEAD) ;;
+    # 分叉：`git commit --amend` 之后旧提交仍可达（reflog），它与新 HEAD 分属两条历史
+    ORPHAN) src=$(git rev-parse HEAD); git commit -q --amend -m "amended (history rewritten)"
+            head=$(git rev-parse HEAD) ;;
+    # 原样写入（`RAW:` 前缀）：要注入 `HEAD` / `@` / 一个 refname 这类**字面量**时必须走这里，
+    # 否则 `PS_SRC=HEAD` 会命中上面第一条分支、被换成真实 sha，形状锚定就测不到了。
+    RAW:*) src="${PS_SRC#RAW:}" ;;
     *) src="$PS_SRC" ;;
   esac
   case "$PS_TGT" in BASE) tgt="$base" ;; *) tgt="$PS_TGT" ;; esac
@@ -721,7 +731,8 @@ submit_body() { printf '%s\n' "$1" | grep -F 'DRY_RUN body: {"submitDraftComment
 run_inline_case ok1 ifx-ok1
 assert_rc "$RC" 0 "行内开启：退出码 0"
 assert_contains "$OUT" "changeRequests/7/diffs/patches" "行内开启：先查 MR 版本列表"
-assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "行内开启：版本列表只查一次"
+# 票 17-fix3 ⑥ 起是两次：Kiro 之前预采样一次（提前发现滞后/配置错），发布前再采样一次（两次比对证明成因）
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "2" "行内开启：版本列表查两次（Kiro 之前预采样 + 发布前采样）"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "行内开启：quiet 下发出 3 条可定位的 P0/P1"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "1" "行内开启：草稿一次提交（只调一次 review）"
 # 三个版本字段必传（P1-03 实测缺一即 400），且 line_number 是新文件侧行号
@@ -1016,7 +1027,8 @@ PS_SRC=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 run_inline_case 
 assert_rc "$RC" 0 "A11 新推送：评审仍成功（退出码 0）"
 assert_contains "$OUT" "不在本地克隆里" "A11 新推送：日志点明成因是提交不在克隆里"
 assert_contains "$OUT" "fail-closed" "A11 新推送：日志点明是 fail-closed，不是发了再提醒"
-assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "A11 新推送：版本列表查过一次（判定就在版本对核对处）"
+# 预采样就判定绑不上（这个 fixture 从头到尾都是那个不在克隆里的提交），发布前不再重查 ⇒ 只有预采样那一次
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "A11 新推送：预采样已判定，发布前不再查版本列表"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "A11 新推送：0 次创建行内评论（不拿旧 HEAD 的行号去绑新版本）"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "A11 新推送：POST …/comments 只有汇总评论那一次，没有草稿"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "A11 新推送：不调提交接口"
@@ -1063,10 +1075,10 @@ assert_contains "$comment" "## 问题清单" "A11 两者都不一致：回落成
 # 协调者复审改判：绑不上就不发，notice 单列这个成因（读者要能区分「对不上」与「没给」）。
 PS_SRC=OMIT PS_SRC_ID=src-9 run_inline_case nocommitid ifx-nocommitid
 assert_rc "$RC" 0 "A11 缺 commitId：评审仍成功（退出码 0）"
-assert_contains "$OUT" "最新合并源版本（src-9）没有提交号" "A11 缺 commitId：日志在「没有提交号」那一行点名是哪个版本缺"
+assert_contains "$OUT" "最新合并源版本（src-9）没有可用的提交号" "A11 缺 commitId：日志在「没有可用的提交号」那一行点名是哪个版本缺"
 assert_contains "$OUT" "fail-closed" "A11 缺 commitId：日志点明是 fail-closed"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "A11 缺 commitId：0 次创建行内评论（绑不上就不发）"
-assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "A11 缺 commitId：版本列表只查一次（不重查——没有提交号不是滞后）"
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "A11 缺 commitId：只有预采样那一次（不重查——没有提交号不是滞后）"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "A11 缺 commitId：POST …/comments 只有汇总评论那一次，没有草稿"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "A11 缺 commitId：不调提交接口"
 assert_eq "$(req_count "$OUT" DELETE)" "0" "A11 缺 commitId：没有任何删除请求"
@@ -1080,8 +1092,9 @@ assert_contains "$comment" "硬编码疑似应用密钥" "A11 缺 commitId：问
 assert_not_contains "$comment" "已标注在" "A11 缺 commitId：不谎报行内计数"
 
 # ---- A11（17-fix2 B③）：提交号规范化——12 位缩写与大写都算「就是本次评审的提交」，照发 ----
-# 这个字段的宽度不受我们控制：本仓库 fixture 里是 12 位（tests/fixtures/inline/normal/list-patchsets.json），
-# 真实验收数据里是 40 位。字面相等会把缩写误判成「不一致」，于是行内评论被永久关掉（fail-closed 之后每轮都是）。
+# 证据分级（票 17-fix3 ⑧）：**真实 API 只观察到 40 位全 sha**（acceptance 留档），没有观察到 Codeup 返回缩写。
+# 规范化是对**未观察到的形态**保守——万一哪天返回缩写或大写，字面相等会把它误判成「不一致」，
+# 而 fail-closed 之后每轮都发不出行内评论。下面两条用例是 fixture/unit 级的形状覆盖，不是真实 API 的证据。
 PS_SRC=HEAD12 run_inline_case shortsha ifx-shortsha
 assert_rc "$RC" 0 "缩写 sha：评审成功"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "缩写 sha：规范化后等于 HEAD，行内照发 3 条"
@@ -1110,7 +1123,8 @@ PS_SRC=PARENT PS_SRC_ID=src-9 run_inline_case lagging ifx-lagging CODEUP_RETRY_B
 assert_rc "$RC" 0 "版本列表滞后：评审成功"
 assert_contains "$OUT" "是当前 HEAD" "版本列表滞后：日志点明那个版本是 HEAD 的祖先"
 assert_contains "$OUT" "按退避重查至多 3 次" "版本列表滞后：日志写明要重查几次"
-assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "4" "版本列表滞后：初次 + 三次重查 = 4 次 GET"
+# 重查已经挪到预采样里（票 17-fix3 ⑥）：预采样 1 次 + 三次重查 = 4 次，发布前不再查
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "4" "版本列表滞后：预采样 1 次 + 三次重查 = 4 次 GET"
 assert_contains "$OUT" "重查第 3/3 次" "版本列表滞后：三次都跑到了"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "版本列表滞后：重查仍滞后 → 0 次创建行内评论"
 comment=$(posted_comment "$OUT")
@@ -1121,23 +1135,113 @@ assert_contains "$comment" "## 问题清单" "版本列表滞后：回落成完�
 
 # ---- A11（17-fix2 B③）：滞后但重查命中 → 用新版本正常发 ----
 # 第二次 GET 起 fixture 换成「to = 真实 HEAD、版本号更大」的列表：模拟 Codeup 在几秒内把版本建出来了。
+# 第 1 次 GET 用 `.1.json`（滞后：to 是 HEAD^），之后每一次都落到无序号的那份（已包含本次提交）：
+# 预采样重查命中之后，发布前还会再采样一次，那一次也必须拿到新版本（票 17-fix3 ⑥）。
 mk_lag_then_ok() {
-  local head
-  head=$(git rev-parse HEAD)
-  jq -n --arg sha "$head" --arg base "$(git merge-base origin/master HEAD)" '[
+  local head base
+  head=$(git rev-parse HEAD); base=$(git merge-base origin/master HEAD)
+  jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFX_DIR/list-patchsets.1.json"
+  jq -n --arg sha "$head" --arg base "$base" '[
     {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
     {patchSetBizId:"src-10", versionNo:10, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
-  ]' > "$IFX_DIR/list-patchsets.2.json"
+  ]' > "$IFX_DIR/list-patchsets.json"
 }
-PS_SRC=PARENT PS_SRC_ID=src-9 CASE_EXTRA_TWEAK=mk_lag_then_ok \
-  run_inline_case lagrecovered ifx-lagrecovered CODEUP_RETRY_BACKOFF=0
+# CASE_EXTRA_TWEAK 在 mk_patchsets 之后执行，所以上面写的两份 fixture 会覆盖它生成的那份
+CASE_EXTRA_TWEAK=mk_lag_then_ok run_inline_case lagrecovered ifx-lagrecovered CODEUP_RETRY_BACKOFF=0
 assert_rc "$RC" 0 "滞后后命中：评审成功"
 assert_contains "$OUT" "重查命中" "滞后后命中：日志写明命中"
-assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "2" "滞后后命中：第一次重查就命中，只多查一次"
+# 预采样 1 次（滞后）+ 第一次重查命中 = 2 次，随后发布前再采样一次 = 3 次
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "3" "滞后后命中：预采样 + 一次重查命中 + 发布前采样 = 3 次 GET"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "滞后后命中：行内照发 3 条"
 assert_eq "$(inline_bodies "$OUT" | jq -r '.to_patchset_biz_id' | sort -u | paste -sd, -)" "src-10" \
   "滞后后命中：patchset_biz_id 换成重查拿到的新版本"
 assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出" "滞后后命中：汇总里没有 fail-closed 的 notice"
+
+# ---- A11（17-fix3 ①）：提交号不是 sha 形状 → 按「没有可用的提交号」处置，**绝不**当成已证明的版本 ----
+# `git rev-parse --verify "<x>^{commit}"` 接受任意 revision 表达式：不锚形状的话 `HEAD` / `@` / 一个 refname
+# 都会解析成克隆里的分支顶端、恰好等于 HEAD，于是「版本已证明」这条结论建立在一个从未核对内容的取值上
+# （fail-open）。锚了形状之后它落到 noid：一条行内评论都不发。
+for shape in HEAD @ master refs/heads/master; do
+  PS_SRC="RAW:$shape" PS_SRC_ID=src-9 run_inline_case "shape-$(printf '%s' "$shape" | tr -c 'A-Za-z0-9' '-')" ifx-shape
+  assert_rc "$RC" 0 "形状锚定（${shape}）：评审仍成功"
+  assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "形状锚定（${shape}）：0 次创建行内评论（不把 refname 当成已证明的版本）"
+  assert_contains "$OUT" "不是 sha 形状" "形状锚定（${shape}）：日志点明形状不对"
+  comment=$(posted_comment "$OUT")
+  assert_contains "$comment" "未给出该版本（src-9）的提交号" "形状锚定（${shape}）：按「没有提交号」处置"
+  assert_not_contains "$comment" "有新推送" "形状锚定（${shape}）：不谎称新推送（那条建议是等下一轮，永远等不到）"
+done
+# 正控：40 位全 sha 与 12 位缩写仍然照发（上面 shortsha/uppersha 已钉）；7 位以下不认
+PS_SRC=HEAD6 PS_SRC_ID=src-9 run_inline_case shape6 ifx-shape6
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "形状锚定：6 位十六进制短于 git 短 sha 下限，不认"
+
+# ---- A11（17-fix3 ③）：最新合并源版本是 HEAD 的**后代** ⇒ 评审期间有新推送（对象已在克隆里）----
+# 浅克隆下这个提交拉不到（判定 pushed_dark），fetch 过之后它在本地（判定 pushed_known）——同一个事件，
+# 处置与文案必须一致，不能一个说新推送、另一个说 force-push。
+PS_SRC=CHILD PS_SRC_ID=src-9 run_inline_case descendant ifx-descendant
+assert_rc "$RC" 0 "后代版本：评审仍成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "后代版本：0 次创建行内评论"
+assert_contains "$OUT" "是当前 HEAD" "后代版本：日志点明拓扑关系"
+assert_contains "$OUT" "的后代（对象已在克隆里）" "后代版本：日志说明对象在本地"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "评审期间源分支有新推送" "后代版本：与 pushed_dark 同一套文案（同因同断）"
+assert_contains "$comment" "新推送触发的评审会补上行内评论" "后代版本：给出会自愈的处置"
+assert_not_contains "$comment" "不在同一条历史上" "后代版本：不谎称 force-push"
+assert_not_contains "$comment" "重跑流水线即可" "后代版本：不给滞后那条处置"
+
+# ---- A11（17-fix3 ④）：分叉历史（force-push / rebase 改写）→ fail-closed 且文案单列 ----
+# fixture 用 `git commit --amend` 之后的**旧** sha：对象还在克隆里（reflog 可达），但与新 HEAD 分属两条历史。
+PS_SRC=ORPHAN PS_SRC_ID=src-9 run_inline_case diverged ifx-diverged
+assert_rc "$RC" 0 "分叉历史：评审仍成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "分叉历史：0 次创建行内评论"
+assert_contains "$OUT" "分属两条历史" "分叉历史：日志点明成因"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "不在同一条历史上（源分支被改写或强推）" "分叉历史：notice 单列这个成因"
+assert_not_contains "$comment" "尚未包含本次提交" "分叉历史：不谎称滞后"
+assert_contains "$comment" "## 问题清单" "分叉历史：回落成完整清单"
+
+# ---- A11（17-fix3 ②）：滞后重查期间成因变了 → 按**最终**成因给文案，不再一律说「滞后，重跑流水线」----
+# 第 1 次 GET 滞后 → 触发重查；之后每次都返回一个不在克隆里的提交（评审期间来了新推送）。
+mk_lag_then_push() {
+  local base
+  base=$(git merge-base origin/master HEAD)
+  jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFX_DIR/list-patchsets.1.json"
+  jq -n --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-11", versionNo:11, relatedMergeItemType:"MERGE_SOURCE", commitId:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}
+  ]' > "$IFX_DIR/list-patchsets.json"
+}
+CASE_EXTRA_TWEAK=mk_lag_then_push run_inline_case lagthenpush ifx-lagthenpush CODEUP_RETRY_BACKOFF=0
+assert_rc "$RC" 0 "重查期间来了新推送：评审仍成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "重查期间来了新推送：0 次创建行内评论"
+assert_contains "$OUT" "判定：pushed_dark" "重查期间来了新推送：日志记下每次重查的判定"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "评审期间源分支有新推送" "重查期间来了新推送：按最终成因给文案"
+assert_not_contains "$comment" "尚未包含本次提交" "重查期间来了新推送：不再一律说滞后"
+assert_not_contains "$comment" "重跑流水线即可" "重查期间来了新推送：不给「重跑」这条只会复现的建议"
+
+# ---- A11（17-fix3 ②）：滞后重查期间接口失败 / 选不出版本对 → 各自既有的 notice ----
+mk_lag_then_500() {
+  local base
+  base=$(git merge-base origin/master HEAD)
+  jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFX_DIR/list-patchsets.1.json"
+  jq -n '[]' > "$IFX_DIR/list-patchsets.json"   # 之后每次都返回空数组 → 选不出版本对
+}
+CASE_EXTRA_TWEAK=mk_lag_then_500 run_inline_case lagthennopair ifx-lagthennopair CODEUP_RETRY_BACKOFF=0
+assert_rc "$RC" 0 "重查后选不出版本对：评审仍成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "重查后选不出版本对：0 次创建行内评论"
+assert_contains "$OUT" "重查后仍选不出版本对" "重查后选不出版本对：日志留痕"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "选不出「最新合并目标版本 + 最新合并源版本」这一对" "重查后选不出版本对：用这条既有 notice"
+assert_not_contains "$comment" "重跑流水线即可" "重查后选不出版本对：不谎称滞后"
 
 # ---- A11（17-fix2 B③）：最新合并目标版本没有提交号 → 只打警告（P1-14 探针失效），照发 ----
 PS_TGT=OMIT run_inline_case fromnoid ifx-fromnoid
@@ -1146,6 +1250,15 @@ assert_contains "$OUT" "P1-14 的探针" "from 缺 commitId：日志写明探针
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "from 缺 commitId：不影响发布，行内照发 3 条"
 assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出" "from 缺 commitId：不 fail-closed"
 assert_not_contains "$(posted_comment "$OUT")" "行号可能有偏移" "from 缺 commitId：没有提交号就不谈偏移（无从比较）"
+# ---- A11（17-fix3 ⑤）：最新合并目标版本的提交号只有空白 → 与 to 侧同样先去空白，不渲染空括号 ----
+PS_TGT="   " PS_TGT_ID=tgt-9 run_inline_case fromblank ifx-fromblank
+assert_rc "$RC" 0 "from 空白 commitId：评审成功"
+assert_contains "$OUT" "P1-14 的探针" "from 空白 commitId：按「没有提交号」处置（探针失效）"
+assert_not_contains "$OUT" "不等于本地 merge-base" "from 空白 commitId：不落到「基准不一致」那条分支"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "from 空白 commitId：不影响发布，行内照发 3 条"
+comment=$(posted_comment "$OUT")
+assert_not_contains "$comment" "行号可能有偏移" "from 空白 commitId：汇总里不谈偏移（无从比较）"
+assert_not_contains "$comment" "合并目标版本 ）" "from 空白 commitId：评论里不出现空括号"
 
 # ---- 查现有行内评论失败 → 跳过去重但照常发布，并留痕 ----
 run_inline_case nodedup ifx-nodedup DRY_RUN_FAIL_ROUTES="list-comments-inline:500" CODEUP_RETRY_BACKOFF=0
@@ -1158,7 +1271,9 @@ run_inline_case inlinedegrade ifx-inlinedegrade MOCK_KIRO_NO_MARKER=1
 assert_rc "$RC" 0 "降级 + 行内开启：退出码 0"
 assert_contains "$OUT" "结构化解析失败" "降级 + 行内开启：仍是降级评论"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "降级 + 行内开启：不发行内评论（没有可信的结构化问题）"
-assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "0" "降级 + 行内开启：连版本列表都不用查"
+# 预采样在 Kiro 之前，所以降级路径也会有那一次（它的作用正是「不用等模型跑完才知道版本对能不能用」）；
+# 发布路径本身不会再查——降级不进行内发布。
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "降级 + 行内开启：只有 Kiro 之前那次预采样"
 
 # ---- 无问题：不发行内评论，汇总仍完整 ----
 printf '{"contract":"codeup-reviewer/1","summary":"没有发现问题。","verdict":"MERGE","verdict_reason":"改动很小。","findings":[]}\n' > "$tmp/empty-contract.json"
@@ -1168,7 +1283,7 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "无问题 + 行内�
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "无问题 + 行内开启：不调提交接口"
 # 没有可发的行内评论时连版本列表与现有评论列表都不该查：白跑两个接口，还可能在一条
 # 「未发现明显问题」的汇总上挂一句「下面是完整问题清单」
-assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "0" "无问题 + 行内开启：不查版本列表"
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "无问题 + 行内开启：只有 Kiro 之前那次预采样（发布路径提前返回，不再查）"
 assert_eq "$(printf '%s\n' "$OUT" | grep -cF 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}')" "0" "无问题 + 行内开启：不查现有行内评论"
 assert_contains "$OUT" "本次没有可发的行内评论" "无问题 + 行内开启：日志说明为什么跳过"
 comment=$(posted_comment "$OUT")

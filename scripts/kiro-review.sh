@@ -43,6 +43,11 @@ MAX_INLINE_COMMENTS="${MAX_INLINE_COMMENTS:-10}"
 # 行内评论实际是否生效：版本对取不到时降为 0，并把原因写进汇总评论（INLINE_NOTICE）。
 INLINE_ACTIVE=0
 INLINE_NOTICE=""
+# 版本列表滞后时重查几次（票 17-fix2 B③、17-fix3 ⑥：预采样与发布前采样共用同一个上限）
+INLINE_LAG_MAX=3
+# from 侧探针的结果（1 = Codeup 的比较基准与本地 merge-base 不一致）。默认 0：`set -u` 下没跑过探针
+# 就读它会直接崩掉整次评审。
+INLINE_FROM_OFFSET=0
 # 官方安装脚本 URL。来源：https://kiro.dev/docs/cli/installation/（页面命令
 # `curl -fsSL https://cli.kiro.dev/install | bash`；脚本本身支持 Linux/macOS，
 # Linux 下安装到 ~/.local/bin，含 glibc 检测与 musl 回退）。核实日期：2026-07-21。
@@ -151,6 +156,8 @@ die_review() {
 #        让这条汇总带上完整问题清单——问题一条都不能因为「行内发不出去」而消失（I4/I10）。
 # 注意：本函数被写成 `if publish_inline_comments …`，`if` 会让整个函数体不受 errexit 约束，
 # 所以每一步都显式判退出码，绝不依赖 set -e。
+# 每个 fail-closed 出口的 `return 1` 后面带一个 `# fail-closed:<名字>` 标签：变异测试按标签精确锚定
+# （票 17-fix3；此前锚 notice 文案，文案挪进 inline_bail_to 之后就失配了）。改名字要同步 test-mutations.sh。
 # fail-closed / 发不出去的统一出口（票 17-fix2 C⑤）：原因既要进汇总评论（阿里云侧看不到流水线日志，I10），
 # 又要进日志。六个出口原先各抄一份「拼 notice + log + return 1」，改一处文案就得同步六处。
 # 调用方写成 `inline_bail "<notice>" "<log>"; return 1`：rc 由调用方给，读起来就是「说明原因，然后退出」。
@@ -159,21 +166,194 @@ inline_bail() {
   log "$2"
 }
 
-# 把 Codeup 给的提交号规范化成本地克隆里的全 sha（票 17-fix2 B③）：接受缩写与大写
-# （本仓库 fixture 与真实验收 JSON 分别出现过 12 位与 40 位，字面比较会把缩写误判成「不一致」）。
-# rc 0 + stdout 全 sha = 该提交在克隆里；rc 1 = 解析不出（对象不在克隆里，或不是提交对象）。
+# 把 Codeup 给的提交号规范化成本地克隆里的全 sha（票 17-fix2 B③）：接受缩写与大写。
+# 真实 API 只观察到 40 位全 sha（acceptance 留档）；规范化是对**未观察到的形态**保守——万一哪天返回缩写，
+# 字面比较会把它误判成「不一致」并把行内评论永久关掉。
+# **先锚形状再 rev-parse**（票 17-fix3 ①）：`git rev-parse --verify "<x>^{commit}"` 接受任意 revision 表达式，
+# 不锚形状的话 `HEAD` / `@` / 一个 refname 都能解析成克隆里的分支顶端、恰好等于 HEAD，于是「版本已证明」
+# 这条结论建立在一个从未核对过内容的取值上（fail-open，比误判成不一致严重得多）。
+# rc 0 + stdout 全 sha = 该提交在克隆里；rc 1 = 不是 sha 形状、或解析不出（对象不在克隆里 / 不是提交对象）。
 inline_resolve_commit() {
   local raw="${1//[[:space:]]/}" full
-  [[ -n "$raw" ]] || return 1
+  # 7 位是 git 的短 sha 下限；上限 40 位（SHA-1）。纯十六进制且长度在此区间才继续。
+  [[ "$raw" =~ ^[0-9a-fA-F]{7,40}$ ]] || return 1
   full=$(git rev-parse --verify --quiet "${raw}^{commit}" 2>/dev/null) || return 1
   [[ -n "$full" ]] || return 1
   printf '%s' "$full"
 }
 
+# to 侧提交号的四分类（票 17-fix3 ②③）：初次核对与重查收尾都走这一份，避免「重查完只会说滞后」。
+# 结果放**全局**：`st=$(inline_classify_to …)` 那种写法会让函数跑在子 shell 里，规范化后的 sha 传不回来
+# （codeup-api.sh 里对 CODEUP_HTTP_CODE 踩过同一个坑），于是 notice 里的提交号渲染成空。
+#   INLINE_TO_STATUS = 状态词；INLINE_TO_NORM = 规范化后的全 sha（ok/lag/pushed_known/diverged 时非空）。
+#   noid          空 / 全空白 / 不是 sha 形状 —— 没有可核对的提交号
+#   pushed_known  是 HEAD 的**后代**（对象已在克隆里，多半是 fetch 时被一起带下来的）⇒ 评审期间有新推送
+#   pushed_dark   解析不出（对象不在克隆里）⇒ 同样是评审期间有新推送，只是本地看不到那个提交
+#   lag           是 HEAD 的**祖先** ⇒ Codeup 版本列表尚未包含本次提交
+#   diverged      两向都不是祖先 ⇒ 历史分叉（force-push / rebase 改写）
+# 「后代」这一支不能落到 diverged（票 17-fix3 ③）：同一个「评审期间新推送」事件，浅克隆下对象不在本地、
+# 非浅克隆或 fetch 过之后对象在本地，两种情形若给出两种结论，运维会按错误的方向排查。
+inline_classify_to() {
+  local raw="${1//[[:space:]]/}" head="$2"
+  INLINE_TO_NORM=""; INLINE_TO_STATUS=""
+  [[ -n "$raw" ]] || { INLINE_TO_STATUS=noid; return 0; }
+  if ! INLINE_TO_NORM=$(inline_resolve_commit "$raw"); then
+    INLINE_TO_NORM=""
+    # 形状就不对（refname/HEAD/@/带非法字符）时同样按「没有可核对的提交号」处理：把它说成新推送会给出
+    # 「等下一轮」这条永远等不到的建议。
+    if [[ "$raw" =~ ^[0-9a-fA-F]{7,40}$ ]]; then INLINE_TO_STATUS=pushed_dark; else INLINE_TO_STATUS=noid; fi
+    return 0
+  fi
+  if [[ "$INLINE_TO_NORM" == "$head" ]]; then INLINE_TO_STATUS=ok; return 0; fi
+  if git merge-base --is-ancestor "$INLINE_TO_NORM" "$head" 2>/dev/null; then INLINE_TO_STATUS=lag; return 0; fi
+  if git merge-base --is-ancestor "$head" "$INLINE_TO_NORM" 2>/dev/null; then INLINE_TO_STATUS=pushed_known; return 0; fi
+  INLINE_TO_STATUS=diverged
+}
+
+# 把状态词渲染成 notice + 日志（票 17-fix3 ②：初次与重查收尾共用一套文案）。
+# 调用方写成 `inline_bail_to "<状态>" …; return 1`。
+inline_bail_to() { # <状态> <to_ps> <to_commit 原值> <head 全 sha>
+  local st="$1" ps="$2" raw="$3" head="$4"
+  case "$st" in
+    noid)
+      inline_bail "行内评论未发出：Codeup 版本列表未给出该版本（${ps}）的提交号，无法确认行内评论会绑到本次评审的提交上，下面是完整问题清单。" \
+        "警告：版本列表里最新合并源版本（${ps}）没有可用的提交号（空/空白/不是 sha 形状：「${raw:0:20}」）——本次不发任何行内评论（fail-closed，ADR-0005）：绑不上就不能发" ;;
+    pushed_dark)
+      inline_bail "行内评论未发出：评审期间源分支有新推送（Codeup 侧最新合并源版本是 ${raw:0:12}，本次评审的是 ${head:0:12}），下面是完整问题清单；新推送触发的评审会补上行内评论。" \
+        "警告：最新合并源版本的提交（${raw:0:12}）不在本地克隆里——判定为评审期间有新推送，本次不发任何行内评论（fail-closed，ADR-0005）；新推送触发的那次评审会补上" ;;
+    pushed_known)
+      inline_bail "行内评论未发出：评审期间源分支有新推送（Codeup 侧最新合并源版本是 ${INLINE_TO_NORM:0:12}，本次评审的是 ${head:0:12}），下面是完整问题清单；新推送触发的评审会补上行内评论。" \
+        "警告：最新合并源版本的提交（${INLINE_TO_NORM:0:12}）是当前 HEAD（${head:0:12}）的后代（对象已在克隆里）——判定为评审期间有新推送，本次不发任何行内评论（fail-closed，ADR-0005）；新推送触发的那次评审会补上" ;;
+    lag)
+      inline_bail "行内评论未发出：Codeup 版本列表尚未包含本次提交（${head:0:12}，版本列表滞后），下面是完整问题清单；重跑流水线即可。" \
+        "警告：Codeup 版本列表仍未包含本次提交（${head:0:12}），最新合并源版本是它的祖先（${INLINE_TO_NORM:0:12}）——本次不发任何行内评论（fail-closed，ADR-0005）：绑到旧版本上会挂错位置；重跑流水线即可" ;;
+    diverged)
+      inline_bail "行内评论未发出：Codeup 侧最新合并源版本（${INLINE_TO_NORM:0:12}）与本次评审的提交（${head:0:12}）不在同一条历史上（源分支被改写或强推），下面是完整问题清单；新推送触发的评审会补上行内评论。" \
+        "警告：最新合并源版本的提交（${INLINE_TO_NORM:0:12}）与当前 HEAD（${head:0:12}）分属两条历史（force-push？）——本次不发任何行内评论（fail-closed，ADR-0005）" ;;
+    *)
+      inline_bail "行内评论未发出：版本对核对得到未知状态，下面是完整问题清单。" \
+        "警告：版本对核对得到未知状态「${st}」（这是脚本自身的缺陷，请报告）——本次不发任何行内评论（fail-closed）" ;;
+  esac
+}
+
+# 取一次版本对并分类（票 17-fix3 ⑥：预采样与发布前采样共用这一份）。
+# rc 0 = 已分类（INLINE_TO_STATUS / INLINE_TO_NORM 有效）；rc 1 = 查询接口失败；rc 2 = 选不出版本对。
+# 版本对本身放进 SAMPLE_* 全局：命令替换会开子 shell，全局传不回来（同 inline_classify_to 的理由）。
+inline_sample_pair() { # <head 全 sha>
+  local head="$1" pairv
+  SAMPLE_FROM_PS=""; SAMPLE_TO_PS=""; SAMPLE_TO_COMMIT=""; SAMPLE_FROM_COMMIT=""
+  codeup_list_patchsets "$LOCAL_ID" > "$WORK/patchsets.json" || return 1
+  pairv=$(codeup_select_patchset_pair < "$WORK/patchsets.json") || return 2
+  SAMPLE_FROM_PS=$(printf '%s' "$pairv" | cut -f1)
+  SAMPLE_TO_PS=$(printf '%s' "$pairv" | cut -f2)
+  SAMPLE_TO_COMMIT=$(printf '%s' "$pairv" | cut -f3)
+  SAMPLE_FROM_COMMIT=$(printf '%s' "$pairv" | cut -f4)
+  inline_classify_to "$SAMPLE_TO_COMMIT" "$head"
+}
+
+# 滞后重查：按既有退避（CODEUP_RETRY_BACKOFF）重取版本对至多 <max> 次。
+# 收尾状态写进 INLINE_END_STATE（四分类之一，或 http / nopair）——调用方按它选 notice（票 17-fix3 ②）。
+inline_requery_lag() { # <head 全 sha> <次数>
+  local head="$1" max="$2" attempt rc
+  INLINE_END_STATE="$INLINE_TO_STATUS"
+  for attempt in $(seq 1 "$max"); do
+    _codeup_retry_sleep "$attempt"
+    rc=0; inline_sample_pair "$head" || rc=$?
+    if [[ "$rc" == "1" ]]; then
+      INLINE_END_STATE=http
+      log "警告：重查 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}），第 ${attempt}/${max} 次"
+      continue
+    fi
+    if [[ "$rc" == "2" ]]; then
+      INLINE_END_STATE=nopair
+      log "警告：重查后仍选不出版本对，第 ${attempt}/${max} 次"
+      continue
+    fi
+    INLINE_END_STATE="$INLINE_TO_STATUS"
+    if [[ "$INLINE_TO_STATUS" == "ok" ]]; then
+      log "重查命中：版本列表已包含本次提交，改用 to=${SAMPLE_TO_PS}（第 ${attempt}/${max} 次）"
+      return 0
+    fi
+    log "重查第 ${attempt}/${max} 次：最新合并源版本仍不是本次评审的提交（判定：${INLINE_TO_STATUS}）"
+  done
+  return 0
+}
+
+# 接口失败 / 选不出版本对这两种收尾的 notice（两处采样共用）
+inline_bail_pair() { # <http|nopair>
+  case "$1" in
+    http)
+      inline_bail "行内评论未发出：查询 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}），下面是完整问题清单。" \
+        "警告：查询 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}）——本次不发任何行内评论（fail-closed）" ;;
+    *)
+      inline_bail "行内评论未发出：MR 版本列表里选不出「最新合并目标版本 + 最新合并源版本」这一对，下面是完整问题清单。" \
+        "警告：选不出行内评论要用的版本对——本次不发任何行内评论（fail-closed）" ;;
+  esac
+}
+
+# from 侧核对（R8 探针）：两处采样都要走它，所以收成顶层函数（票 17-fix3 ⑤）。
+# 结果写 INLINE_FROM_OFFSET（1 = 基准不一致，发布时要在汇总里带一句「行号可能有偏移」）。
+# 只打日志、不碰 notice：fail-closed 那条路径一条行内评论都没发，那时把偏移写进汇总只会让读者
+# 去找不存在的行内评论。<标签> 用来区分两次采样的日志。
+inline_check_from() { # <from_ps> <from_commit> [标签]
+  local ps="$1" raw="${2//[[:space:]]/}" tag="${3:-}" norm
+  INLINE_FROM_OFFSET=0
+  if [[ -z "$raw" ]]; then
+    # 去空白之后为空同样走这里：空白串落到下面那条分支会在日志与汇总里渲染出一对空括号
+    log "警告：${tag}版本列表里最新合并目标版本（${ps}）没有提交号——P1-14 的探针（MERGE_TARGET 是否仍冻结在 merge-base）本次失效；行号是新文件侧的（P1-02），不影响发布"
+    return 0
+  fi
+  # 先字面比、比不上再规范化（缩写/大写不该触发探针），规范化仍不等或解析不出才算异常
+  if [[ "$raw" == "$BASE" ]] || { norm=$(inline_resolve_commit "$raw") && [[ "$norm" == "$BASE" ]]; }; then
+    return 0
+  fi
+  INLINE_FROM_OFFSET=1
+  log "警告：${tag}最新合并目标版本的提交（${raw:0:12}）不等于本地 merge-base（${BASE:0:12}）——按 P1-14 的结论 MERGE_TARGET 应冻结在 merge-base，这不该发生；行号是新文件侧的（P1-02），所以这条只留痕、不拒发（ADR-0005）"
+}
+
+# --- 预采样：checkout 之后、Kiro 之前先核对一次版本对（票 17-fix3 ⑥，方案 (a)）---
+# 为什么：不预采样的话，所有分类/重查/notice 都只能在模型跑完 900 秒之后解释「为什么什么都没发」，
+# 而滞后的重查成本只有几秒——把它挪到前面，多数滞后在评审开始前就自愈了。
+# 两次采样还把成因从**推断**变成**证明**：checkout 时一致、发布前不一致 = 评审期间确实有新推送；
+# checkout 时就不一致且重查后仍不一致 = 滞后或配置错（不是新推送）。
+# 采样失败**不**跳过 Kiro（协调者裁定）：评审的价值在问题清单，行内只是增强，跳过会让这条 MR 本轮零评审。
+# INLINE_COMMENT=0 时整个跳过，不多打一次 API。
+INLINE_PRE_STATUS=""      # "" = 没做预采样（INLINE_COMMENT=0 或还没走到）
+INLINE_PRE_TO_PS=""; INLINE_PRE_TO_COMMIT=""; INLINE_PRE_DECIDED=0
+inline_presample() {
+  local head_full rc=0
+  [[ "$INLINE_COMMENT" == "1" ]] || return 0
+  head_full=$(git rev-parse HEAD)
+  inline_sample_pair "$head_full" || rc=$?
+  case "$rc" in
+    1) INLINE_PRE_STATUS=http ;;
+    2) INLINE_PRE_STATUS=nopair ;;
+    *) INLINE_PRE_STATUS="$INLINE_TO_STATUS" ;;
+  esac
+  INLINE_PRE_TO_PS="$SAMPLE_TO_PS"; INLINE_PRE_TO_COMMIT="$SAMPLE_TO_COMMIT"
+  log "行内评论预采样（Kiro 之前）：to=${INLINE_PRE_TO_PS:-?} 提交=${INLINE_PRE_TO_COMMIT:0:12} HEAD=${head_full:0:12} 判定=${INLINE_PRE_STATUS}"
+  # from 侧的探针在这里就要打（票 17-fix3 ⑤）：预采样一旦判定绑不上，发布路径会直接 fail-closed、
+  # 不再采样，那时探针就永远进不了日志——而「P1-14 的结论失效了」比「推送太频繁」要紧得多。
+  [[ "$rc" == "0" ]] && inline_check_from "$SAMPLE_FROM_PS" "$SAMPLE_FROM_COMMIT" "预采样："
+  if [[ "$INLINE_PRE_STATUS" == "lag" ]]; then
+    log "注意：预采样判定版本列表滞后——最新合并源版本的提交（${INLINE_TO_NORM:0:12}）是当前 HEAD（${head_full:0:12}）的祖先；现在就按退避重查至多 ${INLINE_LAG_MAX} 次（此时重查成本是几秒，评审跑完再重查要等一轮模型）"
+    inline_requery_lag "$head_full" "$INLINE_LAG_MAX"
+    INLINE_PRE_STATUS="$INLINE_END_STATE"
+    INLINE_PRE_TO_PS="$SAMPLE_TO_PS"; INLINE_PRE_TO_COMMIT="$SAMPLE_TO_COMMIT"
+    log "行内评论预采样（重查后）：判定=${INLINE_PRE_STATUS}"
+  fi
+  if [[ "$INLINE_PRE_STATUS" != "ok" ]]; then
+    # 已经确定绑不上：发布前不必再采样一次（省下那次重查），到时直接按这个成因 fail-closed。
+    INLINE_PRE_DECIDED=1
+    log "行内评论：预采样已判定本轮发不出行内评论（${INLINE_PRE_STATUS}），评审照常进行、汇总将带完整问题清单；发布前不再重查"
+  fi
+  return 0
+}
+
 publish_inline_comments() {
   local validated="$1"
   local pair from_ps to_ps to_commit from_commit head_full existing_rg draft_rg config_notice
-  local to_norm from_norm attempt lag_max=3
+  # INLINE_TO_NORM / INLINE_TO_STATUS / INLINE_FROM_OFFSET 都是全局（函数间共享，命令替换会丢）
   local item idx file ls le title fp cid crc ocid hits hrc n_created=0 n_existing=0 n_failed=0 submitted=0
 
   # 2/3/4. 变更行集合 → 可定位判定 → 排序与档位 → 上限截取。
@@ -194,82 +374,63 @@ publish_inline_comments() {
   fi
 
   # 1. 版本对（spec §4.5 第 1 步、Q6）
-  if ! codeup_list_patchsets "$LOCAL_ID" > "$WORK/patchsets.json"; then
-    inline_bail "行内评论未发出：查询 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}），下面是完整问题清单。" "警告：查询 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}）"; return 1
-  fi
-  if ! pair=$(codeup_select_patchset_pair < "$WORK/patchsets.json"); then
-    inline_bail "行内评论未发出：MR 版本列表里选不出「最新合并目标版本 + 最新合并源版本」这一对，下面是完整问题清单。" "警告：选不出行内评论要用的版本对"; return 1
-  fi
-  from_ps=$(printf '%s' "$pair" | cut -f1)
-  to_ps=$(printf '%s' "$pair" | cut -f2)
-  to_commit=$(printf '%s' "$pair" | cut -f3)
-  from_commit=$(printf '%s' "$pair" | cut -f4)
-  log "行内评论版本对：from=${from_ps}（最新合并目标版本）→ to=${to_ps}（最新合并源版本，patchset_biz_id 用它）"
   head_full=$(git rev-parse HEAD)
+  # 预采样已经判定「绑不上」时不再多打一次接口（票 17-fix3 ⑥）：成因在 Kiro 之前就确定了，
+  # 而且那时已经按退避重查过——发布前再查一次只会多一次 API 调用与一段重复日志。
+  if [[ "$INLINE_PRE_DECIDED" == "1" ]]; then
+    log "行内评论：沿用预采样的判定（${INLINE_PRE_STATUS}），不再重查版本列表"
+    case "$INLINE_PRE_STATUS" in
+      http|nopair) inline_bail_pair "$INLINE_PRE_STATUS" ;;
+      *) inline_bail_to "$INLINE_PRE_STATUS" "$INLINE_PRE_TO_PS" "$INLINE_PRE_TO_COMMIT" "$head_full" ;;
+    esac
+    return 1  # fail-closed:pre
+  fi
+  local rc=0
+  inline_sample_pair "$head_full" || rc=$?
+  if [[ "$rc" == "1" ]]; then inline_bail_pair http; return 1; fi   # fail-closed:pair-http
+  if [[ "$rc" == "2" ]]; then inline_bail_pair nopair; return 1; fi  # fail-closed:pair-nopair
+  from_ps="$SAMPLE_FROM_PS"; to_ps="$SAMPLE_TO_PS"
+  to_commit="$SAMPLE_TO_COMMIT"; from_commit="$SAMPLE_FROM_COMMIT"
+  log "行内评论版本对：from=${from_ps}（最新合并目标版本）→ to=${to_ps}（最新合并源版本，patchset_biz_id 用它）"
   # --- to 侧 / from 侧的版本核对（ADR-0005：行内评论只绑定它所评审的那个提交）---
   # 依据都在 docs/adr/0005-inline-comments-bind-to-reviewed-commit.md：为什么 to 侧绑不上就不发、
-  # 三种成因各自怎么处置、为什么 from 侧只留痕（P1-02 行号是新文件侧的、P1-14 目标版本冻结在 merge-base）。
+  # 各种成因怎么处置、为什么 from 侧只留痕（P1-02 行号是新文件侧的、P1-14 目标版本冻结在 merge-base）。
   # 判定全部在草稿创建之前、也在拉现有行内评论（第 5 步）之前：除了版本列表查询，不留任何副作用。
   #
   # from 侧先打日志（探针不能被 to 侧的 fail-closed 吞掉）：两者同时异常时运维只看到「推送太频繁」，
   # 就查不到「P1-14 的结论失效了」这件更要紧的事。
-  local from_offset=0
-  if [[ -z "$from_commit" ]]; then
-    log "警告：版本列表里最新合并目标版本（${from_ps}）没有提交号——P1-14 的探针（MERGE_TARGET 是否仍冻结在 merge-base）本次失效；行号是新文件侧的（P1-02），不影响发布"
-  elif [[ "$from_commit" != "$BASE" ]] && ! { from_norm=$(inline_resolve_commit "$from_commit") && [[ "$from_norm" == "$BASE" ]]; }; then
-    # 先字面比、比不上再规范化（缩写/大写不该触发探针），规范化仍不等或解析不出才算异常
-    from_offset=1
-    log "警告：最新合并目标版本的提交（${from_commit:0:12}）不等于本地 merge-base（${BASE:0:12}）——按 P1-14 的结论 MERGE_TARGET 应冻结在 merge-base，这不该发生；行号是新文件侧的（P1-02），所以这条只留痕、不拒发（ADR-0005）"
-  fi
+  inline_check_from "$from_ps" "$from_commit"
 
-  # to 侧成因① 空/全空白：没有提交号，绑定无从证明。空白串也走这里——否则它会落到「不一致」分支、
-  # 在评论里渲染出一对空括号。
-  if [[ -z "${to_commit//[[:space:]]/}" ]]; then
-    inline_bail "行内评论未发出：Codeup 版本列表未给出该版本（${to_ps}）的提交号，无法确认行内评论会绑到本次评审的提交上，下面是完整问题清单。" "警告：版本列表里最新合并源版本（${to_ps}）没有提交号——本次不发任何行内评论（fail-closed，ADR-0005）：绑不上就不能发"; return 1
+  # to 侧：四分类（inline_classify_to 已在 inline_sample_pair 里跑过）。只有 ok 才继续发布。
+  local to_status="$INLINE_TO_STATUS"
+  # 两次采样比对（票 17-fix3 ⑥）：预采样一致、发布前不一致 ⇒ 成因是**评审期间的新推送**，这是证明而不是
+  # 靠 git 拓扑推断；两次都不一致（且中间重查过）⇒ 滞后或配置错。结论只进日志，notice 仍按最终成因写。
+  if [[ -n "$INLINE_PRE_STATUS" && "$to_status" != "ok" ]]; then
+    log "两次采样：checkout 时判定=${INLINE_PRE_STATUS}（to=${INLINE_PRE_TO_PS:-?}）、发布前判定=${to_status}（to=${to_ps}）$([[ "$INLINE_PRE_STATUS" == "ok" ]] && printf '%s' " ⇒ 评审期间源分支确实有新推送（两次采样即证据）" || printf '%s' " ⇒ 与评审期间的推送无关")"
   fi
-  # 规范化后再比：Codeup 返回过 12 位缩写（本仓库 fixture）也返回过 40 位（真实验收），字面相等会把
-  # 缩写误判成「不一致」、把行内评论永久关掉。
-  if ! to_norm=$(inline_resolve_commit "$to_commit"); then
-    # 成因③ 解析不出 ⇒ 这个提交不在克隆里 ⇒ Codeup 侧有本次 checkout 之后推上去的提交
-    inline_bail "行内评论未发出：评审期间源分支有新推送（Codeup 侧最新合并源版本是 ${to_commit:0:12}，本次评审的是 ${head_full:0:12}），下面是完整问题清单；新推送触发的评审会补上行内评论。" "警告：最新合并源版本的提交（${to_commit:0:12}）不在本地克隆里——判定为评审期间有新推送，本次不发任何行内评论（fail-closed，ADR-0005）；新推送触发的那次评审会补上"; return 1
-  fi
-  if [[ "$to_norm" != "$head_full" ]]; then
-    if git merge-base --is-ancestor "$to_norm" "$head_full" 2>/dev/null; then
-      # 成因② 该版本是 HEAD 的祖先 ⇒ Codeup 的版本列表还没为本次推送建出版本（滞后）。
-      # 这一种大概率是几秒内的时序差（流水线被推送事件触发得比建版本更快），所以按既有退避重查几次；
-      # 重查用的是同一个 GET，命中后 to_ps 也要跟着换成新版本（patchset_biz_id 必须指向新的那个）。
-      log "注意：最新合并源版本的提交（${to_norm:0:12}）是当前 HEAD（${head_full:0:12}）的祖先——Codeup 版本列表可能尚未包含本次提交，按退避重查至多 ${lag_max} 次"
-      for attempt in $(seq 1 "$lag_max"); do
-        _codeup_retry_sleep "$attempt"
-        if ! codeup_list_patchsets "$LOCAL_ID" > "$WORK/patchsets.json"; then
-          log "警告：重查 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}），第 ${attempt}/${lag_max} 次"
-          continue
-        fi
-        if ! pair=$(codeup_select_patchset_pair < "$WORK/patchsets.json"); then
-          log "警告：重查后仍选不出版本对，第 ${attempt}/${lag_max} 次"
-          continue
-        fi
-        to_ps=$(printf '%s' "$pair" | cut -f2)
-        to_commit=$(printf '%s' "$pair" | cut -f3)
-        from_ps=$(printf '%s' "$pair" | cut -f1)
-        if to_norm=$(inline_resolve_commit "$to_commit") && [[ "$to_norm" == "$head_full" ]]; then
-          log "重查命中：版本列表已包含本次提交，改用 to=${to_ps}（第 ${attempt}/${lag_max} 次）"
-          break
-        fi
-        to_norm=""
-        log "重查第 ${attempt}/${lag_max} 次：最新合并源版本仍不是本次评审的提交"
-      done
-      if [[ "$to_norm" != "$head_full" ]]; then
-        inline_bail "行内评论未发出：Codeup 版本列表尚未包含本次提交（${head_full:0:12}，版本列表滞后），下面是完整问题清单；重跑流水线即可。" "警告：重查 ${lag_max} 次后 Codeup 版本列表仍未包含本次提交（${head_full:0:12}）——本次不发任何行内评论（fail-closed，ADR-0005）：绑到旧版本上会挂错位置；重跑流水线即可"; return 1
-      fi
-    else
-      # 既不是 HEAD、也不是 HEAD 的祖先 ⇒ 两侧历史分叉（force-push / 改写历史），同样按新推送处置
-      inline_bail "行内评论未发出：Codeup 侧最新合并源版本（${to_norm:0:12}）与本次评审的提交（${head_full:0:12}）不在同一条历史上（源分支被改写或强推），下面是完整问题清单；新推送触发的评审会补上行内评论。" "警告：最新合并源版本的提交（${to_norm:0:12}）与当前 HEAD（${head_full:0:12}）分属两条历史（force-push？）——本次不发任何行内评论（fail-closed，ADR-0005）"; return 1
+  if [[ "$to_status" == "lag" ]]; then
+    log "注意：最新合并源版本的提交（${INLINE_TO_NORM:0:12}）是当前 HEAD（${head_full:0:12}）的祖先——Codeup 版本列表可能尚未包含本次提交，按退避重查至多 ${INLINE_LAG_MAX} 次"
+    inline_requery_lag "$head_full" "$INLINE_LAG_MAX"
+    to_status="$INLINE_TO_STATUS"
+    from_ps="$SAMPLE_FROM_PS"; to_ps="$SAMPLE_TO_PS"
+    to_commit="$SAMPLE_TO_COMMIT"; from_commit="$SAMPLE_FROM_COMMIT"
+    # 收尾必须**重新分类**（票 17-fix3 ②）：重查期间可能来了新推送、可能返回空 commitId、可能接口失败或
+    # 选不出版本对。全部说成「滞后，重跑流水线即可」是错的——重跑在同一份陈旧 checkout 上只会复现。
+    if [[ "$INLINE_END_STATE" != "ok" ]]; then
+      case "$INLINE_END_STATE" in
+        http|nopair) inline_bail_pair "$INLINE_END_STATE" ;;
+        *) inline_bail_to "$INLINE_END_STATE" "$to_ps" "$to_commit" "$head_full" ;;
+      esac
+      return 1  # fail-closed:lag-end
     fi
+    inline_check_from "$from_ps" "$from_commit"   # 重查换了版本对，探针按新值重走一遍
+  fi
+  if [[ "$to_status" != "ok" ]]; then
+    inline_bail_to "$to_status" "$to_ps" "$to_commit" "$head_full"; return 1  # fail-closed:to
   fi
   # from 侧的 notice 留到这里（警告已在上面打过）：它说的是「**发出去的**行内评论的行号可能有偏移」，
   # 而 fail-closed 那条路径一条都没发，那时写进汇总只会让读者去找不存在的行内评论。
-  if [[ "$from_offset" == "1" ]]; then
+  if [[ "$INLINE_FROM_OFFSET" == "1" ]]; then
     INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }注意：行内评论的行号可能有偏移——Codeup 侧的比较基准（合并目标版本 ${from_commit:0:12}）与本次 diff 的基准（merge-base ${BASE:0:12}）不一致。"
   fi
 
@@ -681,6 +842,11 @@ log "隔离：已移除业务库工作树中 $(wc -l < "$WORK/removed-agents-md.
 # 写入的是执行器 $HOME 的全局设置且刻意不回滚（spec I1）：常驻构建机上它保持为 true 只会更严格。
 "$TIMEOUT_BIN" 60 kiro-cli settings chat.disableInheritingDefaultResources true || die_review "隔离失败：无法设置 kiro-cli chat.disableInheritingDefaultResources=true"
 log "隔离：已设置 chat.disableInheritingDefaultResources=true"
+
+# --- 5.6 行内评论的版本对预采样（票 17-fix3 ⑥；只在 INLINE_COMMENT=1 时打这一次接口）---
+# 放在这里而不是发布前：滞后的重查只要几秒，挪到模型之前多数滞后在评审开始前就自愈了；
+# 采样结果还会与发布前那次比对，把「评审期间有新推送」从推断变成证明。核对失败**不**跳过评审。
+inline_presample
 
 # --- 6. 执行 Kiro headless 评审（强制超时）---
 # --trust-tools 用 V2 短名（read/grep/glob）：kiro-cli 对未知名字静默接受，所以名字靠实测而非 --help
