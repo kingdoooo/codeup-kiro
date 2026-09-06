@@ -38,6 +38,11 @@ _kiro_agent_physical_dir() {
   p=$(cd "$1" && pwd -P) || { echo "kiro_install_agent: 无法进入 $2 目录：$1" >&2; return 1; }
   printf '%s\n' "$p"
 }
+# deny 谓词、工具三元组与 deny 报错文案**各只有一份**（15-fix4 #5）：安装器的 _kiro_agent_deny_missing 与 kiro_agent_selfcheck 都把
+# 这段 jq 前导拼进自己的程序。两份谓词只改一处的两种后果都是静默的——安装器放行而自检拒绝（每次评审都失败），或反过来（自检形同虚设）。
+KIRO_AGENT_TOOLS_JQ='("read","grep","glob")'
+_KIRO_DENY_OK_JQ='def deny_ok($t): (.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null);'
+KIRO_AGENT_DENY_MSG='deniedPaths 缺失、为空或不含 **/.git/**'
 # 三个工具的 deniedPaths 是否都合格（存在、非空、含 **/.git/**）——一次 jq 查完三处（15-fix3 #13）。
 # $1=定义文件；stdout 打出第一个不合格的工具名（都合格则为空）；文件为空 / 不是恰好一个 JSON 对象 / 不是合法 JSON 时返回非零。
 # fail-closed（15-fix4 #13）：单次 jq 对空 / 纯空白输入**不输出且退出 0**，"" 会被调用方当成「三处都合格」；两个对象拼在一个文件里
@@ -45,8 +50,9 @@ _kiro_agent_physical_dir() {
 # 是被检查的条件而不是数输出行数；不满足输出 empty → `-e` 无结果退 4。
 _kiro_agent_deny_missing() {
   [[ -s "$1" ]] || return 1
-  jq -e -r --slurp 'if length != 1 or (.[0] | type) != "object" then empty else .[0]
-      | [("read","grep","glob") as $t | select((.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null) | not) | $t] | first // "" end' "$1" 2>/dev/null
+  jq -e -r --slurp "$_KIRO_DENY_OK_JQ"'
+      if length != 1 or (.[0] | type) != "object" then empty
+      else .[0] | first('"$KIRO_AGENT_TOOLS_JQ"' as $t | select(deny_ok($t) | not) | $t) // "" end' "$1" 2>/dev/null
 }
 
 kiro_install_agent() {
@@ -77,8 +83,11 @@ kiro_install_agent() {
   prompt=$(jq -r '.prompt // empty' "$src")
   # prompt 是只读角色约束所在，缺失就等于让默认系统提示词跑评审——拒绝安装
   [[ -n "$prompt" ]] || { echo "kiro_install_agent: agent 定义缺少 prompt：${src}" >&2; return 1; }
-  # deniedPaths 三处都必须合格（15-fix2 #11）：写成一行，变异测试删掉即模拟「忘了检查」
-  deny_missing=$(_kiro_agent_deny_missing "$src") || { echo "kiro_install_agent: 读取定义失败：${src}" >&2; return 1; }; [[ -z "$deny_missing" ]] || { echo "kiro_install_agent: 定义里 toolsSettings.${deny_missing}.deniedPaths 缺失、为空或不含 **/.git/**——该工具没有拒绝清单，拒绝安装：${src}" >&2; return 1; }
+  # deniedPaths 三处都必须合格（15-fix2 #11）。第一行的失败分支不是死代码：本函数跑在调用方的 `$(…) || die_review` 里，errexit 对
+  # 命令替换体不生效，_kiro_agent_deny_missing 非零（空 / 多值 / 非对象 / 非法 JSON）若不在这里接住，deny_missing="" 会被当成「三处都合格」。
+  # 第二行是检查本身（写成一行，变异测试 M5n 删掉即模拟「忘了检查」）。
+  deny_missing=$(_kiro_agent_deny_missing "$src") || { echo "kiro_install_agent: 定义为空、不是恰好一个 JSON 对象或不是合法 JSON：${src}" >&2; return 1; }
+  [[ -z "$deny_missing" ]] || { echo "kiro_install_agent: 定义里 toolsSettings.${deny_missing}.${KIRO_AGENT_DENY_MSG}——该工具没有拒绝清单，拒绝安装：${src}" >&2; return 1; }
   dest="${dest_dir}/${name}.json"
   # prompt：相对 file:// 改写为绝对；绝对 file:// 与内联文本原样保留（prompt_new 为空 = 不改写）
   prompt_new=""
@@ -134,21 +143,22 @@ kiro_agent_selfcheck() {
   KIRO_AGENT_SELFCHECK_ERROR=""
   [[ -r "$f" ]] || { KIRO_AGENT_SELFCHECK_ERROR="安装后的定义文件不可读：${f}"; return 1; }
   [[ -s "$f" ]] || { KIRO_AGENT_SELFCHECK_ERROR="安装后的定义文件为空（0 字节）：${f}"; return 1; }
-  reason=$(jq -e -r --slurp --arg ws "$ws" --arg ch "$ch" '
+  # 原因顺序固定（15-fix4 #11）：read/grep/glob 逐工具（allowedPaths → deniedPaths），再 allowedTools、includeMcpJson、includePowers。
+  # jq 里 `,` 比 `|` 绑定更紧：`… as $t | A, B, C` 会把尾部检查也放进 $t 的作用域（对每个工具各发一次、与逐工具条目交错，first 可能先取到
+  # 尾部检查——MR 失败评论把运维指向错的字段），所以 `as $t` 的体用括号收住只包逐工具检查。first(...) 取第一条不符（15-fix4 #5 补）。
+  reason=$(jq -e -r --slurp --arg ws "$ws" --arg ch "$ch" --arg deny_msg "$KIRO_AGENT_DENY_MSG" "$_KIRO_DENY_OK_JQ"'
       def want: [$ws, $ch];
-      def deny_ok($t): (.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null);
       if length != 1 then "安装后的定义文件里不是恰好一个 JSON 值（\(length) 个；纯空白文件算 0 个）"
       elif (.[0] | type) != "object" then "安装后的定义顶层不是 JSON 对象（是 \(.[0] | type)）"
-      else .[0] |
-      [ ("read","grep","glob") as $t
-        | ( if .toolsSettings[$t].allowedPaths != want
-            then "\($t).allowedPaths 写入的是 \(.toolsSettings[$t].allowedPaths | tojson)，预期 \(want | tojson)（业务库 checkout 物理路径 + chunks 物理路径，顺序固定）"
-            elif (deny_ok($t) | not) then "\($t).deniedPaths 缺失、为空或不含 **/.git/**"
-            else null end ),
-        (if .allowedTools != [] then "allowedTools 不为空（\(.allowedTools | tojson)）——免确认只能来自 allowedPaths" else null end),
-        (if .includeMcpJson != false then "includeMcpJson 不是 false" else null end),
-        (if .includePowers != false then "includePowers 不是 false" else null end)
-      ] | map(select(. != null)) | first // ""
+      else .[0] | first(
+        ( '"$KIRO_AGENT_TOOLS_JQ"' as $t
+          | ( select(.toolsSettings[$t].allowedPaths != want)
+              | "\($t).allowedPaths 写入的是 \(.toolsSettings[$t].allowedPaths | tojson)，预期 \(want | tojson)（业务库 checkout 物理路径 + chunks 物理路径，顺序固定）" ),
+            ( select(deny_ok($t) | not) | "\($t).\($deny_msg)" ) ),
+        ( select(.allowedTools != []) | "allowedTools 不为空（\(.allowedTools | tojson)）——免确认只能来自 allowedPaths" ),
+        ( select(.includeMcpJson != false) | "includeMcpJson 不是 false" ),
+        ( select(.includePowers != false) | "includePowers 不是 false" )
+      ) // ""
       end' "$f" 2>/dev/null) || { KIRO_AGENT_SELFCHECK_ERROR="定义不是合法 JSON（或 jq 没有产出任何结果）：${f}"; return 1; }
   [[ -z "$reason" ]] || { KIRO_AGENT_SELFCHECK_ERROR="$reason"; return 1; }
   return 0

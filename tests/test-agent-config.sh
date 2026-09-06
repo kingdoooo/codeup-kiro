@@ -193,6 +193,27 @@ assert_eq "$rc" "1" "selfcheck：glob.deniedPaths 少了 **/.git/** → 失败"
 assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "glob.deniedPaths" "selfcheck：点名 glob.deniedPaths"
 rc=0; kiro_agent_selfcheck "$tmp/does-not-exist.json" "$WS_P" "$CH_P" || rc=$?
 assert_eq "$rc" "1" "selfcheck：文件不存在 → 失败"
+# 15-fix4 #11：jq 里 `,` 比 `|` 绑定更紧，`("read","grep","glob") as $t | A, B, C` 把尾部检查也放进了 $t 的作用域——三条尾部检查对每个
+# 工具各发一次、与逐工具条目交错，first 可能先取到尾部检查。实测 glob.allowedPaths=["/WRONG"] + allowedTools=["execute_bash"] 在
+# 5462175 报「allowedTools 不为空」（3d44f2e 报 glob.allowedPaths）：两边都拒绝，但 MR 失败评论把运维指向错的字段。
+# 顺序固定：read/grep/glob 逐工具（allow → deny），再 allowedTools、includeMcpJson、includePowers。
+jq '.toolsSettings.glob.allowedPaths = ["/WRONG"] | .allowedTools = ["execute_bash"]' "$dest" > "$tmp/sc-order.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-order.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：glob.allowedPaths 错 + allowedTools 非空 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "glob.allowedPaths" "selfcheck：两处都错时先报逐工具的 glob.allowedPaths（不是尾部的 allowedTools）"
+assert_not_contains "$KIRO_AGENT_SELFCHECK_ERROR" "allowedTools" "selfcheck：只报第一条不符"
+jq '.toolsSettings.grep.deniedPaths = [] | .includeMcpJson = true' "$dest" > "$tmp/sc-order2.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-order2.json" "$WS_P" "$CH_P" || rc=$?
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "grep.deniedPaths" "selfcheck：grep.deniedPaths 空 + includeMcpJson=true → 先报 grep.deniedPaths"
+jq '.toolsSettings.read.allowedPaths = ["/WRONG"] | .toolsSettings.read.deniedPaths = []' "$dest" > "$tmp/sc-order3.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-order3.json" "$WS_P" "$CH_P" || rc=$?
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "read.allowedPaths" "selfcheck：同一工具 allow 与 deny 都错 → 先报 allowedPaths"
+# 15-fix4 #5：deny 谓词、工具三元组、deny 报错文案在库里各只有一份（安装器的 _kiro_agent_deny_missing 与自检都拼同一段 jq）——
+# 只改一处的两种后果都是静默的：安装器放行自检拒绝（每次评审都失败），或安装器拒绝自检放行（自检形同虚设）
+lib_code() { grep -v '^[[:space:]]*#' "$ROOT/scripts/lib/kiro-agent.sh"; }   # 只看代码行，注释里的说明不算
+assert_eq "$(lib_code | grep -c 'index("\*\*/.git/\*\*")')" "1" "库里 deny 谓词（index **/.git/**）只出现一次"
+assert_eq "$(lib_code | grep -c '"read","grep","glob"')" "1" "库里工具三元组字面量只出现一次"
+assert_eq "$(lib_code | grep -c 'deniedPaths 缺失、为空或不含')" "1" "库里 deny 报错文案只出现一次"
 
 # --- 15-fix4 #13：空 / 纯空白 / 非对象 / 多值的定义文件必须 fail-closed ---
 # 5462175 及之前：单次 jq 对空输入不输出且退出 0 → reason="" → 自检返回 0。--print-paths 交叉核对已删（15-fix3 #12），自检是**唯一**

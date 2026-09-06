@@ -231,7 +231,7 @@ assert_rc "$RC" 0 "M5m：没有自检时评审照跑"
 assert_not_contains "$OUT" "受信 agent 自检通过" "M5m：自检留痕消失——端到端「第 3 步自检通过并留痕」断言会失败"
 
 # --- M5n：安装器去掉 deniedPaths 三处检查 → 缺 toolsSettings.glob 的定义照样装成功、glob 只有 allow 没有 deny（15-fix2 #11）---
-pkg=$(make_mutant m5n-deny-check '/deniedPaths 缺失、为空或不含/d' scripts/lib/kiro-agent.sh)
+pkg=$(make_mutant m5n-deny-check '/^  \[\[ -z "\$deny_missing" \]\] ||/d' scripts/lib/kiro-agent.sh)
 jq --arg p "file://$ROOT/prompts/review-agent-prompt.md" '.prompt = $p | del(.toolsSettings.glob)' "$ROOT/kiro/agent-codeup-reviewer.json" > "$tmp/m5n-noglob.json"
 rc5n=0; dest5n=$( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_install_agent "$tmp/m5n-noglob.json" "$tmp/m5n-agents" --workspace "$tmp/m5l-ws" --chunks "$tmp/m5l-ch" 2>/dev/null ) || rc5n=$?
 assert_eq "$rc5n" "0" "M5n：缺 glob.deniedPaths 的定义装成功——单测「定义缺 toolsSettings.glob：拒绝安装」断言会失败"
