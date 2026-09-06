@@ -2003,10 +2003,18 @@ review_redact_secrets() {
     }
     # 上一行含起始标记但没锚定，这一行决定它的身份：像正文 → 上一行是块起始；否则上一行按普通行放出（含 pem_inline）
     function emit_pending() { if (pend != "") { print redact_line(pend); pend = "" } }
-    # 起始行：保行模式原样打出（只是标记）；字段级换成占位（票 10 的形态：闭合 / 未闭合都在这一行之后补提示）
-    function begin_block(l) {
+    # 起始行。锚定的（整行只有标记 + 装饰）：保行模式原样打出（只是标记），字段级换成占位（票 10 的形态：闭合 / 未闭合都在这一行
+    # 之后补提示）。**悬挂行**（第 10 条再补的兜底：标记前面有散文、下一行才像正文）：标记前的散文必须过 redact_line 再打出——
+    # 16-fix3 一度整行原样（保行）/ 整行换占位（字段级），`硬编码凭证 AKIA… 与私钥 -----BEGIN…-----` 里的 AKIA 就跟着原样出去、
+    # 或者整段问题陈述被无声吞掉（第 11 条 P0 回归）。标记后同一行的尾巴：保行按正文处理（掩 ≥ 20 位 base64 连片），字段级随块丢弃。
+    function begin_block(l,   pre, mk, tail) {
       inpem = 1
-      if (keeplines) print l; else print PEM_PLACEHOLDER
+      if (pem_marker(l, PEM_BEGIN_RE)) { if (keeplines) print l; else print PEM_PLACEHOLDER; return }
+      match(l, PEM_BEGIN_RE)
+      # 三段先切好再掩：redact_line 内部的 match() 会改写 RSTART / RLENGTH
+      pre = substr(l, 1, RSTART - 1); mk = substr(l, RSTART, RLENGTH); tail = substr(l, RSTART + RLENGTH)
+      if (keeplines) print redact_line(pre) mk redact_b64(redact_line(tail), 20, 0)
+      else           print redact_line(pre) PEM_PLACEHOLDER
     }
     BEGIN {
       PEM_PLACEHOLDER = "**** （脚本已屏蔽一段 PRIVATE KEY 内容）"

@@ -2302,9 +2302,19 @@ for deco in '`%s`' '* %s' '1. %s' '**%s**' '> * %s'; do
 done
 # 兜底：一行含 BEGIN 标记（没锚定）且下一行像正文 → 视为块起始；下一行是散文 → 那一行只是引用，按普通行放出
 out=$(printf '私钥如下 %s\n%s\n%s\ntail\n' "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)
-assert_eq "$out" "$(printf '%s\ntail' "$CLOSED1")" "第 10 条兜底：含 BEGIN 的散文行 + 下一行像正文 → 当块起始、整块丢弃"
+assert_eq "$out" "$(printf '私钥如下 %s\ntail' "$CLOSED1")" "第 10 条兜底：含 BEGIN 的散文行 + 下一行像正文 → 当块起始、整块丢弃，标记前的散文保留（第 11 条）"
 out=$(printf '**F1** 硬编码私钥：%s\n%s\n%s\n影响：必须轮换\n' "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)
-assert_eq "$out" "$(printf '%s\n影响：必须轮换' "$CLOSED1")" "第 10 条再补：BEGIN 前有任何文字、下一行是正文 → 块起始（48aff39 整把钥匙原样输出：正控）"
+assert_eq "$out" "$(printf '**F1** 硬编码私钥：%s\n影响：必须轮换' "$CLOSED1")" "第 10 条再补：BEGIN 前有任何文字、下一行是正文 → 块起始，标记前的散文保留（48aff39 整把钥匙原样输出：正控）"
+# ---- 16-fix4 第 11 条（P0 回归）：悬挂行的 BEGIN 前散文必须过掩码再打出，字段级不能吞掉它 ----
+hang_in=$(printf '硬编码凭证 %s 与私钥 %s\n%s\n%s\n影响：必须轮换\n' "$SEC_AKIA" "$PEM_B" "$PEM_L64" "$PEM_E")
+out=$(printf '%s\n' "$hang_in" | review_redact_secrets --keep-lines)
+assert_eq "$out" "$(printf '硬编码凭证 %s 与私钥 %s\n%s\n%s\n影响：必须轮换' "$SEC_AKIA_MASKED" "$PEM_B" "$PEM_BODY_PH" "$PEM_E")" "第 11 条（保行）：悬挂行的 AKIA 掩码、标记保留、正文行占位、行数不变（cf29da0 原样输出 AKIA：正控）"
+out=$(printf '%s\n' "$hang_in" | review_redact_secrets)
+assert_eq "$out" "$(printf '硬编码凭证 %s 与私钥 %s\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）\n影响：必须轮换' "$SEC_AKIA_MASKED" "$PEM_PLACEHOLDER")" "第 11 条（字段级）：BEGIN 前的问题陈述保留并掩码，标记换占位、块丢弃（cf29da0 整行换占位吞掉陈述：正控）"
+out=$(printf '硬编码凭证 %s 与私钥 %s 尾巴 %s\n%s\n%s\n' "$SEC_AKIA" "$PEM_B" "$PEM_L64" "$PEM_L64" "$PEM_E" | review_redact_secrets --keep-lines)
+assert_eq "$(printf '%s\n' "$out" | head -1)" "硬编码凭证 ${SEC_AKIA_MASKED} 与私钥 ${PEM_B} 尾巴 MIIE****ijkl" "第 11 条（保行）：标记后同一行的尾巴按正文处理（≥ 20 位 base64 连片前 4 后 4）"
+out=$(printf '硬编码凭证 %s 与私钥 %s\n这是散文\n' "$SEC_AKIA" "$PEM_B" | review_redact_secrets --keep-lines)
+assert_eq "$out" "$(printf '硬编码凭证 %s 与私钥 %s\n这是散文' "$SEC_AKIA_MASKED" "$PEM_B")" "第 11 条对照：下一行不像正文 → emit_pending 走 redact_line（一直是掩的）"
 out=$(printf '以 \`%s\` 开头的文件\n这是散文\n' "$PEM_B" | review_redact_secrets)
 assert_eq "$out" "$(printf '以 \`%s\` 开头的文件\n这是散文' "$PEM_B")" "第 10 条兜底正控：句中引用 + 下一行散文 → 逐字节不动"
 # ---- 第 1 条：一行 .env 形态的正文含 /（48aff39 的 [A-Za-z0-9+] 字符类漏 /：正控）----

@@ -976,5 +976,10 @@ assert_eq "$(mut_rd "$ROOT" "$PEM_L64")" "MIIE****ijkl" "M-u 对照：未变异�
 pkg=$(make_mutant m-v-close-note 's|^      if (held_n > 0) print "> ⚠️ （其间 " held_n " 行已随密钥块一并屏蔽）"$|      # 变异 M-v：闭合块无提示|' scripts/lib/review-render.sh)
 assert_not_contains "$(mut_rd_multi "$pkg" "x\n$PEM_B\n（内容已省略）\n$PEM_L64\n$PEM_E\ny\n")" "其间 2 行已随密钥块一并屏蔽" "M-v：闭合块提示消失——单测「不再无声」断言会失败"
 assert_contains "$(mut_rd_multi "$ROOT" "x\n$PEM_B\n（内容已省略）\n$PEM_L64\n$PEM_E\ny\n")" "其间 2 行已随密钥块一并屏蔽" "M-v 对照：未变异实现给提示"
+# ============ 16-fix4 的守卫 ============
+# --- M-w：第 11 条——begin_block 的悬挂行不再对标记前的散文过 redact_line → AKIA 原文跟着出去 ---
+pkg=$(make_mutant m-w-begin-pre 's|      if (keeplines) print redact_line(pre) substr(l, RSTART, RLENGTH) redact_b64(redact_line(tail), 20, 0)|      if (keeplines) print pre substr(l, RSTART, RLENGTH) redact_b64(redact_line(tail), 20, 0)  # 变异 M-w|' scripts/lib/review-render.sh)
+assert_contains "$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w：悬挂行 BEGIN 前的 AKIA 原样出去——单测「悬挂行掩码」断言会失败"
+assert_not_contains "$( ( set +e; source "$ROOT/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w 对照：未变异实现掩"
 
 report
