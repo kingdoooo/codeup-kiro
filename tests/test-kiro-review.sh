@@ -1386,7 +1386,8 @@ assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH �
 assert_not_contains "$OUT" "liveSecret" "像令牌的非法 token：原文不进日志也不进评论"
 assert_contains "$(posted_comment "$OUT")" "ghp****" "像令牌的非法 token：评论里只有掩码"
 # 15-fix3 #6：`ghp_<36 位>` 是**合法标识符**，不带 = 也不带连字符——原来不匹配任何凭证形状、被静默接受并透传；现在按 GHP_* 前缀拒绝并掩码
-run_case badpass3b KIRO_ENV_PASSTHROUGH="ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+FAKE_GHP="ghp_""ABCDEFGHIJKLMNOPQRSTUVWXYZ""abcdefghij"   # 片段拼接：公开仓库里不留完整的令牌形态字面量
+run_case badpass3b KIRO_ENV_PASSTHROUGH="$FAKE_GHP"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 贴了一个真形态 ghp_ 令牌：拒绝运行"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "凭证形状" "ghp_ 令牌：按凭证形状拒绝"

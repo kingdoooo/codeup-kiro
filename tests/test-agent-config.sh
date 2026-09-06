@@ -364,13 +364,16 @@ for pair in 'KIRO_FOO=s3cr3t|KIRO****|s3cr3t' 'ghp-liveSecret123|ghp****|liveSec
   assert_contains "$err" "$want" "非法 token [${tok}]：掩码为 ${want}"
   assert_not_contains "${err#*非法变量名：}" "$leak" "非法 token [${tok}]：原文 ${leak} 不进报错"
 done
+# 令牌形态的假字面量由片段拼出来：仓库是公开的，密钥扫描器会把 ghp_<36 位> 这类完整形态当真令牌（与替身里 PEM 片段同一理由）
+FAKE_TOK_BODY="ABCDEFGHIJKLMNOPQRSTUVWXYZ""abcdefghij"
+FAKE_AKIA_BODY="IOSFODNN7""EXAMPLE"
 # 15-fix2 #13 / 15-fix3 #6：凭证形状的名字（语法合法）也拒绝——YUNXIAO_* / CODEUP_* / AWS_* / *TOKEN* / *SECRET* / *PASSWORD* /
 # *CREDENTIAL* / *_KEY，加令牌前缀 GHP_* / GHO_* / GITHUB_PAT_* / AKIA* / XOX*，大小写不敏感；被拒名字**掩码**（首段 + ****）——
 # `svc_SECRET_9f3ab21c7de4` 这种合法标识符形态的密钥会进 MR 失败评论
 for pair in 'YUNXIAO_TOKEN|YUNXIAO****' 'yunxiao_org_id|yunxiao****' 'CODEUP_REPO_ID|CODEUP****' 'AWS_PROFILE|AWS****' 'AWS_SECRET_ACCESS_KEY|AWS****' \
             'GITHUB_TOKEN|GITHUB****' 'MY_SECRET|MY****' 'DB_PASSWORD|DB****' 'GCP_CREDENTIALS|GCP****' 'SIGNING_KEY|SIGNING****' 'KIRO_API_KEY|KIRO****' \
-            'svc_SECRET_9f3ab21c7de4|svc****' 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij|ghp****' 'gho_16C7e42F292c6912E7710c838347Ae178B4a|gho****' \
-            'github_pat_11ABCDEFG_abcdef|github****' 'AKIAIOSFODNN7EXAMPLE|AKIA****' 'xoxb_123456_abcdef|xoxb****'; do
+            'svc_SECRET_9f3ab21c7de4|svc****' "ghp_${FAKE_TOK_BODY}|ghp****" "gho_${FAKE_TOK_BODY}|gho****" \
+            'github_pat_11ABCDEFG_abcdef|github****' "AKIA${FAKE_AKIA_BODY}|AKIA****" 'xoxb_123456_abcdef|xoxb****'; do
   cn="${pair%%|*}"; want_mask="${pair#*|}"
   rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH="KIRO_FOO,${cn}" \
     bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
