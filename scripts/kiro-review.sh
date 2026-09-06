@@ -192,29 +192,38 @@ publish_inline_comments() {
   from_commit=$(printf '%s' "$pair" | cut -f4)
   log "行内评论版本对：from=${from_ps}（最新合并目标版本）→ to=${to_ps}（最新合并源版本，patchset_biz_id 用它）"
   head_full=$(git rev-parse HEAD)
-  # 不一致的成因通常是「评审开始后又推了一次」：Codeup 侧的版本才是评论要绑的真值，所以不改用 HEAD，
-  # 但必须留痕——此时行号是按本次评审的 diff 算的，可能与那个版本对不上。
-  # 两个基准都可能与 Codeup 侧不一致，而后果是同一个（行号可能有偏移）。成因分别收集、
-  # 最后合成**一句**写进汇总评论：分成两句时读者会连着看到两遍「行号可能有偏移」。
-  local -a offset_causes=()
-  if [[ -n "$to_commit" && "$to_commit" != "$head_full" ]]; then
-    log "警告：最新合并源版本的提交（${to_commit:0:12}）与当前 HEAD（${head_full:0:12}）不一致——仍以 API 给的版本为准（Codeup 侧真值），但行号可能对不上这次评审的 diff"
-    # 阿里云侧开发者看不到流水线日志（I10），所以这条不确定性也必须进汇总评论
-    offset_causes+=("本次评审的提交（${head_full:0:12}）不是 Codeup 侧最新的合并源版本（${to_commit:0:12}，评审开始后可能又推送过）")
-  fi
-  # from 侧的基准核对（R8）：我们的变更行集合来自 `merge-base(origin/<目标分支>, HEAD)..HEAD`，
-  # 而 from 取的是「最新 MERGE_TARGET 版本」。目标分支在 MR 分出之后又前进过时，那个版本很可能是
-  # 目标分支的**顶端**而不是 merge-base，两个基准算出来的新文件侧行号可以不一样。
-  # 本票不猜 Codeup 的语义（待探测 P1-14），只做两件事：打警告 + 把不确定性写进汇总评论——
-  # 让读者知道「行内评论的位置可能有偏移」，而不是默默给出一个可能错位的行号。
+  # from 侧核对（R8）：我们的变更行集合来自 `merge-base(origin/<目标分支>, HEAD)..HEAD`，而 from 取的是
+  # 「最新 MERGE_TARGET 版本」。这条**刻意不** fail-closed（票 17 裁决），理由有两个实测结论：
+  #   ① `line_number` 是**新文件侧**行号（spec §4.7.1 P1-02）——比较基准换了，新文件侧的行号不变；
+  #   ② MERGE_TARGET 版本冻结在建 MR 时的目标顶端（= merge-base），目标分支此后前进不会生成新目标版本
+  #      （spec §4.7.1 P1-14）——所以这条分支在真实 Codeup 上几乎不会触发，它实际是「P1-14 的结论失效了」
+  #      的探针。正因为是探针，**警告要先于下面的 fail-closed 落进日志**：两个核对同时不成立时（目标语义
+  #      变了、同一个 MR 又在评审期间被推送），先 return 就把探针一起吞掉了，运维只会看到「推送太频繁」。
+  local from_offset=0
   if [[ -n "$from_commit" && "$from_commit" != "$BASE" ]]; then
-    log "警告：最新合并目标版本的提交（${from_commit:0:12}）不等于本地 merge-base（${BASE:0:12}）——两者算出的新文件侧行号可能不同（目标分支在 MR 分出后前进过？待探测项 P1-14）"
-    offset_causes+=("Codeup 侧的比较基准（合并目标版本 ${from_commit:0:12}）与本次 diff 的基准（merge-base ${BASE:0:12}）不一致")
+    from_offset=1
+    log "警告：最新合并目标版本的提交（${from_commit:0:12}）不等于本地 merge-base（${BASE:0:12}）——按 P1-14 的结论 MERGE_TARGET 应冻结在 merge-base，这不该发生；行号是新文件侧的（P1-02），所以这条只留痕、不拒发"
   fi
-  if [[ "${#offset_causes[@]}" -gt 0 ]]; then
-    local causes
-    causes=$(printf '%s；' "${offset_causes[@]}"); causes="${causes%；}"
-    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }注意：行内评论的行号可能有偏移——${causes}。"
+  # to 侧核对（spec §4.5 第 1 步，2026-09-06 修订，票 17 A）：最新合并源版本的提交 ≠ HEAD ⇒ 评审期间有新推送。
+  # 此时 Kiro 评的是旧 HEAD、变更行集合也按旧 HEAD 算，而评论只能绑 Codeup 侧最新的版本——同一行号在新版本里
+  # 可能是完全不同的代码（违反 I5「定位可信」），「行号可能有偏移」的提醒补救不了挂错位置的 P0。
+  # 所以 **fail-closed**：一条行内评论都不发，退回 INLINE_COMMENT=0 形态的完整清单（信息不丢，I10 可见）；
+  # 新推送本来就会触发新一轮评审把行内评论放对。判定在草稿创建之前、也在拉现有行内评论（第 5 步）之前：
+  # 除了上面那次版本列表查询，不留任何副作用。
+  # 阿里云侧开发者看不到流水线日志，原因必须写进汇总评论（notice）。
+  # 「绑与 HEAD 匹配的旧 MERGE_SOURCE 版本」需要探测 Codeup 是否接受非最新 patchset_biz_id（P1-16，可选后续）。
+  if [[ -n "$to_commit" && "$to_commit" != "$head_full" ]]; then
+    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论未发出：本次评审的提交（${head_full:0:12}）已不是 Codeup 侧最新的合并源版本（${to_commit:0:12}，评审期间有新推送），下面是完整问题清单。"
+    log "警告：最新合并源版本的提交（${to_commit:0:12}）与当前 HEAD（${head_full:0:12}）不一致（评审期间有新推送）——本次不发任何行内评论（fail-closed，spec §4.5 第 1 步）：行号是按本次评审的提交算的，绑到新版本上会挂错位置；新推送触发的那次评审会补上行内评论"
+    # 调用方按 `if publish_inline_comments`：rc 1 → SUMMARY_JSON 仍是 validated.json，INLINE_ACTIVE 在本函数里
+    # 只在两处成功返回前置 1，此处仍为初始值 0 ⇒ 汇总以完整清单形态渲染。变异测试 M52 把下面这行换成空语句。
+    return 1  # fail-closed：INLINE_ACTIVE 仍为 0，调用方按 INLINE_COMMENT=0 渲染完整清单
+  fi
+  # from 侧的 notice 留在这里（警告已在上面打过）：它说的是「**发出去的**行内评论的行号可能有偏移」，
+  # 而 fail-closed 那条路径一条都没发——那时把这句话写进汇总只会让读者去找不存在的行内评论（I10 要求
+  # 汇总说得准，不是说得多）。所以 notice 只在真的要发布时追加。
+  if [[ "$from_offset" == "1" ]]; then
+    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }注意：行内评论的行号可能有偏移——Codeup 侧的比较基准（合并目标版本 ${from_commit:0:12}）与本次 diff 的基准（merge-base ${BASE:0:12}）不一致。"
   fi
 
   # 5. 去重：拉现有行内评论，按「同文件、行区间重叠或相邻」跳过（实测澄清 2026-09-03）
@@ -731,6 +740,14 @@ else
     || log "警告：${dropped} 条问题不符合输出契约已丢弃（级别不在 P0/P1/P2，或缺 title/body）"
   [[ "$delocated" == "0" ]] \
     || log "警告：${delocated} 条问题的 file 含换行/竖线/反引号，已按未定位处理（这类值会破坏表格与定位串）"
+  # 票 17 C：同一轮里逐字段相同的问题已在 review_validate 里合并（只留首条），这里只留痕
+  duplicates=$(jq -r '.duplicate_findings // 0' "$WORK/validated.json")
+  [[ "$duplicates" == "0" ]] \
+    || log "警告：${duplicates} 条完全重复的问题已合并（同文件、同行区间、同级别、同标题；只保留首条）"
+  # 票 17 B：契约外的结论已被 review_validate 置空（评论里渲染固定文案），原值**只**出现在这行日志里
+  verdict_raw=$(jq -r '.verdict_raw // ""' "$WORK/validated.json")
+  [[ -z "$verdict_raw" ]] \
+    || log "警告：评审员结论不在契约内（已按未给出结论处理）：${verdict_raw}"
   log "评审报告：P0 $(jq -r '[.findings[] | select(.severity == "P0")] | length' "$WORK/validated.json") · P1 $(jq -r '[.findings[] | select(.severity == "P1")] | length' "$WORK/validated.json") · P2 $(jq -r '[.findings[] | select(.severity == "P2")] | length' "$WORK/validated.json")，结论 $(jq -r '.verdict' "$WORK/validated.json")，丢弃 ${dropped}"
   # 行内评论必须在渲染汇总之前发（spec §4.5 把汇总排在第 8 步）：统计行里「其中 N 条已标注在
   # 对应行」只能是真的发出去的条数，折叠区也只能在知道哪些发失败之后才算得准。

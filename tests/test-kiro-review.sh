@@ -133,6 +133,9 @@ assert_not_contains "$out" "${esc}[" "清洗：不含 ANSI 控制序列"
 assert_contains "$out" "Kiro 用量：credits=0.2609" "日志记录 credits 用量（累加 meteringUsage）"
 assert_contains "$out" "context=3.8%" "日志记录上下文占用"
 assert_contains "$out" "评审报告：P0 1 · P1 1 · P2 1" "日志记录各级别问题数"
+# 票 17 B/C：契约内的结论、没有重复问题时，两条警告都不该出现（正控）
+assert_not_contains "$out" "结论不在契约内" "票 17 B 正控：契约内结论不打警告"
+assert_not_contains "$out" "完全重复的问题已合并" "票 17 C 正控：没有重复问题时不打警告"
 
 # --- 隔离：diff 先算好，随后业务库工作树中的注入面文件在 Kiro 启动前被移除 ---
 assert_contains "$(cat "$CASE/stdin")" "CANARY-AGENTSMD-ROOT" "diff 先算：stdin 仍含根 AGENTS.md 的改动"
@@ -995,26 +998,71 @@ assert_contains "$OUT" "MERGE_TARGET" "选不出版本对：日志点名缺哪�
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "选不出版本对：不发行内评论"
 assert_contains "$(posted_comment "$OUT")" "## 问题清单" "选不出版本对：回落成完整清单"
 
-# ---- 最新合并源版本的提交与 HEAD 不一致 → 记 warning，但仍以 API 版本为准 ----
+# ---- A11（票 17）：最新合并源版本的提交 ≠ HEAD → fail-closed：0 条行内评论、完整清单 + notice ----
+# 评审期间有新推送时 Kiro 评的是旧 HEAD、变更行集合也按旧 HEAD 算，评论却会绑到最新版本——同一行号在新版本里
+# 可能是完全不同的代码（I5）。「行号可能有偏移」补救不了挂错位置的 P0，所以一条都不发；新推送本来就会触发
+# 新一轮评审把行内评论放对，fail-closed 没有信息损失（完整清单仍在汇总里，I10）。
 IFX_DIR="$tmp/ifx-shamismatch"; mkdir -p "$IFX_DIR"
 mk_mismatch() {
+  local base
   mkdir -p "$IFX_DIR"
-  jq -n '[{patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:"aaaa1111"},
+  # from 就是 merge-base：只让 to 不一致，隔离成因（from≠BASE 是另一条分支，见下面 R8）
+  base=$(git merge-base origin/master HEAD)
+  jq -n --arg base "$base" '[{patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
           {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}]' \
     > "$IFX_DIR/list-patchsets.json"
   jq -n '{comment_biz_id:"draft-1"}' > "$IFX_DIR/create-comment-inline.json"
 }
 CASE_TWEAK=mk_mismatch run_case shamismatch DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
   CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
-assert_rc "$RC" 0 "版本提交与 HEAD 不一致：评审仍成功"
-assert_contains "$OUT" "与当前 HEAD" "版本提交与 HEAD 不一致：记 warning"
-assert_eq "$(inline_bodies "$OUT" | jq -r '.to_patchset_biz_id' | sort -u | paste -sd, -)" "src-9" \
-  "版本提交与 HEAD 不一致：仍以 API 给的版本为准（Codeup 侧真值）"
-# 票 05 复审修复：这条不确定性也必须进汇总评论——阿里云侧开发者看不到流水线日志（I10）
+assert_rc "$RC" 0 "A11 to≠HEAD：评审仍成功（退出码 0）"
+assert_contains "$OUT" "与当前 HEAD" "A11 to≠HEAD：日志记 warning"
+assert_contains "$OUT" "fail-closed" "A11 to≠HEAD：日志点明是 fail-closed，不是发了再提醒"
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "A11 to≠HEAD：版本列表查过一次（判定就在版本对核对处）"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "A11 to≠HEAD：0 次创建行内评论（不拿旧 HEAD 的行号去绑新版本）"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "A11 to≠HEAD：POST …/comments 只有汇总评论那一次，没有草稿"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "A11 to≠HEAD：不调提交接口"
+assert_eq "$(req_count "$OUT" DELETE)" "0" "A11 to≠HEAD：没有任何删除请求（没建草稿，也不清理孤儿）"
+# 判定在草稿创建之前——也在拉现有行内评论（第 5 步）之前：除了查版本列表，一个副作用都没有
+assert_eq "$(printf '%s\n' "$OUT" | grep -cF 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}')" "0" "A11 to≠HEAD：连现有行内评论都不查"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "不是 Codeup 侧最新的合并源版本" "版本提交与 HEAD 不一致：汇总评论里说明（I10）"
-assert_contains "$comment" "行号可能有偏移" "版本提交与 HEAD 不一致：说清后果"
-assert_contains "$comment" "已标注在「文件改动」对应行" "版本提交与 HEAD 不一致：不影响行内计数"
+assert_contains "$comment" "行内评论未发出：本次评审的提交（$(cd "$CASE/work" && git rev-parse HEAD | cut -c1-12)）已不是 Codeup 侧最新的合并源版本（deadbeefdead，评审期间有新推送），下面是完整问题清单。" \
+  "A11 to≠HEAD：notice 文案带 12 位 HEAD、12 位最新版本提交与成因"
+assert_contains "$comment" "## 问题清单" "A11 to≠HEAD：回落成完整展开的问题清单（INLINE_COMMENT=0 形态）"
+assert_contains "$comment" "硬编码疑似应用密钥" "A11 to≠HEAD：问题明细仍在汇总里（信息不丢，I10）"
+assert_contains "$comment" "仓库级问题：没有统一的密钥管理" "A11 to≠HEAD：未定位问题也在完整清单里"
+assert_not_contains "$comment" "已标注在" "A11 to≠HEAD：不谎报行内计数（INLINE_ACTIVE 仍为 0）"
+assert_not_contains "$comment" "行号可能有偏移" "A11 to≠HEAD：不再有「行号可能有偏移」这种发了再提醒的文案"
+# 按结构判（契约 fixture 的 G5 正文里本来就有「折叠区」二字，完整清单会把它展开出来）
+assert_not_contains "$comment" "<details><summary>折叠区" "A11 to≠HEAD：没有折叠区（完整清单形态）"
+# 正控：to = HEAD（mk_inline_fixture 写的就是真实 HEAD）→ 行内照发。成功路径 ok1 已断言 3 条，这里并排再钉一次
+run_inline_case a11control ifx-a11control
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "A11 正控：to = HEAD 时行内照发 3 条"
+assert_not_contains "$OUT" "fail-closed" "A11 正控：日志没有 fail-closed"
+assert_not_contains "$(posted_comment "$OUT")" "已不是 Codeup 侧最新的合并源版本" "A11 正控：没有 fail-closed 的 notice"
+
+# ---- A11 复审补充：两个核对同时不成立（to≠HEAD 且 from≠BASE）----
+# from 侧那条警告是「P1-14 的结论失效了」的探针，必须先于 fail-closed 落进日志：否则最需要它的那种运行
+# （目标语义变了、同一个 MR 又在评审期间被推送）反而没有它，运维只会看到「推送太频繁」。
+# 汇总里仍然只写 fail-closed 的成因：一条行内评论都没发，「行内评论的行号可能有偏移」会让读者去找不存在的东西。
+IFX_DIR="$tmp/ifx-bothmismatch"; mkdir -p "$IFX_DIR"
+mk_bothmismatch() {
+  mkdir -p "$IFX_DIR"
+  jq -n '[{patchSetBizId:"tgt-9", versionNo:9, relatedMergeItemType:"MERGE_TARGET", commitId:"feedfacefeedfacefeedfacefeedfacefeedface"},
+          {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}]' \
+    > "$IFX_DIR/list-patchsets.json"
+  jq -n '{comment_biz_id:"draft-1"}' > "$IFX_DIR/create-comment-inline.json"
+}
+CASE_TWEAK=mk_bothmismatch run_case bothmismatch DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+assert_rc "$RC" 0 "A11 两者都不一致：评审仍成功"
+assert_contains "$OUT" "不等于本地 merge-base" "A11 两者都不一致：from 侧探针警告仍在日志里（不被 fail-closed 吞掉）"
+assert_contains "$OUT" "与当前 HEAD" "A11 两者都不一致：to 侧警告也在"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "A11 两者都不一致：仍然 0 次创建行内评论"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "已不是 Codeup 侧最新的合并源版本" "A11 两者都不一致：汇总写 fail-closed 的成因"
+assert_not_contains "$comment" "行号可能有偏移" "A11 两者都不一致：汇总不提行号偏移（一条行内评论都没发）"
+assert_contains "$comment" "## 问题清单" "A11 两者都不一致：回落成完整清单"
 
 # ---- 查现有行内评论失败 → 跳过去重但照常发布，并留痕 ----
 run_inline_case nodedup ifx-nodedup DRY_RUN_FAIL_ROUTES="list-comments-inline:500" CODEUP_RETRY_BACKOFF=0
@@ -1144,7 +1192,9 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 0 条已标注在「文件改动」对应行" "R6b 回读失败：不谎报已标注条数"
 assert_contains "$comment" "**行内发布失败（3）**" "R6b 回读失败：三条都在折叠区完整列出（宁可重复，绝不藏问题）"
 
-# ---- R8：Codeup 侧的比较基准与本地 merge-base 不一致 → 警告 + 汇总里说明 ----
+# ---- R8：Codeup 侧的比较基准与本地 merge-base 不一致 → 警告 + 汇总里说明，**照发**（票 17 裁决：from≠BASE 不 fail-closed）----
+# 与 A11 相反：line_number 是新文件侧行号（P1-02 实测），比较基准不同不改变行号；P1-14 又证明 MERGE_TARGET
+# 冻结在建 MR 时的 merge-base。所以这条只是留痕，不拒发。
 IFX_DIR="$tmp/ifx-basemismatch"; mkdir -p "$IFX_DIR"
 mk_basemismatch() {
   local head
@@ -1161,8 +1211,10 @@ CASE_TWEAK=mk_basemismatch run_case basemismatch DRY_RUN_FIXTURE_DIR="$IFX_DIR" 
   CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
 assert_rc "$RC" 0 "R8 基准不一致：评审仍成功"
 assert_contains "$OUT" "不等于本地 merge-base" "R8 基准不一致：日志告警"
-assert_contains "$OUT" "P1-14" "R8 基准不一致：日志指向待探测项"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "R8 基准不一致：仍以 API 给的版本发出（不猜语义）"
+assert_contains "$OUT" "P1-14" "R8 基准不一致：日志引用 P1-14 的结论（不 fail-closed 的依据）"
+assert_not_contains "$OUT" "待探测" "R8 基准不一致：P1-14 已探完，日志不再写成待探测项"
+assert_not_contains "$OUT" "fail-closed" "R8 基准不一致：这条分支不 fail-closed"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "R8 基准不一致：仍以 API 给的版本发出（新文件侧行号不受基准影响）"
 assert_eq "$(inline_bodies "$OUT" | jq -r '.from_patchset_biz_id' | sort -u | paste -sd, -)" "tgt-9" "R8 基准不一致：from 仍用 API 的版本"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "行内评论的行号可能有偏移" "R8 基准不一致：汇总评论里说明不确定性（I10）"
@@ -1263,5 +1315,31 @@ assert_rc "$RC" 0 "REVIEW_RERUN_HINT：评审成功"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" '评论 `/kiro review` 可重新评审' "REVIEW_RERUN_HINT：页脚用配置的提示语"
 assert_not_contains "$comment" "重跑流水线可重新评审" "REVIEW_RERUN_HINT：不再出现默认提示语"
+
+# ============================================================================
+# 票 17 B：契约外的 verdict → 结论行固定文案，原值只进流水线日志
+# ============================================================================
+printf '{"contract":"codeup-reviewer/1","summary":"s","verdict":"<h1>可合并</h1>","verdict_reason":"r","findings":[]}\n' > "$tmp/offcontract-verdict.json"
+run_case offverdict MOCK_KIRO_CONTRACT="$tmp/offcontract-verdict.json"
+assert_rc "$RC" 0 "票 17 B：契约外 verdict 不让评审失败（退出码 0）"
+assert_contains "$OUT" "警告：评审员结论不在契约内（已按未给出结论处理）：&lt;h1>可合并&lt;/h1>" "票 17 B：日志带清洗后的原值（只在日志里）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "## 结论：评审员未给出契约内的结论" "票 17 B：结论行是脚本的固定文案"
+assert_not_contains "$comment" "h1" "票 17 B：载荷（连转义形态）不出现在评论任何位置"
+assert_not_contains "$comment" "可合并" "票 17 B：载荷里的文字不出现在评论任何位置"
+assert_not_contains "$comment" "非契约取值" "票 17 B：不再是「X（非契约取值）」"
+
+# ============================================================================
+# 票 17 C：同一轮完全重复的问题 → 合并、日志警告、行内只发一条
+# ============================================================================
+run_inline_case inlinedup ifx-inlinedup MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/inline-dup.json"
+assert_rc "$RC" 0 "票 17 C：退出码 0"
+assert_contains "$OUT" "警告：1 条完全重复的问题已合并" "票 17 C：日志说明合并了几条"
+assert_contains "$OUT" "评审报告：P0 1 · P1 0 · P2 0" "票 17 C：日志里的级别计数按合并后算"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "1" "票 17 C：两条逐字段相同的问题只发一条行内评论（CodeX 复现时 inline_count=2）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "其中 1 条已标注在「文件改动」对应行" "票 17 C：统计行按合并后计数"
+assert_contains "$comment" "P0 1 · P1 0 · P2 0" "票 17 C：级别计数按合并后算"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.content' | grep -c '直接写入源码')" "1" "票 17 C：发出的是首条（保留首条的正文）"
 
 report

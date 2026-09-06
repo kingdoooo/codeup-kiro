@@ -306,10 +306,13 @@ body=$(cat "$tmp/run2-basic.md")
 assert_contains "$body" "<!-- kiro-review:90fcb05 run:2 -->" "渲染：run 参数进入标记（原地更新的定位依据）"
 assert_contains "$body" "第 2 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进" "渲染：页脚自报第 N 次评审"
 
-# 未知 verdict 不能被静默吞掉
+# 未知 verdict：结论行不是模型的自由文本槽位（票 17 B）——原值不进评论，只进 verdict_raw 给日志；
+# 也不静默吞掉：结论行写明「未给出契约内的结论」（旧行为「LGTM（非契约取值）」会把任意文本带进读者第一眼看的位置）
 printf '{%s"summary":"s","verdict":"LGTM","verdict_reason":"r","findings":[]}' "$C" > "$tmp/badverdict.json"
 render "$tmp/badverdict.json" "$tmp/badverdict.md"
-assert_contains "$(cat "$tmp/badverdict.md")" "LGTM" "渲染：未知 verdict 原样显示（不静默吞掉）"
+assert_not_contains "$(cat "$tmp/badverdict.md")" "LGTM" "渲染：未知 verdict 的原值不进评论"
+assert_contains "$(cat "$tmp/badverdict.md")" "## 结论：评审员未给出契约内的结论" "渲染：未知 verdict 用固定文案点明（不静默吞掉）"
+assert_eq "$(jq -r .verdict_raw "$tmp/validated.json")" "LGTM" "渲染：原值留在 verdict_raw 里供日志使用"
 
 # 渲染确定性：同参数两次渲染逐字节一致（无时间戳等隐式输入）
 render fixtures/contract/full.json "$tmp/det1.md"
@@ -370,19 +373,22 @@ render "$tmp/dashn.json" "$tmp/dashn.md"
 assert_contains "$(cat "$tmp/dashn.md")" "-n" "渲染：summary 恰好是 -n 时不被 echo 吃掉"
 assert_contains "$(cat "$tmp/dashn.md")" "-e" "渲染：verdict_reason 恰好是 -e 时不被 echo 吃掉"
 
-# ============ 契约要求「有 P0 时不要给 MERGE」：模型违约时必须把矛盾摆在结论旁 ============
+# ============ 契约要求「有 P0 时不要给 MERGE」：模型违约时改写为「不建议合并」并明说原因（票 17 B）============
+# 结论行是读者第一眼看的位置，没有合并卡点时它就是唯一的合并建议；「可合并」旁边挂一句矛盾提示
+# 不够——只看标题的人会合并一份自己都说有 P0 的代码。改写必须明说（不静默），历次表记改写后的结论。
 cat > "$tmp/mergewithp0.json" <<'JSON'
 {"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"看起来没问题","findings":[
  {"id":"F1","severity":"P0","category":"security","title":"SQL 注入","file":"a.py","line_start":3,"line_end":3,"body":"拼接 SQL。","fix":"参数化。"}]}
 JSON
 render "$tmp/mergewithp0.json" "$tmp/mergewithp0.md"
 body=$(cat "$tmp/mergewithp0.md")
-assert_contains "$body" "## 结论：可合并" "渲染：不改写评审员给出的结论"
-assert_contains "$body" "两者矛盾" "渲染：MERGE 与 P0 并存时给出矛盾提示"
-assert_contains "$body" "1 条 P0" "渲染：矛盾提示带上 P0 条数"
-# 没有 P0 的 MERGE 不该出现这个提示
+assert_contains "$body" "## 结论：不建议合并" "渲染：MERGE 与 P0 并存时结论改写为不建议合并"
+assert_contains "$body" "评审员给出「可合并」，但报告了 1 条 P0；P0 必须修复，已按不建议合并处理。" "渲染：改写原因紧接结论行明说（带 P0 条数）"
+assert_not_contains "$body" "## 结论：可合并" "渲染：评审员的「可合并」不再出现在结论行"
+# 没有 P0 的 MERGE 不改写
 render fixtures/contract/empty.json "$tmp/cleanmerge.md"
-assert_not_contains "$(cat "$tmp/cleanmerge.md")" "两者矛盾" "渲染：无 P0 的 MERGE 不加矛盾提示"
+assert_contains "$(cat "$tmp/cleanmerge.md")" "## 结论：可合并" "渲染：无 P0 的 MERGE 照常可合并"
+assert_not_contains "$(cat "$tmp/cleanmerge.md")" "已按不建议合并处理" "渲染：无 P0 的 MERGE 不加改写说明"
 
 # ============ review_redact_secrets：降级路径的脚本侧掩码 ============
 # 正向：已知形态的凭证必须掩掉
@@ -1807,8 +1813,9 @@ while IFS= read -r line; do
   assert_eq "$(( bt % 2 ))" "0" "折叠区：条目内反引号成对（这一行 ${bt} 个）：${line:0:40}"
 done < <(printf '%s\n' "$body" | grep '^- ')
 
-# ---- R3：「结论 MERGE 但有 P0」的矛盾提示必须指向本次真的渲染出来的地方 ----
-# INLINE_COMMENT=1 时早返回、根本没有「问题清单」这一节，指过去等于让读者去找一个不存在的章节。
+# ---- R3 → 票 17 B：「结论 MERGE 但有 P0」在 INLINE_COMMENT=1 下同样改写为不建议合并（两种形态同一句说明）----
+# 票 17 之前这里是「两者矛盾，请以…为准」的指路提示，两种形态各一句；改写之后说明行不再指向任何章节，
+# 所以两种形态用同一句——inline 形态没有「问题清单」这一节，这一点由下面的前置断言钉住。
 cat > "$tmp/mergep0-inline.json" <<'JSON'
 {"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"看起来没问题","findings":[
  {"id":"M1","severity":"P0","category":"security","title":"可定位的 P0","file":"src/app.py","line_start":30,"line_end":30,"body":"拼接 SQL。","fix":"参数化。"},
@@ -1818,15 +1825,17 @@ review_validate < "$tmp/mergep0-inline.json" > "$tmp/mergep0-validated.json"
 review_plan_inline --json "$tmp/mergep0-validated.json" --changed-lines "$CL" > "$tmp/plan-mergep0.json"
 render_inline "$tmp/plan-mergep0.json" "$tmp/summary-mergep0.md"
 body=$(cat "$tmp/summary-mergep0.md")
-assert_contains "$body" "两者矛盾，请以「文件改动」上的行内评论与下方折叠区为准。" "R3：inline 模式指向行内评论与折叠区"
-assert_not_contains "$body" "请以下方 P0 清单为准" "R3：inline 模式不再指向不存在的「问题清单」"
-assert_contains "$body" "2 条 P0" "R3：矛盾提示仍带上 P0 条数"
-assert_not_contains "$body" "## 问题清单" "R3：前置——inline 模式确实没有「问题清单」这一节"
-# INLINE_COMMENT=0 的文案不变（那一节真的在下面）
+assert_contains "$body" "## 结论：不建议合并" "票 17 B inline：结论行改写为不建议合并"
+assert_contains "$body" "评审员给出「可合并」，但报告了 2 条 P0；P0 必须修复，已按不建议合并处理。" "票 17 B inline：说明行带 P0 条数"
+assert_not_contains "$body" "两者矛盾" "票 17 B inline：旧的指路提示不再出现"
+assert_contains "$body" '"verdict":"DO_NOT_MERGE"' "票 17 B inline：历次表记改写后的结论"
+assert_not_contains "$body" "## 问题清单" "票 17 B inline：前置——inline 模式确实没有「问题清单」这一节"
+# INLINE_COMMENT=0 同一句
 review_render_summary --json "$tmp/plan-mergep0.json" --inline-comment 0 \
   --sha 90fcb05 --src f --dst m --ts t --diff-note n > "$tmp/summary-mergep0-0.md"
-assert_contains "$(cat "$tmp/summary-mergep0-0.md")" "请以下方 P0 清单为准" "R3：INLINE_COMMENT=0 的文案不变"
-assert_contains "$(cat "$tmp/summary-mergep0-0.md")" "## 问题清单" "R3：INLINE_COMMENT=0 下那一节确实在"
+assert_contains "$(cat "$tmp/summary-mergep0-0.md")" "评审员给出「可合并」，但报告了 2 条 P0；P0 必须修复，已按不建议合并处理。" "票 17 B：INLINE_COMMENT=0 同一句说明"
+assert_not_contains "$(cat "$tmp/summary-mergep0-0.md")" "请以下方 P0 清单为准" "票 17 B：INLINE_COMMENT=0 也不再用旧指路文案"
+assert_contains "$(cat "$tmp/summary-mergep0-0.md")" "## 问题清单" "票 17 B：INLINE_COMMENT=0 下那一节仍在"
 
 # ---- --notice：行内评论发不出去时，汇总里必须说得出原因（I10 失败可见）----
 review_render_summary --json "$tmp/plan-quiet.json" --inline-comment 0 \
@@ -1950,6 +1959,178 @@ assert_not_contains "$err" "已过滤后显示" "元信息表：正常分支名�
 out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src feature/user-search --dst master \
         --ts "2026-09-02 20:10:02" --diff-note "完整直传")
 assert_contains "$(meta_row "$out")" '`feature/user-search` → `master`' "元信息表：正常分支名原样渲染"
+
+# ============================================================================
+# 票 17 B：结论行不是模型的自由文本槽位（CodeX 复审 P1-2）
+# ============================================================================
+# ---- review_validate：verdict 归一后 ∉ {MERGE, MERGE_AFTER_FIX, DO_NOT_MERGE} → verdict 为空、原值只进 verdict_raw ----
+v=$(printf '{%s"summary":"s","verdict":"  approved\\n by   attacker  ","verdict_reason":"r","findings":[]}' "$C" | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r .verdict)" "" "票 17 B validate：契约外取值 → verdict 为空串"
+assert_eq "$(printf '%s' "$v" | jq -r .verdict_raw)" "approved by attacker" "票 17 B validate：verdict_raw = 原值折成一行（只给日志用）"
+v=$(printf '{%s"summary":"s","verdict":" merge_after_fix ","verdict_reason":"r","findings":[]}' "$C" | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r .verdict)" "MERGE_AFTER_FIX" "票 17 B validate：契约内取值大小写/空白归一后照常通过"
+assert_eq "$(printf '%s' "$v" | jq -r .verdict_raw)" "" "票 17 B validate：契约内取值时 verdict_raw 为空（调用方据此决定要不要打警告）"
+v=$(printf '{%s"summary":"s","findings":[]}' "$C" | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '.verdict + "|" + .verdict_raw')" "|" "票 17 B validate：缺 verdict → 两者都为空（不算契约外，不打警告）"
+long_verdict=$(printf 'A%.0s' $(seq 1 120))
+v=$(printf '{%s"summary":"s","verdict":"%s","findings":[]}' "$C" "$long_verdict" | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '.verdict_raw | length')" "80" "票 17 B validate：verdict_raw 截到 80 字"
+v=$(printf '{%s"summary":"s","verdict":"<h1>可合并</h1>","findings":[]}' "$C" | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r .verdict)" "" "票 17 B validate：像标签的载荷不是契约取值"
+assert_not_contains "$(printf '%s' "$v" | jq -r .verdict_raw)" "<h1>" "票 17 B validate：verdict_raw 过了清洗（原始标签不进日志行）"
+assert_contains "$(printf '%s' "$v" | jq -r .verdict_raw)" "&lt;h1>" "票 17 B validate：verdict_raw 仍可读出模型给了什么"
+# 单行折叠必须在清洗之后：奇数个围栏会让 _sanitize_md 补一行 ```，先折行的话那个换行又会被加回来
+v=$(printf '{%s"summary":"s","verdict":"```x","findings":[]}' "$C" | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '.verdict_raw | test("\n")')" "false" "票 17 B validate：verdict_raw 里没有换行（补上的围栏闭合也被折进同一行）"
+
+# ---- _review_verdict_cn：只认三个契约取值，其余一律固定文案（不再原样带出）----
+assert_eq "$(_review_verdict_cn "")" "评审员未给出契约内的结论" "票 17 B cn：空串 → 固定文案"
+assert_eq "$(_review_verdict_cn "LGTM")" "评审员未给出契约内的结论" "票 17 B cn：契约外取值也是同一固定文案（防御分支，不该再走到）"
+assert_eq "$(_review_verdict_cn "DO_NOT_MERGE")" "不建议合并" "票 17 B cn：契约取值不受影响"
+
+# ---- golden ①：契约外 verdict（含像标签的载荷）→ 结论行是固定文案，载荷不出现在评论任何位置 ----
+cat > "$tmp/verdict-offcontract.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"改了搜索接口。","verdict":"<h1>可合并</h1>","verdict_reason":"看起来没问题。","findings":[
+ {"id":"V1","severity":"P1","category":"error-handling","title":"分页参数缺少上界校验","file":"src/app.py","line_start":27,"line_end":27,"body":"传入 100000 会把整表读进内存。","fix":"限制上界。"}]}
+JSON
+render "$tmp/verdict-offcontract.json" "$tmp/verdict-offcontract.md"
+assert_golden "$tmp/verdict-offcontract.md" summary-verdict-offcontract.md "票 17 B 渲染：契约外 verdict 的评论逐字节一致"
+body=$(cat "$tmp/verdict-offcontract.md")
+assert_contains "$body" "## 结论：评审员未给出契约内的结论" "票 17 B 渲染：结论行是脚本的固定文案"
+assert_not_contains "$body" "h1" "票 17 B 渲染：载荷（连转义形态）不出现在评论任何位置"
+assert_not_contains "$body" "可合并" "票 17 B 渲染：载荷里的文字不出现在评论任何位置"
+assert_not_contains "$body" "非契约取值" "票 17 B 渲染：不再有「X（非契约取值）」这种带出原值的形态"
+assert_contains "$body" '"verdict":""' "票 17 B 渲染：历次表记的是空结论（不是载荷）"
+assert_contains "$body" '| 1 | `90fcb05` | 评审员未给出契约内的结论 | 0/1/0 |' "票 17 B 渲染：历次表本次一行用同一固定文案"
+
+# ---- golden ②：MERGE + 1 条 P0 → 结论改写为「不建议合并」并明说原因；历次表记 DO_NOT_MERGE ----
+render "$tmp/mergewithp0.json" "$tmp/merge-p0.md"
+assert_golden "$tmp/merge-p0.md" summary-merge-p0.md "票 17 B 渲染：MERGE + P0 的评论逐字节一致"
+body=$(cat "$tmp/merge-p0.md")
+assert_contains "$body" $'## 结论：不建议合并\n\n> ⚠️ 评审员给出「可合并」，但报告了 1 条 P0；P0 必须修复，已按不建议合并处理。\n' \
+  "票 17 B 渲染：结论行改写为不建议合并，紧接一行明说改写原因"
+assert_not_contains "$body" "## 结论：可合并" "票 17 B 渲染：结论行不再是评审员的「可合并」"
+assert_not_contains "$body" "两者矛盾" "票 17 B 渲染：旧的「两者矛盾」提示已被改写机制取代"
+assert_contains "$body" '"verdict":"DO_NOT_MERGE"' "票 17 B 渲染：历次表记的是改写后的结论（与读者看到的一致）"
+assert_contains "$body" '| 1 | `90fcb05` | 不建议合并 | 1/0/0 |' "票 17 B 渲染：历次表本次一行显示不建议合并"
+assert_contains "$body" "看起来没问题" "票 17 B 渲染：评审员的结论理由仍在（改写的是结论，不是理由）"
+
+# ---- golden ③（正控）：MERGE + 0 条 P0（有 P1）→ 照常「可合并」，没有改写行 ----
+cat > "$tmp/merge-p1-only.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"改了分页。","verdict":"MERGE","verdict_reason":"小问题，可合并。","findings":[
+ {"id":"V2","severity":"P1","category":"error-handling","title":"分页参数缺少上界校验","file":"src/app.py","line_start":27,"line_end":27,"body":"传入 100000 会把整表读进内存。","fix":"限制上界。"}]}
+JSON
+render "$tmp/merge-p1-only.json" "$tmp/merge-p1-only.md"
+assert_golden "$tmp/merge-p1-only.md" summary-merge-p1-only.md "票 17 B 渲染：MERGE + 0 P0 的评论逐字节一致"
+body=$(cat "$tmp/merge-p1-only.md")
+assert_contains "$body" "## 结论：可合并" "票 17 B 正控：没有 P0 时不改写"
+assert_not_contains "$body" "已按不建议合并处理" "票 17 B 正控：没有改写说明行"
+assert_contains "$body" '"verdict":"MERGE"' "票 17 B 正控：历次表记 MERGE"
+# MERGE_AFTER_FIX / DO_NOT_MERGE 与 P0 相容，不动（summary-full.md 是 MERGE_AFTER_FIX + 1 P0，golden 本身就是这条断言）
+assert_not_contains "$(cat "$tmp/full.md")" "已按不建议合并处理" "票 17 B：MERGE_AFTER_FIX + P0 不触发改写"
+
+# ---- 改写也要留在流水线日志里（复审发现）：kiro-review.sh 那行「结论 X」取自 validated.json，
+#      打出来的是改写前的 MERGE，与评论、与隐藏历史都不一致。日志由渲染器出，判定只有一份。----
+err=$(review_render_summary --json "$tmp/mergep0-validated.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n 2>&1 >/dev/null)
+assert_contains "$err" "评审员给出 MERGE 但报告了 2 条 P0" "票 17 B：改写时 stderr 上有一条警告（进流水线日志）"
+assert_contains "$err" "已按 DO_NOT_MERGE 渲染" "票 17 B：警告说明渲染成了什么"
+review_validate < "$tmp/merge-p1-only.json" > "$tmp/rw-ctl.json"   # MERGE + 0 条 P0
+err=$(review_render_summary --json "$tmp/rw-ctl.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n 2>&1 >/dev/null)
+assert_not_contains "$err" "已按 DO_NOT_MERGE 渲染" "票 17 B 正控：不改写时 stderr 上没有这条警告"
+
+# ---- 渲染器边界的纵深防御：没走 review_validate 的调用方直接送契约外取值 → 结论行是固定文案，
+#      **且隐藏历史里也不留原值**（那份 JSON 下一轮会被读回来）。----
+jq '.verdict = "MERGE\n## 伪造标题"' "$tmp/rw-ctl.json" > "$tmp/bypass-verdict.json"
+out=$(review_render_summary --json "$tmp/bypass-verdict.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n 2>/dev/null)
+assert_contains "$out" "## 结论：评审员未给出契约内的结论" "票 17 B 边界：绕过校验的契约外取值也只渲染固定文案"
+assert_not_contains "$out" "伪造标题" "票 17 B 边界：原值不出现在评论任何位置（含隐藏历史标记）"
+assert_contains "$out" '"verdict":""' "票 17 B 边界：隐藏历史记空结论"
+err=$(review_render_summary --json "$tmp/bypass-verdict.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n 2>&1 >/dev/null)
+assert_contains "$err" "结论不在契约内" "票 17 B 边界：stderr 上留痕"
+assert_not_contains "$err" "伪造标题" "票 17 B 边界：连日志也不回显整段原值（长度已够定位）"
+
+# ---- 旧评论的隐藏历史里有契约外结论（升级前原样带出过）→ 表格里也只显示固定文案 ----
+printf '[{"run":1,"sha":"abc1234","verdict":"LGTM","status":"","p0":0,"p1":0,"p2":0}]' > "$tmp/lgtm-hist.json"
+render fixtures/contract/empty.json "$tmp/lgtm-hist.md" --run 2 --history "$tmp/lgtm-hist.json"
+assert_contains "$(cat "$tmp/lgtm-hist.md")" '| 1 | `abc1234` | 评审员未给出契约内的结论 | 0/0/0 |' "票 17 B 历次表：旧记录里的契约外结论按固定文案显示"
+# 隐藏的历史 JSON 是数据载体（票 13 的字符许可清单已限制它），旧值原样保留在里面；这里只钉可见部分
+assert_not_contains "$(grep -v '^<!-- kiro-history:' "$tmp/lgtm-hist.md")" "LGTM" "票 17 B 历次表：契约外原值不出现在评论的可见部分"
+
+# ============================================================================
+# 票 17 C：同一轮输出里完全重复的问题合并（file/line_start/line_end/severity/title 五元组逐字段相同）
+# ============================================================================
+cat > "$tmp/dup2.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
+ {"id":"D1","severity":"P0","category":"security","title":"拼接 SQL","file":"src/app.py","line_start":30,"line_end":31,"body":"第一份措辞。","fix":"参数化。"},
+ {"id":"D2","severity":"P0","category":"logic","title":"拼接 SQL","file":"src/app.py","line_start":30,"line_end":31,"body":"第二份措辞（body/fix/category 不参与判定）。","fix":""}]}
+JSON
+review_validate < "$tmp/dup2.json" > "$tmp/dup2-validated.json"
+assert_eq "$(jq -r '.findings | length' "$tmp/dup2-validated.json")" "1" "票 17 C：逐字段相同的两条并成一条"
+assert_eq "$(jq -r .duplicate_findings "$tmp/dup2-validated.json")" "1" "票 17 C：duplicate_findings=1"
+assert_eq "$(jq -r .dropped_findings "$tmp/dup2-validated.json")" "0" "票 17 C：合并不计入 dropped_findings（语义不变）"
+assert_eq "$(jq -r '.findings[0].body' "$tmp/dup2-validated.json")" "第一份措辞。" "票 17 C：保留首条（含它的正文）"
+review_plan_inline --json "$tmp/dup2-validated.json" --changed-lines "$CL" > "$tmp/plan-dup2.json"
+assert_eq "$(jq -r .inline_count "$tmp/plan-dup2.json")" "1" "票 17 C：INLINE_COMMENT=1 计划 inline_count=1（CodeX 复现时是 2）"
+# 顺序：合并保留原次序（jq 的 unique_by 会按键重排，这里不允许）
+cat > "$tmp/dup3.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
+ {"id":"E1","severity":"P1","category":"logic","title":"乙","file":"src/db.py","line_start":12,"line_end":12,"body":"b","fix":""},
+ {"id":"E2","severity":"P0","category":"security","title":"甲","file":"src/app.py","line_start":30,"line_end":31,"body":"b","fix":""},
+ {"id":"E3","severity":"P1","category":"logic","title":"乙","file":"src/db.py","line_start":12,"line_end":12,"body":"b2","fix":""},
+ {"id":"E4","severity":"P2","category":"style","title":"丙","file":null,"line_start":null,"line_end":null,"body":"b","fix":""}]}
+JSON
+review_validate < "$tmp/dup3.json" > "$tmp/dup3-validated.json"
+assert_eq "$(jq -r '[.findings[].id] | join(",")' "$tmp/dup3-validated.json")" "E1,E2,E4" "票 17 C：合并后保持原顺序（E1 在 E2 前，不按键重排）"
+assert_eq "$(jq -r .duplicate_findings "$tmp/dup3-validated.json")" "1" "票 17 C：三条里只有一对重复"
+# 只差 title → 不合并；只差 line_end → 不合并（后者是区间去重的领域，Q8 已裁决维持）
+cat > "$tmp/dup-title.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
+ {"id":"T1","severity":"P0","category":"security","title":"拼接 SQL","file":"src/app.py","line_start":30,"line_end":31,"body":"b","fix":""},
+ {"id":"T2","severity":"P0","category":"security","title":"鉴权绕过","file":"src/app.py","line_start":30,"line_end":31,"body":"b","fix":""}]}
+JSON
+v=$(review_validate < "$tmp/dup-title.json")
+assert_eq "$(printf '%s' "$v" | jq -r '.findings | length')" "2" "票 17 C：只差 title 的两条不合并"
+assert_eq "$(printf '%s' "$v" | jq -r .duplicate_findings)" "0" "票 17 C：只差 title 时 duplicate_findings=0"
+cat > "$tmp/dup-lineend.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
+ {"id":"L1","severity":"P0","category":"security","title":"拼接 SQL","file":"src/app.py","line_start":30,"line_end":31,"body":"b","fix":""},
+ {"id":"L2","severity":"P0","category":"security","title":"拼接 SQL","file":"src/app.py","line_start":30,"line_end":30,"body":"b","fix":""}]}
+JSON
+v=$(review_validate < "$tmp/dup-lineend.json")
+assert_eq "$(printf '%s' "$v" | jq -r '.findings | length')" "2" "票 17 C：只差 line_end 的两条不合并（那是区间去重的领域）"
+assert_eq "$(printf '%s' "$v" | jq -r .duplicate_findings)" "0" "票 17 C：只差 line_end 时 duplicate_findings=0"
+# 只差 severity → 不合并（同一处一条 P0 一条 P2 是两条不同的意见）
+v=$(jq -c '.findings[1].severity = "P2"' "$tmp/dup2.json" | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '.findings | length')" "2" "票 17 C：只差 severity 的两条不合并"
+# 判定发生在字段归一化之后：级别大小写/空白、标题空白折叠后相同即视为相同
+v=$(jq -c '.findings[1].severity = " p0 " | .findings[1].title = "拼接  SQL"' "$tmp/dup2.json" | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '.findings | length')" "1" "票 17 C：归一化后相同（' p0 '、双空格标题）也算重复"
+# 两条一样的未定位问题（file 不合规 → null）也合并，且未定位计数按合并后算
+v=$(jq -c '.findings[0].file = "a|b" | .findings[1].file = "a|b"' "$tmp/dup2.json" | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings, .delocated_findings] | join(",")')" "1,1,1" \
+  "票 17 C：两条一样的未定位问题并成一条，delocated_findings 按合并后算"
+# 判定键取的是**归一化前**的路径与行号（复审发现）：输出字段把所有不可定位的问题都塌成
+# file/line_start/line_end 全 null，按它们比较的话「路径不合规的两个不同文件」「同一个不合规文件里的两处」
+# 都会被并掉，第二条的正文与修复建议在 MR 上无处落脚。
+cat > "$tmp/dup-deloc.json" <<'JSON'
+{"contract":"codeup-reviewer/1","summary":"s","verdict":"DO_NOT_MERGE","verdict_reason":"r","findings":[
+ {"id":"U1","severity":"P0","category":"security","title":"硬编码密钥","file":"src/a`1.py","line_start":10,"line_end":10,"body":"甲","fix":""},
+ {"id":"U2","severity":"P0","category":"security","title":"硬编码密钥","file":"src/b`2.py","line_start":88,"line_end":90,"body":"乙","fix":""},
+ {"id":"U3","severity":"P0","category":"security","title":"硬编码密钥","body":"丙","fix":""}]}
+JSON
+v=$(review_validate < "$tmp/dup-deloc.json")
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings, .delocated_findings] | join(",")')" "3,0,2" \
+  "票 17 C：不可定位但路径不同的三条同标题问题不合并（两条路径不合规、一条仓库级）"
+assert_eq "$(printf '%s' "$v" | jq -r '[.findings[].body] | join(",")')" "甲,乙,丙" "票 17 C：三条的正文都还在（不吞掉别人的明细）"
+v=$(jq -c '.findings[1].file = .findings[0].file' "$tmp/dup-deloc.json" | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "3,0" \
+  "票 17 C：同一个不合规路径、行号不同的两条不合并（归一化后都是 null，按原值才分得开）"
+# 判定键不能泄进输出（它只是内部字段）
+assert_eq "$(printf '%s' "$v" | jq -r '[.findings[] | has("dupkey")] | unique | join(",")')" "false" "票 17 C：内部判定键不出现在规范化输出里"
+# 渲染器的输入校验不强制 duplicate_findings（旧 plan.json 兼容）
+jq 'del(.duplicate_findings)' "$tmp/dup2-validated.json" > "$tmp/dup2-old.json"
+rc=0; review_render_summary --json "$tmp/dup2-old.json" --sha x --src a --dst b --ts t --diff-note n >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 0 "票 17 C：缺 duplicate_findings 的旧 JSON 仍可渲染"
 
 if [[ "$GOLDEN_DIRTY" == "1" ]]; then
   echo "GOLDEN_UPDATE=1：golden 文件已重写，本次运行不构成通过。请人工读 git diff 确认渲染正确，再不带该变量重跑。" >&2
