@@ -24,12 +24,16 @@
   与 `FLOW_PIPELINE_ID`。
 - `probe-kiro-headless.sh` 不写 Codeup，但会消耗 Kiro credit，并临时改动真实 `$HOME`
   下的设置与 agent 目录（退出时恢复，见下文）。
+- `probe-kiro-allowlist.sh` 不写 Codeup、不改任何全局设置；在真实 `$HOME/.kiro/agents/` 下装两个**独立名字**的
+  探测 agent（`codeup-reviewer-probe-allowlist`、`codeup-reviewer-probe-noallow`，不碰生产 agent），
+  在 `$HOME` 下放一个 canary 文件，退出时全部删除。
 
 | 脚本 | 覆盖 | 需要 |
 |---|---|---|
 | `probe-codeup-inline.sh` | P1-00 身份/MR · P1-01 版本列表 · P1-02 行号侧向 · P1-03 必填字段 · P1-04 草稿一次提交 · P1-05 原地更新 · P1-06 评论列表 · P1-09 `<details>` 渲染 | 令牌：代码只读 + 合并请求读写；一个打开的测试 MR |
 | `probe-flow-run.sh` | P1-07 `CreatePipelineRun` 的 `envs` / `runningBranchs` 覆写 | 令牌：流水线读写；已配置的评审流水线 |
 | `probe-kiro-headless.sh` | P1-08 `stream-json` 事件形态 · P1-10 AGENTS.md 继承隔离 · P1-11 禁止路径 · P1-12 `--engine v3` 对照 | 装有 kiro-cli 的机器 + `KIRO_API_KEY`（或本机已 `kiro-cli login`） |
+| `probe-kiro-allowlist.sh` | P1-15 读取**许可清单**（`allowedPaths`）在 headless 下是不是边界：T1 allow 内可读 · T2 allow 外/deny 外的 canary 被**拒绝**（不是等确认到超时）· T3 deny 先于 allow · T4 `env -i` 许可清单下能启动 · T5 正控（无 allowedPaths 的旧形态 + `--trust-tools` 读出 canary）· T6/T7 INFO（`--trust-tools` 不覆盖 allow；`--trust-all-tools` **绕过** allow） | 同上；每用例一次调用（约 0.3 credit） |
 
 ## 用法
 
@@ -58,6 +62,12 @@ KIRO_ENGINE=v2 PROBE_FORCE_READ=1 bash scripts/probe/probe-kiro-headless.sh
 # 4) 对照 V3（时间盒）
 KIRO_ENGINE=v3 bash scripts/probe/probe-kiro-headless.sh
 # 原始输出默认留在 /tmp/kiro-probe-<时间>，可用 PROBE_KEEP_DIR 指定目录
+
+# 5) 读取许可清单边界（P1-15；票 15 主方案的前提，改动 agent 定义 / kiro_install_agent / 许可清单函数后重跑）
+bash scripts/probe/probe-kiro-allowlist.sh
+# 只跑子集省额度：PROBE_CASES="T1 T2 T4" bash scripts/probe/probe-kiro-allowlist.sh
+# 原始输出默认留在 /tmp/kiro-probe-allowlist-<时间>（每用例 .jsonl/.err、agent-installed.json、
+# env-allowlist-names.txt、summary.json）
 ```
 
 `probe-kiro-headless.sh` 会真实调用 Kiro（消耗 credit），并在真实 `$HOME` 下临时改动
@@ -92,6 +102,19 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与 `~/.kiro/` 下
   - **P1-11 的正控**：临时去掉 `kiro/agent-codeup-reviewer.json` 里 `toolsSettings.read.deniedPaths`
     与 `permissions.rules` 中 `fs_read` 的 deny 规则，以 `PROBE_FORCE_READ=1` 重跑 → 应 FAIL
     （读到 canary）。看完务必 `git checkout kiro/agent-codeup-reviewer.json` 还原。
+
+- `probe-kiro-allowlist.sh`：探测 agent 就是**生产定义**改名换成中性提示词，占位符由生产的 `kiro_install_agent
+  --workspace/--chunks` 注入、`env -i` 许可清单用生产的 `kiro_env_allowlist`——测的就是生产要跑的那份规则。
+  T1–T4 任一 FAIL → `allowedPaths` 不能作为 headless 读取边界，退出码 1（票 15 回退方案）；INCONCLUSIVE → 3；全 PASS → 0。
+  - **T2 的判据**：canary 未出现 **且** 事件流里有对该文件的读取尝试 **且** 有拒绝痕迹
+    （`tool_call_update.status=failed`、`Permission request failed … not supported in non-interactive mode`、
+    stderr `[denied]`），运行正常结束——**超时（124/137）算 FAIL**：「等待确认到超时」正是要排除的行为。
+  - **T5 正控必须 PASS**（canary 被读出）：它跑的是票 15 之前的形态（无 `allowedPaths` + `allowedTools` 三个工具 +
+    `--trust-tools`），复现 CodeX P0-1；正控读不出来说明探测本身不可信。
+  - T6/T7 只是 INFO，不参与退出码：2026-09-06 实测 `--trust-tools` **不**覆盖 allow 之外的路径（去掉它是为了语义
+    单一，不是安全必需），`--trust-all-tools` **绕过** allowedPaths（生产绝不传，端到端测试断言参数里没有任何 `--trust-*`）。
+  - 路径要**物理路径**：macOS 的 `/var/folders` 是 `/private/var/folders` 的符号链接，写逻辑路径会让全部读取落在
+    allow 之外。安装函数已按 `pwd -P` 注入，脚本自检安装后的 `allowedPaths` 与预期一致。
 
 ## 常见问题
 

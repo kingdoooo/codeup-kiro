@@ -41,7 +41,13 @@ run_case() {
   MUT_TWEAK=""
   export HOME="$CASE/home"; mkdir -p "$HOME"
   export REVIEW_REPO_DIR="$CASE/work" MOCK_ARGS_FILE="$CASE/args" MOCK_STDIN_FILE="$CASE/stdin" \
-         MOCK_SETTINGS_FILE="$CASE/settings" MOCK_CWD_SCAN_FILE="$CASE/cwdscan" MOCK_CALLS_FILE="$CASE/calls"
+         MOCK_SETTINGS_FILE="$CASE/settings" MOCK_CWD_SCAN_FILE="$CASE/cwdscan" MOCK_CALLS_FILE="$CASE/calls" \
+         MOCK_ENV_FILE="$CASE/env"
+  # 替身在 env -i 之下收不到 MOCK_* 环境变量，改从 $HOME/.kiro-mock.env 读（与 test-kiro-review.sh 同一约定）：
+  # 把导出的那几个与本次 "$@" 里的 MOCK_* 都写进去
+  { printf '%s\n' "MOCK_ARGS_FILE=$MOCK_ARGS_FILE" "MOCK_STDIN_FILE=$MOCK_STDIN_FILE" "MOCK_SETTINGS_FILE=$MOCK_SETTINGS_FILE" \
+      "MOCK_CWD_SCAN_FILE=$MOCK_CWD_SCAN_FILE" "MOCK_CALLS_FILE=$MOCK_CALLS_FILE" "MOCK_ENV_FILE=$MOCK_ENV_FILE"
+    local a; for a in "$@"; do [[ "$a" == MOCK_* ]] && printf '%s\n' "$a"; done; } > "$HOME/.kiro-mock.env"
   RC=0; OUT=$(env "$@" "$pkg/scripts/kiro-review.sh" 2>&1) || RC=$?
 }
 
@@ -77,7 +83,9 @@ assert_eq "$([[ -e "$CASE/work/AGENTS.md" || -e "$CASE/work/src/sub/AGENTS.md" ]
 assert_eq "$(cat "$CASE/cwdscan")" "" "对照：Kiro 启动时工作区干净"
 assert_eq "$([[ -e "$CASE/work/src/sub/.kiro" || -e "$CASE/work/lsp.json" ]] && echo exists || echo gone)" "gone" "对照：子目录 .kiro/ 与根 lsp.json 已移除"
 assert_contains "$(paste -sd' ' "$CASE/args")" "--agent codeup-reviewer" "对照：参数含 --agent codeup-reviewer"
-assert_eq "$(grep -c -x -- '--trust-tools=read,grep,glob' "$CASE/args")" "1" "对照：--trust-tools 精确"
+assert_eq "$(grep -c -- '^--trust' "$CASE/args")" "0" "对照：参数里没有任何 --trust-* 开关"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$CASE/env")" "0" "对照：Kiro 进程环境里没有 YUNXIAO_TOKEN"
+assert_eq "$(grep -c -x -- 'KIRO_API_KEY' "$CASE/env")" "1" "对照：Kiro 进程环境里有 KIRO_API_KEY"
 assert_contains "$(paste -sd' ' "$CASE/args")" "--agent-engine v2" "对照：参数含 --agent-engine v2"
 assert_contains "$(paste -sd' ' "$CASE/args")" "--output-format stream-json" "对照：参数含 --output-format stream-json"
 assert_contains "$(cat "$CASE/settings")" "chat.disableInheritingDefaultResources true" "对照：settings 已调用"
@@ -106,11 +114,62 @@ run_case m4 "$pkg"
 assert_rc "$RC" 0 "M4：变异体仍能跑完"
 assert_not_contains "$(paste -sd' ' "$CASE/args")" "--agent codeup-reviewer" "M4：参数中不再有 --agent codeup-reviewer——端到端断言会失败"
 
-# --- M5：--trust-tools 放宽到 shell → 精确匹配断言必须失败 ---
-pkg=$(make_mutant m5-trust 's/--trust-tools=read,grep,glob/--trust-tools=read,grep,glob,shell/')
-run_case m5 "$pkg"
-assert_rc "$RC" 0 "M5：变异体仍能跑完"
-assert_eq "$(grep -c -x -- '--trust-tools=read,grep,glob' "$CASE/args")" "0" "M5：精确的 --trust-tools=read,grep,glob 不再出现——端到端断言会失败"
+# --- M5a：把 --trust-tools=read,grep,glob 加回调用行 → 「没有任何 --trust-*」断言必须失败（票 15）---
+pkg=$(make_mutant m5a-trust-tools 's/--agent "\$AGENT_NAME"/--trust-tools=read,grep,glob --agent "$AGENT_NAME"/')
+run_case m5a "$pkg"
+assert_rc "$RC" 0 "M5a：变异体仍能跑完（只是失去边界语义）"
+assert_eq "$(grep -c -x -- '--trust-tools=read,grep,glob' "$CASE/args")" "1" "M5a：参数里出现 --trust-tools——端到端断言「没有任何 --trust-*」会失败"
+assert_eq "$(grep -c -- '^--trust' "$CASE/args")" "1" "M5a：行首匹配同样抓到它"
+
+# --- M5b：加上拒绝信息里推荐的 --trust-all-tools（实测绕过 allowedPaths，P1-15 T7）→ 断言必须失败 ---
+pkg=$(make_mutant m5b-trust-all 's/--agent "\$AGENT_NAME"/--trust-all-tools --agent "$AGENT_NAME"/')
+run_case m5b "$pkg"
+assert_rc "$RC" 0 "M5b：变异体仍能跑完"
+assert_eq "$(grep -c -x -- '--trust-all-tools' "$CASE/args")" "1" "M5b：参数里出现 --trust-all-tools——端到端断言「绝不传 --trust-all-tools」会失败"
+
+# --- M5c：去掉 env -i 许可清单 → Kiro 进程继承完整环境，YUNXIAO_TOKEN 可见（票 15）---
+pkg=$(make_mutant m5c-env-i 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" //')
+run_case m5c "$pkg"
+assert_rc "$RC" 0 "M5c：变异体仍能跑完"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$CASE/env")" "1" "M5c：Kiro 进程环境里出现 YUNXIAO_TOKEN——端到端断言「没有 YUNXIAO_TOKEN」会失败"
+assert_eq "$(grep -c -x -- 'CODEUP_REPO_ID' "$CASE/env")" "1" "M5c：CODEUP_REPO_ID 同样泄入"
+
+# --- M5d：拿掉安装函数里「占位符未替换 → 拒绝安装」的检查 → 缺 --workspace 也能装出一份带占位符的 agent（票 15）---
+# 这是单测层的可观测结果（端到端里执行器总是传两条路径）：装出来的定义 allowedPaths 仍是字面量占位符，
+# kiro-cli 会把它当成一个不存在的路径 → allow 形同为空，headless 下每次读取都被拒、评审在读第一个文件时失败并烧掉额度。
+pkg=$(make_mutant m5d-placeholder '/占位符未替换/d' scripts/lib/kiro-agent.sh)
+rc5d=0; dest5d=$( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_install_agent "$pkg/kiro/agent-codeup-reviewer.json" "$tmp/m5d-agents" 2>/dev/null ) || rc5d=$?
+assert_eq "$rc5d" "0" "M5d：缺 --workspace 仍安装成功——单测断言「缺 --workspace：安装失败」会失败"
+assert_eq "$(jq -r '.toolsSettings.read.allowedPaths[0]' "$tmp/m5d-agents/codeup-reviewer.json")" '{{REVIEW_WORKSPACE}}' "M5d：落盘的定义里 allowedPaths 仍是占位符字面量"
+rc5d=0; ( set +e; source "$ROOT/scripts/lib/kiro-agent.sh"; kiro_install_agent "$ROOT/kiro/agent-codeup-reviewer.json" "$tmp/m5d-control" >/dev/null 2>&1 ) || rc5d=$?
+assert_eq "$([[ $rc5d -ne 0 ]] && echo nonzero)" "nonzero" "M5d 对照：未变异实现缺 --workspace 时拒绝安装"
+assert_eq "$([[ -e "$tmp/m5d-control" ]] && echo written || echo none)" "none" "M5d 对照：未变异实现不落盘"
+
+# --- M5e：build_review_input 里 chunk 目录改回逻辑路径（pwd 而非 pwd -P）→ 索引里的 chunk 目录与 allowedPaths[1] 形态不一致（票 15）---
+# 要让「逻辑 ≠ 物理」在任何平台成立：macOS 的 mktemp -d 落在 /var/folders（→ /private/var/folders，且不理 TMPDIR）；
+# Linux 的 /tmp 通常是真目录，所以给一个符号链接 TMPDIR（GNU mktemp 按它创建 $WORK）。两个平台至少有一种生效；
+# 下面第一条断言就是这个前提的自检：变异体写出的索引目录必须**不是**物理形态，否则本变异在此主机上不可观测。
+pkg=$(make_mutant m5e-chunk-logical 's/chunk_dir=\$(cd "\$chunk_dir" \&\& pwd -P)/chunk_dir=$(cd "$chunk_dir" \&\& pwd)/' scripts/lib/diff-compress.sh)
+mkdir -p "$tmp/m5e-tmp-real"; ln -s "$tmp/m5e-tmp-real" "$tmp/m5e-tmp-link"
+# 变异体与对照都要读索引目录：$WORK 在脚本退出时被 trap 删掉，所以「物理形态」用其父目录（TMPDIR 或 /var/folders）的 pwd -P 判
+idx_dir_of() { awk 'index($0, "=== 未直传的变更文件索引") == 1 {on=1; next} on && $0 == "" {exit} on {print}' "$1" | jq -r '.chunk | sub("/[^/]*$"; "")' | sort -u; }
+phys_of_parent() { local d; d=$(dirname "$(dirname "$1")"); (cd "$d" && pwd -P); }   # <WORK>/chunks → <WORK> 的父目录
+run_case m5e "$pkg" DIFF_SIZE_LIMIT=1 TMPDIR="$tmp/m5e-tmp-link"
+assert_rc "$RC" 0 "M5e：变异体仍能跑完"
+idx5e_dir=$(idx_dir_of "$CASE/stdin")
+assert_eq "$([[ -n "$idx5e_dir" ]] && echo nonempty)" "nonempty" "M5e：索引非空"
+assert_eq "$([[ "$(dirname "$(dirname "$idx5e_dir")")" == "$(phys_of_parent "$idx5e_dir")" ]] && echo physical || echo logical)" "logical" \
+  "M5e 前提自检：变异体写出的索引 chunk 目录是逻辑形态（${idx5e_dir}）——此主机上逻辑≠物理成立"
+allow5e=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$CASE/home/.kiro/agents/codeup-reviewer.json")
+assert_eq "$([[ "$idx5e_dir" == "$allow5e" ]] && echo same || echo differs)" "differs" \
+  "M5e：索引里的 chunk 目录（${idx5e_dir}）与 allowedPaths[1]（${allow5e}）形态不一致——端到端「逐字相同」断言会失败"
+# 对照：未变异实现下两者逐字相同，且都是物理形态
+run_case m5e-control "$ROOT" DIFF_SIZE_LIMIT=1 TMPDIR="$tmp/m5e-tmp-link"
+idx5ec_dir=$(idx_dir_of "$CASE/stdin")
+allow5ec=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$CASE/home/.kiro/agents/codeup-reviewer.json")
+assert_eq "$idx5ec_dir" "$allow5ec" "M5e 对照：未变异实现下索引 chunk 目录与 allowedPaths[1] 逐字相同"
+assert_eq "$([[ "$(dirname "$(dirname "$idx5ec_dir")")" == "$(phys_of_parent "$idx5ec_dir")" ]] && echo physical || echo logical)" "physical" \
+  "M5e 对照：未变异实现写出的索引 chunk 目录是物理形态"
 
 # --- M6：删掉任意深度 .kiro/ 的删除逻辑 → 子目录 .kiro/ 残留、Kiro 启动时能看到 ---
 # 模式只用 `-name .kiro`：任意深度 .kiro 的删除条件已改为 \( -type d -o -type l \)（覆盖符号链接），

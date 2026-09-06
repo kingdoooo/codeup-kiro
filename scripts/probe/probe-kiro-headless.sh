@@ -119,6 +119,10 @@ P
 fi
 
 ENGINE_ARGS=(); [[ -n "$KIRO_ENGINE" ]] && ENGINE_ARGS=(--agent-engine "$KIRO_ENGINE")
+# 与生产调用行的差别（票 15 之后）：这里仍带 --trust-tools=read,grep,glob、也不做 env -i 许可清单——本脚本测的是
+# deniedPaths（P1-11）与 AGENTS.md 继承隔离（P1-10），trust 不影响 deny（deny 先于一切判定，2026-09-06 T3/T6 实测），
+# 留着它能把「模型自己没去读」这一态压到最低。生产调用行**不传** --trust-tools（免确认只来自 allowedPaths）且以
+# env -i 启动；许可清单边界（allowedPaths）与 env -i 由 probe-kiro-allowlist.sh（P1-15）单独探测。
 run_kiro() { # out err [extra...]
   local out="$1" err="$2"; shift 2; local rc=0
   KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" kiro-cli chat --no-interactive \

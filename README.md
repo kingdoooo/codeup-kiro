@@ -20,15 +20,19 @@
       2. 定位 MR（环境变量优先，OpenAPI 反查兜底，歧义即报错）；
          找出本评审员上一次的汇总评论（原地更新与 run 计数的前提）。
          此后任何失败（含第 3 步的安装失败与能力检查不通过）都会在 MR 上回写「评审未完成」
-      3. 安装/检测 kiro-cli；安装只读受信 agent（read/grep/glob，禁 shell/write/web/MCP，
-         敏感路径拒绝清单）+ 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行）
+      3. 安装/检测 kiro-cli；安装只读受信 agent（read/grep/glob，禁 shell/write/web/MCP；
+         读取**许可清单** allowedPaths = 业务库 checkout + 本次 diff chunk 目录，安装时注入物理路径，
+         占位符没替换干净就拒绝安装；敏感路径与 .git 的拒绝清单是第二道）
+         + 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行）
       4. merge-base 三点 diff；>300KB 按优先级压缩，省略文件以 diff 片段索引供 Kiro 自读；
          开启行内评论时同时算出「本次变更行集合」（零上下文 diff，与评审输入同源）
       5. 隔离（必须在 diff 算完之后、启动 Kiro 之前）：移除业务库工作树中任意深度的
          AGENTS.md 与 .kiro/ 及根 lsp.json，设置 chat.disableInheritingDefaultResources=true
-      6. timeout 强制限时执行
+      6. timeout 强制限时、`env -i` 许可清单环境（只透传 PATH/HOME/KIRO_*/代理与证书/区域设置，
+         云效令牌与 Flow 变量不进 Kiro 进程）执行
          kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json
-                       --trust-tools=read,grep,glob --agent codeup-reviewer
+                       --agent codeup-reviewer
+         不传 --trust-tools（免确认只来自 allowedPaths），绝不传会绕过 allowedPaths 的 --trust-all-tools；
          报告取自 runFinished.data.finalText 里带本次随机串标记包裹的契约 JSON
       7. 由脚本渲染评论并回写 OpenAPI：
          · 汇总评论每个 MR 一条；配了 CODEUP_BOT_USERNAME 时重跑原地更新
@@ -46,7 +50,9 @@
 - MR 源分支全部内容视为不受信数据：运行 Kiro 前移除业务库中任意深度的
   `AGENTS.md`、`.kiro/`（含符号链接）与根目录 `lsp.json`；custom agent 关闭工作区
   MCP/Powers 加载（`includeMcpJson: false`、`includePowers: false`），工具仅 read/grep/glob，
-  并对 `~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、`/var/run/secrets` 等路径配拒绝清单。
+  读取边界是**许可清单**（`allowedPaths`：业务库 checkout 与本次 diff chunk 目录，其它路径 headless 下直接被拒），
+  `~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、`/var/run/secrets`、`**/.git/**` 等拒绝清单是第二道；
+  Kiro 进程以 `env -i` 许可清单环境启动，看不到云效令牌与 Flow 注入的其它变量。
 - Kiro 固定以 `--agent-engine v2` 运行：实测 headless 的默认引擎（v1）与预览版 v3 都不阻断
   工作区 `AGENTS.md` 注入，只有 v2 配合 `chat.disableInheritingDefaultResources` 才阻断
   （见 [docs/adr/0004-pin-kiro-cli-v2-engine.md](docs/adr/0004-pin-kiro-cli-v2-engine.md)）。
@@ -85,7 +91,7 @@
 | `scripts/probe/` | 环境探测脚本（真实 Codeup / 真实 kiro-cli），见下节与 `scripts/probe/README.md` |
 | `prompts/review-agent-prompt.md` | agent 提示词（稳定部分）：只读角色、不受信输入、P0/P1/P2 判定、掩码规则、输出契约 |
 | `prompts/review-prompt.md` | 运行时提示词（每次不同）：MR 元信息与本次契约标记随机串 `{{REVIEW_NONCE}}` |
-| `kiro/agent-codeup-reviewer.json` | 只读 custom agent 定义：工具仅 read/grep/glob，拒绝清单 V2/V3 双写，不加载工作区 MCP/Powers |
+| `kiro/agent-codeup-reviewer.json` | 只读 custom agent 定义：工具仅 read/grep/glob，`allowedPaths` 许可清单（两个运行时路径占位符，安装时注入），拒绝清单 V2/V3 双写，不加载工作区 MCP/Powers |
 | `pipeline/flow-pipeline.yaml` | 云效 Flow 流水线参考配置：双代码源 + MR 触发事件 + 评审任务 + 变量清单 |
 | `pipeline/setup-guide.md` | 部署指南：前提、流水线搭建、开关矩阵、验收清单、故障排查、安全隔离说明 |
 | `tests/` | 测试套件：DRY_RUN + mock kiro-cli + golden file + 变异测试，全程无网络依赖 |

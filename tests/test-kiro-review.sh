@@ -29,6 +29,17 @@ export MR_LOCAL_ID=7 MR_TARGET_BRANCH=master CI_COMMIT_REF_NAME=feature/x
 # 用法：run_case <名字> [VAR=值 ...]   额外的 VAR=值 只作用于这一次调用（VAR= 表示置空）。
 # 可选：CASE_TWEAK=<函数名> 在运行前于 checkout 目录内执行，用来改造 fixture。
 # 结果：CASE（用例目录）、RC、OUT；替身记录在 $CASE/{args,stdin,settings,cwdscan,calls,helpcwd}。
+# 替身 kiro-cli 的配置文件（票 15）：生产脚本以 `env -i` + 许可清单启动 kiro-cli，MOCK_* 变量到不了替身，
+# 替身改从 $HOME/.kiro-mock.env 读配置（HOME 在许可清单内）。所以每个用例都要把 MOCK_* 写进该文件——
+# 包括 run_case 之外直接调用脚本的用例：否则「Kiro 未被启动」这类断言会因为替身根本记不了 args 而恒真。
+# 用法：mock_env_file <HOME 目录> [MOCK_X=值 ...]（非 MOCK_ 开头的参数忽略，便于把 run_case 的 "$@" 原样传进来）
+mock_env_file() {
+  local home="$1"; shift
+  local a
+  : > "$home/.kiro-mock.env"
+  for a in "$@"; do [[ "$a" == MOCK_* ]] && printf '%s\n' "$a" >> "$home/.kiro-mock.env"; done
+  return 0
+}
 run_case() {
   local name="$1"; shift
   CASE="$tmp/case-$name"; mkdir -p "$CASE/home"
@@ -37,10 +48,15 @@ run_case() {
   # 显式清空：`CASE_TWEAK=f run_case x` 这种赋值前缀是否在函数返回后仍然生效，POSIX 未定义
   # （bash 3.2 不保留，POSIX 模式下保留）。不清掉的话，后面每个用例都会跑在被改造过的 fixture 上。
   CASE_TWEAK=""
+  # 替身配置同时走环境（settings/--help 这两次调用不在 env -i 之下）与配置文件（chat 那次在 env -i 之下）
+  mock_env_file "$CASE/home" MOCK_ARGS_FILE="$CASE/args" MOCK_STDIN_FILE="$CASE/stdin" MOCK_SETTINGS_FILE="$CASE/settings" \
+        MOCK_CWD_SCAN_FILE="$CASE/cwdscan" MOCK_CALLS_FILE="$CASE/calls" MOCK_HELP_CWD_FILE="$CASE/helpcwd" \
+        MOCK_ENV_FILE="$CASE/env" MOCK_ALLOW_SCAN_FILE="$CASE/allowscan" "$@"
   RC=0
   OUT=$(cd "$CASE/work" && env HOME="$CASE/home" REVIEW_REPO_DIR="$CASE/work" \
         MOCK_ARGS_FILE="$CASE/args" MOCK_STDIN_FILE="$CASE/stdin" MOCK_SETTINGS_FILE="$CASE/settings" \
         MOCK_CWD_SCAN_FILE="$CASE/cwdscan" MOCK_CALLS_FILE="$CASE/calls" MOCK_HELP_CWD_FILE="$CASE/helpcwd" \
+        MOCK_ENV_FILE="$CASE/env" MOCK_ALLOW_SCAN_FILE="$CASE/allowscan" \
         "$@" "$ROOT/scripts/kiro-review.sh" 2>&1) || RC=$?
 }
 # 某个 kiro-cli 子命令被调用了几次。calls 文件在「脚本还没调过任何 kiro-cli 子命令」时
@@ -80,10 +96,26 @@ run_case ok
 out=$OUT
 assert_rc "$RC" 0 "成功路径退出码 0"
 assert_contains "$(cat "$CASE/args")" "--no-interactive" "kiro 参数：no-interactive"
-# 参数文件每行一个参数：用整行精确匹配，避免 --trust-tools=read,grep,glob,shell 或 --agent-engine 也能蒙混过关
-assert_eq "$(grep -c -x -- '--trust-tools=read,grep,glob' "$CASE/args")" "1" "kiro 参数：--trust-tools 精确等于 read,grep,glob"
-assert_eq "$(grep -c -- '^--trust-tools=' "$CASE/args")" "1" "kiro 参数：只有一个 --trust-tools"
+# 读取边界来自受信 agent 的 allowedPaths（票 15 / P1-15）：参数里不得有任何 --trust-* 开关。
+# --trust-tools 让「整个工具免审」与路径边界叠加、语义不透明；--trust-all-tools（拒绝信息里推荐的那个）
+# 实测**绕过** allowedPaths（P1-15 T7）。参数文件每行一个参数，按行首匹配，等号与空格两种写法都拦。
+assert_eq "$(grep -c -- '^--trust' "$CASE/args")" "0" "kiro 参数：没有任何 --trust-* 开关"
 args_line=$(paste -sd' ' "$CASE/args")
+assert_not_contains "$args_line" "--trust-tools" "kiro 参数：不传 --trust-tools（免确认只来自 allowedPaths）"
+assert_not_contains "$args_line" "--trust-all-tools" "kiro 参数：绝不传 --trust-all-tools（它绕过 allowedPaths）"
+# Kiro 子进程环境 = env -i + 许可清单：替身记下 chat 时环境里的变量名
+env_names=$(cat "$CASE/env")
+for v in YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID DRY_RUN MR_LOCAL_ID MR_TARGET_BRANCH CI_COMMIT_REF_NAME MOCK_ARGS_FILE REVIEW_REPO_DIR; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "0" "Kiro 进程环境：没有 $v"
+done
+for v in PATH HOME KIRO_API_KEY KIRO_LOG_NO_COLOR; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "1" "Kiro 进程环境：有 $v"
+done
+assert_contains "$out" "Kiro 进程环境许可清单" "日志打出透传的变量名清单"
+env_log_line=$(printf '%s\n' "$out" | grep -F "Kiro 进程环境许可清单" | head -1)
+assert_contains "$env_log_line" "KIRO_API_KEY" "许可清单日志行列出 KIRO_API_KEY（只有名字）"
+assert_not_contains "$env_log_line" "YUNXIAO_TOKEN" "许可清单日志行不含 YUNXIAO_TOKEN"
+assert_not_contains "$out" "KIRO_API_KEY=k" "日志里不出现变量取值"
 assert_contains "$args_line" "--agent codeup-reviewer" "kiro 参数：套用受信 custom agent codeup-reviewer"
 assert_contains "$args_line" "--agent-engine v2" "kiro 参数：固定 --agent-engine v2"
 assert_contains "$out" "引擎：v2" "日志显式记录所用引擎为 v2"
@@ -162,7 +194,22 @@ assert_eq "$([[ "$inst_prompt" == file:///*/prompts/review-agent-prompt.md ]] &&
   "安装后的 prompt 为绝对 file:// 路径（实际：${inst_prompt}）"
 assert_eq "$([[ -r "${inst_prompt#file://}" ]] && echo y || echo n)" "y" "prompt 引用的提示词文件存在且可读"
 assert_eq "$(jq -c '[.includeMcpJson, .includePowers]' "$inst")" "[false,false]" "安装后的 agent 不含 MCP/Powers"
-assert_eq "$(jq -c 'del(.prompt)' "$inst")" "$(jq -c 'del(.prompt)' "$ROOT/kiro/agent-codeup-reviewer.json")" "安装只改写 prompt，其余字段与集成包一致"
+assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths)' "$inst")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths)' "$ROOT/kiro/agent-codeup-reviewer.json")" \
+  "安装只改写 prompt 与 allowedPaths 占位符，其余字段与集成包一致"
+# --- 读取边界（票 15）：allowedPaths = 业务库 checkout 物理路径 + 本次 $WORK/chunks；allowedTools 为空 ---
+ws_p=$(cd "$CASE/work" && pwd -P)
+assert_eq "$(jq -r '.toolsSettings.read.allowedPaths | length' "$inst")" "2" "安装后 allowedPaths 恰好两条"
+assert_eq "$(jq -r '.toolsSettings.read.allowedPaths[0]' "$inst")" "$ws_p" "allowedPaths[0] = 业务库 checkout 的物理路径"
+chunks_p=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$inst")
+assert_eq "$([[ "$chunks_p" == /*/chunks ]] && echo y || echo n)" "y" "allowedPaths[1] 是绝对路径下的 chunks 目录（实际：${chunks_p}）"
+assert_eq "$([[ "$chunks_p" == "$ws_p"/* ]] && echo inside || echo outside)" "outside" "chunks 目录不在业务库 checkout 之内（是 mktemp 出来的工作目录）"
+assert_eq "$(jq -c '.toolsSettings | [.read.allowedPaths, .grep.allowedPaths, .glob.allowedPaths] | unique | length' "$inst")" "1" "read/grep/glob 的 allowedPaths 同组"
+assert_eq "$(jq -c .allowedTools "$inst")" "[]" "安装后 allowedTools 为空"
+assert_eq "$(jq '[.. | strings | select(contains("{{"))] | length' "$inst")" "0" "安装后没有残留占位符"
+assert_contains "$out" "受信 agent 许可路径：${ws_p}、${chunks_p}" "日志打出许可路径两条（与安装文件一致）"
+# chat 时两条许可路径都真实存在（chunks 目录在 Kiro 启动前已建好——否则 build_review_input 之前装的 agent 指向一个还没有的目录）
+assert_eq "$(awk -F'\t' '{print $2}' "$CASE/allowscan" | sort -u)" "dir" "Kiro 启动时两条许可路径都是存在的目录"
+assert_eq "$(grep -c . "$CASE/allowscan")" "2" "allowscan 记录了两条路径"
 
 # ============ REVIEW_REPO_DIR 未设置：回退到 cwd（Flow 里 PROJECT_DIR 就是 cwd）============
 run_case fallback REVIEW_REPO_DIR=
@@ -191,7 +238,7 @@ sentinel_intact() {
 }
 assert_eq "$(sentinel_intact)" "intact" "前置：哨兵文件已就位（否则下面的断言恒真）"
 
-RC=0; CASE="$tmp/case-selftarget"; mkdir -p "$CASE/home"
+RC=0; CASE="$tmp/case-selftarget"; mkdir -p "$CASE/home"; mock_env_file "$CASE/home" MOCK_ARGS_FILE="$CASE/args"
 OUT=$(cd "$PKGCOPY" && env HOME="$CASE/home" REVIEW_REPO_DIR="$PKGCOPY" \
       MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=集成包：非零退出"
@@ -201,7 +248,7 @@ assert_eq "$(sentinel_intact)" "intact" "REVIEW_REPO_DIR=集成包：集成包�
 
 # 符号链接不能绕过这道保护（R10①：路径规范化必须用 pwd -P）
 ln -s "$PKGCOPY" "$tmp/pkglink"
-RC=0; CASE="$tmp/case-selflink"; mkdir -p "$CASE/home"
+RC=0; CASE="$tmp/case-selflink"; mkdir -p "$CASE/home"; mock_env_file "$CASE/home" MOCK_ARGS_FILE="$CASE/args"
 OUT=$(cd "$tmp" && env HOME="$CASE/home" REVIEW_REPO_DIR="$tmp/pkglink" \
       MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=指向集成包的符号链接：非零退出"
@@ -209,7 +256,7 @@ assert_contains "$OUT" "互相包含" "符号链接：同样被这道保护拦�
 assert_eq "$(sentinel_intact)" "intact" "符号链接：集成包内的哨兵文件仍在"
 
 # REVIEW_REPO_DIR 在集成包**内部**同样会删到集成包的文件，反向包含也要拦
-RC=0; CASE="$tmp/case-selfinner"; mkdir -p "$CASE/home" "$PKGCOPY/nested"
+RC=0; CASE="$tmp/case-selfinner"; mkdir -p "$CASE/home" "$PKGCOPY/nested"; mock_env_file "$CASE/home" MOCK_ARGS_FILE="$CASE/args"
 OUT=$(cd "$tmp" && env HOME="$CASE/home" REVIEW_REPO_DIR="$PKGCOPY/nested" \
       MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=集成包内的子目录：非零退出"
@@ -1221,6 +1268,31 @@ assert_not_contains "$idx_lines" "=> " '超限：索引里没有旧的 `=> 路�
 assert_contains "$idx_lines" '"file":"src/app.py"' "超限：file 字段是文件名本身"
 assert_eq "$(printf '%s\n' "$idx_lines" | jq -r 'select(.file == "src/app.py") | .added')" "1" "超限：src/app.py 的增行数按 numstat 算（+1 行密钥）"
 assert_contains "$stdin_ol" "=== DIFF ===" "超限：DIFF 节仍在（此时为空）"
+# 许可路径里的 chunks 目录就是 chunk 真正落盘的目录：Kiro 启动时那个目录里已有 0000.diff（票 15）
+allow_chunks_row=$(awk -F'\t' '$1 ~ /\/chunks$/ {print}' "$CASE/allowscan")
+assert_eq "$(printf '%s\n' "$allow_chunks_row" | grep -cE '(^|,)[0-9]{4}\.diff(,|$)')" "1" \
+  "超限：Kiro 启动时许可清单里的 chunks 目录内已有 NNNN.diff chunk 文件（就是 build_review_input 的落盘目录；实际：${allow_chunks_row})"
+assert_eq "$(printf '%s\n' "$idx_lines" | jq -r '.chunk | test("/chunks/[0-9]{4}\\.diff$")' | sort -u)" "true" "超限：索引里的 chunk 路径都在 chunks 目录下"
+# 索引里的 chunk 目录与 allowedPaths[1] 必须**逐字同一形态**（物理路径）：模型按索引去读，形态不同就落在 allow 之外
+# （kiro-cli 会不会先解析符号链接再比对未经实测，P1-15 T1 只按物理路径读过）。要让「逻辑路径 ≠ 物理路径」在任何平台上
+# 都成立：macOS 的 mktemp -d 落在 /var/folders（→ /private/var/folders 的符号链接，且它不理 TMPDIR）；Linux 的 /tmp 通常
+# 是真目录，所以给一个符号链接 TMPDIR（GNU mktemp 按它创建 $WORK）。断言不写死哪一种：只要求 allowedPaths[1] 已是物理
+# 形态、索引里的 chunk 目录与之逐字相同。
+mkdir -p "$tmp/tmp-real"; ln -s "$tmp/tmp-real" "$tmp/tmp-link"
+run_case overlimit-symtmp DIFF_SIZE_LIMIT=1 TMPDIR="$tmp/tmp-link"
+assert_rc "$RC" 0 "超限+符号链接 TMPDIR：退出码 0"
+allow_chunks_st=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$CASE/home/.kiro/agents/codeup-reviewer.json")
+assert_eq "$([[ "$allow_chunks_st" == /*/chunks ]] && echo y || echo n)" "y" "超限+符号链接 TMPDIR：allowedPaths[1] 是绝对路径下的 chunks（实际：${allow_chunks_st}）"
+idx_st=$(awk -v h="$IDX_HDR" 'index($0, h) == 1 {on=1; next} on && $0 == "" {exit} on {print}' "$CASE/stdin")
+assert_eq "$(printf '%s\n' "$idx_st" | grep -c .)" "$(git -C "$CASE/work" diff --no-renames --name-only master HEAD | wc -l | tr -d ' ')" "超限+符号链接 TMPDIR：索引非空、条数与变更文件数一致"
+idx_st_dir=$(printf '%s\n' "$idx_st" | jq -r '.chunk | sub("/[^/]*$"; "")' | sort -u)
+assert_eq "$idx_st_dir" "$allow_chunks_st" "超限+符号链接 TMPDIR：索引里每条 chunk 的目录与 allowedPaths[1] 逐字相同"
+# 前提自检：allowedPaths[1] 已是物理形态（$WORK 已被 trap 删掉，用其父目录——TMPDIR 或 /var/folders/…/T——的 pwd -P 判）
+allow_gp=$(dirname "$(dirname "$allow_chunks_st")")
+assert_eq "$allow_gp" "$(cd "$allow_gp" && pwd -P)" "超限+符号链接 TMPDIR：allowedPaths[1] 是物理形态（父目录 pwd -P 与原文一致）"
+# chunk 目录在 Kiro 启动时已存在（allowscan 记录的是 chat 时的状态），此刻 $WORK 已被脚本 trap 删掉，
+# 物理形态的判据用 allowscan 里的路径与 chunks 目录的父目录 pwd -P 对照：allowscan 每行首列就是 allowedPaths 原文
+assert_eq "$(awk -F'\t' '$1 ~ /\/chunks$/ {print $2}' "$CASE/allowscan")" "dir" "超限+符号链接 TMPDIR：Kiro 启动时 chunks 许可路径是存在的目录"
 assert_contains "$(posted_comment "$OUT")" "已按优先级截断" "超限：汇总评论的 diff 说明写明已截断"
 # 正控：阈值足够大时没有索引节
 run_case underlimit DIFF_SIZE_LIMIT=1000000
@@ -1258,6 +1330,22 @@ run_case goodlimits KIRO_TIMEOUT=60 DIFF_SIZE_LIMIT=1000000
 assert_rc "$RC" 0 "合法的秒数/字节数：评审照常成功"
 
 # ---- REVIEW_RERUN_HINT：AWS 档位可把提示语换成评论命令（Flow 默认不承诺它）----
+# ============ Kiro 子进程环境许可清单（票 15）：Flow 注入的任何东西都不进 Kiro 进程 ============
+# 许可清单内的变量各放一个（区域设置、代理、证书、XDG、KIRO_*），清单外放几个像凭证的 canary。
+run_case envscrub CODEUP_BOT_USERNAME=bot-x FLOW_CANARY_SECRET=s3cr3t AWS_SECRET_ACCESS_KEY=aws GIT_ASKPASS=/askpass \
+  LC_TIME=C HTTPS_PROXY=http://proxy.example:3128 http_proxy=http://proxy.example:3128 no_proxy=localhost \
+  XDG_CACHE_HOME=/tmp/xdg-canary SSL_CERT_FILE=/etc/ssl/cert.pem SSL_CERT_DIR=/etc/ssl/certs CURL_CA_BUNDLE=/etc/ssl/cert.pem KIRO_FOO=1
+assert_rc "$RC" 0 "环境许可清单：评审正常完成（清单内的变量足够 kiro-cli 启动）"
+env_names=$(cat "$CASE/env")
+for v in CODEUP_BOT_USERNAME FLOW_CANARY_SECRET AWS_SECRET_ACCESS_KEY GIT_ASKPASS YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "0" "环境许可清单：Kiro 进程看不到 $v"
+done
+for v in PATH HOME KIRO_API_KEY KIRO_FOO KIRO_LOG_NO_COLOR LC_TIME HTTPS_PROXY http_proxy no_proxy XDG_CACHE_HOME SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "1" "环境许可清单：Kiro 进程看得到 $v"
+done
+# 替身按 --agent 在 $HOME/.kiro/agents 下找定义、找不到就失败：rc 0 已证明 HOME 透传的是安装 agent 的那个 HOME
+assert_contains "$(paste -sd' ' "$CASE/args")" "--agent codeup-reviewer" "环境许可清单：仍以受信 agent 运行"
+
 run_case rerunhint REVIEW_RERUN_HINT='评论 `/kiro review` 可重新评审'
 assert_rc "$RC" 0 "REVIEW_RERUN_HINT：评审成功"
 comment=$(posted_comment "$OUT")

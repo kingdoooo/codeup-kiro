@@ -38,7 +38,29 @@
 #   MOCK_KIRO_TRUNCATED=1       finalText 被截断且 finalTextTruncated=true（→ 降级原因应点明截断）
 #   MOCK_KIRO_LEAK_SECRET=1     无标记且原文里带未掩码的真实形态密钥（→ 脚本侧掩码应生效）
 #   MOCK_KIRO_NO_STREAM_FLAG=1  模拟 --help 不列出 --output-format 的版本（→ 脚本应拒绝运行）
+#
+# 配置的来路（票 15）：生产脚本用 `env -i` + 许可清单启动 kiro-cli，MOCK_* 这类变量到不了本替身。
+# 所以替身先 source "$HOME/.kiro-mock.env"（测试把 MOCK_* 写在那里；HOME 在许可清单内，真实 kiro-cli 的
+# 登录态与 agent 目录也靠它），环境里已有的同名变量优先（变异测试去掉 env -i 后两边一致）。
+# 与真实 kiro-cli 一致的一点：`--agent X` 必须能在 $HOME/.kiro/agents/X.json 找到定义，找不到就失败退出——
+# HOME 没透传或 agent 没装到位时，评审不能「静默用默认 agent 跑」。
+# 额外记录：MOCK_ENV_FILE ← chat 时环境里的变量名（每行一个，只记名字不记值）；
+#           MOCK_ALLOW_SCAN_FILE ← agent 定义里 read.allowedPaths 每条路径在 chat 时是否为目录及目录内容
+#           （`路径<TAB>dir|MISSING<TAB>逗号分隔的目录内容`），用于断言 chunks 目录就是 diff chunk 的落盘目录。
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 先记下**收到的**环境里的变量名（再往下会从配置文件导出 MOCK_*，那些不算 kiro-cli 收到的环境）
+MOCK_RECEIVED_ENV=$(compgen -e | sort)
+if [[ -n "${HOME:-}" && -r "$HOME/.kiro-mock.env" ]]; then
+  # 文件里每行 `NAME=VALUE`（NAME 限 MOCK_*）；收到的环境里已有的名字不覆盖，文件内同名后者覆盖前者（与 env 的语义一致：
+  # 测试的 run_case 会把默认值与本次用例的覆盖值先后写进去）
+  while IFS= read -r _line || [[ -n "$_line" ]]; do
+    [[ "$_line" =~ ^(MOCK_[A-Z0-9_]+)=(.*)$ ]] || continue
+    _n="${BASH_REMATCH[1]}"; _v="${BASH_REMATCH[2]}"
+    printf '%s\n' "$MOCK_RECEIVED_ENV" | grep -qx -- "$_n" && continue
+    export "$_n=$_v"
+  done < "$HOME/.kiro-mock.env"
+  unset _line _n _v
+fi
 if [[ -n "${MOCK_CALLS_FILE:-}" ]]; then
   if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$MOCK_CALLS_FILE"; else printf '%s\n' "${1:-}" >> "$MOCK_CALLS_FILE"; fi
 fi
@@ -78,6 +100,23 @@ done
 MOCK_NONCE=$(printf '%s\n' "$@" | grep -oE '<<<KIRO_REVIEW_JSON:[0-9a-f]+>>>' | head -1 | sed -E 's/^<<<KIRO_REVIEW_JSON:([0-9a-f]+)>>>$/\1/')
 [[ -n "$MOCK_NONCE" ]] || MOCK_NONCE="nononcefound000"
 [[ -n "${MOCK_ARGS_FILE:-}" ]] && printf '%s\n' "$@" > "$MOCK_ARGS_FILE"
+[[ -n "${MOCK_ENV_FILE:-}" ]] && printf '%s\n' "$MOCK_RECEIVED_ENV" > "$MOCK_ENV_FILE"
+# --agent X → $HOME/.kiro/agents/X.json 必须存在（真实 kiro-cli 按 name 在 agent 目录里找）
+AGENT_ARG=""; prev=""
+for a in "$@"; do [[ "$prev" == "--agent" ]] && AGENT_ARG="$a"; prev="$a"; done
+if [[ -n "$AGENT_ARG" ]]; then
+  AGENT_JSON="${HOME:-/nonexistent}/.kiro/agents/${AGENT_ARG}.json"
+  if [[ ! -r "$AGENT_JSON" ]]; then
+    echo "mock kiro-cli: agent '${AGENT_ARG}' not found under ${HOME:-<HOME 未设置>}/.kiro/agents" >&2; exit 1
+  fi
+  if [[ -n "${MOCK_ALLOW_SCAN_FILE:-}" ]]; then
+    : > "$MOCK_ALLOW_SCAN_FILE"
+    while IFS= read -r p; do
+      if [[ -d "$p" ]]; then printf '%s\tdir\t%s\n' "$p" "$(ls -A "$p" | paste -sd, -)"
+      else printf '%s\tMISSING\t\n' "$p"; fi
+    done < <(jq -r '.toolsSettings.read.allowedPaths[]?' "$AGENT_JSON") >> "$MOCK_ALLOW_SCAN_FILE"
+  fi
+fi
 [[ -n "${MOCK_NONCE_FILE:-}" ]] && printf '%s\n' "$MOCK_NONCE" > "$MOCK_NONCE_FILE"
 if [[ -n "${MOCK_STDIN_FILE:-}" ]]; then cat > "$MOCK_STDIN_FILE"; else cat > /dev/null; fi
 if [[ -n "${MOCK_CWD_SCAN_FILE:-}" ]]; then
