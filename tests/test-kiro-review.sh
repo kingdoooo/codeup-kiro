@@ -1264,4 +1264,108 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" '评论 `/kiro review` 可重新评审' "REVIEW_RERUN_HINT：页脚用配置的提示语"
 assert_not_contains "$comment" "重跑流水线可重新评审" "REVIEW_RERUN_HINT：不再出现默认提示语"
 
+# ============================================================================
+# 票 16 / A10：脚本侧掩码覆盖全部 sink（spec I3 修订）
+# ============================================================================
+# mock 评审员输出**合法契约**、summary / verdict_reason / title / body / fix 里各放一个合成 token
+# （helpers.sh with_secrets：ghp_ 形态、AKIA 形态、base64 补位形态）。此前正常路径只做结构清洗、不掩码，
+# 三个值原样进汇总评论（CodeX P0-2）。断言对象是三处 sink：DRY_RUN 记录的汇总正文、每条行内正文、以及
+# 2> 捕获的流水线日志（OUT 同时含三者，所以对 OUT 整体断一次「原文不在」等于三处都断了；再对各处单独断
+# 「掩码形态在」，证明不是靠内容整体消失蒙对的）。
+with_secrets "$ROOT/tests/fixtures/contract/mock-review.json" > "$tmp/secrets-summary.json"
+with_secrets "$E2E_CONTRACT" > "$tmp/secrets-inline.json"
+# 三种 token 原文都不在（<内容> <说明前缀>）
+e2e_assert_no_secrets() {
+  assert_not_contains "$1" "$SEC_GHP" "$2：ghp_ 形态原文不出现"
+  assert_not_contains "$1" "$SEC_AKIA" "$2：AKIA 形态原文不出现"
+  assert_not_contains "$1" "$SEC_B64" "$2：base64 补位形态原文不出现"
+}
+# 三种掩码形态都在
+e2e_assert_masked() {
+  e2e_assert_no_secrets "$1" "$2"
+  assert_contains "$1" "$SEC_GHP_MASKED" "$2：ghp_ 形态掩成前 4 后 4"
+  assert_contains "$1" "$SEC_AKIA_MASKED" "$2：AKIA 形态掩成前 4 后 4"
+  assert_contains "$1" "$SEC_B64_MASKED" "$2：base64 补位形态掩成前 4 后 4"
+}
+
+# ---- INLINE_COMMENT=0：汇总正文 + 流水线日志 ----
+run_case sinkleak MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
+assert_rc "$RC" 0 "A10：合法契约带 token → 评审仍成功（掩码不是失败）"
+assert_not_contains "$OUT" "结构化解析失败" "A10：走的是正常结构化路径，不是降级路径上的旧掩码"
+comment=$(posted_comment "$OUT")
+e2e_assert_masked "$comment" "A10 汇总正文"
+e2e_assert_masked "$OUT" "A10 全部输出（含流水线日志）"
+assert_contains "$comment" "硬编码疑似应用密钥 ${SEC_AKIA_MASKED}**" "A10 汇总：标题里的 token 掩码后，加粗标题其余部分完好"
+assert_contains "$comment" "api_key = \"${SEC_B64_MASKED}\"" "A10 汇总：fix 里的 key=value 只掩取值、键名保留"
+assert_contains "$comment" "FAKE****0000" "A10 汇总：模型已自行掩码的值不被二次改写（幂等）"
+# 掩码不碰脚本结构：评审标记 / 隐藏历史 / 元信息表 / 页脚都还在原形
+assert_eq "$(printf '%s\n' "$comment" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:1 -->$')" "1" "A10 汇总：评审标记仍恰好一行"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^<!-- kiro-history:\[')" "1" "A10 汇总：隐藏历史仍在"
+assert_eq "$(meta_row "$comment" | tr -cd '|' | wc -c | tr -d ' ')" "5" "A10 汇总：元信息表列数不变"
+assert_contains "$comment" "第 1 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进" "A10 汇总：页脚不变"
+
+# ---- INLINE_COMMENT=1：每条行内正文 + 汇总 + 日志 ----
+run_inline_case sinkleak-inline ifx-sinkleak MOCK_KIRO_CONTRACT="$tmp/secrets-inline.json"
+assert_rc "$RC" 0 "A10 行内：评审成功"
+bodies=$(inline_bodies "$OUT")
+assert_eq "$(printf '%s\n' "$bodies" | grep -c .)" "3" "A10 行内：仍发出 3 条行内评论（掩码不改变发布计划）"
+inline_text=$(printf '%s\n' "$bodies" | jq -r '.content')
+e2e_assert_masked "$inline_text" "A10 行内正文"
+assert_contains "$inline_text" "**P0 · 硬编码疑似应用密钥 ${SEC_AKIA_MASKED}**" "A10 行内正文：首行加粗完好，只有 token 变掩码"
+assert_eq "$(printf '%s\n' "$inline_text" | grep -c '^<!-- kiro-inline:[0-9a-f]\{40\} L[0-9]*-[0-9]* sev=P[0-2] -->$')" "3" \
+  "A10 行内正文：三条隐藏标记完好（sha1 是十六进制、sev= 不在键名清单里，都没被掩）"
+e2e_assert_no_secrets "$OUT" "A10 行内全部输出（含汇总与流水线日志）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "$SEC_GHP_MASKED" "A10 行内的汇总：summary 里的 token 掩码后仍在"
+assert_contains "$comment" "$SEC_AKIA_MASKED" "A10 行内的汇总：verdict_reason 里的 token 掩码后仍在"
+assert_contains "$comment" "其中 3 条已标注在「文件改动」对应行" "A10 行内的汇总：计数不受掩码影响"
+
+# ---- 一次提交失败 → 退回逐条非草稿发布：回退路径复用同一份 body-<idx>.md，掩过一次就够 ----
+run_inline_case sinkleak-submitfail ifx-sinkleak-sf DRY_RUN_FAIL_ROUTES="submit-review:400" \
+  MOCK_KIRO_CONTRACT="$tmp/secrets-inline.json"
+assert_rc "$RC" 0 "A10 回退发布：评审成功"
+nondraft=$(inline_bodies "$OUT" | jq -r 'select(.draft == false) | .content')
+assert_eq "$(printf '%s\n' "$nondraft" | grep -c '^<!-- kiro-inline:')" "3" "A10 回退发布：三条非草稿正文都发了"
+e2e_assert_masked "$nondraft" "A10 回退发布的非草稿正文"
+e2e_assert_no_secrets "$OUT" "A10 回退发布全部输出"
+
+# ---- 行内全部发布失败 → 问题完整渲染进折叠区：折叠区里的 body/fix 由汇总的 sink 掩码兜住 ----
+run_inline_case sinkleak-allfail ifx-sinkleak-af DRY_RUN_FAIL_ROUTES="submit-review:400,create-comment-inline:400" \
+  MOCK_KIRO_CONTRACT="$tmp/secrets-inline.json"
+assert_rc "$RC" 0 "A10 折叠区：评审成功"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "**行内发布失败（3）**" "A10 折叠区：发布失败小节在"
+assert_contains "$comment" "api_key = \"${SEC_B64_MASKED}\"" "A10 折叠区：完整渲染的 fix 里 token 已掩"
+e2e_assert_masked "$comment" "A10 折叠区里的完整正文"
+e2e_assert_no_secrets "$OUT" "A10 折叠区全部输出"
+
+# ---- 截断变体：掩码在截断之前，日志里回显的「完整内容」也是掩码后的 ----
+run_case sinkleak-trunc MAX_COMMENT_BYTES=1200 MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
+assert_rc "$RC" 0 "A10 截断：评审成功"
+assert_contains "$OUT" "评审报告超长已截断；完整内容如下：" "A10 截断：日志确实回显了完整内容（否则下面的断言是空转）"
+assert_contains "$OUT" "已截断（上限 1200 字节）" "A10 截断：评论确实被截断"
+e2e_assert_masked "$OUT" "A10 截断（日志全文 + 截断后评论）"
+
+# ---- 回写失败变体：日志里回显的「评审结果如下」也是掩码后的 ----
+run_case sinkleak-postfail DRY_RUN_FAIL_ROUTES="create-comment:500" CODEUP_RETRY_BACKOFF=0 \
+  MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "A10 回写失败：非零退出"
+assert_contains "$OUT" "OpenAPI 回写失败（已按策略重试）。评审结果如下：" "A10 回写失败：日志确实回显了评论全文"
+e2e_assert_masked "$OUT" "A10 回写失败（日志全文）"
+
+# ---- 掩码程序失败 → 绝不把未掩码的评论往下送：走失败评论，且失败评论自己也只剩固定文案 ----
+# 故障注入替身（helpers.sh make_bad_awk）：只让 review_redact_secrets 那段 awk 程序失败，其余 awk 调用透传。
+make_bad_awk "$tmp/badawk"
+run_case sinkleak-redactfail PATH="$tmp/badawk:$PATH" MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "A10 掩码失败：评审以失败结束（不能带着未掩码的评论成功）"
+assert_contains "$OUT" "评论掩码失败" "A10 掩码失败：日志写明原因"
+e2e_assert_no_secrets "$OUT" "A10 掩码失败（全部输出：汇总没发、失败评论与日志都不含原文）"
+assert_not_contains "$OUT" "$SEC_GHP_MASKED" "A10 掩码失败：掩码后的形态也不在（正控：掩码确实没跑成，不是替身没生效）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "⚠️ 评审未完成" "A10 掩码失败：MR 上仍有失败评论（I10）"
+assert_contains "$comment" "只保留固定文案" "A10 掩码失败：失败评论退回只含固定文案的最小形态（掩码不可用时连 reason 都不带）"
+assert_not_contains "$comment" "评论掩码失败" "A10 掩码失败：最小评论确实不带 die_review 的原因文本"
+assert_eq "$(printf '%s\n' "$comment" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:1 -->$')" "1" "A10 掩码失败：最小评论仍带评审标记（下次评审找得到）"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^<!-- kiro-history:\[')" "1" "A10 掩码失败：最小评论仍带隐藏历史"
+
 report

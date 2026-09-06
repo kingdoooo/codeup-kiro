@@ -1951,6 +1951,224 @@ out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src feature/u
         --ts "2026-09-02 20:10:02" --diff-note "完整直传")
 assert_contains "$(meta_row "$out")" '`feature/user-search` → `master`' "元信息表：正常分支名原样渲染"
 
+# ============================================================================
+# 票 16：脚本侧掩码覆盖全部 sink（spec I3 修订）
+# ============================================================================
+# 正常路径（review_validate → review_render_summary / review_render_inline_body）此前只做 _sanitize_md，
+# 不掩码：一份完全合法的契约里 title / body / fix 各放一个合成 token，三个值原样进汇总评论（CodeX P0-2）。
+# 修法是 sink 层：渲染完的最终 Markdown 整份过 review_redact_file，再截断、再回写。所以这里的 golden 断的
+# 是「最终评论」而不是某个字段——同时要证明掩码**没有碰脚本自己生成的结构**（评审标记、隐藏历史、
+# 行内标记、元信息表、<details>、页脚）：现有全部 golden 过一遍掩码必须逐字节不变。
+
+# ---- review_redact_file：就地改写；空文件 / 不可读 / 掩码程序失败 → 非零，且原文件一个字节都不动 ----
+printf 'token: %s\n正文。\n' "$SEC_GHP" > "$tmp/rf.md"
+rc=0; review_redact_file "$tmp/rf.md" || rc=$?
+assert_rc "$rc" 0 "redact_file：正常文件 rc 0"
+assert_eq "$(cat "$tmp/rf.md")" "$(printf 'token: %s\n正文。' "$SEC_GHP_MASKED")" "redact_file：就地改写成掩码后的内容"
+cp "$tmp/rf.md" "$tmp/rf-twice.md"
+review_redact_file "$tmp/rf-twice.md"
+assert_eq "$(cmp -s "$tmp/rf.md" "$tmp/rf-twice.md" && echo same || echo differ)" "same" "redact_file：幂等（掩码后的文件再掩一次不变）"
+: > "$tmp/rf-empty.md"
+rc=0; review_redact_file "$tmp/rf-empty.md" 2>/dev/null || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "redact_file：空文件 → 非零（调用方按渲染失败处理）"
+rc=0; review_redact_file "$tmp/no-such-file.md" 2>/dev/null || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "redact_file：文件不存在 → 非零"
+rc=0; review_redact_file 2>/dev/null || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "redact_file：缺参数 → 非零"
+# 掩码程序本身失败（awk 退出非零 / 一个字节都没输出）：必须非零，且**原文件保持原样**——
+# 调用方靠这个 rc 决定走 die_review；如果这里把空文件或半截文件留在原位，「掩码失败」就会以「空评论」或
+# 「残片」的形态继续往 sink 走。用同名 shell 函数遮住 awk（review_redact_secrets 里是 `LC_ALL=C awk`，函数优先于 PATH）。
+printf 'token: %s\n' "$SEC_GHP" > "$tmp/rf-fail.md"; cp "$tmp/rf-fail.md" "$tmp/rf-fail.orig"
+awk() { return 1; }
+rc=0; review_redact_file "$tmp/rf-fail.md" 2>/dev/null || rc=$?
+unset -f awk
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "redact_file：awk 失败 → 非零"
+assert_eq "$(cmp -s "$tmp/rf-fail.md" "$tmp/rf-fail.orig" && echo same || echo differ)" "same" "redact_file：awk 失败时原文件逐字节不动（不留空文件/半截文件）"
+awk() { :; }
+rc=0; review_redact_file "$tmp/rf-fail.md" 2>/dev/null || rc=$?
+unset -f awk
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "redact_file：awk 一个字节都没输出 → 也算失败（空正文不能往 sink 送）"
+assert_eq "$(cmp -s "$tmp/rf-fail.md" "$tmp/rf-fail.orig" && echo same || echo differ)" "same" "redact_file：输出为空时原文件同样不动"
+# 正控：遮住 awk 的那两段确实遮住了——同一个文件在没遮的时候掩得掉
+review_redact_file "$tmp/rf-fail.md"
+assert_eq "$(cat "$tmp/rf-fail.md")" "token: ${SEC_GHP_MASKED}" "redact_file 正控：解除遮罩后同一文件正常掩码"
+
+# ---- golden ①：合法契约 + 三种形态 token（helpers.sh with_secrets）→ 掩码只动 token ----
+# 把 token / 掩码剔掉：每处插入都是「空格 + token」或独占一行，剔掉后应逐字节等于不带 token 的同形态 golden。
+strip_secrets() {
+  sed -E -e "/^api_key = \"(${SEC_B64}|${SEC_B64_MASKED//\*/\\*})\"\$/d" \
+         -e "s/ (${SEC_GHP}|${SEC_GHP_MASKED//\*/\\*})//g" \
+         -e "s/ (${SEC_AKIA}|${SEC_AKIA_MASKED//\*/\\*})//g"
+}
+same_as() { cmp -s "$1" "$2" && echo same || echo differ; }   # <文件 A> <文件 B>
+# 三种 token 都不在、三种掩码都在（<文件> <说明前缀>）
+assert_masked() {
+  local body; body=$(cat "$1")
+  assert_not_contains "$body" "$SEC_GHP" "$2：ghp_ 形态原文不出现"
+  assert_not_contains "$body" "$SEC_AKIA" "$2：AKIA 形态原文不出现"
+  assert_not_contains "$body" "$SEC_B64" "$2：base64 补位形态原文不出现"
+  assert_contains "$body" "$SEC_GHP_MASKED" "$2：ghp_ 形态掩成前 4 后 4"
+  assert_contains "$body" "$SEC_AKIA_MASKED" "$2：AKIA 形态掩成前 4 后 4"
+  assert_contains "$body" "$SEC_B64_MASKED" "$2：base64 补位形态掩成前 4 后 4"
+}
+
+# INLINE_COMMENT=0 汇总：summary / verdict_reason / title / body / fix 五个槽位都有 token
+with_secrets fixtures/contract/full.json > "$tmp/secrets-full.json"
+render "$tmp/secrets-full.json" "$tmp/secrets-full.raw.md"
+# 正控：渲染器（含 review_validate 的 _sanitize_md）自己不掩码——三种 token 在渲染结果里原样都在。
+# 没有这条，下面的 golden 可能是 _sanitize_md 顺手做掉的，sink 掩码形同虚设也测不出来。
+raw=$(cat "$tmp/secrets-full.raw.md")
+assert_contains "$raw" "$SEC_GHP" "票 16 正控：渲染器不掩 ghp_ 形态（掩码只能来自 sink 层）"
+assert_contains "$raw" "$SEC_AKIA" "票 16 正控：渲染器不掩 AKIA 形态"
+assert_contains "$raw" "$SEC_B64" "票 16 正控：渲染器不掩 base64 补位形态"
+assert_eq "$(strip_secrets < "$tmp/secrets-full.raw.md" | cmp -s - "$GOLDEN/summary-full.md" && echo same || echo differ)" "same" \
+  "票 16 正控：带 token 的 fixture 渲染后剔掉 token 与 summary-full.md 逐字节一致（fixture 只差 token）"
+cp "$tmp/secrets-full.raw.md" "$tmp/secrets-full.md"
+review_redact_file "$tmp/secrets-full.md"
+assert_golden "$tmp/secrets-full.md" summary-full-secrets.md "票 16 golden①：INLINE_COMMENT=0 汇总，五个槽位的 token 全部掩码"
+assert_masked "$tmp/secrets-full.md" "票 16 汇总(0)"
+assert_eq "$(grep -c -F "$SEC_GHP_MASKED" "$tmp/secrets-full.md")" "3" "票 16 汇总(0)：ghp_ 掩码出现在 summary、F1 body、F3 body 三行"
+assert_eq "$(grep -c -F "$SEC_AKIA_MASKED" "$tmp/secrets-full.md")" "2" "票 16 汇总(0)：AKIA 掩码出现在 verdict_reason 与 F1 标题两行"
+assert_eq "$(grep -c -F "api_key = \"${SEC_B64_MASKED}\"" "$tmp/secrets-full.md")" "1" "票 16 汇总(0)：fix 代码围栏里的 key=value 只掩取值、键名保留"
+strip_secrets < "$tmp/secrets-full.md" > "$tmp/secrets-full.stripped.md"
+assert_eq "$(same_as "$tmp/secrets-full.stripped.md" "$GOLDEN/summary-full.md")" "same" \
+  "票 16 golden①：掩码后剔掉掩码与 summary-full.md 逐字节一致——掩码只动了 token，没碰任何脚本结构"
+
+# INLINE_COMMENT=1 汇总：summary / verdict_reason 与折叠区首句里的 token
+with_secrets fixtures/contract/inline.json > "$tmp/secrets-inline.json"
+review_validate < "$tmp/secrets-inline.json" > "$tmp/secrets-inline-validated.json"
+review_plan_inline --json "$tmp/secrets-inline-validated.json" --changed-lines "$CL" > "$tmp/secrets-plan.json"
+assert_eq "$(ids "$tmp/secrets-plan.json" inline)" "F1,F7,F2" "票 16 正控：带 token 的契约规划结果与不带时一致"
+render_inline "$tmp/secrets-plan.json" "$tmp/secrets-inline.raw.md"
+assert_contains "$(cat "$tmp/secrets-inline.raw.md")" "$SEC_GHP" "票 16 正控：INLINE=1 渲染器不掩 ghp_ 形态"
+cp "$tmp/secrets-inline.raw.md" "$tmp/secrets-inline.md"
+review_redact_file "$tmp/secrets-inline.md"
+assert_golden "$tmp/secrets-inline.md" summary-inline-secrets.md "票 16 golden①：INLINE_COMMENT=1 汇总，token 全部掩码"
+body=$(cat "$tmp/secrets-inline.md")
+assert_not_contains "$body" "$SEC_GHP" "票 16 汇总(1)：ghp_ 形态原文不出现"
+assert_not_contains "$body" "$SEC_AKIA" "票 16 汇总(1)：AKIA 形态原文不出现"
+assert_contains "$body" "$SEC_GHP_MASKED" "票 16 汇总(1)：ghp_ 形态掩成前 4 后 4"
+assert_contains "$body" "$SEC_AKIA_MASKED" "票 16 汇总(1)：AKIA 形态掩成前 4 后 4"
+assert_contains "$body" "**变量命名过于笼统** — \`data\` 这个名字看不出装的是什么 ${SEC_GHP_MASKED}。" "票 16 汇总(1)：折叠区首句里的 token 也掩了"
+assert_eq "$(strip_secrets < "$tmp/secrets-inline.md" | cmp -s - "$GOLDEN/summary-inline.md" && echo same || echo differ)" "same" \
+  "票 16 golden①：INLINE=1 掩码后剔掉掩码与 summary-inline.md 逐字节一致"
+
+# 一条行内正文：title / body / fix 三个槽位。指纹是渲染器的入参（不是从标题反算的），沿用不带 token 的 fpR，
+# 这样标记行也能进「只动了 token」的逐字节对比。
+jq -c '.inline[0]' "$tmp/secrets-plan.json" > "$tmp/secrets-item.json"
+assert_eq "$(jq -r .id "$tmp/secrets-item.json")" "F1" "票 16 正控：行内第一条仍是 F1"
+review_render_inline_body "$tmp/secrets-item.json" 90fcb05 "$fpR" > "$tmp/secrets-inline-body.raw.md"
+assert_contains "$(cat "$tmp/secrets-inline-body.raw.md")" "$SEC_B64" "票 16 正控：行内正文渲染器不掩 base64 补位形态"
+cp "$tmp/secrets-inline-body.raw.md" "$tmp/secrets-inline-body.md"
+review_redact_file "$tmp/secrets-inline-body.md"
+assert_golden "$tmp/secrets-inline-body.md" inline-range-secrets.md "票 16 golden①：行内正文，title/body/fix 的 token 全部掩码"
+assert_masked "$tmp/secrets-inline-body.md" "票 16 行内正文"
+assert_contains "$(cat "$tmp/secrets-inline-body.md")" "**P0 · 用户输入直接拼接进 SQL ${SEC_AKIA_MASKED}（L30–L31）**" "票 16 行内正文：首行加粗与区间后缀完好，只有 token 变成掩码"
+assert_eq "$(strip_secrets < "$tmp/secrets-inline-body.md" | cmp -s - "$GOLDEN/inline-range.md" && echo same || echo differ)" "same" \
+  "票 16 golden①：行内正文掩码后剔掉掩码与 inline-range.md 逐字节一致（含 kiro-inline 标记行）"
+
+# ---- golden ②：现有全部 golden 过掩码后逐字节不变——「不碰脚本结构」的直接证据 ----
+# 评审标记 / 隐藏历史 / 行内标记（sha1 是纯十六进制，sev= 的键不在键名清单里）/ 元信息表 / <details> / 页脚，
+# 任何一处被误掩都会在这里现形。新 golden（*-secrets.md）本身就是掩码后的输出，跟着一起证明幂等。
+n_golden=0
+for g in "$GOLDEN"/*.md; do
+  cp "$g" "$tmp/golden-pass.md"
+  review_redact_file "$tmp/golden-pass.md"
+  assert_eq "$(same_as "$g" "$tmp/golden-pass.md")" "same" "票 16 golden②：$(basename "$g") 过 sink 掩码后逐字节不变"
+  n_golden=$((n_golden + 1))
+done
+assert_eq "$([[ $n_golden -ge 13 ]] && echo enough)" "enough" "票 16 golden②：覆盖了全部 golden（≥13 个，实际 ${n_golden}）"
+
+# ---- golden ③：降级路径已在 sanitize 之前掩过一次，sink 层再掩一遍必须幂等 ----
+printf '# 代码评审报告\n\nP0：写死了 token = %s，还有 %s。\napi_key = "%s"\n\n总体结论：不建议合并。\n' \
+  "$SEC_GHP" "$SEC_AKIA" "$SEC_B64" > "$tmp/deg-secrets.raw.md"
+review_render_degraded --text "$tmp/deg-secrets.raw.md" --sha 90fcb05 --src feature/user-search --dst master \
+  --ts "2026-09-02 20:10:02" --diff-note "完整直传" --reason "输出中未找到契约标记" > "$tmp/deg-secrets.md"
+assert_masked "$tmp/deg-secrets.md" "票 16 降级"
+cp "$tmp/deg-secrets.md" "$tmp/deg-secrets.sink.md"
+review_redact_file "$tmp/deg-secrets.sink.md"
+assert_eq "$(same_as "$tmp/deg-secrets.md" "$tmp/deg-secrets.sink.md")" "same" "票 16 golden③：降级评论再过一次 sink 掩码逐字节不变（幂等，不会掩成 ghp_****）"
+# 失败评论：--reason 里带模型回显的取值（jq 报错会回显模型文本）时同样要能被 sink 掩码掩掉
+review_render_failure --reason "契约 JSON 顶层结构不符（Cannot iterate over string (\"${SEC_GHP}\")）" --sha 90fcb05 \
+  --src feature/user-search --dst master --ts "2026-09-02 20:10:02" --diff-note "完整直传" > "$tmp/fail-secrets.md"
+assert_contains "$(cat "$tmp/fail-secrets.md")" "$SEC_GHP" "票 16 正控：失败评论渲染器自己不掩（掩码在 die_review 的 sink 层）"
+review_redact_file "$tmp/fail-secrets.md"
+assert_not_contains "$(cat "$tmp/fail-secrets.md")" "$SEC_GHP" "票 16：失败评论过 sink 掩码后 reason 里的 token 不在"
+assert_contains "$(cat "$tmp/fail-secrets.md")" "$SEC_GHP_MASKED" "票 16：失败评论的 reason 里 token 掩成前 4 后 4"
+assert_eq "$(printf '%s\n' "$(cat "$tmp/fail-secrets.md")" | grep -cE '^<!-- kiro-review:90fcb05 run:1 -->$')" "1" "票 16：失败评论掩码后评审标记仍恰好一行"
+
+# ---- PEM 规则搬到整份评论上的边界：BEGIN 与 END 落在不同字段时不能吞掉中间的脚本结构 ----
+# 票 10 的 PEM 规则只在降级原文上跑过：起始行到很远的 END 行之间全当块内容丢掉，丢的只是模型文本。到了 sink 层，
+# BEGIN 可能在 F1 的 body、END 在 F3 的 body——中间是脚本生成的小节标题与别的问题（自审复现：76 行的汇总掩成 27 行，
+# `## 结论`、`## 问题统计`、P0/P1 问题全没了，而统计与历次表还写着 P0 1）。现在 END 到来时先看块内是否全是密钥块该有的行，
+# 不是 → 按未闭合块同样的方式放出。期望 = 原渲染：BEGIN 行 → 屏蔽占位 + 提示行；END 行删掉；其余逐字节不变。
+D5="-----"; PEM_B="${D5}BEGIN RSA PRIVATE KEY${D5}"; PEM_E="${D5}END RSA PRIVATE KEY${D5}"   # 拼接：完整 PEM 头字面量不进源码（Code Defender）
+PEM_PLACEHOLDER="**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
+pem_straddle_note() { printf '> ⚠️ 上面的 PEM 起始行与 END 行之间夹着不像密钥正文的内容（评审员可能只是在文字里引用了这两行）；起始行后若有密钥正文已一并屏蔽，其后 %s 行按原文保留并继续掩码。' "$1"; }
+jq --arg b "$PEM_B" --arg e "$PEM_E" '.findings[0].body += "\n\n" + $b | .findings[2].body += "\n\n" + $e' \
+  fixtures/contract/full.json > "$tmp/pem-straddle.json"
+render "$tmp/pem-straddle.json" "$tmp/pem-straddle.raw.md"
+assert_eq "$(grep -cxF -- "$PEM_B" "$tmp/pem-straddle.raw.md")" "1" "票 16 PEM 正控：渲染结果里 BEGIN 独占一行（sanitize 没动它）"
+assert_eq "$(grep -cxF -- "$PEM_E" "$tmp/pem-straddle.raw.md")" "1" "票 16 PEM 正控：渲染结果里 END 独占一行"
+held_n=$(awk -v b="$PEM_B" -v e="$PEM_E" '$0 == b {f=1; next} $0 == e {f=0} f {c++} END {print c+0}' "$tmp/pem-straddle.raw.md")
+assert_eq "$([[ $held_n -gt 10 ]] && echo many)" "many" "票 16 PEM 正控：BEGIN 与 END 之间夹着 ${held_n} 行脚本结构与别的问题"
+awk -v b="$PEM_B" -v e="$PEM_E" -v ph="$PEM_PLACEHOLDER" -v note="$(pem_straddle_note "$held_n")" \
+  '$0 == b { print ph; print note; next } $0 == e { next } { print }' "$tmp/pem-straddle.raw.md" > "$tmp/pem-straddle.expected.md"
+cp "$tmp/pem-straddle.raw.md" "$tmp/pem-straddle.md"
+rc=0; review_redact_file "$tmp/pem-straddle.md" || rc=$?
+assert_rc "$rc" 0 "票 16 PEM：跨字段的 BEGIN/END 掩码 rc 0"
+assert_eq "$(same_as "$tmp/pem-straddle.md" "$tmp/pem-straddle.expected.md")" "same" \
+  "票 16 PEM：跨字段 BEGIN/END 只动了这两行（占位 + 提示 / 删除），中间 ${held_n} 行脚本结构与问题逐字节保留"
+body=$(cat "$tmp/pem-straddle.md")
+assert_contains "$body" "**P1 应当修复（2）**" "票 16 PEM：夹在中间的 P1 小节标题还在"
+assert_contains "$body" "## 结论：建议修改后合并" "票 16 PEM：结论小节还在"
+assert_not_contains "$body" "$PEM_E" "票 16 PEM：END 行本身不进评论"
+# 正控 ①：真正的 PEM 块（起始行 + 正文 + END 连在一起，在 fix 的代码围栏里）仍整块丢弃、不留提示、围栏配对
+PEM_BODY1="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02"
+jq --arg b "$PEM_B" --arg e "$PEM_E" --arg l1 "$PEM_BODY1" \
+   '.findings[0].fix = "```\n" + $b + "\n" + $l1 + "\n" + $l1 + "\nc2hvcnQ=\n" + $e + "\n```"' \
+  fixtures/contract/full.json > "$tmp/pem-block.json"
+render "$tmp/pem-block.json" "$tmp/pem-block.raw.md"
+assert_eq "$(grep -cF -- "$PEM_BODY1" "$tmp/pem-block.raw.md")" "2" "票 16 PEM 正控：渲染器不掩 PEM 正文（掩码只能来自 sink 层）"
+awk -v b="$PEM_B" -v e="$PEM_E" -v ph="$PEM_PLACEHOLDER" '$0 == b { print ph; f=1; next } $0 == e { f=0; next } !f { print }' \
+  "$tmp/pem-block.raw.md" > "$tmp/pem-block.expected.md"
+cp "$tmp/pem-block.raw.md" "$tmp/pem-block.md"
+rc=0; review_redact_file "$tmp/pem-block.md" || rc=$?
+assert_rc "$rc" 0 "票 16 PEM 正控：真块掩码 rc 0"
+assert_eq "$(same_as "$tmp/pem-block.md" "$tmp/pem-block.expected.md")" "same" "票 16 PEM 正控：真块整块换成一行占位，其余逐字节不变（零泄漏、不留提示）"
+assert_not_contains "$(cat "$tmp/pem-block.md")" "上面的 PEM" "票 16 PEM 正控：真块不带任何提示行"
+assert_eq "$(( $(grep -c '^```' "$tmp/pem-block.md") % 2 ))" "0" "票 16 PEM 正控：围栏仍配对"
+# 正控 ②：行内正文里 BEGIN 在标题、END 在 fix → 行内标记行逐字节保留（丢了它下次评审认不出自己的评论，重复发）
+jq --arg b "$PEM_B" --arg e "$PEM_E" '.title += " " + $b | .fix += "\n" + $e' "$tmp/item-range.json" > "$tmp/pem-item.json"
+review_render_inline_body "$tmp/pem-item.json" 90fcb05 "$fpR" > "$tmp/pem-inline.md"
+rc=0; review_redact_file "$tmp/pem-inline.md" || rc=$?
+assert_rc "$rc" 0 "票 16 PEM 行内：标题带 BEGIN、fix 带 END 时掩码 rc 0"
+assert_eq "$(grep -cxF -- "<!-- kiro-inline:${fpR} L30-31 sev=P0 -->" "$tmp/pem-inline.md")" "1" "票 16 PEM 行内：行内标记逐字节仍在"
+assert_contains "$(cat "$tmp/pem-inline.md")" "— Kiro 评审 · 提交 \`90fcb05\`" "票 16 PEM 行内：页脚仍在"
+assert_contains "$(cat "$tmp/pem-inline.md")" "**修复建议**" "票 16 PEM 行内：修复建议小节仍在"
+
+# ---- review_redact_file 的结构硬守卫：掩码后脚本标记行丢失 → rc 3，原文件不动（与截断的硬守卫同一个理由）----
+# 用子 shell 里的同名函数遮住 review_redact_secrets（在父 shell 里 unset -f 会把真函数一起删掉），模拟一条会删行的规则。
+printf '# Kiro 代码评审\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-history:[] -->\n\n正文 %s\n' "$SEC_GHP" > "$tmp/guard.md"
+cp "$tmp/guard.md" "$tmp/guard.orig"
+rc=$( ( review_redact_secrets() { grep -v 'kiro-review:'; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "票 16 守卫：掩码把评审标记删了 → rc 3"
+assert_eq "$(same_as "$tmp/guard.md" "$tmp/guard.orig")" "same" "票 16 守卫：拒绝写回时原文件逐字节不动"
+rc=$( ( review_redact_secrets() { grep -v 'kiro-history:'; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "票 16 守卫：隐藏历史标记丢失同样 rc 3"
+printf '**P0 · t**\n<!-- kiro-inline:%s L30-31 sev=P0 -->\n\n正文\n' "$fpR" > "$tmp/guard-inline.md"
+rc=$( ( review_redact_secrets() { grep -v 'kiro-inline:'; }; review_redact_file "$tmp/guard-inline.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "票 16 守卫：行内标记丢失 rc 3"
+rc=$( ( review_redact_secrets() { sed 's/ run:1 / run:2 /'; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "票 16 守卫：标记行被改写（不只是删除）同样 rc 3——守卫要求逐字节"
+# 正控：只删非标记行的规则不触发守卫（守卫只看标记），真规则对同一文件正常掩码
+rc=$( ( review_redact_secrets() { grep -v '^正文'; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "0" "票 16 守卫正控：删的不是标记行 → 放行（守卫只管标记）"
+cp "$tmp/guard.orig" "$tmp/guard.md"
+review_redact_file "$tmp/guard.md"
+assert_contains "$(cat "$tmp/guard.md")" "正文 ${SEC_GHP_MASKED}" "票 16 守卫正控：真规则对同一文件正常掩码"
+assert_eq "$(grep -cxF -- '<!-- kiro-review:90fcb05 run:1 -->' "$tmp/guard.md")" "1" "票 16 守卫正控：真规则不碰评审标记"
+
 if [[ "$GOLDEN_DIRTY" == "1" ]]; then
   echo "GOLDEN_UPDATE=1：golden 文件已重写，本次运行不构成通过。请人工读 git diff 确认渲染正确，再不带该变量重跑。" >&2
   exit 1

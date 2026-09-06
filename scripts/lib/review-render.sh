@@ -1777,17 +1777,33 @@ review_redact_secrets() {
       }
       return out line
     }
-    # 提示文案只写一处：两种措辞只在结尾不同，抄成两条整句时改一句会漏另一句。
-    function pem_note(k,   head) {
-      head = "> ⚠️ 上面的 PEM 块没有配对的 END 行（评审员只引用了起始行，或原文被截断）；"
+    # 提示文案只写一处：几种措辞只在开头/结尾不同，抄成整句时改一句会漏另一句。
+    #   kind 0 = 到 EOF 仍未闭合；kind 1 = 有 END 行但块内夹着不像密钥正文的内容（见 pem_pure）。
+    function pem_note(kind, k,   head) {
+      if (kind == 1) head = "> ⚠️ 上面的 PEM 起始行与 END 行之间夹着不像密钥正文的内容（评审员可能只是在文字里引用了这两行）；起始行后若有密钥正文已一并屏蔽，"
+      else           head = "> ⚠️ 上面的 PEM 块没有配对的 END 行（评审员只引用了起始行，或原文被截断）；"
       if (k > 0) return head "其后 " k " 行按原文保留并继续掩码。"
       return head "其后没有其他内容。"
     }
     function pem_hold(l) { held[++held_n] = l }
     function pem_drop() { held_n = 0; inpem = 0 }
-    # EOF 仍未闭合：丢掉紧跟起始行的密钥正文（含 Proc-Type/DEK-Info 头与头后的那一个空行），
-    # 其余按普通行掩码放出，整行 base64 与连片 base64 额外再掩一次。
-    function pem_flush(   i, first, prev_hdr, l) {
+    # 块内是否全是「密钥块该有的行」：Proc-Type/DEK-Info 头、空行、密钥正文形态。一条真正的 PEM 私钥块
+    # 只会有这几种行；夹着别的东西（小节标题、加粗行、表格、评审标记……）就不是一个块，而是模型在两处
+    # 文字里分别引用了起始行与 END 行。票 16 把本函数从「只跑降级原文」搬到了整份评论上（汇总、行内正文），
+    # BEGIN 可能落在 F1 的 body、END 落在 F3 的 body——中间全是脚本生成的结构与别的问题；原先「起始行到很远的
+    # END 行之间整段丢掉」在降级原文上只丢模型文本，在整份评论上会把 P0 问题、小节标题、行内标记一起吞掉
+    # （汇总统计还写着 P0 1，正文里却没有；行内标记丢了下次评审认不出自己的评论 → 重复发，违反 I4）。
+    function pem_pure(   i, l) {
+      for (i = 1; i <= held_n; i++) {
+        l = held[i]
+        if (pem_is_hdr(l) || l ~ /^[[:space:]]*$/ || pem_body_like(l)) continue
+        return 0
+      }
+      return 1
+    }
+    # 块没有按「密钥块」收尾（kind 0：到 EOF 仍未闭合；kind 1：有 END 但块内不纯）：丢掉紧跟起始行的密钥正文
+    # （含 Proc-Type/DEK-Info 头与头后的那一个空行），其余按普通行掩码放出，整行 base64 与连片 base64 额外再掩一次。
+    function pem_flush(kind,   i, first, prev_hdr, l) {
       first = 1
       while (first <= held_n) {
         l = held[first]
@@ -1796,7 +1812,7 @@ review_redact_secrets() {
         if (pem_body_like(l)) { prev_hdr = 0; first++; continue }
         break
       }
-      print pem_note(held_n - first + 1)
+      print pem_note(kind, held_n - first + 1)
       for (i = first; i <= held_n; i++) {
         l = redact_line(held[i])
         if (pem_body_like(l)) l = redact(l, "[A-Za-z0-9+/=]+")
@@ -1830,10 +1846,47 @@ review_redact_secrets() {
       print "**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
       next
     }
-    inpem && /-----END [A-Z ]*PRIVATE KEY-----/ { pem_drop(); next }
+    # END 行：块内全是密钥块该有的行 → 整块丢弃（零泄漏）；夹着别的内容 → 不是一个块，按未闭合块同样的方式放出
+    inpem && /-----END [A-Z ]*PRIVATE KEY-----/ { if (pem_pure()) pem_drop(); else pem_flush(1); next }
     inpem { pem_hold($0); next }
     { print redact_line($0) }
-    END { if (inpem) pem_flush() }'
+    END { if (inpem) pem_flush(0) }'
+}
+
+# --- sink 层掩码：文件就地改写（票 16，spec I3 修订）---
+# 用法：review_redact_file <文件>   rc 0 = 已就地改写；非零 = 失败，**原文件一个字节都没动**
+# 掩码是脚本侧不变量的实现：正常路径的 summary / verdict_reason / title / body / fix 此前只做 Markdown 结构
+# 清洗、不掩码，一份合法契约里的 token 会原样进汇总评论（CodeX 复审 P0-2）。逐字段掩码（在 review_validate
+# 的 jq 之后）不采纳：JSON ↔ 文本往返、`\n`/`\"` 转义与 awk 的按行处理互相干扰，多一层失败面。改为在每个 sink
+# 的唯一出口前把最终 Markdown 整份过一遍 review_redact_secrets：汇总评论、每条行内正文、失败评论、以及流水线
+# 日志打印评论全文的两处（后者靠「掩码在截断之前」自动成立——comment.full.md 是掩码后的副本）。
+# 掩码规则是凭证形态驱动的（前缀 / key=value 字面量 / Bearer / 头字段 / URL 凭证 / PEM），不碰评审标记、隐藏历史、
+# 行内标记（sha1 是纯十六进制，`sev=` 的键不在键名清单里）、元信息表与页脚——由 golden 逐字节证明
+# （tests/test-review-render.sh「票 16 golden②」），不靠推理。
+# 失败语义：空文件 / 不可读 / 掩码程序失败 / 掩码后为空 → 非零；掩码后脚本标记行丢失 → rc 3。调用方一律按渲染失败
+# 处理。绝不能把未掩码的原文继续往 sink 送，也不能把空文件或半截文件留在原位——所以写到同目录临时文件，成功后再
+# 原子替换。
+review_redact_file() {
+  local file="${1-}" out
+  [[ -n "$file" ]] || { echo "review_redact_file: 缺少文件参数" >&2; return 2; }
+  [[ -r "$file" ]] || { echo "review_redact_file: 文件不可读：${file}" >&2; return 2; }
+  [[ -s "$file" ]] || { echo "review_redact_file: 文件为空：${file}" >&2; return 2; }
+  out=$(mktemp "${file}.redact.XXXXXX") || { echo "review_redact_file: 建不出临时文件：${file}" >&2; return 1; }
+  if ! review_redact_secrets < "$file" > "$out" || [[ ! -s "$out" ]]; then
+    rm -f "$out"
+    echo "review_redact_file: 掩码失败（awk 退出非零或无输出）：${file}" >&2
+    return 1
+  fi
+  # 结构硬守卫：脚本生成的标记行（评审标记 / 隐藏历史 / 行内标记）掩码后必须逐字节仍在。掩码规则按凭证形态
+  # 工作、理论上碰不到它们，但 PEM 整块屏蔽是会**删行**的规则——哪天某条规则误删了标记，发出去的评论下一次
+  # 评审就认不出：汇总 → 新建第二条汇总（违反 I4）、旧报告与历次记录不可恢复；行内 → 去重失守、同一处重复发。
+  # 宁可让掩码失败（调用方走失败评论 / 折叠区，形态完整），也不发丢了标记的评论——与 review_truncate_comment
+  # 的硬守卫同一个理由。守卫只看标记行，不看别的：其余结构由 golden 逐字节证明（tests/test-review-render.sh）。
+  local m
+  while IFS= read -r m; do
+    grep -qxF -- "$m" "$out" || { rm -f "$out"; echo "review_redact_file: 掩码后脚本标记行丢失，拒绝写回：${m:0:60}" >&2; return 3; }
+  done < <(grep -E '^<!-- kiro-(review|inline|history):' "$file" || true)
+  mv -f "$out" "$file" || { rm -f "$out"; echo "review_redact_file: 写回失败：${file}" >&2; return 1; }
 }
 
 # --- 降级评论：结构化解析失败时贴出评审员原文 ---
