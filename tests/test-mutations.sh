@@ -699,8 +699,9 @@ assert_eq "$(mut_meta_row "$ROOT" "$nl_branch" | tr -cd '|' | wc -c | tr -d ' ')
 assert_eq "$(sha_row_pipes "$(mut_render "$ROOT" "$nl_branch")")" "5" \
   "M38 对照：未变异实现里前半截就是完整那一行"
 
-# --- M39–M43：PEM 未闭合块的放出 / 提示 / 掩码——16-fix3 第 14 条后降级路径走保行模式，字段级的 pem_flush 只在
-#     review_redact_json 里跑，这几条改为库级探针（字段模式的 review_redact_secrets），端到端向量换成保行模式的 M-r ---
+# --- M39–M43：库级探针（字段模式的 review_redact_secrets）。M39 / M40 / M42 / M43 是 PEM 未闭合块的放出 / 提示 / 掩码——16-fix3 第 14 条后
+#     降级路径走保行模式，字段级的 pem_flush 只在 review_redact_json 里跑，端到端向量换成保行模式的 M-r；M41 与 PEM 无关：
+#     redact_assign 的分隔符扫描方向（16-fix4 第 25 条补回）---
 D5="-----"; PEM_B="${D5}BEGIN RSA PRIVATE KEY${D5}"; PEM_E="${D5}END RSA PRIVATE KEY${D5}"   # 拆片段：完整 PEM 头字面量不进源码
 PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02abcdefghijkl"
 PEM_PLACEHOLDER="**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
@@ -715,6 +716,11 @@ pkg=$(make_mutant m40-pem-note 's|      print pem_note(held_n - first + 1)|     
 assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "总体结论：不建议合并。" "M40：正文仍在（变异只影响提示）"
 assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "没有配对的 END 行" "M40：未闭合提示消失——单测「给出提示」断言会失败"
 assert_contains "$(mut_rd_multi "$ROOT" "$unclosed_in")" "没有配对的 END 行" "M40 对照：未变异实现给提示"
+# M41：分隔符改成从段末往回找 → base64 补位的 `=` 被当成分隔符、取值变空串，`api_key = "…dA=="` 全裸奔（单测「补位 == 结尾的取值被掩掉」会失败）
+pkg=$(make_mutant m41-assign-sep 's|^        for (i = 1; i <= length(seg); i++) {$|        for (i = length(seg); i >= 1; i--) {  # 变异 M41：反向扫描|' scripts/lib/review-render.sh)
+b64_pad="dGhpcyBpcyBh""IHNlY3JldA=="
+assert_contains "$(mut_rd "$pkg" "api_key = \"${b64_pad}\"")" "$b64_pad" "M41：补位 == 结尾的取值原样放出——单测「掩码①」断言会失败"
+assert_eq "$(mut_rd "$ROOT" "api_key = \"${b64_pad}\"")" 'api_key = "dGhp****dA=="' "M41 对照：未变异实现从键之后向前找分隔符、取值被掩"
 # M42：放出时不再掩夹在句子里的 base64 连片（redact_b64 的掩码换成原样）
 pkg=$(make_mutant m42-b64-runs 's|out = out substr(s, 1, RSTART - 1) (b64_material(m, minlen) ? (full ? "\*\*\*\*" : mask(m)) : m)|out = out substr(s, 1, RSTART - 1) m|' scripts/lib/review-render.sh)
 assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "$PEM_L64" "M42：句子里的私钥正文片段完整放出——单测「片段不进评论」断言会失败"
@@ -966,7 +972,7 @@ assert_rc "$RC" 0 "M-s：掩码失败被吞后评审「成功」——端到端�
 assert_contains "$(posted_comment "$OUT")" "结构化解析失败" "M-s：发出的是一份降级评论（正文为空）"
 run_case m-s-control "$ROOT" PATH="$tmp/badawk-raw:$PATH" MOCK_KIRO_LEAK_SECRET=1
 assert_nonzero "$RC" "M-s 对照：未变异实现 fail-closed"
-assert_contains "$OUT" "review_render_degraded: 原文掩码失败" "M-s 对照：库函数点明原因"
+assert_contains "$OUT" "review_render_degraded: 掩码失败" "M-s 对照：库函数点明原因"
 # --- M-u：第 17 条——去掉全模式的整行密钥正文规则 → 跨字段的正文行裸奔 ---
 pkg=$(make_mutant m-u-body-line 's|^      if (pem_body(line, 40, 1)) {   .*$|      if (0) {   # 变异 M-u：无整行规则|' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" "$PEM_L64")" "$PEM_L64" "M-u：整行密钥正文原样——单测「≥ 40 位整行 base64 在任何字段都掩」断言会失败"
@@ -988,5 +994,10 @@ assert_eq "$(mut_rd "$ROOT" 'src/main/java/com/example/v2/service/impl/UserServi
 pkg=$(make_mutant m-x2-no-digit 's|^      if (s !~ /\[0-9\]/ \|\| s !~ /\[a-z\]/ \|\| s !~ /\[A-Z\]/) return 0$|      if (s !~ /[a-z]/ \|\| s !~ /[A-Z]/) return 0  # 变异 M-x2：不要求数字|' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" 'disableInheritingDefaultResourcesForAllTenantsNow')" 'disa****sNow' "M-x2：无数字的 48 位标识符整行掩——单测「无数字的长标识符不算正文」断言会失败"
 assert_eq "$(mut_rd "$ROOT" 'disableInheritingDefaultResourcesForAllTenantsNow')" 'disableInheritingDefaultResourcesForAllTenantsNow' "M-x2 对照：未变异实现原样"
+
+# --- M-y：第 27 条——fpath 回到先剔控制字符再查禁用字符 → src/<U+0001>app.py 洗成合法路径、不计数（单测「按不可定位处理并计数」会失败）---
+pkg=$(make_mutant m-y-fpath-dectl-first 's|^    def fpath(v): (if (v \| type) == "string" then .*$|    def fpath(v): (tr(v)) as $t   # 变异 M-y：先 dectl|' scripts/lib/review-render.sh)
+assert_eq "$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; jq -n --arg f "$(printf 'src/\001app.py')" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P2",title:"t",body:"b",file:$f,line_start:1}]}' | review_validate | jq -c '[.findings[0].file, .delocated_findings]' ) )" '["src/app.py",0]' "M-y：控制字符被洗掉后路径「合法」、不计数——单测第 27 条断言会失败"
+assert_eq "$( ( set +e; source "$ROOT/scripts/lib/review-render.sh"; jq -n --arg f "$(printf 'src/\001app.py')" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P2",title:"t",body:"b",file:$f,line_start:1}]}' | review_validate | jq -c '[.findings[0].file, .delocated_findings]' ) )" '[null,1]' "M-y 对照：未变异实现置空并计数"
 
 report

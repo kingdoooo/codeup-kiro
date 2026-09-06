@@ -148,19 +148,19 @@ make_bad_awk() {
   mkdir -p "$dir"
   {
     echo '#!/usr/bin/env bash'
-    echo 'is_mask=0; is_doc=0'
+    # 文档级 / 字段级按**参数**区分（16-fix4 第 21 条）：字段级掩码带 -v sentre=<非空>（--sentinel），文档级（review_redact_file /
+    # 降级原文 / 日志行）没有；stdin 内容不参与判定——清洗挪到掩码之后，模型 title 里伪造的 <!-- kiro-review:… --> 会原样进 dump-k，
+    # 靠「stdin 含标记」判定会让字段级在 doc 模式下失败、走 die_review 而不是它声称隔离的汇总出口退路
+    echo 'is_mask=0; is_doc=0; has_sent=0'
     echo 'for a in "$@"; do'
     echo '  [[ "$a" == *"function mask(s)"* ]] && is_mask=1'
     echo '  [[ "$a" == "keeplines=1" ]] && is_doc=1'
+    echo '  [[ "$a" == sentre=?* ]] && has_sent=1'
     echo 'done'
     case "$mode" in
       all)    echo '[[ $is_mask == 1 ]] && { echo "badawk: 模拟掩码程序失败" >&2; exit 1; }' ;;
-      doc)    echo 'if [[ $is_mask == 1 && $is_doc == 1 ]]; then'
-              echo '  buf=$(mktemp); cat > "$buf"'
-              echo '  if grep -q "<!-- kiro-" "$buf"; then rm -f "$buf"; echo "badawk: 模拟文档级掩码失败" >&2; exit 1; fi'
-              printf '  %q "$@" < "$buf"; rc=$?; rm -f "$buf"; exit $rc\n' "$real"
-              echo 'fi' ;;
-      inline) echo 'if [[ $is_mask == 1 && $is_doc == 1 ]]; then'
+      doc)    echo 'if [[ $is_mask == 1 && $is_doc == 1 && $has_sent == 0 ]]; then echo "badawk: 模拟文档级掩码失败" >&2; exit 1; fi' ;;
+      inline) echo 'if [[ $is_mask == 1 && $is_doc == 1 && $has_sent == 0 ]]; then'
               echo '  buf=$(mktemp); cat > "$buf"'
               echo '  if grep -q "<!-- kiro-inline:" "$buf"; then rm -f "$buf"; echo "badawk: 模拟行内正文掩码失败" >&2; exit 1; fi'
               printf '  %q "$@" < "$buf"; rc=$?; rm -f "$buf"; exit $rc\n' "$real"

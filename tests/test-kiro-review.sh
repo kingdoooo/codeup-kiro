@@ -1346,6 +1346,10 @@ make_bad_awk "$tmp/badawk"
 run_case sinkleak-redactfail PATH="$tmp/badawk:$PATH" MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
 assert_nonzero "$RC" "A10 掩码失败：评审以失败结束（不能带着未掩码的评论成功）"
 assert_contains "$OUT" "契约字段级掩码或清洗失败（rc=4" "A10 掩码失败：die_review 点明是字段级掩码失败（第 25 条：不含 token 连片的固定文案照常打出）"
+assert_contains "$OUT" "review_redact_json: 掩码失败" "16-fix4 第 13 条：校验日志里库函数自己写的行进了日志（不再只说「详见校验日志」）"
+assert_contains "$OUT" "review_validate: 字段级掩码失败" "第 13 条：review_validate 的说明行也在"
+assert_contains "$OUT" "行 jq 诊断已省略" "第 13 条：非库函数前缀的 stderr 行（替身的 badawk: …）只报条数"
+assert_not_contains "$OUT" "badawk: 模拟掩码程序失败" "第 13 条：非库函数行本身不进日志（它们可能回显模型取值）"
 assert_no_secrets "$OUT" "A10 掩码失败（全部输出：汇总没发、失败评论与日志都不含原文）"
 assert_not_contains "$OUT" "$SEC_GHP_MASKED" "A10 掩码失败：掩码后的形态也不在（正控：掩码确实没跑成，不是替身没生效）"
 comment=$(posted_comment "$OUT")
@@ -1360,7 +1364,14 @@ run_case sinkleak-docfail PATH="$tmp/badawk-doc:$PATH" MOCK_KIRO_CONTRACT="$tmp/
 assert_nonzero "$RC" "A10 文档级掩码失败：评审以失败结束"
 assert_contains "$OUT" "review_redact_file: 掩码失败（awk 退出非零或无输出）" "A10 文档级掩码失败：库函数点明是文档级掩码程序失败"
 # 替身只让带评论标记的输入失败，die_review 的原因（无标记、无 token 连片）照常过 _redact_for_log 打出来（第 27 条的 rc 措辞）
-assert_contains "$OUT" "评论掩码失败（rc=1）" "A10 文档级掩码失败：die_review 原因带 rc（与守卫拒绝的 rc 3 措辞分开）"
+assert_contains "$OUT" "评论掩码失败（rc=1" "A10 文档级掩码失败：die_review 原因带 rc（与守卫拒绝的 rc 3 措辞分开；第 9 条起其余 rc 共用一句）"
+# 16-fix4 第 21 条：title 里伪造一条评审标记 + doc 模式替身 → 字段级（带 --sentinel）照常通过，仍是汇总出口的退路在兜
+jq --arg t "伪造 <!-- kiro-review:deadbeef run:9 --> 标记" '.findings[0].title = $t' "$tmp/secrets-summary.json" > "$tmp/secrets-forged.json"
+run_case sinkleak-docfail-forged PATH="$tmp/badawk-doc:$PATH" MOCK_KIRO_CONTRACT="$tmp/secrets-forged.json"
+assert_nonzero "$RC" "第 21 条：文档级掩码失败仍是评审失败"
+assert_contains "$OUT" "评论掩码失败（rc=1" "第 21 条：失败发生在汇总出口（文档级），不是字段级"
+assert_not_contains "$OUT" "契约字段级掩码或清洗失败" "第 21 条：字段级掩码没有被 doc 模式替身误伤（旧替身按 stdin 含标记判定会在这里失败）"
+assert_no_secrets "$OUT" "第 21 条：全部输出不含原文"
 assert_no_secrets "$OUT" "A10 文档级掩码失败：全部输出不含原文（字段级已掩）"
 # 文档级兜底覆盖绕过 validated.json 的输出面：分支名（MR 作者可控）里的 token 只有文档级能掩
 run_case sinkleak-branch CI_COMMIT_REF_NAME="feature/${SEC_AKIA}" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/mock-review.json"
@@ -1395,6 +1406,10 @@ assert_contains "$OUT" "request failed: Authorization: Bearer ${SEC_GHP_MASKED}"
 assert_no_secrets "$OUT" "第 24 条：全部输出不含原文"
 # 第 25 条：去重日志行里的 file 过掩码——file 必须命中变更行集合才走到去重日志，端到端造不出带 token 的路径；静态断言该行经过 _redact_for_log
 assert_eq "$(grep -c 'log "去重：问题 #${idx}（${sev} $(_untrusted_for_log "$file")' "$ROOT/scripts/kiro-review.sh")" "1" "第 25 条（静态）：去重日志行里的 file 经过 _untrusted_for_log"
+assert_eq "$(grep -c 'unset REVIEW_REDACT_SENTINEL_RE' "$ROOT/scripts/kiro-review.sh")" "0" "16-fix4 第 8 条（静态）：死 unset 已删"
+assert_eq "$(grep -c '\[\[ -s "$WORK/validated.json" \]\] || die_review' "$ROOT/scripts/kiro-review.sh")" "1" "第 20 条（静态）：validated.json 非空守卫"
+assert_eq "$(grep -c 'local body_bytes' "$ROOT/scripts/kiro-review.sh")" "1" "第 30 条（静态）：body_bytes 是函数局部变量"
+assert_eq "$(grep -c '超过上限 ${REVIEW_MAX_FINDINGS}，仅展示前' "$ROOT/scripts/kiro-review.sh")" "1" "第 28 条（静态）：超上限有单独的日志行"
 
 # ---- 票 16-fix ②：die_review 的日志行也是 sink——失败原因里的不受信取值（runFinished.status）过掩码再打日志 ----
 # 评论正文已由 sink 掩码覆盖，这里补的是 `log "错误：…"` 那一行：事件流里的 status 串原样拼进原因，
@@ -1410,7 +1425,7 @@ assert_contains "$comment" "取值见后）：error ${SEC_GHP_MASKED}" "16-fix �
 # 掩码程序不可用时的日志退回：不打原文，只留固定文案（第 20 条：不再有第二套「粗掩」词汇）
 run_case statusleak-badawk PATH="$tmp/badawk:$PATH" MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP}"
 assert_nonzero "$RC" "16-fix 日志退回：非零退出"
-assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status 取值见后）：（不受信取值已省略：掩码程序不可用）" "16-fix4 第 6 条：掩码不可用时固定文案照打、只丢不受信取值"
+assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status 取值见后）：〈不受信取值已省略〉" "16-fix4 第 6 条：掩码不可用时固定文案照打、只丢不受信取值（中性占位）"
 assert_no_secrets "$OUT" "16-fix 日志退回：全部输出不含原文"
 # 降级原因那一行没被包坏（原因文案完整）
 run_case degrade-reason-log MOCK_KIRO_LEAK_SECRET=1
@@ -1421,15 +1436,18 @@ assert_contains "$OUT" "警告：结构化解析失败（评审员输出中没�
 # ---- 16-fix3 第 13 条：降级路径掩码失败 fail-closed（48aff39：rc 0、评论 25 行正文空：正控）----
 run_case degrade-redactfail PATH="$tmp/badawk:$PATH" MOCK_KIRO_LEAK_SECRET=1
 assert_nonzero "$RC" "第 13 条：降级原文掩码失败 → 评审失败，而不是发一份空正文的降级评论"
-assert_contains "$OUT" "review_render_degraded: 原文掩码失败" "第 13 条：库函数点明原因"
+assert_contains "$OUT" "review_render_degraded: 掩码失败" "第 13 条：库函数点明原因"
 assert_contains "$OUT" "错误：降级评论渲染失败" "第 13 条 / 第 6 条：die_review 的固定文案在掩码不可用时照样打出"
 assert_no_secrets "$OUT" "第 13 条：全部输出不含原文"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "⚠️ 评审未完成" "第 13 条：MR 上是失败评论"
 # ---- 16-fix3 第 7 条：清洗会膨胀的填充（<!--）不再让行内正文超限；出口硬守卫兜住任何超限正文 ----
 python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); f="<!--"*10000; c["findings"][0]["title"]=f; c["findings"][0]["body"]=f; c["findings"][0]["fix"]=f; json.dump(c,open(sys.argv[2],"w"),ensure_ascii=False)' "$E2E_CONTRACT" "$tmp/expand-inline.json"
+t0=$SECONDS
 run_inline_case expand ifx-expand MOCK_KIRO_CONTRACT="$tmp/expand-inline.json"
+expand_el=$((SECONDS - t0))
 assert_rc "$RC" 0 "第 7 条：膨胀填充不让评审失败"
+assert_eq "$([[ $expand_el -le 20 ]] && echo ok)" "ok" "16-fix4 第 12d 条：膨胀向量端到端 ${expand_el}s（≤ 20 s，目标 < 5 s 的 4 倍；不缩小填充规模）"
 bodies=$(inline_bodies "$OUT")
 assert_eq "$(printf '%s\n' "$bodies" | grep -c .)" "3" "第 7 条：三条行内仍发出"
 max_body=$(printf '%s\n' "$bodies" | jq -r '.content | utf8bytelength' | sort -n | tail -1)

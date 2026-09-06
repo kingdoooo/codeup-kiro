@@ -2026,8 +2026,9 @@ assert_eq "$rc" "3" "守卫：行内标记被改写 → rc 3"
 assert_same_file "$tmp/guard.md" "$tmp/guard.orig" "守卫：拒绝写回时原文件逐字节不动"
 rc=$( ( review_redact_secrets() { cat; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
 assert_eq "$rc" "0" "守卫正控：恒等规则 → 放行"
-# 第 11 条：标记正则从三个常量派生。把隐藏历史前缀改名后，守卫要跟着认新前缀（旧的硬编码字面量会零命中、无条件放行）
-rc=$( ( REVIEW_HISTORY_PREFIX='<!-- kiro-hist:'; printf '# T\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-hist:[] -->\n正文\n' > "$tmp/guard-const.md"
+# 第 11 条：标记正则从三个常量派生（16-fix4 第 16 条起是加载期常量，改常量后按同一公式重算）。把隐藏历史前缀改名后，守卫要跟着认新前缀
+# （旧的硬编码字面量会零命中、无条件放行）
+rc=$( ( REVIEW_HISTORY_PREFIX='<!-- kiro-hist:'; REVIEW_MARKER_LINE_RE_ALL=$(_review_marker_line_re_build); printf '# T\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-hist:[] -->\n正文\n' > "$tmp/guard-const.md"
         review_redact_secrets() { sed 's/kiro-hist:\[\]/kiro-hist:[9]/'; }; review_redact_file "$tmp/guard-const.md" 2>/dev/null; echo $? ) )
 assert_eq "$rc" "3" "守卫（第 11 条）：改了 REVIEW_HISTORY_PREFIX 常量，守卫仍按新前缀抓到被改写的历史行"
 assert_contains "$(_review_marker_line_re)" "$REVIEW_INLINE_MARKER_PREFIX" "守卫（第 11 条）：标记正则含行内标记前缀常量"
@@ -2218,12 +2219,12 @@ assert_same_file "$tmp/pem-inline.md" "$tmp/pem-inline.raw.md" "行内 PEM：正
 big=$(python3 -c 'print("a"*9000, end="")'); cjk=$(python3 -c 'print("漏"*12000, end="")')
 jq -n --arg s "$big" --arg c "$cjk" '{contract:"codeup-reviewer/1", summary:$s, verdict:"MERGE", verdict_reason:"短", findings:[{severity:"P0",title:("t"+$s),body:$c,fix:("f"+$c+$c),file:"src/app.py",line_start:1}]}' \
   | review_validate > "$tmp/cap.json"
-assert_eq "$(jq -r '.summary | utf8bytelength' "$tmp/cap.json")" "$((8192 + 15))" "第 21 条：summary 截到 8192 字节 + 「（已截断）」"
+assert_eq "$(jq -r '.summary | utf8bytelength <= 8192' "$tmp/cap.json")" "true" "第 21 条 / 16-fix4 第 19 条：summary 连「（已截断）」一起 ≤ 8192 字节"
 assert_eq "$(jq -r '.summary | .[-5:]' "$tmp/cap.json")" "（已截断）" "第 21 条：summary 末尾标注已截断"
-assert_eq "$(jq -r '.findings[0].title | utf8bytelength' "$tmp/cap.json")" "$((2048 + 15))" "第 21 条：title 截到 2048 字节"
-assert_eq "$(jq -r '.findings[0].body | utf8bytelength <= 32768 + 15' "$tmp/cap.json")" "true" "第 21 条：body 截到 ≤ 32768 字节（多字节字符不切半）"
+assert_eq "$(jq -r '.findings[0].title | utf8bytelength <= 2048' "$tmp/cap.json")" "true" "第 21 条：title ≤ 2048 字节"
+assert_eq "$(jq -r '.findings[0].body | utf8bytelength <= 32768' "$tmp/cap.json")" "true" "第 21 条：body ≤ 32768 字节（多字节字符不切半）"
 assert_eq "$(jq -r '.findings[0].body | .[:-5] | test("^漏+$")' "$tmp/cap.json")" "true" "第 21 条：body 截断落在字符边界（没有半个 U+6F0F）"
-assert_eq "$(jq -r '.findings[0].fix | utf8bytelength <= 16384 + 15' "$tmp/cap.json")" "true" "第 21 条：fix 截到 ≤ 16384 字节"
+assert_eq "$(jq -r '.findings[0].fix | utf8bytelength <= 16384' "$tmp/cap.json")" "true" "第 21 条：fix ≤ 16384 字节"
 assert_eq "$(jq -r '.truncated_fields' "$tmp/cap.json")" "4" "第 21 条：截断字段计数 4（summary、title、body、fix）"
 assert_eq "$(jq -r '.verdict_reason' "$tmp/cap.json")" "短" "第 21 条：未超限字段不动"
 assert_eq "$(review_validate < fixtures/contract/full.json | jq -r '.truncated_fields')" "0" "第 21 条：正常契约计数 0"
@@ -2412,7 +2413,7 @@ printf 'P0 x %s\n' "$SEC_GHP" > "$tmp/deg-fail.raw.md"
 rc=$( ( awk() { return 1; }; review_render_degraded --text "$tmp/deg-fail.raw.md" --sha 90fcb05 --src f --dst m --ts t --diff-note n --reason r > "$tmp/deg-fail.md" 2>"$tmp/deg-fail.err"; echo $? ) )
 assert_eq "$rc" "2" "第 13 条：降级原文掩码失败 → rc 2"
 assert_eq "$(wc -c < "$tmp/deg-fail.md" | tr -d ' ')" "0" "第 13 条：失败时一个字节都不输出（不是半截评论）"
-assert_contains "$(cat "$tmp/deg-fail.err")" "原文掩码失败" "第 13 条：stderr 点明原因"
+assert_contains "$(cat "$tmp/deg-fail.err")" "review_render_degraded: 掩码失败" "第 13 条：stderr 点明原因（_review_redact_to 以调用方名开头，16-fix4 第 4 条）"
 # ---- 第 3 条：哨兵形状只在一处定义——改常量后倒出 / 掩码 / 切回仍一致 ----
 with_secrets fixtures/contract/full.json | _review_normalize > "$tmp/sent-a.json"; cp "$tmp/sent-a.json" "$tmp/sent-b.json"
 review_redact_json "$tmp/sent-a.json"
@@ -2428,12 +2429,30 @@ assert_eq "$(jq -c '[.summary, .verdict_reason, .findings[0].body, .findings[0].
 filler=$(python3 -c 'print("<!--"*10000, end="")')   # 40000 字节，清洗后 70000 字节
 jq -n --arg c "$filler" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1},{severity:"P9",title:$c,body:$c,fix:$c,file:"x",line_start:1}]}' \
   | review_validate > "$tmp/cap2.json"
-assert_eq "$(jq -r '.findings[0].body | utf8bytelength <= 32768 + 15' "$tmp/cap2.json")" "true" "第 7 条：body 的上限量的是清洗后的字节（48aff39 先截再洗 → 57 KB：正控）"
-assert_eq "$(jq -r '.findings[0].title | utf8bytelength <= 2048 + 15' "$tmp/cap2.json")" "true" "第 7 条：title 同理"
-assert_eq "$(jq -r '.findings[0].fix | utf8bytelength <= 16384 + 15' "$tmp/cap2.json")" "true" "第 7 条：fix 同理"
+assert_eq "$(jq -r '.findings[0].body | utf8bytelength <= 32768' "$tmp/cap2.json")" "true" "第 7 条：body 的上限量的是清洗后的字节（48aff39 先截再洗 → 57 KB：正控）"
+assert_eq "$(jq -r '.findings[0].title | utf8bytelength <= 2048' "$tmp/cap2.json")" "true" "第 7 条：title 同理"
+assert_eq "$(jq -r '.findings[0].fix | utf8bytelength <= 16384' "$tmp/cap2.json")" "true" "第 7 条：fix 同理"
 assert_eq "$(jq -r '.truncated_fields, .dropped_findings' "$tmp/cap2.json" | tr '\n' ' ')" "3 1 " "第 6 条：被丢弃的问题（severity P9）不计入 truncated_fields，只数保留问题的三个字段"
 assert_eq "$(jq -r '.findings[0].body | .[-5:]' "$tmp/cap2.json")" "（已截断）" "第 7 条：截断标注仍在"
 assert_eq "$([[ -n "$REVIEW_CAP_BODY" && "$REVIEW_CAP_BODY" == 32768 ]] && echo one)" "one" "第 6 条：上限常量只在 REVIEW_CAP_* 一处"
+# 16-fix4 第 12b / 19 条：最终结果是「清洗过的文本 + 截断标记 ≤ 上限」（不再是 ≤ 上限 + 15），最后一步一定是清洗
+assert_eq "$(jq -r '[.summary, .findings[0].title, .findings[0].body, .findings[0].fix] | map(utf8bytelength) | [.[0] == 1, (.[1] | . <= 2048 and . > 2000), (.[2] | . <= 32768 and . > 32700), (.[3] | . <= 16384 and . > 16300)] | all' "$tmp/cap2.json")" "true" \
+  "第 12b 条：三个超限字段清洗后连截断标记一起 ≤ 上限、且贴着上限（不是砍到 1/4 的兜底路径；summary 未超限原样）"
+assert_eq "$(jq -r '.findings[0].fix | test("<!--") | not' "$tmp/cap2.json")" "true" "第 19 条：截断之后仍是清洗过的文本（没有半个未转义的 <!--）"
+assert_eq "$(jq -r '.findings[0].fix | .[-5:]' "$tmp/cap2.json")" "（已截断）" "第 19 条：截断标记在清洗之外追加、已计入预算"
+# 第 12a 条：归一化先按 2 × 上限的码点预切（掩码成本绑定到上限）；id / category 切 REVIEW_CAP_ID 码点（不渲染、不计 truncated_fields）
+big=$(python3 -c 'print("é"*70000, end="")')   # 70000 码点 = 140000 字节
+jq -n --arg c "$big" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:$c,fix:"f",id:$c,category:$c,file:"src/app.py",line_start:1}]}' \
+  | _review_normalize > "$tmp/pre.json"
+assert_eq "$(jq -r '[.summary, .findings[0].body, .findings[0].id, .findings[0].category] | map(length) | @csv' "$tmp/pre.json")" "16384,65536,256,256" \
+  "第 12a 条：summary 切 2×8192 码点、body 切 2×32768 码点、id / category 切 256 码点"
+assert_eq "$(jq -n --arg c "$big" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:"b",fix:"f",id:$c,file:"src/app.py",line_start:1}]}' | review_validate | jq -r '[(.summary|utf8bytelength <= 8192), (.findings[0].id|length), .truncated_fields] | @csv')" "true,256,1" \
+  "第 12a 条：预切不影响最终字节上限（summary 8192 内）；id 只预切、不计入 truncated_fields"
+# 第 12d 条：计时守卫（目标 < 5 s，守 4 倍）——10000 个 <!-- 的膨胀向量与 100 KB 单行 body 都要在秒级；不要靠缩小向量让它变快
+python3 -c 'import json,random,string; random.seed(7); s="".join(random.choice(string.ascii_letters+string.digits+"+/ .") for _ in range(100000)); print(json.dumps({"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"r","findings":[{"severity":"P0","title":"t","body":s,"fix":"","file":"src/app.py","line_start":1}]}))' > "$tmp/big-line.json"
+t0=$SECONDS; review_validate < "$tmp/big-line.json" > "$tmp/big-line.out"; jq -n --arg c "$filler" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1}]}' | review_validate > /dev/null; el=$((SECONDS - t0))
+assert_eq "$([[ $el -le 20 ]] && echo ok)" "ok" "第 12d 条：100 KB 单行 body + 膨胀向量两次 review_validate 共 ${el}s（≤ 20 s；cf29da0 的 redact_url 无界回扫要十几秒）"
+assert_eq "$(jq -r '.findings[0].body | utf8bytelength <= 32768' "$tmp/big-line.out")" "true" "第 12d 条：100 KB 单行 body 截到上限之内"
 # 第 8 条：行数按记录数（末行无换行也算）
 printf 'a\nb' > "$tmp/lc.md"; assert_eq "$(_review_line_count "$tmp/lc.md")" "2" "第 8 条：_review_line_count 一个 fork，末行无换行也算一行"
 
@@ -2449,7 +2468,6 @@ assert_contains "$(cat "$tmp/fenced-pem.md")" '\## 结论：伪造的可合并' 
 assert_eq "$(( $(grep -c '^```' "$tmp/fenced-pem.md") % 2 ))" "0" "第 15 条：围栏配对（清洗在掩码之后补齐闭合围栏）"
 assert_contains "$(tail -1 "$tmp/fenced-pem.md")" "第 1 次评审 · P0 必须修复" "第 15 条：页脚没被吞进围栏"
 # 第 16 条：哨兵不读环境
-assert_eq "$( ( export REVIEW_REDACT_SENTINEL_RE='^.*$'; rd "$SEC_AKIA" ) )" "$SEC_AKIA_MASKED" "第 16 条：导出 REVIEW_REDACT_SENTINEL_RE 也不能让掩码直通（48aff39 直通：正控）"
 rc=0; printf 'x\n' | review_redact_secrets --sentinel 2>/dev/null >/dev/null || rc=$?
 assert_rc "$rc" 2 "第 16 条：--sentinel 缺取值 → rc 2（不能静默当空、更不能在参数循环里打转）"
 assert_eq "$(rd 'x')" "x" "第 16 条：不带 --sentinel 正常工作"
@@ -2471,7 +2489,42 @@ assert_eq "$(printf '%s\n' "$render_inline_body_title" | sed -n 2p)" "<!-- kiro-
 assert_eq "$(python3 -c "import sys; sys.stdout.buffer.write(b'line one \x00 ${SEC_AKIA} tail\n')" | review_clean_text | review_redact_secrets --keep-lines)" "line one  ${SEC_AKIA_MASKED} tail" "第 20 条：NUL 先剔除，其后的密钥不再被 awk 截断吞掉（48aff39：24 字节静默消失）"
 assert_eq "$(printf '\033[38;5;141mReading\033[0m 报告正文\n' | review_clean_text)" "Reading 报告正文" "第 20 条：ANSI 剥离仍先于控制字符剔除（ESC 本身在剔除范围里）"
 # 第 22 条：问题条数上限
-assert_eq "$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[range(201) | {severity:"P2",title:"t",body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -c '[(.findings|length), .dropped_findings]')" "[200,1]" "第 22 条：201 条问题只保留 200 条，多出的计入 dropped_findings"
+assert_eq "$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[range(201) | {severity:"P2",title:"t",body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -c '[(.findings|length), .dropped_findings, .overflow_findings]')" "[200,0,1]" "第 22 条 / 16-fix4 第 28 条：201 条问题只保留 200 条，多出的计入 overflow_findings、不算不合契约"
+assert_eq "$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[range(250) | {severity:"P2",title:"t",body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -c '[(.findings|length), .dropped_findings, .overflow_findings]')" "[200,0,50]" "第 28 条：250 条合法问题 → kept 200 / dropped 0 / overflow 50（cf29da0 记成 dropped 50：正控）"
+jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:([range(205) | {severity:"P2",title:"t",body:"b",fix:"",file:"src/app.py",line_start:1}] + [{severity:"P9",title:"x",body:"y"}])}' \
+  | review_validate > "$tmp/overflow.json"
+assert_eq "$(jq -c '[(.findings|length), .dropped_findings, .overflow_findings]' "$tmp/overflow.json")" "[200,0,6]" "第 28 条：上限之外的不合契约条目算 overflow（没进校验）"
+assert_contains "$(review_render_summary --json "$tmp/overflow.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n)" "（另有 6 条超出展示上限）" "第 28 条：汇总统计行单独一段说明超出展示上限"
+assert_not_contains "$(review_render_summary --json "$tmp/overflow.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n)" "不合契约已丢弃" "第 28 条：超上限不再冒充「不合契约」"
+# 第 27 条：file 里的控制字符——先在只 trim 的值上查禁用字符，再剔控制字符；命中 → null + delocated 计数
+assert_eq "$(jq -n --arg f "$(printf 'src/\001app.py')" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P2",title:"t",body:"b",file:$f,line_start:1}]}' | review_validate | jq -c '[.findings[0].file, .delocated_findings]')" "[null,1]" \
+  "第 27 条：src/<U+0001>app.py 按不可定位处理并计数（cf29da0 先剔控制字符 → 合法路径、不计数：正控）"
+# 第 2 条：控制字符集只此一份——两份渲染与三个消费者一致
+assert_eq "$REVIEW_CTRL_TR_SET" '\000-\010\013-\014\016-\037' "第 2 条：tr 字符集由 _REVIEW_CTRL_RANGES 渲染"
+assert_eq "$REVIEW_CTRL_JQ_RE" '[\u0000-\u0008\u000b-\u000c\u000e-\u001f]' "第 2 条：jq 正则由同一份区间渲染"
+assert_eq "$(printf 'a\001b\013c\td\n' | review_clean_text | od -An -c | tr -s ' ' | sed 's/ *$//')" " a b c \t d \n" "第 2 条：review_clean_text 剔 \001 / \013、留制表"
+assert_eq "$(printf '{"contract":"codeup-reviewer/1","summary":"a\\u0001b\\u000bc\\td","verdict":"MERGE","verdict_reason":"r","findings":[]}' | review_validate | jq -r '.summary | @json')" '"abc\td"' "第 2 条：归一化的 dectl 与清洗用同一份 jq def"
+# 第 3 / 4 条：两个共用小函数的失败语义——jq 失败 / 掩码程序失败时目标文件一个字节不动、临时文件不残留
+printf '{"a":1}\n' > "$tmp/jqi.json"; cp "$tmp/jqi.json" "$tmp/jqi.orig"
+rc=0; _review_jq_inplace "$tmp/jqi.json" who 步骤 -c '.a |= error("boom")' 2> "$tmp/jqi.err" || rc=$?
+assert_rc "$rc" 1 "第 3 条：_review_jq_inplace 在 jq 失败时 rc 1"
+assert_same_file "$tmp/jqi.json" "$tmp/jqi.orig" "第 3 条：jq 失败时原文件不动"
+assert_contains "$(cat "$tmp/jqi.err")" "who: 步骤失败" "第 3 条：报错以调用方名 + 步骤名开头"
+assert_eq "$(ls "$tmp"/jqi.json.jq.* 2>/dev/null | wc -l | tr -d ' ')" "0" "第 3 条：失败时不残留临时文件"
+_review_jq_inplace "$tmp/jqi.json" who 步骤 -c '.a = 2'; assert_eq "$(cat "$tmp/jqi.json")" '{"a":2}' "第 3 条：成功时就地改写"
+printf 'x %s\n' "$SEC_AKIA" > "$tmp/rt.in"
+rc=0; ( awk() { return 1; }; _review_redact_to "$tmp/rt.in" "$tmp/rt.out" who "：ctx" --keep-lines 2> "$tmp/rt.err" ) || rc=$?
+assert_rc "$rc" 1 "第 4 条：_review_redact_to 在掩码程序失败时 rc 1"
+assert_eq "$([[ -e "$tmp/rt.out" ]] && echo left || echo gone)" "gone" "第 4 条：失败时删掉输出文件"
+assert_contains "$(cat "$tmp/rt.err")" "who: 掩码失败（awk 退出非零或无输出）：ctx" "第 4 条：报错以调用方名开头、带调用方给的尾巴"
+_review_redact_to "$tmp/rt.in" "$tmp/rt.out" who "" --keep-lines; assert_eq "$(cat "$tmp/rt.out")" "x ${SEC_AKIA_MASKED}" "第 4 条：成功时输出掩码结果"
+# 第 16 / 17 条：标记正则是加载期常量；两份文件的行数一次 awk 算完
+assert_eq "$REVIEW_MARKER_LINE_RE_ALL" "$(_review_marker_line_re)" "第 16 条：_review_marker_line_re 只是常量的取值口"
+printf 'a\nb\nc' > "$tmp/lc3.md"; assert_eq "$(_review_line_counts "$tmp/lc.md" "$tmp/lc3.md")" "2 3" "第 17 条：_review_line_counts 一次给出两份文件的记录数（末行无换行也算）"
+# 第 29 条：截断的替换文件建在目标同目录、不残留
+cp "$GOLDEN/summary-full.md" "$tmp/tr29.md"; review_truncate_comment "$tmp/tr29.md" 3000
+assert_eq "$(ls "$tmp"/tr29.md.trunc.* 2>/dev/null | wc -l | tr -d ' ')" "0" "第 29 条：截断成功后目标同目录不残留 .trunc 临时文件"
+assert_contains "$(tail -1 "$tmp/tr29.md")" "报告超长已截断" "第 29 条：截断结果已就地写回"
 # 第 23 条：同一行两把钥匙
 assert_eq "$(printf 'A="%s\\n%s\\n%s" B="%s\\n%s\\n%s"\n' "$PEM_B" "$PEM_L64" "$PEM_E" "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)" "A=\"${PEM_PLACEHOLDER}\" B=\"${PEM_PLACEHOLDER}\"" "第 23 条：同一行两把钥匙 → 两个占位（48aff39 第二把裸奔：正控）"
 # 第 24 条：闭合块不再无声

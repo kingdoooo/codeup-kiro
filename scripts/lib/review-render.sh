@@ -37,6 +37,19 @@ REVIEW_TITLE="# Kiro 代码评审"
 REVIEW_TITLE_DEGRADED="${REVIEW_TITLE} · ⚠️ 结构化解析失败"
 REVIEW_TITLE_FAILED="${REVIEW_TITLE} · ⚠️ 评审未完成"
 
+# --- 控制字符集只此一份（16-fix4 第 2 条）：NUL、\001–\010、\013、\014、\016–\037 剔除；换行 \012、制表 \011、回车 \015 保留。
+# 三个消费者（review_clean_text 的 tr、_sanitize_md 与 _review_normalize 共用的 jq def dectl）都从下面两份渲染取值，不再各写一份字面量。
+_REVIEW_CTRL_RANGES=(0 8 11 12 14 31)   # 成对的十进制闭区间
+_review_ctrl_render() {  # <每段的 printf 格式（吃两个数）> → 各段拼接
+  local fmt="$1" out="" i
+  for ((i = 0; i < ${#_REVIEW_CTRL_RANGES[@]}; i += 2)); do
+    out+=$(printf "$fmt" "${_REVIEW_CTRL_RANGES[i]}" "${_REVIEW_CTRL_RANGES[i+1]}")
+  done
+  printf '%s' "$out"
+}
+REVIEW_CTRL_TR_SET=$(_review_ctrl_render '\\%03o-\\%03o')          # tr 字符集：\000-\010\013-\014\016-\037
+REVIEW_CTRL_JQ_RE="[$(_review_ctrl_render '\\u%04x-\\u%04x')]"     # jq 正则：[\u0000-\u0008\u000b-\u000c\u000e-\u001f]
+
 # --- 文本清洗：剥离 ANSI 控制序列（stdin → stdout）---
 # stream-json 的 stdout 实测不含 ANSI，但降级路径要贴的是模型原文，且纯文本回退路径仍需清洗，
 # 所以清洗放在公共函数里，两条路径都过一遍。
@@ -46,10 +59,10 @@ REVIEW_TITLE_FAILED="${REVIEW_TITLE} · ⚠️ 评审未完成"
 review_clean_text() {
   local esc
   esc=$(printf '\033')
-  # 先剔 NUL 与其它控制字符（与 _sanitize_md 同一份字符集：\000–\010、\013、\014、\016–\037）：BSD awk 在 NUL 处截断记录，
+  # 先剔 NUL 与其它控制字符（REVIEW_CTRL_TR_SET，与 _sanitize_md / 归一化同一份字符集）：BSD awk 在 NUL 处截断记录，
   # 降级原文 / kiro stderr 里一个 NUL 就能让它后面的密钥静默消失又不进掩码（第 20 条）；换行 / 制表 / 回车保留
   # 顺序：先剥 ANSI 序列再剔控制字符——ESC（\033）本身就在剔除范围里，反过来会只剩 `[38;5;141m` 的尾巴
-  LC_ALL=C sed "s/${esc}\\[[0-9;?]*[a-zA-Z]//g" | LC_ALL=C tr -d '\000-\010\013\014\016-\037'
+  LC_ALL=C sed "s/${esc}\\[[0-9;?]*[a-zA-Z]//g" | LC_ALL=C tr -d "$REVIEW_CTRL_TR_SET"
 }
 
 # --- 模型文本的 Markdown 结构清洗（R1）---
@@ -74,7 +87,8 @@ review_clean_text() {
 #     标题），模型文本里的整行加粗能逐字节冒充这些结构行。行内加粗（`**影响**：…`）不动——真实评审里
 #     模型从没写过整行加粗（acceptance 留档的 13 处整行加粗全是脚本自己的「修复建议」）。
 #   - 围栏数为奇数时补一个闭合围栏：否则模型开一个不闭合的围栏就能把后面脚本渲染的章节与页脚一起吞掉。
-_REVIEW_JQ_SANITIZE='
+# 开头的 def dectl 是控制字符剔除（REVIEW_CTRL_JQ_RE 渲染进来；_sanitize_md 与 _review_normalize 都用它，第 2 条）
+_REVIEW_JQ_SANITIZE="def dectl(v): (v | gsub(\"${REVIEW_CTRL_JQ_RE}\"; \"\"));"'
   def _is_bold_line: (test("^[[:space:]]{0,3}\\*\\*[^[:space:]*].*\\*\\*[[:space:]]*$")
                       or test("^[[:space:]]{0,3}__[^[:space:]_].*__[[:space:]]*$"));
   def _escape_bold_line: sub("^(?<sp>[[:space:]]{0,3})\\*\\*"; .sp + "\\*\\*")
@@ -112,11 +126,11 @@ _REVIEW_JQ_SANITIZE='
   def _re_thematic: "^[[:space:]]{0,3}([-*_])([[:space:]]*\\1){2,}[[:space:]]*$";
   def _re_setext: "^[[:space:]]{0,3}(=+|-+)[[:space:]]*$";
   def _is_break_line: (test(_re_thematic) or test(_re_setext));
-  # 第 23 条：NUL 与其它控制字符（\u0000–\u0008、\u000b、\u000c、\u000e–\u001f）一律剔除——一个 NUL 就能让 grep 把评论
+  # 第 23 条：NUL 与其它控制字符（dectl，字符集见 REVIEW_CTRL_JQ_RE）一律剔除——一个 NUL 就能让 grep 把评论
   # 当二进制（BSD grep 的「Binary file matches」进 stdout，守卫失败 → 整份评审退成最小失败评论）；换行 / 制表 / 回车保留。
   def _sanitize_md:
     if type != "string" then "" else
-    (gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f]"; "")
+    (dectl(.)
      | gsub("<!--"; "&lt;!--") | gsub("-->"; "--&gt;")
      | gsub("<(?<tag>/?details)"; "&lt;\(.tag)"; "i"))
     | split("\n")
@@ -333,17 +347,19 @@ review_extract_json() {
 # 输出也不合契约——而降级路径会把那份输出贴到 MR 上。有了这个字段，缺失/不符就能判定为
 # 「不是受信 agent 的产出」，走失败评论而**不是**降级（不能把非受信产出贴出去）。
 REVIEW_CONTRACT_ID="codeup-reviewer/1"
-# 模型字段的字节上限（第 21 条；只在这里定义，review_validate 经 --argjson 注入）。summary / verdict_reason 共用 REVIEW_CAP_SUMMARY。
-# fix 取 16 KB 而非 32 KB、title 另设 2 KB：title + body + fix + 标记 + 页脚要落在 MAX_COMMENT_BYTES 默认值 60000 之内，
-# 超长单行同样触发 awk 的 O(n²)。
+# 模型字段的字节上限（第 21 条；只在这里定义，_review_normalize / review_finalize_json 经 --argjson 注入）。summary / verdict_reason
+# 共用 REVIEW_CAP_SUMMARY。fix 取 16 KB 而非 32 KB、title 另设 2 KB：title + body + fix + 标记 + 页脚要落在 MAX_COMMENT_BYTES 默认值
+# 60000 之内。上限在两处生效（16-fix4 第 12 条）：归一化先按 2 × 上限的码点数预切（把掩码 awk 的成本绑定到上限而不是模型输出），
+# 清洗之后再按字节精确截断并标注。掩码 awk 对单行的成本是线性的（redact_url 先 index("://") 再跑正则；连片掩码按 match 前进），
+# 100 KB 单行 body 与 10000 个 `<!--` 的清洗膨胀向量都在秒级（tests 里有 4 × 目标的计时守卫）。
 REVIEW_CAP_SUMMARY=8192
 REVIEW_CAP_TITLE=2048
 REVIEW_CAP_BODY=32768
 REVIEW_CAP_FIX=16384
+REVIEW_CAP_ID=256        # id / category：不渲染，只为约束掩码成本（按码点预切，不计入 truncated_fields）
 
-# --- 契约校验（stdin = 契约 JSON → stdout = 规范化 JSON）---
-# 规范化后的形态：
-#   {summary, verdict, verdict_reason, findings:[…], dropped_findings:N, delocated_findings:N}
+# --- 契约归一化（stdin = 契约 JSON → stdout = 归一化 JSON；只做结构 / 类型 / trim / 归一化 / 预切，**不**清洗、不掩码、不截断）---
+# 对外入口与最终形态见下面的 review_validate；这里只描述归一化本身。
 # 丢弃规则（spec §4.1「字段校验失败的 finding 丢弃并计数」）：
 #   - 不是 JSON 对象
 #   - severity 规范化（去首尾空白 + 大写）后不是 P0/P1/P2
@@ -354,16 +370,13 @@ REVIEW_CAP_FIX=16384
 #     「重点关注文件」表格的单元格（`|` 会造出幻影列、截断表格）和被反引号包裹的定位串（反引号会破坏配对），
 #     换行更是直接把表格截断、给攻击者一个塞伪造章节的位置。这类路径本来也不可能是真实文件名。
 #   - line_start/line_end 不是 ≥1 的整数 → null；file 为 null 时行号一并置 null
-# 文本清洗：summary / verdict_reason / title / body / fix 全部过 _sanitize_md（见 R1 说明）；
-#   title 与 verdict 额外把空白折叠成单空格——它们要渲染进单行（`**n. … — 标题**` 加粗行与 `## 结论：…`），
-#   带换行就会把标题行截断。
-# body/fix 不做 trim：它们是 Markdown，可能以缩进代码块开头，裁掉缩进会破坏渲染。
-# dropped_findings 直接写进输出 JSON 而不是回传全局变量：调用方普遍用 $(…) 取结果，
-# 命令替换在子 shell 里跑，全局变量传不回来（codeup-api.sh 里踩过同一个坑）。
-# --- 契约归一化（只做结构 / 类型 / trim / 归一化；**不**清洗、不掩码、不截断）---
-# 顺序是 归一化 → 字段级掩码 → 清洗 → 上限（第 15 条，P1）：先清洗再掩码时，围栏内的 `# Kiro 代码评审` / `---` 合法地不被转义，
-# 随后 PEM 整块删除把围栏开启行一起删掉，渲染出的汇总里出现真 H1 / H2 与吞掉页脚的未闭合围栏，R1「结构只能来自脚本」被打穿。
-# 问题条数上限 REVIEW_MAX_FINDINGS（第 22 条）：超出的丢弃并计入 dropped_findings。
+# 单行槽位（title / verdict / id / category）把空白折叠成单空格——它们要渲染进单行（`**n. … — 标题**` 加粗行与 `## 结论：…`），
+#   带换行就会把标题行截断；body / fix 不做 trim：它们是 Markdown，可能以缩进代码块开头，裁掉缩进会破坏渲染。
+# 控制字符在这里就剔掉（dectl）：掩码在清洗之前跑，BSD awk 会在 NUL 处截断记录，一个 NUL 就能让它后面的密钥静默消失又不进掩码（第 20 / 23 条）。
+# 预切（16-fix4 第 12a 条）：多行槽位按 2 × 字节上限的**码点**数切（一个码点至少一字节，所以永远不会切到最终字节上限之下），
+#   id / category 切 REVIEW_CAP_ID 码点——只为把掩码的 awk 成本绑定到上限而不是模型输出；真正的字节上限与截断标记在 review_finalize_json。
+# 问题条数上限 REVIEW_MAX_FINDINGS：超出的条数计入 overflow_findings（第 28 条），dropped_findings 只数不合契约的。
+# 计数直接写进输出 JSON 而不是回传全局变量：调用方普遍用 $(…) 取结果，命令替换在子 shell 里跑，全局变量传不回来。
 REVIEW_MAX_FINDINGS=200
 _review_normalize() {
   local input
@@ -374,12 +387,13 @@ _review_normalize() {
     || { echo "review_validate: 契约的 findings 不是数组" >&2; return 1; }
   printf '%s' "$input" | jq -e --arg id "$REVIEW_CONTRACT_ID" '(.contract // "") == $id' >/dev/null 2>&1 \
     || { echo "review_validate: 契约缺少 contract=\"${REVIEW_CONTRACT_ID}\" 字段（该字段只在受信 agent 提示词里要求，说明受信 agent 未生效）" >&2; return 3; }
-  printf '%s' "$input" | jq -c --arg deny "$REVIEW_CELL_DENY_CHARS" --argjson maxf "$REVIEW_MAX_FINDINGS" "${_REVIEW_JQ_CELL}"'
+  printf '%s' "$input" | jq -c --arg deny "$REVIEW_CELL_DENY_CHARS" --argjson maxf "$REVIEW_MAX_FINDINGS" \
+      --argjson cap_summary "$REVIEW_CAP_SUMMARY" --argjson cap_title "$REVIEW_CAP_TITLE" --argjson cap_body "$REVIEW_CAP_BODY" \
+      --argjson cap_fix "$REVIEW_CAP_FIX" --argjson cap_id "$REVIEW_CAP_ID" "${_REVIEW_JQ_SANITIZE}${_REVIEW_JQ_CELL}"'
     # \A / \z 是显式的「字符串首/尾」锚点：jq 的 ^ / $ 在不同版本可能被当行锚点，
     # 那会连多行字符串里每一行的缩进都裁掉。
-    # 控制字符（NUL、\u0001–\u0008、\u000b、\u000c、\u000e–\u001f）在归一化就剔掉（与 _sanitize_md / review_clean_text 同一份字符集）：
-    # 掩码在清洗之前跑，BSD awk 会在 NUL 处截断记录，一个 NUL 就能让它后面的密钥静默消失又不进掩码（第 20 / 23 条）
-    def dectl(v): (v | gsub("[\u0000-\u0008\u000b\u000c\u000e-\u001f]"; ""));
+    # dectl 来自 _REVIEW_JQ_SANITIZE（控制字符集只此一份，第 2 条）
+    def pre(v; n): if (v | type) == "string" then v[0:n] else v end;   # 预切（第 12a 条，按码点）
     def tr(v): if (v | type) == "string"
                then (dectl(v) | gsub("\\A[[:space:]]+"; "") | gsub("[[:space:]]+\\z"; ""))
                else "" end;
@@ -387,8 +401,9 @@ _review_normalize() {
     def oneline(v): (tr(v) | gsub("[[:space:]]+"; " "));
     def lineno(v): if (v | type) == "number" and (v | floor) == v and v >= 1 then (v | floor) else null end;
     # 文件路径：非空字符串，且不含许可清单外的字符（REVIEW_CELL_DENY_CHARS 与控制字符；否则按未定位处理——
-    # 与另两处的差别只在处置：这里不剔字符，因为「不可定位」要计数并写进统计行）
-    def fpath(v): (tr(v)) as $t
+    # 与另两处的差别只在处置：这里不剔字符，因为「不可定位」要计数并写进统计行）。
+    # 先在**只 trim、不剔控制字符**的值上查禁用字符（第 27 条）：先 dectl 会把 `src/\u0001app.py` 洗成合法路径、既不计数也不置空
+    def fpath(v): (if (v | type) == "string" then (v | gsub("\\A[[:space:]]+"; "") | gsub("[[:space:]]+\\z"; "")) else "" end) as $t
                   | if ($t | length) == 0 then null
                     elif _cell_has_deny($t) then null
                     elif ($t | startswith("-----")) then null   # 路径不可能长这样；PEM 的 BEGIN 标记当 file 会被 PEM 规则当块起始（第 10 条）
@@ -398,7 +413,7 @@ _review_normalize() {
     | [ (.findings // [])[:$maxf][]
         | select(type == "object")
         | (tr(.severity) | ascii_upcase) as $sev
-        | oneline(.title) as $title
+        | oneline(.title | pre(.; 2 * $cap_title)) as $title
         | select(($sev == "P0" or $sev == "P1" or $sev == "P2")
                  and ($title | length) > 0
                  and ((tr(.body)) | length) > 0)
@@ -407,63 +422,87 @@ _review_normalize() {
         | (if $file == null then null else lineno(.line_start) end) as $ls
         | (if $ls == null then null
            else (lineno(.line_end)) as $le | (if $le == null or $le < $ls then $ls else $le end) end) as $le
-        | { id: (oneline(.id)), severity: $sev, category: (oneline(.category)), title: $title,
+        | { id: (oneline(.id | pre(.; $cap_id))), severity: $sev, category: (oneline(.category | pre(.; $cap_id))), title: $title,
             file: $file, line_start: $ls, line_end: $le, delocated: $delocated,
-            body: (if (.body | type) == "string" then dectl(.body) else "" end),
-            fix: (if (.fix | type) == "string" then dectl(.fix) else "" end) }
+            body: (if (.body | type) == "string" then dectl(.body | pre(.; 2 * $cap_body)) else "" end),
+            fix: (if (.fix | type) == "string" then dectl(.fix | pre(.; 2 * $cap_fix)) else "" end) }
       ] as $kept
-    | { summary: (tr($root.summary)),
+    | { summary: (tr($root.summary | pre(.; 2 * $cap_summary))),
         verdict: (tr($root.verdict) | ascii_upcase | gsub("[[:space:]]+"; " ")),
-        verdict_reason: (tr($root.verdict_reason)),
+        verdict_reason: (tr($root.verdict_reason | pre(.; 2 * $cap_summary))),
         findings: ($kept | map(del(.delocated))),
-        dropped_findings: ($total - ($kept | length)),
+        dropped_findings: (([$total, $maxf] | min) - ($kept | length)),
+        overflow_findings: (if $total > $maxf then $total - $maxf else 0 end),
         delocated_findings: ([$kept[] | select(.delocated)] | length) }'
+}
+# --- 就地 jq 改写（16-fix4 第 3 条；review_finalize_json 与 review_redact_json 共用）---
+# 输出先写到目标同目录的临时文件（跨文件系统的 mv 不是原子的，中途失败会留下半截 JSON），jq 失败或输出为空 → 删临时文件、
+# 原文件一个字节不动。用法：_review_jq_inplace <文件> <调用方名> <步骤名> <jq 参数…（程序在最后）>
+_review_jq_inplace() {
+  local file="$1" who="$2" step="$3" out; shift 3
+  out=$(mktemp "${file}.jq.XXXXXX") || { echo "$who: 建不出临时文件：${file}" >&2; return 1; }
+  if ! jq "$@" "$file" > "$out" || [[ ! -s "$out" ]]; then rm -f "$out"; echo "$who: ${step}失败：${file}" >&2; return 1; fi
+  mv -f "$out" "$file" || { rm -f "$out"; echo "$who: 写回失败：${file}" >&2; return 1; }
 }
 # --- 清洗 + 上限（掩码**之后**）：Markdown 结构清洗、title 的 `*` 转义、按字节上限截断并计数 ---
 # 用法：review_finalize_json <文件>  就地改写；上限值只在 REVIEW_CAP_* 常量、经 --argjson 注入。
 review_finalize_json() {
-  local file="${1-}" out
+  local file="${1-}"
   [[ -n "$file" && -r "$file" ]] || { echo "review_finalize_json: 文件不可读：${file}" >&2; return 2; }
-  out=$(mktemp "${file}.final.XXXXXX") || return 1
-  if ! jq -c --argjson cap_summary "$REVIEW_CAP_SUMMARY" --argjson cap_title "$REVIEW_CAP_TITLE" \
+  _review_jq_inplace "$file" review_finalize_json "清洗 / 上限" -c --argjson cap_summary "$REVIEW_CAP_SUMMARY" --argjson cap_title "$REVIEW_CAP_TITLE" \
            --argjson cap_body "$REVIEW_CAP_BODY" --argjson cap_fix "$REVIEW_CAP_FIX" "${_REVIEW_JQ_SANITIZE}"'
-    # 字段上限（第 21 条，按 UTF-8 **字节**）：施加在 _sanitize_md 之后（第 7 条：清洗会膨胀——全是 `<!--` 的字段 4 → 7 字节，先截再洗会
-    # 超限 1.75 倍），截到上限后再洗一遍（截断点可能落在围栏中间，补齐闭合围栏）并在末尾标「（已截断）」；cap 返回 {v, t}，计数就在这里
-    # 产出（第 6 条）。只在真的超限时才逐码点累加字节，且先按上界切片再 explode（第 30 条：开销绑定到上限而不是输入）。
+    # 字段上限（第 21 条，按 UTF-8 **字节**）：最终结果是「清洗过的文本 ≤ 上限」——清洗会膨胀（全是 `<!--` 的字段 4 → 7 字节；`<a` → `&lt;a`
+    # 2.5 倍），所以不能洗完再切（切点可能落在围栏中间、留下半个实体），也不能切完就交（洗一遍又超）。做法（16-fix4 第 12b / 19 条）：
+    # 原文按字节预算二分找最长的码点前缀（不 explode）→ 清洗 → 超了就按比例缩预算再来，最多 6 轮，**最后一步一定是清洗**；截断标记
+    # 「（已截断）」是脚本文案、在清洗之外追加，预算里已经给它留了位置，所以 v 的总字节数 ≤ n。cap 返回 {v, t}，计数就在这里产出（第 6 条）。
     # 掩码不会让字段变长（mask 等长或变短；PEM 占位 / 提示行有界），行内正文 ≈ 上限之和 + 标记 + 页脚 < 60000；出口另有硬守卫。
-    def _capb(v; n): if (v | utf8bytelength) <= n then v
-                     else (((v | explode)[0:n]) | reduce .[] as $c ({s: [], b: 0};
-                             if .b >= n then . else ($c | [.] | implode | utf8bytelength) as $w
-                               | if .b + $w > n then .b = n else (.s += [$c] | .b += $w) end end)
-                           | .s | implode) + "（已截断）" end;
-    def cap(v; n): if (v | type) != "string" then {v: "", t: 0}
-                   elif (v | utf8bytelength) <= n then {v: v, t: 0}
-                   else {v: (_capb(v; n) | _sanitize_md), t: 1} end;
+    # 参数一进函数就绑成 $变量：jq 的函数参数是闭包，在 until 的状态对象上求值时 `.body` 一类路径参数会变成 null
+    def _bytecut(v; n): v as $v | n as $n
+      | if ($v | utf8bytelength) <= $n then $v
+        else ({lo: 0, hi: ($v | length)}
+              | until(.lo >= .hi;
+                  (((.lo + .hi + 1) / 2) | floor) as $mid
+                  | if ($v[:$mid] | utf8bytelength) <= $n then .lo = $mid else .hi = ($mid - 1) end)
+              | $v[:.lo]) end;
+    def _fit(raw; m): raw as $raw | m as $m
+      | {b: $m, c: null, i: 0}
+      | until(.i >= 6 or (if .c == null then false else (.c | utf8bytelength) <= $m end);
+          .b as $b | (_bytecut($raw; $b) | _sanitize_md) as $c
+          | .c = $c | .i += 1
+          | if ($c | utf8bytelength) > $m then .b = ([0, (((($b * $m) / ($c | utf8bytelength)) | floor) - 1)] | max) else . end)
+      | if .c != null and (.c | utf8bytelength) <= $m then .c else (_bytecut($raw; (($m / 4) | floor)) | _sanitize_md) end;   # 6 轮仍超（清洗膨胀 > 2.5 倍的病态输入）：预算砍到 1/4 再洗一次
+    def _mark: "（已截断）";
+    def cap(v; n): v as $v | n as $n
+      | if ($v | type) != "string" then {v: "", t: 0}
+        else ($v | _sanitize_md) as $s
+          | if ($s | utf8bytelength) <= $n then {v: $s, t: 0}
+            else {v: (_fit($v; $n - (_mark | utf8bytelength)) + _mark), t: 1} end end;
     # 加粗槽位：title 会被脚本包进 `**…**`（问题标题行、折叠区条目、行内评论首行）。先把 `*` 转义成 `\*`，
     # 否则标题里的 `**kwargs` 会提前闭合脚本的加粗、把级别前缀变回普通文字。先转义再清洗：转义后的
     # 字符串以反斜杠开头，不会再被 _sanitize_md 的整行加粗规则二次转义。
     # 标题里**所有** `*` 一律转义（16-fix4 第 22 条）：掩码结果 `AKIA****4567` 的四颗星也转义成 `\*\*\*\*`（渲染出来仍是 ****）——
     # 一处掩码靠 CommonMark「三的倍数」规则碰巧不闭合外层 `**`，两处（`硬编码 AKIA… 与 ghp_… 两处密钥`）就互相配对、把 `P0 ·`
     # 级别前缀打回普通文字。全部转义在两种解读下都安全。
-    def boldsafe: gsub("\\*"; "\\*") | _sanitize_md;
+    def boldsafe_esc: if type == "string" then gsub("\\*"; "\\*") else . end;   # 清洗由 cap 做（最后一步一定是清洗）
     . as $r
-    | cap(($r.summary | _sanitize_md); $cap_summary) as $S
-    | cap(($r.verdict_reason | _sanitize_md); $cap_summary) as $R
+    | cap($r.summary; $cap_summary) as $S
+    | cap($r.verdict_reason; $cap_summary) as $R
     | .findings |= [ .[]
-        | cap((.title | boldsafe); $cap_title) as $T
-        | cap((.body | _sanitize_md); $cap_body) as $B
-        | cap((.fix | _sanitize_md); $cap_fix) as $F
+        | cap((.title | boldsafe_esc); $cap_title) as $T
+        | cap(.body; $cap_body) as $B
+        | cap(.fix; $cap_fix) as $F
         | .title = $T.v | .body = $B.v | .fix = $F.v | .id |= _sanitize_md | .category |= _sanitize_md
         | ._tc = ($T.t + $B.t + $F.t) ]
     | .summary = $S.v | .verdict_reason = $R.v | .verdict |= _sanitize_md
     | .truncated_fields = ($S.t + $R.t + ([.findings[]._tc] | add // 0))
-    | .findings |= map(del(._tc))' "$file" > "$out" || [[ ! -s "$out" ]]; then
-    rm -f "$out"; echo "review_finalize_json: 清洗 / 上限失败：${file}" >&2; return 1
-  fi
-  mv -f "$out" "$file" || { rm -f "$out"; echo "review_finalize_json: 写回失败：${file}" >&2; return 1; }
+    | .findings |= map(del(._tc))'
 }
 # --- 契约校验（对外入口）：归一化 → 字段级掩码 → 清洗 + 上限（stdin → stdout）---
-# 规范化后的形态：{summary, verdict, verdict_reason, findings:[…], dropped_findings:N, delocated_findings:N, truncated_fields:N}
+# 顺序不能倒（16-fix3 第 15 条，P1）：先清洗再掩码时，围栏内的 `# Kiro 代码评审` / `---` 合法地不被转义，随后 PEM 整块删除把围栏
+# 开启行一起删掉，渲染出的汇总里出现真 H1 / H2 与吞掉页脚的未闭合围栏，R1「结构只能来自脚本」被打穿。
+# 规范化后的形态：{summary, verdict, verdict_reason, findings:[…], dropped_findings:N, overflow_findings:N, delocated_findings:N, truncated_fields:N}
+#   summary / verdict_reason / title / body / fix 已掩码并过 _sanitize_md（见 R1 说明），title 里的 `*` 已转义；
+#   title / verdict / id / category 是单行；每个文本字段 ≤ REVIEW_CAP_*（字节），超出的已截断并计入 truncated_fields。
 # rc 1 = 顶层不是对象 / findings 不是数组 / 不是合法 JSON（调用方走降级）
 # rc 3 = contract 字段缺失或不等于 REVIEW_CONTRACT_ID（调用方走失败评论，**不得**贴出模型内容）
 # rc 4 = 字段级掩码或清洗失败（调用方走失败评论：不能把未掩码的字段往下送，也不能把它当「解析失败」贴原文）
@@ -474,7 +513,8 @@ review_validate() {
   if (( rc != 0 )); then rm -f "$f"; return "$rc"; fi
   review_redact_json "$f" || { rm -f "$f"; echo "review_validate: 字段级掩码失败" >&2; return 4; }
   review_finalize_json "$f" || { rm -f "$f"; echo "review_validate: 清洗 / 上限失败" >&2; return 4; }
-  cat "$f"; rm -f "$f"
+  cat "$f" || { rm -f "$f"; echo "review_validate: 输出失败" >&2; return 4; }   # 第 20 条：写 stdout 失败也算失败，调用方不能拿半截文件当结果
+  rm -f "$f"
 }
 
 # ============================================================================
@@ -1517,6 +1557,7 @@ review_render_summary() {
   verdict_reason=$(jq -r '.verdict_reason // ""' "$_RR_JSON")
   dropped=$(jq -r '.dropped_findings' "$_RR_JSON")
   delocated=$(jq -r '.delocated_findings' "$_RR_JSON")
+  overflow=$(jq -r '.overflow_findings // 0' "$_RR_JSON")   # 超出 REVIEW_MAX_FINDINGS 的条数（第 28 条；旧 JSON 没有这个字段 → 0）
   total=$(jq -r '.findings | length' "$_RR_JSON")
   n0=$(jq -r '[.findings[] | select(.severity == "P0")] | length' "$_RR_JSON")
   n1=$(jq -r '[.findings[] | select(.severity == "P1")] | length' "$_RR_JSON")
@@ -1561,6 +1602,7 @@ review_render_summary() {
   [[ "$_RR_INLINE" == "1" ]] \
     && stat="${stat} —— 其中 $(jq -r '.inline_count' "$_RR_JSON") 条已标注在「文件改动」对应行"
   [[ "$dropped" -gt 0 ]] && stat="${stat}（另有 ${dropped} 条不合契约已丢弃）"
+  [[ "$overflow" -gt 0 ]] && stat="${stat}（另有 ${overflow} 条超出展示上限）"
   [[ "$delocated" -gt 0 ]] && stat="${stat}（${delocated} 条的文件路径不合规，已按未定位处理）"
   echo "$stat"
   if [[ -n "$_RR_NOTICE" ]]; then
@@ -1646,7 +1688,7 @@ review_truncate_comment() {
   [[ "$max" =~ ^[0-9]+$ && "$max" -ge 1 ]] || { echo "review_truncate_comment: 字节上限必须是 ≥1 的整数（实际：${max}）" >&2; return 2; }
   size=$(wc -c < "$file" | tr -d ' ')
   [[ "$size" -gt "$max" ]] || return 1
-  dir=$(mktemp -d)
+  dir=$(mktemp -d) || { echo "review_truncate_comment: 建不出临时目录" >&2; return 4; }   # $dir 为空时会写到 /cut（第 29 条）
   head -c "$max" "$file" > "$dir/cut"
   # **先退到最后一个完整行**（丢掉那半行），再做任何补齐：
   #   ① 半行会让后面追加的闭合围栏/闭合标签接在半行后面，而它们不在行首就不起作用
@@ -1698,8 +1740,12 @@ review_truncate_comment() {
   # （评审标记 + 隐藏历史——后者紧跟标记之后，上限小到砍掉它时下一次评审就读不回历次记录，票 18 ②）。丢了标记的残片一旦被
   # PUT 上去：① 上一次的完整报告与隐藏的历次记录当场不可恢复地消失；② 下一次评审再也定位不到这条评论，会在 MR 上新建
   # 第二条汇总（违反 I4）。宁可让截断失败（调用方回写失败评论，形态完整、历史仍在），也不发这种残片。
-  local rc=0
-  _review_replace_guarded "$file" "$dir/out" review_truncate_comment || rc=$?
+  # 交给守卫的替换文件必须在目标同目录（第 29 条，与 review_redact_file / _review_jq_inplace 同款）：TMPDIR 与 WORK 不同文件系统时
+  # mv 是拷贝不是原子重命名——而这是全脚本风险最高的写者（结果会 PUT 覆盖上一份汇总）
+  local rc=0 out
+  out=$(mktemp "${file}.trunc.XXXXXX") || { rm -rf "$dir"; echo "review_truncate_comment: 建不出临时文件：${file}" >&2; return 4; }
+  cp "$dir/out" "$out" || { rm -f "$out"; rm -rf "$dir"; echo "review_truncate_comment: 写临时文件失败：${file}" >&2; return 4; }
+  _review_replace_guarded "$file" "$out" review_truncate_comment || rc=$?
   rm -rf "$dir"
   if [[ "$rc" == "3" ]]; then
     echo "review_truncate_comment: 上限 ${max} 字节太小，截断后连评审标记/隐藏历史都没了——拒绝截断（那份残片会覆盖掉上一条汇总的全部内容与历次记录）。请调大 MAX_COMMENT_BYTES" >&2
@@ -2096,14 +2142,21 @@ _review_field_sentinel_re() {  # <nonce> → 能匹配任意序号的 ERE（同�
   local lit; lit=$(_review_field_sentinel "$1" $'\001')
   lit=$(_review_ere_escape "$lit"); printf '%s' "${lit//$'\001'/[0-9]+}"
 }
+# --- 掩码到文件（16-fix4 第 4 条；review_redact_file / review_render_degraded / review_redact_json 共用）---
+# awk 退出非零、或「输入非空而输出为空」都算失败，失败时删掉输出文件、报错行以调用方名开头。
+# 用法：_review_redact_to <输入文件> <输出文件> <调用方名> <报错尾巴> [review_redact_secrets 的参数…]
+_review_redact_to() {
+  local in="$1" out="$2" who="$3" tail="$4"; shift 4
+  if ! review_redact_secrets "$@" < "$in" > "$out" || [[ ! -s "$out" && -s "$in" ]]; then
+    rm -f "$out"; echo "$who: 掩码失败（awk 退出非零或无输出）${tail}" >&2; return 1
+  fi
+}
 review_redact_json() {
-  local file="${1-}" dir nonce sre pre suf out
+  local file="${1-}" dir nonce sre pre suf
   [[ -n "$file" && -r "$file" ]] || { echo "review_redact_json: 文件不可读：${file}" >&2; return 2; }
   jq -e 'type == "object" and (.findings | type) == "array"' "$file" >/dev/null 2>&1 \
     || { echo "review_redact_json: 不是归一化契约（顶层不是对象 / findings 不是数组）：${file}" >&2; return 2; }
-  dir=$(mktemp -d) || { echo "review_redact_json: 建不出临时目录" >&2; return 1; }
-  # 输出文件放在目标同目录（第 28 条）：跨文件系统的 mv 不是原子的，中途失败会留下半截 JSON，违反「失败时原文不动」
-  out=$(mktemp "${file}.redact.XXXXXX") || { rm -rf "$dir"; echo "review_redact_json: 建不出临时文件" >&2; return 1; }
+  dir=$(mktemp -d) || { echo "review_redact_json: 建不出临时目录：${file}" >&2; return 1; }
   nonce=$(review_new_nonce)
   pre=$(_review_field_sentinel "$nonce" $'\001'); suf=${pre#*$'\001'}; pre=${pre%%$'\001'*}
   sre=$(_review_field_sentinel_re "$nonce")
@@ -2118,25 +2171,24 @@ review_redact_json() {
         [.summary, .verdict_reason, (.findings[] | .body, .fix)]
         | to_entries[] | (if (.value | type) == "string" then .value else "" end) + "\n" + $pre + (.key | tostring) + $suf' \
         "$file" > "$dir/dump-f"; then
-    rm -rf "$dir" "$out"; echo "review_redact_json: 倒出字段失败：${file}" >&2; return 1
+    rm -rf "$dir"; echo "review_redact_json: 倒出字段失败：${file}" >&2; return 1
   fi
-  if ! review_redact_secrets --keep-lines --sentinel "^${sre}\$" < "$dir/dump-k" > "$dir/masked-k" || [[ ! -s "$dir/masked-k" ]] \
-     || ! review_redact_secrets --sentinel "^${sre}\$" < "$dir/dump-f" > "$dir/masked-f" || [[ ! -s "$dir/masked-f" ]]; then
-    rm -rf "$dir" "$out"; echo "review_redact_json: 掩码失败（awk 退出非零或无输出）：${file}" >&2; return 1
+  if ! _review_redact_to "$dir/dump-k" "$dir/masked-k" review_redact_json "：${file}" --keep-lines --sentinel "^${sre}\$" \
+     || ! _review_redact_to "$dir/dump-f" "$dir/masked-f" review_redact_json "：${file}" --sentinel "^${sre}\$"; then
+    rm -rf "$dir"; return 1
   fi
   # 静态 jq：按分隔行切回，第 k 段就是第 k 个字段（与倒出顺序同一份约定）。被整块删掉的字段只剩空段，rtrimstr 后是 ""。
-  if ! jq -c --rawfile mk "$dir/masked-k" --rawfile mf "$dir/masked-f" --arg re "${sre}"$'\n' '
+  # 输出文件放在目标同目录、失败时原文不动（_review_jq_inplace，第 3 / 28 条）
+  if ! _review_jq_inplace "$file" review_redact_json "回注字段" -c --rawfile mk "$dir/masked-k" --rawfile mf "$dir/masked-f" --arg re "${sre}"$'\n' '
         ($mk | split($re; null) | map(rtrimstr("\n"))) as $k
         | ($mf | split($re; null) | map(rtrimstr("\n"))) as $f
         | .verdict = $k[0] | .summary = $f[0] | .verdict_reason = $f[1]
         | reduce range(.findings | length) as $i (.;
             .findings[$i].title = $k[1 + 3 * $i] | .findings[$i].id = $k[2 + 3 * $i] | .findings[$i].category = $k[3 + 3 * $i]
-            | .findings[$i].body = $f[2 + 2 * $i] | .findings[$i].fix = $f[3 + 2 * $i])' \
-        "$file" > "$out" || [[ ! -s "$out" ]]; then
-    rm -rf "$dir" "$out"; echo "review_redact_json: 回注字段失败：${file}" >&2; return 1
+            | .findings[$i].body = $f[2 + 2 * $i] | .findings[$i].fix = $f[3 + 2 * $i])'; then
+    rm -rf "$dir"; return 1
   fi
   rm -rf "$dir"
-  mv -f "$out" "$file" || { rm -f "$out"; echo "review_redact_json: 写回失败：${file}" >&2; return 1; }
 }
 
 # --- 脚本标记行的识别（评审标记 / 行内标记 / 隐藏历史）：从三个常量派生，不手写第四份字面量（第 11 条）---
@@ -2152,12 +2204,19 @@ _review_ere_escape() {
   done
   printf '%s' "$out"
 }
-_review_marker_line_re() {
+# 加载期算一次的常量（16-fix4 第 16 条）：三个常量与 _review_ere_escape 都在上面定义完了才能算；_review_marker_line_re 只是它的取值口，
+# _review_marker_line_re_build 是派生公式（测试改常量后用它重算，证明没有第四份手写字面量）
+_review_marker_line_re_build() {
   printf '%s|^%s|^%s' "$REVIEW_MARKER_LINE_RE" \
     "$(_review_ere_escape "$REVIEW_INLINE_MARKER_PREFIX")" "$(_review_ere_escape "$REVIEW_HISTORY_PREFIX")"
 }
-# 文件的**记录数**（最后一行没有换行也算一行）：文档级掩码的保行守卫用它比较前后，不受 NUL 字节影响。一个 fork（第 8 条）。
+REVIEW_MARKER_LINE_RE_ALL=$(_review_marker_line_re_build)
+_review_marker_line_re() { printf '%s' "$REVIEW_MARKER_LINE_RE_ALL"; }
+# 文件的**记录数**（最后一行没有换行也算一行）：不受 NUL 字节影响。一个 fork（第 8 条）。
 _review_line_count() { LC_ALL=C awk 'END { print NR }' "$1"; }
+# 两份文件的记录数一次算完（16-fix4 第 17 条：review_redact_file 的保行守卫原先起两个 awk，这里合成一个）：输出「前者 后者」。
+# 第一份文件必须非空（调用方已保证），否则文件切换点判不出来。
+_review_line_counts() { LC_ALL=C awk 'FNR == 1 { fi++ } fi == 1 { a++ } END { print a + 0, NR - a }' "$1" "$2"; }
 # --- 守卫 + 原子替换（review_redact_file 与 review_truncate_comment 共用；第 12 条）---
 # 用法：_review_replace_guarded <原文件> <新文件> <调用方名>
 #   原文件里的每一行脚本标记（评审标记 / 行内标记 / 隐藏历史）必须在新文件里逐字节仍在，否则拒绝写回。
@@ -2171,7 +2230,7 @@ _review_line_count() { LC_ALL=C awk 'END { print NR }' "$1"; }
 _review_replace_guarded() {
   local orig="$1" new="$2" who="$3" markers rc=0 m
   # 调用方都开着 errexit：grep 的 rc 1（零匹配）必须用 `|| rc=$?` 接住，否则赋值语句本身就把整个脚本杀掉
-  markers=$(LC_ALL=C grep -a -E "$(_review_marker_line_re)" "$orig") || rc=$?
+  markers=$(LC_ALL=C grep -a -E "$REVIEW_MARKER_LINE_RE_ALL" "$orig") || rc=$?
   if (( rc > 1 )); then rm -f "$new"; echo "$who: 读取脚本标记行失败（grep rc=${rc}），拒绝写回" >&2; return 5; fi
   while IFS= read -r m; do
     [[ -n "$m" ]] || continue
@@ -2191,20 +2250,18 @@ _review_replace_guarded() {
 # 唯一的整行改写是 PEM 块内的正文行 / RFC 1421 头等行数换成占位（16-fix3 第 11 条起有块状态，第 15 条起块状态最多 128 行），
 # 所以结构上不可能吞掉章节；守卫两条都要：行数前后相等（结构上排除吞行）+ 标记行逐字节仍在。
 # 行内评论正文今天确实只含 validated.json 的字段 + 指纹 + sha，也照样过这一遍：这是**有意的双保险**（第 9 条不采纳「跳过」）——
-# 兜底就是为「将来某个出口混入未经 validated.json 的文本」而设，每 MR 成本不到 1 s。
+# 兜底就是为「将来某个出口混入未经 validated.json 的文本」而设。成本（16-fix4 第 17 条实测，3 KB 行内正文）：掩码 awk + 一次
+# 行数统计 awk + 守卫的 grep（标记行数 + 1 次）≈ 6 个进程、约 0.1 s；默认 10 条行内评论约 1 s。
 review_redact_file() {
-  local file="${1-}" out lines_in lines_out
+  local file="${1-}" out counts lines_in lines_out
   [[ -n "$file" ]] || { echo "review_redact_file: 缺少文件参数" >&2; return 2; }
   [[ -r "$file" ]] || { echo "review_redact_file: 文件不可读：${file}" >&2; return 2; }
   [[ -s "$file" ]] || { echo "review_redact_file: 文件为空：${file}" >&2; return 2; }
   out=$(mktemp "${file}.redact.XXXXXX") || { echo "review_redact_file: 建不出临时文件：${file}" >&2; return 1; }
-  if ! review_redact_secrets --keep-lines < "$file" > "$out" || [[ ! -s "$out" ]]; then
-    rm -f "$out"
-    echo "review_redact_file: 掩码失败（awk 退出非零或无输出）：${file}" >&2
-    return 1
-  fi
-  lines_in=$(_review_line_count "$file") && lines_out=$(_review_line_count "$out") \
+  _review_redact_to "$file" "$out" review_redact_file "：${file}" --keep-lines || return 1
+  counts=$(_review_line_counts "$file" "$out") && [[ "$counts" =~ ^[0-9]+\ [0-9]+$ ]] \
     || { rm -f "$out"; echo "review_redact_file: 统计行数失败，拒绝写回：${file}" >&2; return 5; }
+  lines_in=${counts% *}; lines_out=${counts#* }
   if [[ "$lines_in" != "$lines_out" ]]; then
     rm -f "$out"
     echo "review_redact_file: 掩码后行数从 ${lines_in} 变成 ${lines_out}（文档级掩码必须保行），拒绝写回：${file}" >&2
@@ -2225,11 +2282,7 @@ review_render_degraded() {
   [[ -r "$_RR_TEXT" ]] || { echo "review_render_degraded: 原文文件不可读：${_RR_TEXT}" >&2; return 2; }
   local hist masked
   masked=$(mktemp)
-  if ! review_redact_secrets --keep-lines < "$_RR_TEXT" > "$masked" || [[ ! -s "$masked" && -s "$_RR_TEXT" ]]; then
-    rm -f "$masked"
-    echo "review_render_degraded: 原文掩码失败（awk 退出非零或无输出），拒绝渲染降级评论" >&2
-    return 2
-  fi
+  _review_redact_to "$_RR_TEXT" "$masked" review_render_degraded "，拒绝渲染降级评论" --keep-lines || return 2
   # 降级时没有可信的分级计数（正是因为解析失败），历次表这一行记 status=degraded、计数为 -（三步回退与失败评论同一份）
   hist=$(mktemp)
   review_history_for_run "${_RR_HISTORY:--}" "$_RR_RUN" "$_RR_SHA" degraded review_render_degraded > "$hist"
