@@ -194,7 +194,7 @@ assert_eq "$(sentinel_intact)" "intact" "前置：哨兵文件已就位（否则
 RC=0; CASE="$tmp/case-selftarget"; mkdir -p "$CASE/home"
 OUT=$(cd "$PKGCOPY" && env HOME="$CASE/home" REVIEW_REPO_DIR="$PKGCOPY" \
       MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=集成包：非零退出"
+assert_nonzero "$RC" "REVIEW_REPO_DIR=集成包：非零退出"
 assert_contains "$OUT" "互相包含" "REVIEW_REPO_DIR=集成包：报错说明"
 assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "REVIEW_REPO_DIR=集成包：Kiro 未被启动"
 assert_eq "$(sentinel_intact)" "intact" "REVIEW_REPO_DIR=集成包：集成包内的 AGENTS.md 与 .kiro/ 都还在"
@@ -204,7 +204,7 @@ ln -s "$PKGCOPY" "$tmp/pkglink"
 RC=0; CASE="$tmp/case-selflink"; mkdir -p "$CASE/home"
 OUT=$(cd "$tmp" && env HOME="$CASE/home" REVIEW_REPO_DIR="$tmp/pkglink" \
       MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=指向集成包的符号链接：非零退出"
+assert_nonzero "$RC" "REVIEW_REPO_DIR=指向集成包的符号链接：非零退出"
 assert_contains "$OUT" "互相包含" "符号链接：同样被这道保护拦住"
 assert_eq "$(sentinel_intact)" "intact" "符号链接：集成包内的哨兵文件仍在"
 
@@ -212,7 +212,7 @@ assert_eq "$(sentinel_intact)" "intact" "符号链接：集成包内的哨兵文
 RC=0; CASE="$tmp/case-selfinner"; mkdir -p "$CASE/home" "$PKGCOPY/nested"
 OUT=$(cd "$tmp" && env HOME="$CASE/home" REVIEW_REPO_DIR="$PKGCOPY/nested" \
       MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "REVIEW_REPO_DIR=集成包内的子目录：非零退出"
+assert_nonzero "$RC" "REVIEW_REPO_DIR=集成包内的子目录：非零退出"
 assert_contains "$OUT" "互相包含" "反向包含：同样被拦住"
 assert_eq "$(sentinel_intact)" "intact" "反向包含：集成包内的哨兵文件仍在"
 
@@ -233,29 +233,29 @@ assert_eq "$([[ -f "$CASE/evilcfg/settings/mcp.json" ]] && echo y || echo n)" "y
 
 # ============ 失败路径：kiro 失败 → 回写"评审未完成" + 非零退出 ============
 run_case kirofail MOCK_KIRO_FAIL=1
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "kiro 失败：非零退出"
+assert_nonzero "$RC" "kiro 失败：非零退出"
 assert_contains "$OUT" "评审未完成" "kiro 失败：回写说明评论"
 
 # ============ 失败路径：退出码 0 但输出为空 → 同失败处理 ============
 run_case empty MOCK_KIRO_EMPTY=1
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "空输出：非零退出"
+assert_nonzero "$RC" "空输出：非零退出"
 assert_contains "$OUT" "评审未完成" "空输出：回写说明评论"
 
 # ============ 失败路径：挂起 → 超时强杀（timeout/gtimeout 已由文件开头的前置检查保证）============
 run_case hang MOCK_KIRO_HANG=1 KIRO_TIMEOUT=3
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "挂起：超时后非零退出"
+assert_nonzero "$RC" "挂起：超时后非零退出"
 assert_contains "$OUT" "评审未完成" "挂起：回写说明评论"
 
 # ============ 失败路径：settings 设置失败 → 隔离不成立，不启动 Kiro，回写"评审未完成" ============
 run_case settingsfail MOCK_SETTINGS_FAIL=1
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "settings 失败：非零退出"
+assert_nonzero "$RC" "settings 失败：非零退出"
 assert_contains "$OUT" "评审未完成" "settings 失败：回写说明评论"
 assert_contains "$OUT" "disableInheritingDefaultResources" "settings 失败：日志点名失败的设置项"
 assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "settings 失败：Kiro 未被启动"
 
 # ============ 失败路径：kiro-cli 不支持 --agent-engine（旧版）→ 拒绝运行，且 MR 上可见（spec I10）============
 run_case oldcli MOCK_KIRO_NO_ENGINE_FLAG=1
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "旧版 kiro-cli：非零退出"
+assert_nonzero "$RC" "旧版 kiro-cli：非零退出"
 assert_contains "$OUT" "--agent-engine" "旧版 kiro-cli：报错点名 --agent-engine"
 assert_contains "$OUT" "评审未完成" "旧版 kiro-cli：回写「评审未完成」评论（失败可见）"
 assert_contains "$OUT" "changeRequests/7/comments" "旧版 kiro-cli：评论发到 MR 7"
@@ -268,7 +268,7 @@ assert_contains "$OUT" "已截断" "截断注明"
 
 # ============ 失败路径：提示词文件不可读 → 立即失败，不带空提示词跑 Kiro ============
 run_case noprompt PROMPT_FILE=/nonexistent
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "提示词缺失：非零退出"
+assert_nonzero "$RC" "提示词缺失：非零退出"
 assert_contains "$OUT" "提示词文件不可读" "提示词缺失：报错说明"
 assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "提示词缺失：Kiro 未被启动"
 
@@ -294,7 +294,7 @@ assert_not_contains "$OUT" "评审未完成" "非法契约 JSON：不是失败�
 
 # ============ Kiro 失败：runFinished.status 非 success → 走失败评论路径（非零退出）============
 run_case statusfailed MOCK_KIRO_STATUS_FAILED=1
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "status 非 success：非零退出"
+assert_nonzero "$RC" "status 非 success：非零退出"
 assert_contains "$OUT" "评审未完成" "status 非 success：回写失败评论"
 assert_contains "$OUT" "自报运行失败" "status 非 success：错误说明点名原因"
 assert_contains "$OUT" "status=error" "status 非 success：错误说明带上 status 值"
@@ -302,7 +302,7 @@ assert_not_contains "$OUT" "结构化解析失败" "status 非 success：不走�
 
 # ============ Kiro 失败：事件流没有 runFinished → 走失败评论路径 ============
 run_case norunfinished MOCK_KIRO_NO_RUNFINISHED=1
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "无 runFinished：非零退出"
+assert_nonzero "$RC" "无 runFinished：非零退出"
 assert_contains "$OUT" "评审未完成" "无 runFinished：回写失败评论"
 assert_contains "$OUT" "没有 runFinished 事件" "无 runFinished：错误说明点名原因"
 assert_not_contains "$OUT" "结构化解析失败" "无 runFinished：不走降级"
@@ -327,7 +327,7 @@ assert_not_contains "$OUT" "缺 body 字段本身" "丢弃缺 body 字段的问�
 
 # ============ INLINE_COMMENT 取值非 0/1：拒绝运行且 MR 上可见，不静默按 0 跑 ============
 run_case inlinebad INLINE_COMMENT=yes
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "INLINE_COMMENT=yes：非零退出"
+assert_nonzero "$RC" "INLINE_COMMENT=yes：非零退出"
 assert_contains "$OUT" "INLINE_COMMENT=yes" "INLINE_COMMENT=yes：报错点名开关取值"
 assert_contains "$OUT" "评审未完成" "INLINE_COMMENT=yes：回写失败评论（失败可见）"
 assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "INLINE_COMMENT=yes：不浪费额度，Kiro 未被启动"
@@ -365,7 +365,7 @@ assert_contains "$OUT" "没有成对的" "nonce 不匹配：按无标记处理"
 
 # ============ R3：受信 agent 未生效（契约缺 contract 字段）→ 失败评论，不贴模型内容 ============
 run_case nocontract MOCK_KIRO_NO_CONTRACT=1
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "缺 contract 字段：非零退出"
+assert_nonzero "$RC" "缺 contract 字段：非零退出"
 assert_contains "$OUT" "受信 agent 未生效" "缺 contract 字段：错误说明点明受信 agent 未生效"
 assert_contains "$OUT" "评审未完成" "缺 contract 字段：回写失败评论"
 assert_not_contains "$OUT" "结构化解析失败" "缺 contract 字段：不走降级（不能把非受信产出贴出去）"
@@ -407,18 +407,20 @@ assert_contains "$OUT" 'dGhp****dA==' "原文含未掩码凭证：补位形态�
 assert_contains "$OUT" 'api_key = ' "原文含未掩码凭证：键名保留"
 # 票 10 ②：只引用了 PEM 起始行时，其后的结论不能被吞掉，且要给出未闭合提示
 pem_body="MIIEowIBAAKCAQEA""fakekey0123456"
-pem_body2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02"
+pem_body2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4"   # 与 mockbin/kiro-cli 的 PEM_BODY2 一致（第 26 条改定义后尾巴要像随机 base64）
 assert_not_contains "$OUT" "$pem_body" "原文含未掩码凭证：说明行之后的整行私钥正文不进评论"
-assert_contains "$OUT" "MIIE****3456" "原文含未掩码凭证：整行正文掩成前 4 后 4"
+# 16-fix3 第 14 条：降级原文走保行模式——正文行就地换成占位、起始行保留为标记、不插提示行、不删任何行
+assert_contains "$OUT" "****（PEM 正文已屏蔽）" "原文含未掩码凭证：整行正文换成等行数的屏蔽占位（保行模式）"
 assert_not_contains "$OUT" "$pem_body2" "原文含未掩码凭证：夹在句子里的正文片段不进评论"
-assert_contains "$OUT" "正文片段 MIIE****ke02 出现在 app/key.pem" "原文含未掩码凭证：片段掩码后句子其余部分完整"
+assert_contains "$OUT" "正文片段 MIIE****2Lm4 出现在 app/key.pem" "原文含未掩码凭证：片段掩码后句子其余部分完整"
 assert_contains "$OUT" "（下面是私钥内容，节选）" "原文含未掩码凭证：起始行后的说明行放出来（不被吞）"
-assert_contains "$OUT" "没有配对的 END 行" "原文含未掩码凭证：未闭合的 PEM 块给出提示"
+assert_not_contains "$OUT" "没有配对的 END 行" "原文含未掩码凭证（第 14 条）：保行模式不再插「未闭合」提示行"
+assert_contains "$OUT" "BEGIN RSA PRIVATE KEY" "原文含未掩码凭证（第 14 条）：起始行作为标记原位保留"
 assert_contains "$OUT" "总体结论：不建议合并。" "原文含未掩码凭证：未闭合 PEM 之后的结论仍在评论里"
 
 # ============ 能力检查：kiro-cli 不支持 --output-format → 拒绝运行，不白烧额度 ============
 run_case nostreamflag MOCK_KIRO_NO_STREAM_FLAG=1
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "不支持 --output-format：非零退出"
+assert_nonzero "$RC" "不支持 --output-format：非零退出"
 assert_contains "$OUT" "不支持 --output-format" "不支持 --output-format：报错点名参数"
 assert_contains "$OUT" "评审未完成" "不支持 --output-format：回写失败评论（失败可见）"
 assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "不支持 --output-format：Kiro 未被启动"
@@ -545,7 +547,7 @@ assert_contains "$comment" "结构化解析失败 | -/-/- |" "降级 + 原地更
 
 # --- 失败评论也原地更新：否则一次失败就会在 MR 上留下第二条汇总（违反「每评审员至多一条」）---
 run_case failupdate DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_FAIL=1
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "失败评论 + 原地更新：非零退出"
+assert_nonzero "$RC" "失败评论 + 原地更新：非零退出"
 assert_contains "$OUT" "评审未完成" "失败评论 + 原地更新：仍是失败评论"
 assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" "失败评论 + 原地更新：更新同一条评论"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "0" "失败评论 + 原地更新：不新建第二条"
@@ -1188,7 +1190,7 @@ assert_contains "$comment" "<details><summary>历次评审（2）</summary>" "�
 # 票 14 让 review_sanitize_md 转义所有像标签的 `<`，这里是那条链路在真实失败路径上的负向用例：
 # 目标分支名 `feat/a<summary>b` 在 fixture 里不存在 → fetch 失败 → die_review → 失败评论。
 run_case fetchfail MR_TARGET_BRANCH='feat/a<summary>b'
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "票 13 ④：fetch 失败 → 非零退出"
+assert_nonzero "$RC" "票 13 ④：fetch 失败 → 非零退出"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "无法 fetch 目标分支" "票 13 ④：失败评论说明是 fetch 失败"
 # 只查载荷本身：失败评论自己的历次表就是 `<details><summary>`，不能查裸 `<summary`
@@ -1198,7 +1200,7 @@ assert_contains "$comment" "feat/a&lt;summary>b" "票 13 ④：reason 里的分�
 assert_not_contains "$(meta_row "$comment")" "<" "票 13 ④：元信息单元格里的分支名照旧剔掉 <"
 # 正控：普通的不存在分支名原样出现在 reason 里
 run_case fetchfail2 MR_TARGET_BRANCH='no-such-branch'
-assert_contains "$(posted_comment "$OUT")" "无法 fetch 目标分支 no-such-branch" "票 13 ④ 正控：普通分支名原样进 reason"
+assert_contains "$(posted_comment "$OUT")" "无法 fetch 目标分支：no-such-branch" "票 13 ④ 正控：普通分支名原样进 reason（分支名作不受信取值走 die_review 的第二个参数，自审 finding）"
 
 # ============ 票 12 ============
 # ---- ⑤ 超限路径的端到端契约——喂给 Kiro 的 stdin 里有索引节，每行一个含 chunk/file 的 JSON ----
@@ -1263,5 +1265,208 @@ assert_rc "$RC" 0 "REVIEW_RERUN_HINT：评审成功"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" '评论 `/kiro review` 可重新评审' "REVIEW_RERUN_HINT：页脚用配置的提示语"
 assert_not_contains "$comment" "重跑流水线可重新评审" "REVIEW_RERUN_HINT：不再出现默认提示语"
+
+# ============================================================================
+# 票 16 / A10：脚本侧掩码覆盖全部 sink（spec I3 修订）
+# ============================================================================
+# mock 评审员输出**合法契约**、summary / verdict_reason / title / body / fix 里各放一个合成 token
+# （helpers.sh with_secrets：ghp_ 形态、AKIA 形态、base64 补位形态）。此前正常路径只做结构清洗、不掩码，
+# 三个值原样进汇总评论（CodeX P0-2）。断言对象是三处 sink：DRY_RUN 记录的汇总正文、每条行内正文、以及
+# 2> 捕获的流水线日志（OUT 同时含三者，所以对 OUT 整体断一次「原文不在」等于三处都断了；再对各处单独断
+# 「掩码形态在」，证明不是靠内容整体消失蒙对的）。
+with_secrets "$ROOT/tests/fixtures/contract/mock-review.json" > "$tmp/secrets-summary.json"
+with_secrets "$E2E_CONTRACT" > "$tmp/secrets-inline.json"
+# ---- INLINE_COMMENT=0：汇总正文 + 流水线日志 ----
+run_case sinkleak MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
+assert_rc "$RC" 0 "A10：合法契约带 token → 评审仍成功（掩码不是失败）"
+assert_not_contains "$OUT" "结构化解析失败" "A10：走的是正常结构化路径，不是降级路径上的旧掩码"
+comment=$(posted_comment "$OUT")
+assert_masked "$comment" "A10 汇总正文"
+assert_masked "$OUT" "A10 全部输出（含流水线日志）"
+assert_contains "$comment" "硬编码疑似应用密钥 ${SEC_AKIA_MASKED_TITLE}**" "A10 汇总：标题里的 token 掩码后（* 转义，第 22 条），加粗标题其余部分完好"
+assert_contains "$comment" "api_key = \"${SEC_B64_MASKED}\"" "A10 汇总：fix 里的 key=value 只掩取值、键名保留"
+assert_contains "$comment" "FAKE****0000" "A10 汇总：模型已自行掩码的值不被二次改写（幂等）"
+# 掩码不碰脚本结构：评审标记 / 隐藏历史 / 元信息表 / 页脚都还在原形
+assert_eq "$(printf '%s\n' "$comment" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:1 -->$')" "1" "A10 汇总：评审标记仍恰好一行"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^<!-- kiro-history:\[')" "1" "A10 汇总：隐藏历史仍在"
+assert_eq "$(meta_row "$comment" | tr -cd '|' | wc -c | tr -d ' ')" "5" "A10 汇总：元信息表列数不变"
+assert_contains "$comment" "第 1 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进" "A10 汇总：页脚不变"
+
+# ---- INLINE_COMMENT=1：每条行内正文 + 汇总 + 日志 ----
+run_inline_case sinkleak-inline ifx-sinkleak MOCK_KIRO_CONTRACT="$tmp/secrets-inline.json"
+assert_rc "$RC" 0 "A10 行内：评审成功"
+bodies=$(inline_bodies "$OUT")
+assert_eq "$(printf '%s\n' "$bodies" | grep -c .)" "3" "A10 行内：仍发出 3 条行内评论（掩码不改变发布计划）"
+inline_text=$(printf '%s\n' "$bodies" | jq -r '.content')
+assert_masked "$inline_text" "A10 行内正文"
+assert_contains "$inline_text" "**P0 · 硬编码疑似应用密钥 ${SEC_AKIA_MASKED_TITLE}**" "A10 行内正文：首行加粗完好，只有 token 变掩码（标题里的 * 转义）"
+assert_eq "$(printf '%s\n' "$inline_text" | grep -c '^<!-- kiro-inline:[0-9a-f]\{40\} L[0-9]*-[0-9]* sev=P[0-2] -->$')" "3" \
+  "A10 行内正文：三条隐藏标记完好（sha1 是十六进制、sev= 不在键名清单里，都没被掩）"
+assert_no_secrets "$OUT" "A10 行内全部输出（含汇总与流水线日志）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "$SEC_GHP_MASKED" "A10 行内的汇总：summary 里的 token 掩码后仍在"
+assert_contains "$comment" "$SEC_AKIA_MASKED" "A10 行内的汇总：verdict_reason 里的 token 掩码后仍在"
+assert_contains "$comment" "其中 3 条已标注在「文件改动」对应行" "A10 行内的汇总：计数不受掩码影响"
+
+# ---- 一次提交失败 → 退回逐条非草稿发布：回退路径复用同一份 body-<idx>.md，掩过一次就够 ----
+run_inline_case sinkleak-submitfail ifx-sinkleak-sf DRY_RUN_FAIL_ROUTES="submit-review:400" \
+  MOCK_KIRO_CONTRACT="$tmp/secrets-inline.json"
+assert_rc "$RC" 0 "A10 回退发布：评审成功"
+nondraft=$(inline_bodies "$OUT" | jq -r 'select(.draft == false) | .content')
+assert_eq "$(printf '%s\n' "$nondraft" | grep -c '^<!-- kiro-inline:')" "3" "A10 回退发布：三条非草稿正文都发了"
+assert_masked "$nondraft" "A10 回退发布的非草稿正文"
+assert_no_secrets "$OUT" "A10 回退发布全部输出"
+
+# ---- 行内全部发布失败 → 问题完整渲染进折叠区：折叠区里的 body/fix 由汇总的 sink 掩码兜住 ----
+run_inline_case sinkleak-allfail ifx-sinkleak-af DRY_RUN_FAIL_ROUTES="submit-review:400,create-comment-inline:400" \
+  MOCK_KIRO_CONTRACT="$tmp/secrets-inline.json"
+assert_rc "$RC" 0 "A10 折叠区：评审成功"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "**行内发布失败（3）**" "A10 折叠区：发布失败小节在"
+assert_contains "$comment" "api_key = \"${SEC_B64_MASKED}\"" "A10 折叠区：完整渲染的 fix 里 token 已掩"
+assert_masked "$comment" "A10 折叠区里的完整正文"
+assert_no_secrets "$OUT" "A10 折叠区全部输出"
+
+# ---- 截断变体：掩码在截断之前，日志里回显的「完整内容」也是掩码后的 ----
+run_case sinkleak-trunc MAX_COMMENT_BYTES=1200 MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
+assert_rc "$RC" 0 "A10 截断：评审成功"
+assert_contains "$OUT" "评审报告超长已截断；完整内容如下：" "A10 截断：日志确实回显了完整内容（否则下面的断言是空转）"
+assert_contains "$OUT" "已截断（上限 1200 字节）" "A10 截断：评论确实被截断"
+assert_masked "$OUT" "A10 截断（日志全文 + 截断后评论）"
+
+# ---- 回写失败变体：日志里回显的「评审结果如下」也是掩码后的 ----
+run_case sinkleak-postfail DRY_RUN_FAIL_ROUTES="create-comment:500" CODEUP_RETRY_BACKOFF=0 \
+  MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
+assert_nonzero "$RC" "A10 回写失败：非零退出"
+assert_contains "$OUT" "OpenAPI 回写失败（已按策略重试）。评审结果如下：" "A10 回写失败：日志确实回显了评论全文"
+assert_masked "$OUT" "A10 回写失败（日志全文）"
+
+# ---- 掩码程序失败 → 绝不把未掩码的评论往下送：方案 C 下字段级（review_redact_json）先失败 → 失败评论，且失败评论自己也只剩固定文案 ----
+make_bad_awk "$tmp/badawk"
+run_case sinkleak-redactfail PATH="$tmp/badawk:$PATH" MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
+assert_nonzero "$RC" "A10 掩码失败：评审以失败结束（不能带着未掩码的评论成功）"
+assert_contains "$OUT" "契约字段级掩码或清洗失败（rc=4" "A10 掩码失败：die_review 点明是字段级掩码失败（第 25 条：不含 token 连片的固定文案照常打出）"
+assert_contains "$OUT" "review_redact_json: 掩码失败" "16-fix4 第 13 条：校验日志里库函数自己写的行进了日志（不再只说「详见校验日志」）"
+assert_contains "$OUT" "review_validate: 字段级掩码失败" "第 13 条：review_validate 的说明行也在"
+assert_contains "$OUT" "行 jq 诊断已省略" "第 13 条：非库函数前缀的 stderr 行（替身的 badawk: …）只报条数"
+assert_not_contains "$(printf '%s\n' "$OUT" | grep -a '契约字段级掩码或清洗失败' || true)" "badawk:" "第 13 条：非库函数行本身不进失败原因（它们可能回显模型取值；替身在别的调用点直接写 stderr 的那几行不算）"
+assert_no_secrets "$OUT" "A10 掩码失败（全部输出：汇总没发、失败评论与日志都不含原文）"
+assert_not_contains "$OUT" "$SEC_GHP_MASKED" "A10 掩码失败：掩码后的形态也不在（正控：掩码确实没跑成，不是替身没生效）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "⚠️ 评审未完成" "A10 掩码失败：MR 上仍有失败评论（I10）"
+assert_contains "$comment" "只保留固定文案" "A10 掩码失败：失败评论退回只含固定文案的最小形态（掩码不可用时连 reason 都不带）"
+assert_not_contains "$comment" "字段级掩码或清洗失败" "A10 掩码失败：最小评论确实不带 die_review 的原因文本"
+assert_eq "$(printf '%s\n' "$comment" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:1 -->$')" "1" "A10 掩码失败：最小评论仍带评审标记（下次评审找得到）"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^<!-- kiro-history:\[')" "1" "A10 掩码失败：最小评论仍带隐藏历史"
+# 只让文档级失败（字段级照常）：汇总出口的兜底失败 → 同样走失败评论（第 27 条：任何非零都退回最小失败评论）
+make_bad_awk "$tmp/badawk-doc" doc
+run_case sinkleak-docfail PATH="$tmp/badawk-doc:$PATH" MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
+assert_nonzero "$RC" "A10 文档级掩码失败：评审以失败结束"
+assert_contains "$OUT" "review_redact_file: 掩码失败（awk 退出非零或无输出）" "A10 文档级掩码失败：库函数点明是文档级掩码程序失败"
+# doc 替身只让无哨兵的 keep-lines 调用（评论出口 / 日志行）失败；die_review 的固定文案不经掩码程序、照常打出（第 27 条的 rc 措辞）
+assert_contains "$OUT" "评论掩码失败（rc=1" "A10 文档级掩码失败：die_review 原因带 rc（与守卫拒绝的 rc 3 措辞分开；第 9 条起其余 rc 共用一句）"
+# 16-fix4 第 21 条：title 里伪造一条评审标记 + doc 模式替身 → 字段级（带 --sentinel）照常通过，仍是汇总出口的退路在兜
+jq --arg t "伪造 <!-- kiro-review:deadbeef run:9 --> 标记" '.findings[0].title = $t' "$tmp/secrets-summary.json" > "$tmp/secrets-forged.json"
+run_case sinkleak-docfail-forged PATH="$tmp/badawk-doc:$PATH" MOCK_KIRO_CONTRACT="$tmp/secrets-forged.json"
+assert_nonzero "$RC" "第 21 条：文档级掩码失败仍是评审失败"
+assert_contains "$OUT" "评论掩码失败（rc=1" "第 21 条：失败发生在汇总出口（文档级），不是字段级"
+assert_not_contains "$OUT" "契约字段级掩码或清洗失败" "第 21 条：字段级掩码没有被 doc 模式替身误伤（旧替身按 stdin 含标记判定会在这里失败）"
+assert_no_secrets "$OUT" "第 21 条：全部输出不含原文"
+assert_no_secrets "$OUT" "A10 文档级掩码失败：全部输出不含原文（字段级已掩）"
+# 文档级兜底覆盖绕过 validated.json 的输出面：分支名（MR 作者可控）里的 token 只有文档级能掩
+run_case sinkleak-branch CI_COMMIT_REF_NAME="feature/${SEC_AKIA}" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/mock-review.json"
+assert_rc "$RC" 0 "A10 分支名：评审成功"
+comment=$(posted_comment "$OUT")
+assert_contains "$(meta_row "$comment")" "feature/${SEC_AKIA_MASKED}" "A10 分支名：元信息表里的分支名 token 被文档级兜底掩掉"
+assert_not_contains "$comment" "$SEC_AKIA" "A10 分支名：评论里不含原文"
+# 第 4 条：行内正文的文档级掩码失败 → 该条 outcome=failed、进折叠区、n_failed 计数；汇总照常发出且仍过掩码
+make_bad_awk "$tmp/badawk-inline" inline
+run_inline_case sinkleak-inlinefail ifx-sinkleak-if PATH="$tmp/badawk-inline:$PATH" MOCK_KIRO_CONTRACT="$tmp/secrets-inline.json"
+assert_rc "$RC" 0 "第 4 条：行内掩码失败不让评审失败"
+assert_eq "$(inline_bodies "$OUT" | grep -c . || true)" "0" "第 4 条：三条行内正文一条都没发出（掩码失败 → 不发）"
+assert_eq "$(printf '%s\n' "$OUT" | grep -c '行内评论正文渲染或掩码失败，转入折叠区')" "3" "第 4 条：三条都记为掩码失败、转入折叠区"
+assert_contains "$OUT" "失败 3 条" "第 4 条：n_failed 计数为 3"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "**行内发布失败（3）**" "第 4 条：折叠区「行内发布失败」小节在"
+assert_masked "$comment" "第 4 条：折叠区里的正文（字段级已掩、汇总文档级照常）"
+# 第 21 条端到端：超限字段截断 + 日志计数 + 单条行内正文 ≤ MAX_COMMENT_BYTES
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["findings"][0]["body"]="B"*40000; c["findings"][0]["fix"]="F"*40000; json.dump(c,open(sys.argv[2],"w"),ensure_ascii=False)' "$E2E_CONTRACT" "$tmp/oversize-inline.json"
+run_inline_case oversize ifx-oversize MOCK_KIRO_CONTRACT="$tmp/oversize-inline.json"
+assert_rc "$RC" 0 "第 21 条：超限字段不让评审失败"
+assert_contains "$OUT" "个模型字段超出上限已截断" "第 21 条：日志记录截断字段数"
+bodies=$(inline_bodies "$OUT")
+assert_eq "$(printf '%s\n' "$bodies" | grep -c .)" "3" "第 21 条：三条行内仍发出"
+max_body=$(printf '%s\n' "$bodies" | jq -r '.content | utf8bytelength' | sort -n | tail -1)
+assert_eq "$([[ $max_body -le 60000 ]] && echo ok)" "ok" "第 21 条：单条行内正文 ≤ MAX_COMMENT_BYTES 默认值 60000（实际最大 ${max_body} 字节）"
+assert_contains "$(printf '%s\n' "$bodies" | jq -r '.content')" "（已截断）" "第 21 条：超限字段末尾带「（已截断）」"
+# 第 24 条：kiro-cli 自己的 stderr 尾巴也是出口——失败时打进日志前先掩码
+run_case stderrleak MOCK_KIRO_FAIL=1 MOCK_KIRO_STDERR_TEXT="request failed: Authorization: Bearer ${SEC_GHP}"
+assert_nonzero "$RC" "第 24 条：kiro 失败 → 非零退出"
+assert_contains "$OUT" "request failed: Authorization: Bearer ${SEC_GHP_MASKED}" "第 24 条：kiro stderr 尾巴打进日志前掩码"
+assert_no_secrets "$OUT" "第 24 条：全部输出不含原文"
+# 第 25 条：去重日志行里的 file 过掩码——file 必须命中变更行集合才走到去重日志，端到端造不出带 token 的路径；静态断言该行经过 _untrusted_for_log
+assert_eq "$(grep -c 'log "去重：问题 #${idx}（${sev} $(_untrusted_for_log "$file")' "$ROOT/scripts/kiro-review.sh")" "1" "第 25 条（静态）：去重日志行里的 file 经过 _untrusted_for_log"
+assert_eq "$(grep -c 'unset REVIEW_REDACT_SENTINEL_RE' "$ROOT/scripts/kiro-review.sh")" "0" "16-fix4 第 8 条（静态）：死 unset 已删"
+assert_eq "$(grep -c '\[\[ -s "$WORK/validated.json" \]\] || die_review' "$ROOT/scripts/kiro-review.sh")" "1" "第 20 条（静态）：validated.json 非空守卫"
+assert_eq "$(grep -c 'local body_bytes' "$ROOT/scripts/kiro-review.sh")" "1" "第 30 条（静态）：body_bytes 是函数局部变量"
+assert_eq "$(grep -c '超过上限 ${REVIEW_MAX_FINDINGS}，仅展示前' "$ROOT/scripts/kiro-review.sh")" "1" "第 28 条（静态）：超上限有单独的日志行"
+
+# ---- 票 16-fix ②：die_review 的日志行也是 sink——失败原因里的不受信取值（runFinished.status）过掩码再打日志 ----
+# 评论正文已由 sink 掩码覆盖，这里补的是 `log "错误：…"` 那一行：事件流里的 status 串原样拼进原因，
+# 此前直接进流水线日志。降级原因的不受信部分走同一个 _untrusted_for_log（现有 review_validate 对各种怪类型都做了规范化、
+# jq 报错不会回显模型取值，所以降级原因目前没有能带出完整 token 的端到端向量——只断言那行日志仍在、没被包坏）。
+run_case statusleak MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP} ${SEC_AKIA}"
+assert_nonzero "$RC" "16-fix 日志：status 非 success → 非零退出"
+assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status 取值见后）：status=error ${SEC_GHP_MASKED} ${SEC_AKIA_MASKED}" \
+  "16-fix 日志：die_review 的日志行带掩码后的 status（固定文案与取值都在，只有 token 变掩码）"
+assert_no_secrets "$OUT" "16-fix 日志（全部输出：日志 + 失败评论）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "取值见后）：status=error ${SEC_GHP_MASKED}" "16-fix 日志对照：失败评论里同样是掩码后的 status（出口掩码兜住）"
+# 掩码程序不可用时的日志退回：不打原文，只留固定文案（第 20 条：不再有第二套「粗掩」词汇）
+run_case statusleak-badawk PATH="$tmp/badawk:$PATH" MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP}"
+assert_nonzero "$RC" "16-fix 日志退回：非零退出"
+assert_contains "$OUT" "错误：Kiro 自报运行失败（runFinished.status 取值见后）：〈不受信取值已省略〉" "16-fix4 第 6 条：掩码不可用时固定文案照打、只丢不受信取值（中性占位）"
+assert_no_secrets "$OUT" "16-fix 日志退回：全部输出不含原文"
+# 降级原因那一行没被包坏（原因文案完整）
+run_case degrade-reason-log MOCK_KIRO_LEAK_SECRET=1
+assert_rc "$RC" 0 "16-fix 降级原因日志：评审成功（降级）"
+assert_contains "$OUT" "警告：结构化解析失败（评审员输出中没有成对的 <<<KIRO_REVIEW_JSON>>> 契约标记），降级为贴出评审员输出原文" \
+  "16-fix 降级原因日志：过掩码后文案逐字不变"
+
+# ---- 16-fix3 第 13 条：降级路径掩码失败 fail-closed（48aff39：rc 0、评论 25 行正文空：正控）----
+run_case degrade-redactfail PATH="$tmp/badawk:$PATH" MOCK_KIRO_LEAK_SECRET=1
+assert_nonzero "$RC" "第 13 条：降级原文掩码失败 → 评审失败，而不是发一份空正文的降级评论"
+assert_contains "$OUT" "review_render_degraded: 掩码失败" "第 13 条：库函数点明原因"
+assert_contains "$OUT" "错误：降级评论渲染失败" "第 13 条 / 第 6 条：die_review 的固定文案在掩码不可用时照样打出"
+assert_no_secrets "$OUT" "第 13 条：全部输出不含原文"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "⚠️ 评审未完成" "第 13 条：MR 上是失败评论"
+# ---- 16-fix3 第 7 条：清洗会膨胀的填充（<!--）不再让行内正文超限；出口硬守卫兜住任何超限正文 ----
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); f="<!--"*10000; c["findings"][0]["title"]=f; c["findings"][0]["body"]=f; c["findings"][0]["fix"]=f; json.dump(c,open(sys.argv[2],"w"),ensure_ascii=False)' "$E2E_CONTRACT" "$tmp/expand-inline.json"
+# 计时守卫量的是 CPU 时间（user + sys，含子进程）而不是墙钟：共机跑多套测试时墙钟能翻 5–8 倍，CPU 时间不受负载影响（自审 finding）
+TIMEFORMAT='%U %S'
+{ time run_inline_case expand ifx-expand MOCK_KIRO_CONTRACT="$tmp/expand-inline.json"; } 2> "$tmp/expand.time"
+expand_cpu=$(awk 'END { printf "%d", $1 + $2 }' "$tmp/expand.time")
+assert_rc "$RC" 0 "第 7 条：膨胀填充不让评审失败"
+assert_eq "$([[ $expand_cpu -le 20 ]] && echo ok)" "ok" "16-fix4 第 12d 条：膨胀向量端到端 CPU ${expand_cpu}s（≤ 20 s，目标 < 5 s 的 4 倍；不缩小填充规模；cf29da0 单是 review_validate 就 2 分钟）"
+bodies=$(inline_bodies "$OUT")
+assert_eq "$(printf '%s\n' "$bodies" | grep -c .)" "3" "第 7 条：三条行内仍发出"
+max_body=$(printf '%s\n' "$bodies" | jq -r '.content | utf8bytelength' | sort -n | tail -1)
+assert_eq "$([[ $max_body -le 60000 ]] && echo ok)" "ok" "第 7 条：<!-- 填充清洗后再截断，单条行内正文 ≤ 60000（实际最大 ${max_body}；48aff39 为 89789：正控）"
+# 出口硬守卫：把 MAX_COMMENT_BYTES 压到 20000，40 KB 的 body 过不了守卫 → 该条 failed 进折叠区、不发
+run_inline_case bodyguard ifx-bodyguard MAX_COMMENT_BYTES=20000 MOCK_KIRO_CONTRACT="$tmp/oversize-inline.json"
+assert_rc "$RC" 0 "第 7 条守卫：评审成功"
+assert_contains "$OUT" "字节超过 MAX_COMMENT_BYTES=20000，转入折叠区" "第 7 条守卫：日志点明超限正文进折叠区"
+assert_eq "$(inline_bodies "$OUT" | grep -c . || true)" "2" "第 7 条守卫：超限的那一条没发出（其余两条照发）"
+assert_contains "$(posted_comment "$OUT")" "**行内发布失败（1）**" "第 7 条守卫：超限的那一条进了折叠区"
+# 16-fix4 第 38 条：超大正文不再搬进汇总——折叠区只渲染标题 + 说明句，汇总不超限、不触发截断
+assert_contains "$(posted_comment "$OUT")" "字节超过评论上限 MAX_COMMENT_BYTES=20000，未在评论中展示。" "第 38 条：折叠区那一条只有标题 + 说明句"
+assert_not_contains "$(posted_comment "$OUT")" "$(python3 -c 'print("B"*200, end="")')" "第 38 条：40 KB 正文的前 200 字节不在汇总里（4e542ca 全文搬进折叠区、汇总随之超限被截：正控）"
+assert_eq "$([[ $(posted_comment "$OUT" | wc -c) -lt 20000 ]] && echo ok)" "ok" "第 38 条：汇总总字节 < MAX_COMMENT_BYTES=20000"
+assert_not_contains "$OUT" "报告超长已截断" "第 38 条：没有触发 review_truncate_comment（其它问题的文本不再被一起截掉）"
+# ---- 16-fix4 第 7 条：掩码程序不可用时，含 ≥ 12 位 ASCII 标识符的固定文案必须原样出现在日志里（cf29da0 的「连片分类器」会整段省略：正控）----
+run_case fixedtext-badawk PATH="$tmp/badawk:$PATH" INLINE_COMMENT=yes
+assert_nonzero "$RC" "第 7 条：INLINE_COMMENT=yes → 非零退出"
+assert_contains "$OUT" "错误：INLINE_COMMENT=yes 不是 0 或 1。行内评论开关只接受这两个取值" "第 7 条：含 INLINE_COMMENT 这种 ≥ 12 位标识符的固定文案在掩码不可用时仍原样进日志"
 
 report

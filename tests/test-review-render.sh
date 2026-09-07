@@ -527,7 +527,7 @@ review_validate < "$tmp/startitle.json" > "$tmp/startitle-validated.json"
 assert_eq "$(jq -r '.findings[0].title' "$tmp/startitle-validated.json")" '函数用 \*\*kwargs 透传参数' "validate：title 里的 * 转义成 \*"
 render "$tmp/startitle.json" "$tmp/startitle.md"
 assert_contains "$(cat "$tmp/startitle.md")" '**1. `a.py:3-7` — 函数用 \*\*kwargs 透传参数**' "渲染：问题标题行的加粗仍然闭合在行尾"
-jq -c '.findings[0]' "$tmp/startitle-validated.json" > "$tmp/item-startitle.json"
+jq -c '.findings[0] + {finalized: true}' "$tmp/startitle-validated.json" > "$tmp/item-startitle.json"   # 直接从 findings 切条目要自己盖章（生产由 review_plan_inline 盖，第 40 条）
 review_render_inline_body "$tmp/item-startitle.json" 90fcb05 "$(review_fingerprint a.py 3 x)" > "$tmp/inline-startitle.md"
 assert_eq "$(head -1 "$tmp/inline-startitle.md")" '**P1 · 函数用 \*\*kwargs 透传参数（L3–L7）**' "行内正文：首行加粗闭合在行尾，级别前缀不会变回普通文字"
 
@@ -626,7 +626,7 @@ assert_eq "$(printf '%s\n' "$neg_in" | review_redact_secrets)" "$neg_in" "掩码
 # 状态机原先只在 END 行清 inpem：模型只引用起始行（或 finalText 被截断）时，
 # BEGIN 之后的所有行——包括真正的评审结论——都被丢弃，读者完全看不出正文缺失。
 d5="-----"
-pem_head="MIIEowIBAAKCAQEA""secret"
+pem_head="MIIEowIBAAKCAQEA""s3cR9tX"   # 含数字且切换率 0.41：第 15 条 ② / 第 26 条改定义起，块外兜底前瞻要求含数字并像随机 base64（真实正文行如此）
 unclosed=$(printf '## 结论：不可合并\n%sBEGIN RSA PRIVATE KEY%s\n%s\n\nP0：私钥写死在仓库里。\n位置 src/key.pem:1\n请立即轮换这把私钥。\n' "$d5" "$d5" "$pem_head")
 printf '%s\n' "$unclosed" | review_redact_secrets > "$tmp/unclosed-pem.md"
 out=$(cat "$tmp/unclosed-pem.md")
@@ -685,7 +685,7 @@ assert_not_contains "$out" "没有配对的 END 行" "掩码②：END 行在时�
 # 复审 c1：带 diff 前缀（`-`/`+`）或引用前缀（`> `）的正文行不像 base64，第一版实现遇到就退出块、
 # 把随后的密钥正文按普通行放出来（每行漏前 4 后 4），而块尾的 END 行明明还在。现在判定推迟到
 # END/EOF：有 END 就整块丢弃，与修复前逐字节一致、零泄漏，也不打「未闭合」的假提示。
-body64="MIIEowIBAAKCAQEAsecretmaterial""0123456789abcdefghijklmnopqrstuvwxyz"
+body64="MIIEowIBAAKCAQEAs3cR9tXq7Lm2Nz8P""wK4vB6yH1jD5gF0aT3eU9iO2qW7eR1tY"   # 像随机 base64 的正文行（第 26 条改定义：块外判定看类别切换率）
 out=$(printf -- '-%sBEGIN RSA PRIVATE KEY%s\n-%s\n-%s\n-%sEND RSA PRIVATE KEY%s\n结论在这里。\n' "$d5" "$d5" "$body64" "$body64" "$d5" "$d5" | review_redact_secrets)
 assert_not_contains "$out" "$body64" "掩码②：diff 前缀的正文行整块丢弃（不放出）"
 assert_not_contains "$out" "MIIE****" "掩码②：diff 前缀的正文行连前 4 后 4 都不漏"
@@ -707,7 +707,7 @@ sha40="3f2a1b9c4d5e6f708192a3b4c5d6e7f8091a2b3c"
 out=$(printf '%sBEGIN RSA PRIVATE KEY%s\n说明\n提交 %s 已修，正文 %s 泄漏\n' "$d5" "$d5" "$sha40" "$body64" | review_redact_secrets)
 assert_contains "$out" "提交 $sha40 已修" "掩码②：未闭合之后的 40 位提交 SHA 原样保留（纯十六进制不算 base64 大块）"
 assert_not_contains "$out" "$body64" "掩码②：同一行的非十六进制 base64 连片被掩掉（正控）"
-assert_contains "$out" "MIIE****wxyz" "掩码②：连片掩码保留前 4 后 4"
+assert_contains "$out" "MIIE****R1tY" "掩码②：连片掩码保留前 4 后 4"
 # 复审（标准 2 反例）：不足 40 的 base64 连片不掩（长标识符可读），恰好 40 的非十六进制连片掩
 run39="AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abc"
 run40="${run39}d"
@@ -892,9 +892,12 @@ rc=0; err=$(review_render_summary --json "$tmp/validated.json" --sha x --src a -
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "渲染：--history 内容不合法 → 非零"
 assert_contains "$err" "历次记录渲染失败" "渲染：报错点名历次记录"
 assert_not_contains "$(cat "$tmp/junk.md")" "kiro-history:" "渲染：被拒时不输出带空历史标记的评论"
+# 16-fix3 第 32 条：降级评论与失败评论共用 review_history_for_run 的三步回退——历史不合法时退到「只有本次一行」而不是整条渲染失败
+# （降级评论也是「评审员输出了但没按契约」时唯一能到达 MR 的通道，历史坏了不该让它发不出去）
 rc=0; review_render_degraded --text "$tmp/raw.md" --sha x --src a --dst b --ts t \
-      --diff-note n --reason r --history "$tmp/junkhist.json" >/dev/null 2>&1 || rc=$?
-assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "降级：--history 内容不合法 → 非零"
+      --diff-note n --reason r --history "$tmp/junkhist.json" > "$tmp/junk-deg.md" 2>/dev/null || rc=$?
+assert_rc "$rc" 0 "降级：--history 内容不合法 → 仍渲染（第 32 条：与失败评论同一份三步回退）"
+assert_eq "$(sed -n 's/^<!-- kiro-history:\(.*\) -->$/\1/p' "$tmp/junk-deg.md" | jq -c '[length, .[0].status]')" '[1,"degraded"]' "降级：坏历史退到只有本次一行（status=degraded）"
 
 # ---- 复审修复：历史标记的解析必须永远只吐出「恰好一个」JSON 数组 ----
 # ① 评论经 Codeup 网页编辑后回来是 CRLF。评审标记的正则以 [[:space:]]*$ 结尾（有意为之），
@@ -1656,7 +1659,7 @@ assert_not_contains "$(cat "$tmp/inline-single.md")" "（L27" "行内正文：�
 assert_contains "$(cat "$tmp/inline-single.md")" "<!-- kiro-inline:${fpS} L27-27 sev=P1 -->" "行内正文：单行问题的标记区间为 L27-27"
 
 # fix 为空 → 省略修复建议小节
-jq -n '{id:"X",severity:"P2",title:"缺少模块级说明",file:"a.py",line_start:1,line_end:1,body:"说明。",fix:""}' > "$tmp/item-nofix.json"
+jq -n '{id:"X",severity:"P2",title:"缺少模块级说明",file:"a.py",line_start:1,line_end:1,body:"说明。",fix:"",finalized:true}' > "$tmp/item-nofix.json"
 review_render_inline_body "$tmp/item-nofix.json" abc1234 "$(review_fingerprint a.py 1 缺少模块级说明)" > "$tmp/inline-nofix.md"
 assert_not_contains "$(cat "$tmp/inline-nofix.md")" "**修复建议**" "行内正文：fix 为空时省略修复建议小节"
 assert_contains "$(cat "$tmp/inline-nofix.md")" "**P2 · 缺少模块级说明**" "行内正文：fix 为空时其余照常"
@@ -1675,7 +1678,7 @@ assert_rc "$rc" 2 "行内正文：缺 line_start → rc 2（标记里写不出�
 # 模型文本里的注入在 review_validate 阶段就被转义，行内正文里同样不成立
 jq -c '.findings[0]' "$tmp/inline-validated.json" >/dev/null   # 形态自检
 review_validate < "$tmp/inject.json" > "$tmp/inject-validated.json"
-jq -c '.findings[0]' "$tmp/inject-validated.json" > "$tmp/item-inject.json"
+jq -c '.findings[0] + {finalized: true}' "$tmp/inject-validated.json" > "$tmp/item-inject.json"
 review_render_inline_body "$tmp/item-inject.json" 90fcb05 "$(review_fingerprint src/app.py 1 提示词注入企图)" > "$tmp/inline-inject.md"
 assert_eq "$(grep -c '^<!-- kiro-inline:' "$tmp/inline-inject.md")" "1" "行内正文：指纹标记恰好一个（模型文本里的注释已被转义）"
 assert_eq "$(grep -c '<!-- kiro-review:' "$tmp/inline-inject.md")" "0" "行内正文：模型文本里的评审标记不成立"
@@ -1950,6 +1953,680 @@ assert_not_contains "$err" "已过滤后显示" "元信息表：正常分支名�
 out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src feature/user-search --dst master \
         --ts "2026-09-02 20:10:02" --diff-note "完整直传")
 assert_contains "$(meta_row "$out")" '`feature/user-search` → `master`' "元信息表：正常分支名原样渲染"
+
+# ============================================================================
+# 票 16 / 16-fix2（Kent 裁决方案 C）：模型文本在唯一收口点（validated.json）逐字段掩码，评论出口再过一遍严格保行的文档级兜底
+# ============================================================================
+# 生产路径：review_validate → review_redact_json（字段级：PEM 整块删除只在这里发生）→ 渲染 → review_redact_file（文档级：只做
+# 行内替换、行数前后相等、标记行仍在）。下面的 golden 断的是最终评论，同时证明：字段级掩码不碰任何脚本结构（它根本看不到
+# 脚本结构）、文档级兜底在字段级之后是逐字节 no-op（幂等——保行模式不删行不加行，只有 PEM 块内的正文行会等行数换成占位，
+# 而字段级已经把 PEM 整块删掉了）、现有全部 golden 过文档级兜底逐字节不变。
+validate_redacted() { review_validate < "$1" > "$2"; }   # <契约> <输出 validated.json>（16-fix3 第 15 条起 review_validate 内部就是 归一化 → 掩码 → 清洗 + 上限）
+render_redacted() {  # <契约> <输出 md> [额外参数…]：与 render 同参数，但走字段级掩码
+  local src="$1" out="$2"; shift 2
+  validate_redacted "$src" "$tmp/validated-redacted.json"
+  review_render_summary --json "$tmp/validated-redacted.json" --sha 90fcb05 --src feature/user-search --dst master \
+    --ts "2026-09-02 20:10:02" --diff-note "完整直传" "$@" > "$out"
+}
+D5="-----"; PEM_B="${D5}BEGIN RSA PRIVATE KEY${D5}"; PEM_E="${D5}END RSA PRIVATE KEY${D5}"   # 拼接：完整 PEM 头字面量不进源码（Code Defender）
+PEM_PLACEHOLDER="**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
+PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4ijkl"   # 64 位折行的密钥正文形态；尾巴要像随机 base64（切换率 0.41）——第 26 条改定义后块外判定看类别切换率，原 fake02abcdefghijkl 尾巴只有 0.28
+PEM_L16="MIIEvQIBADANBgkq"                                                             # 16 位折行
+rd() { printf '%s\n' "$1" | review_redact_secrets; }               # 字段级（默认）
+
+# ---- review_redact_file：文档级兜底的失败语义（rc 0 改写 / 1 掩码程序失败 / 2 不可读为空 / 3 守卫拒绝；非零时原文件不动）----
+printf 'token: %s\n正文。\n' "$SEC_GHP" > "$tmp/rf.md"
+rc=0; review_redact_file "$tmp/rf.md" || rc=$?
+assert_rc "$rc" 0 "redact_file：正常文件 rc 0"
+assert_eq "$(cat "$tmp/rf.md")" "$(printf 'token: %s\n正文。' "$SEC_GHP_MASKED")" "redact_file：就地改写成掩码后的内容"
+cp "$tmp/rf.md" "$tmp/rf-twice.md"; review_redact_file "$tmp/rf-twice.md"
+assert_same_file "$tmp/rf.md" "$tmp/rf-twice.md" "redact_file：幂等（掩码后的文件再掩一次不变）"
+printf 'no trailing newline %s' "$SEC_GHP" > "$tmp/rf-nonl.md"
+rc=0; review_redact_file "$tmp/rf-nonl.md" || rc=$?
+assert_rc "$rc" 0 "redact_file：末尾没有换行的文件也算保行（按记录数比较，不是按换行数）"
+assert_eq "$(cat "$tmp/rf-nonl.md")" "no trailing newline ${SEC_GHP_MASKED}" "redact_file：末尾没有换行的文件正常掩码"
+: > "$tmp/rf-empty.md"
+rc=0; review_redact_file "$tmp/rf-empty.md" 2>/dev/null || rc=$?
+assert_rc "$rc" 2 "redact_file：空文件 → rc 2"
+rc=0; review_redact_file "$tmp/no-such-file.md" 2>/dev/null || rc=$?
+assert_rc "$rc" 2 "redact_file：文件不存在 → rc 2"
+rc=0; review_redact_file 2>/dev/null || rc=$?
+assert_rc "$rc" 2 "redact_file：缺参数 → rc 2"
+# 掩码程序本身失败：非零且**原文件保持原样**（不留空文件/半截文件）。用同名 shell 函数遮住 awk（函数优先于 PATH）。
+printf 'token: %s\n' "$SEC_GHP" > "$tmp/rf-fail.md"; cp "$tmp/rf-fail.md" "$tmp/rf-fail.orig"
+awk() { return 1; }
+rc=0; review_redact_file "$tmp/rf-fail.md" 2>/dev/null || rc=$?
+unset -f awk
+assert_rc "$rc" 1 "redact_file：awk 失败 → rc 1"
+assert_same_file "$tmp/rf-fail.md" "$tmp/rf-fail.orig" "redact_file：awk 失败时原文件逐字节不动"
+awk() { :; }
+rc=0; review_redact_file "$tmp/rf-fail.md" 2>/dev/null || rc=$?
+unset -f awk
+assert_rc "$rc" 1 "redact_file：awk 一个字节都没输出 → 也算失败（空正文不能往出口送）"
+assert_same_file "$tmp/rf-fail.md" "$tmp/rf-fail.orig" "redact_file：输出为空时原文件同样不动"
+review_redact_file "$tmp/rf-fail.md"
+assert_eq "$(cat "$tmp/rf-fail.md")" "token: ${SEC_GHP_MASKED}" "redact_file 正控：解除遮罩后同一文件正常掩码"
+# 守卫（两条都要）：行数前后相等 + 标记行逐字节仍在。用子 shell 里的同名函数遮住 review_redact_secrets 模拟坏规则
+# （父 shell 里 unset -f 会把真函数一起删掉）。
+printf '# Kiro 代码评审\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-history:[] -->\n\n正文 %s\n' "$SEC_GHP" > "$tmp/guard.md"
+cp "$tmp/guard.md" "$tmp/guard.orig"
+rc=$( ( review_redact_secrets() { grep -v '^正文'; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "守卫：删掉一行（哪一行都一样）→ 行数守卫 rc 3（结构上排除吞行）"
+rc=$( ( review_redact_secrets() { cat; echo extra; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "守卫：多出一行 → 行数守卫 rc 3"
+rc=$( ( review_redact_secrets() { grep -v 'kiro-review:'; echo pad; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "守卫：行数不变但评审标记行没了 → 标记守卫 rc 3"
+rc=$( ( review_redact_secrets() { sed 's/ run:1 / run:2 /'; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "守卫：标记行被改写（不只是删除）→ rc 3——守卫要求逐字节"
+rc=$( ( review_redact_secrets() { sed 's/kiro-history:\[\]/kiro-history:[1]/'; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "守卫：隐藏历史被改写 → rc 3"
+printf '**P0 · t**\n<!-- kiro-inline:%s L30-31 sev=P0 -->\n\n正文\n' "$fpR" > "$tmp/guard-inline.md"
+rc=$( ( review_redact_secrets() { sed 's/ sev=P0 / sev=P1 /'; }; review_redact_file "$tmp/guard-inline.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "守卫：行内标记被改写 → rc 3"
+assert_same_file "$tmp/guard.md" "$tmp/guard.orig" "守卫：拒绝写回时原文件逐字节不动"
+rc=$( ( review_redact_secrets() { cat; }; review_redact_file "$tmp/guard.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "0" "守卫正控：恒等规则 → 放行"
+# 第 11 条：标记正则从三个常量派生（16-fix4 第 16 条起是加载期常量，改常量后按同一公式重算）。把隐藏历史前缀改名后，守卫要跟着认新前缀
+# （旧的硬编码字面量会零命中、无条件放行）
+rc=$( ( REVIEW_HISTORY_PREFIX='<!-- kiro-hist:'; REVIEW_MARKER_LINE_RE_ALL=$(_review_marker_line_re_build); printf '# T\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-hist:[] -->\n正文\n' > "$tmp/guard-const.md"
+        review_redact_secrets() { sed 's/kiro-hist:\[\]/kiro-hist:[9]/'; }; review_redact_file "$tmp/guard-const.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "3" "守卫（第 11 条）：改了 REVIEW_HISTORY_PREFIX 常量，守卫仍按新前缀抓到被改写的历史行"
+assert_contains "$(_review_marker_line_re)" "$REVIEW_INLINE_MARKER_PREFIX" "守卫（第 11 条）：标记正则含行内标记前缀常量"
+assert_contains "$(_review_marker_line_re)" "$REVIEW_HISTORY_PREFIX" "守卫（第 11 条）：标记正则含隐藏历史前缀常量"
+# 第 23 条：NUL 字节不让守卫误判（grep -a）。含 NUL 的评论文件过文档级掩码 → rc 0（NUL 用 python 写，源码里不放控制字符）
+python3 -c 'import sys; open(sys.argv[1],"wb").write(b"# T\n<!-- kiro-review:90fcb05 run:1 -->\n<!-- kiro-history:[] -->\n\nbody " + bytes([0]) + b" nul\n")' "$tmp/guard-nul.md"
+assert_eq "$(python3 -c 'import sys; print(open(sys.argv[1],"rb").read().count(bytes([0])))' "$tmp/guard-nul.md")" "1" "第 23 条正控：测试文件里确实有一个 NUL 字节"
+rc=0; review_redact_file "$tmp/guard-nul.md" || rc=$?
+assert_rc "$rc" 0 "守卫（第 23 条）：正文里一个 NUL 字节不会让 grep 把评论当二进制、误判成标记丢失"
+
+# ---- golden①：合法契约 + 三种形态 token（helpers.sh with_secrets）→ 字段级掩码后只动 token；文档级再过一遍是 no-op ----
+strip_secrets() {
+  sed -E -e "/^api_key = \"(${SEC_B64}|${SEC_B64_MASKED//\*/\\*})\"\$/d" \
+         -e "s/ (${SEC_GHP}|${SEC_GHP_MASKED//\*/\\*})//g" \
+         -e "s/ (${SEC_AKIA}|${SEC_AKIA_MASKED//\*/\\*}|${SEC_AKIA_MASKED_TITLE_RE})//g"
+}
+SEC_AKIA_MASKED_TITLE_RE=$(printf '%s' "$SEC_AKIA_MASKED_TITLE" | sed -E 's/[\\*]/\\&/g')   # AKIA\*\*\*\*4567 → ERE 字面量
+with_secrets fixtures/contract/full.json > "$tmp/secrets-full.json"
+_review_normalize < "$tmp/secrets-full.json" > "$tmp/secrets-full.normalized.json"
+assert_contains "$(cat "$tmp/secrets-full.normalized.json")" "$SEC_GHP" "票 16 正控：归一化阶段自己不掩（掩码只能来自 review_redact_json）"
+assert_contains "$(cat "$tmp/secrets-full.normalized.json")" "$SEC_B64" "票 16 正控：归一化阶段不掩 base64 补位形态"
+review_validate < "$tmp/secrets-full.json" > "$tmp/secrets-full.validated.json"
+assert_no_secrets "$(cat "$tmp/secrets-full.validated.json")" "第 15 条：review_validate 的输出已掩（归一化 → 掩码 → 清洗 + 上限）"
+render_redacted "$tmp/secrets-full.json" "$tmp/secrets-full.md"
+assert_golden "$tmp/secrets-full.md" summary-full-secrets.md "票 16 golden①：INLINE_COMMENT=0 汇总，五个槽位的 token 全部在字段级掩码"
+assert_masked "$(cat "$tmp/secrets-full.md")" "票 16 汇总(0)"
+assert_eq "$(grep -c -F "$SEC_GHP_MASKED" "$tmp/secrets-full.md")" "3" "票 16 汇总(0)：ghp_ 掩码出现在 summary、F1 body、F3 body 三行"
+assert_eq "$(grep -c -F "$SEC_AKIA_MASKED" "$tmp/secrets-full.md")" "1" "票 16 汇总(0)：AKIA 掩码出现在 verdict_reason 一行"
+assert_eq "$(grep -c -F "$SEC_AKIA_MASKED_TITLE" "$tmp/secrets-full.md")" "1" "票 16 汇总(0)（第 22 条）：F1 标题里的 AKIA 掩码四颗星转义（渲染仍是 ****）"
+assert_eq "$(grep -c -F "api_key = \"${SEC_B64_MASKED}\"" "$tmp/secrets-full.md")" "1" "票 16 汇总(0)：fix 代码围栏里的 key=value 只掩取值、键名保留"
+strip_secrets < "$tmp/secrets-full.md" > "$tmp/secrets-full.stripped.md"
+assert_same_file "$tmp/secrets-full.stripped.md" "$GOLDEN/summary-full.md" \
+  "票 16 golden①：掩码后剔掉掩码与 summary-full.md 逐字节一致——掩码只动了 token，没碰任何脚本结构"
+cp "$tmp/secrets-full.md" "$tmp/secrets-full.doc.md"; review_redact_file "$tmp/secrets-full.doc.md"
+assert_same_file "$tmp/secrets-full.md" "$tmp/secrets-full.doc.md" "票 16 golden①：字段级之后再过文档级兜底逐字节 no-op（幂等）"
+# INLINE_COMMENT=1 汇总：summary / verdict_reason 与折叠区首句里的 token
+with_secrets fixtures/contract/inline.json > "$tmp/secrets-inline.json"
+validate_redacted "$tmp/secrets-inline.json" "$tmp/secrets-inline-validated.json"
+review_plan_inline --json "$tmp/secrets-inline-validated.json" --changed-lines "$CL" > "$tmp/secrets-plan.json"
+assert_eq "$(ids "$tmp/secrets-plan.json" inline)" "F1,F7,F2" "票 16 正控：带 token 的契约规划结果与不带时一致"
+render_inline "$tmp/secrets-plan.json" "$tmp/secrets-inline.md"
+assert_golden "$tmp/secrets-inline.md" summary-inline-secrets.md "票 16 golden①：INLINE_COMMENT=1 汇总，token 全部掩码"
+body=$(cat "$tmp/secrets-inline.md")
+assert_no_secrets "$body" "票 16 汇总(1)"
+assert_contains "$body" "$SEC_GHP_MASKED" "票 16 汇总(1)：ghp_ 形态掩成前 4 后 4"
+assert_contains "$body" "$SEC_AKIA_MASKED" "票 16 汇总(1)：AKIA 形态掩成前 4 后 4"
+assert_contains "$body" "**变量命名过于笼统** — \`data\` 这个名字看不出装的是什么 ${SEC_GHP_MASKED}。" "票 16 汇总(1)：折叠区首句里的 token 也掩了"
+strip_secrets < "$tmp/secrets-inline.md" > "$tmp/secrets-inline.stripped.md"
+assert_same_file "$tmp/secrets-inline.stripped.md" "$GOLDEN/summary-inline.md" "票 16 golden①：INLINE=1 掩码后剔掉掩码与 summary-inline.md 逐字节一致"
+# 一条行内正文：title / body / fix 三个槽位。指纹沿用不带 token 的 fpR，标记行也进「只动了 token」的逐字节对比。
+jq -c '.inline[0]' "$tmp/secrets-plan.json" > "$tmp/secrets-item.json"
+assert_eq "$(jq -r .id "$tmp/secrets-item.json")" "F1" "票 16 正控：行内第一条仍是 F1"
+review_render_inline_body "$tmp/secrets-item.json" 90fcb05 "$fpR" > "$tmp/secrets-inline-body.md"
+assert_golden "$tmp/secrets-inline-body.md" inline-range-secrets.md "票 16 golden①：行内正文，title/body/fix 的 token 全部掩码"
+assert_masked "$(cat "$tmp/secrets-inline-body.md")" "票 16 行内正文"
+assert_contains "$(cat "$tmp/secrets-inline-body.md")" "**P0 · 用户输入直接拼接进 SQL ${SEC_AKIA_MASKED_TITLE}（L30–L31）**" "票 16 行内正文：首行加粗与区间后缀完好，只有 token 变成掩码（标题里的 * 转义，第 22 条）"
+# 第 22 条：标题里两处掩码——不转义时 `****…****` 会互相配对、把 `**P0 · ` 打回普通文字（CommonMark 三的倍数规则只救得了一处）
+jq --arg t "硬编码 ${SEC_AKIA} 与 ${SEC_GHP} 两处密钥" '.title = $t' "$tmp/secrets-item.json" > "$tmp/two-mask-item.json"
+jq -n --slurpfile it "$tmp/two-mask-item.json" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[$it[0] + {severity:"P0", file:"src/app.py"}]}' \
+  | review_validate > "$tmp/two-mask-validated.json"
+jq -c '.findings[0] + {finalized: true}' "$tmp/two-mask-validated.json" > "$tmp/two-mask-item.validated.json"
+assert_eq "$(review_render_inline_body "$tmp/two-mask-item.validated.json" 90fcb05 "$fpR" | head -1)" "**P0 · 硬编码 ${SEC_AKIA_MASKED_TITLE} 与 ${SEC_GHP_MASKED_TITLE} 两处密钥（L30–L31）**" \
+  "第 22 条：标题里两处掩码的八颗星全部转义，级别前缀的加粗不被拆开（cf29da0 只转义掩码之外的 *：正控）"
+strip_secrets < "$tmp/secrets-inline-body.md" > "$tmp/secrets-inline-body.stripped.md"
+assert_same_file "$tmp/secrets-inline-body.stripped.md" "$GOLDEN/inline-range.md" "票 16 golden①：行内正文掩码后剔掉掩码与 inline-range.md 逐字节一致（含 kiro-inline 标记行）"
+cp "$tmp/secrets-inline-body.md" "$tmp/secrets-inline-body.doc.md"; review_redact_file "$tmp/secrets-inline-body.doc.md"
+assert_same_file "$tmp/secrets-inline-body.md" "$tmp/secrets-inline-body.doc.md" "票 16 golden①：行内正文再过文档级兜底逐字节 no-op"
+# 文档级兜底覆盖绕过 validated.json 的输出面：元信息表里的分支名（MR 作者可控，不经 review_validate）
+render fixtures/contract/full.json "$tmp/branch-token.md" --src "feature/${SEC_GHP}"
+assert_contains "$(meta_row "$(cat "$tmp/branch-token.md")")" "feature/${SEC_GHP}" "票 16 正控：分支名里的 token 不经字段级掩码，原样进元信息表"
+review_redact_file "$tmp/branch-token.md"
+assert_contains "$(meta_row "$(cat "$tmp/branch-token.md")")" "feature/${SEC_GHP_MASKED}" "票 16：文档级兜底把元信息表里的分支名 token 掩掉（绕过 validated.json 的输出面）"
+
+# ---- golden②：现有全部 golden 过文档级兜底逐字节不变——「不碰脚本结构」的直接证据 ----
+n_golden=0
+for g in "$GOLDEN"/*.md; do
+  cp "$g" "$tmp/golden-pass.md"
+  review_redact_file "$tmp/golden-pass.md"
+  assert_same_file "$g" "$tmp/golden-pass.md" "票 16 golden②：$(basename "$g") 过文档级兜底逐字节不变"
+  n_golden=$((n_golden + 1))
+done
+assert_eq "$([[ $n_golden -ge 13 ]] && echo enough)" "enough" "票 16 golden②：覆盖了全部 golden（≥13 个，实际 ${n_golden}）"
+
+# ---- golden③：降级路径的原文含**两个未闭合 BEGIN 行**（第 28 条）——渲染时掩过一遍，出口再过文档级兜底必须逐字节 no-op ----
+printf '# 代码评审报告\n\nP0：写死了 token = %s，还有 %s。\napi_key = "%s"\n%s\nMIIEowIBAAKCAQEAs3cR9tX\n又一处：\n%s\n\n总体结论：不建议合并。\n' \
+  "$SEC_GHP" "$SEC_AKIA" "$SEC_B64" "$PEM_B" "$PEM_B" > "$tmp/deg-secrets.raw.md"
+review_render_degraded --text "$tmp/deg-secrets.raw.md" --sha 90fcb05 --src feature/user-search --dst master \
+  --ts "2026-09-02 20:10:02" --diff-note "完整直传" --reason "输出中未找到契约标记" > "$tmp/deg-secrets.md"
+assert_masked "$(cat "$tmp/deg-secrets.md")" "票 16 降级"
+assert_not_contains "$(cat "$tmp/deg-secrets.md")" "MIIEowIBAAKCAQEAs3cR9tX" "票 16 降级：未闭合块后紧跟的密钥正文行被就地屏蔽（第 14 条：保行模式）"
+assert_eq "$(grep -c -F -- "$PEM_B" "$tmp/deg-secrets.md")" "2" "票 16 降级（第 14 / 28 条）：两条 BEGIN 行都作为标记原位保留（保行模式不删行、不换占位）"
+assert_eq "$(grep -c -F '****（PEM 正文已屏蔽）' "$tmp/deg-secrets.md")" "1" "票 16 降级（第 14 条）：正文行换成等行数的屏蔽占位"
+assert_not_contains "$(cat "$tmp/deg-secrets.md")" "没有配对的 END 行" "票 16 降级（第 14 条）：保行模式不插提示行"
+assert_contains "$(cat "$tmp/deg-secrets.md")" "又一处：" "票 16 降级：两条标记行之间的评审内容不再整段消失"
+assert_contains "$(cat "$tmp/deg-secrets.md")" "总体结论：不建议合并。" "票 16 降级：结论仍在"
+cp "$tmp/deg-secrets.md" "$tmp/deg-secrets.doc.md"; review_redact_file "$tmp/deg-secrets.doc.md"
+assert_same_file "$tmp/deg-secrets.md" "$tmp/deg-secrets.doc.md" "票 16 golden③（第 28 条）：含两个 BEGIN 行的降级评论再过文档级兜底逐字节不变（文档级不碰 PEM）"
+# 失败评论：--reason 里带取值时同样要能被文档级兜底掩掉（失败原因是文本级，不经 validated.json）
+review_render_failure --reason "Kiro 自报运行失败（runFinished.status=error ${SEC_GHP}）" --sha 90fcb05 \
+  --src feature/user-search --dst master --ts "2026-09-02 20:10:02" --diff-note "完整直传" > "$tmp/fail-secrets.md"
+assert_contains "$(cat "$tmp/fail-secrets.md")" "$SEC_GHP" "票 16 正控：失败评论渲染器自己不掩（掩码在出口）"
+review_redact_file "$tmp/fail-secrets.md"
+assert_not_contains "$(cat "$tmp/fail-secrets.md")" "$SEC_GHP" "票 16：失败评论过文档级兜底后 reason 里的 token 不在"
+assert_contains "$(cat "$tmp/fail-secrets.md")" "$SEC_GHP_MASKED" "票 16：失败评论的 reason 里 token 掩成前 4 后 4"
+assert_eq "$(grep -cE '^<!-- kiro-review:90fcb05 run:1 -->$' "$tmp/fail-secrets.md")" "1" "票 16：失败评论掩码后评审标记仍恰好一行"
+# 第 13 条：评论头只有一份——失败评论的前三行 == review_render_comment_head 用同一份历史渲染的三行
+head -3 "$tmp/fail-secrets.md" | sed -n 's/^<!-- kiro-history:\(.*\) -->$/\1/p' > "$tmp/fail-hist.json"
+assert_eq "$(head -3 "$tmp/fail-secrets.md")" "$(review_render_comment_head "$REVIEW_TITLE_FAILED" 90fcb05 1 "$tmp/fail-hist.json")" \
+  "第 13 条：失败评论的评论头与 review_render_comment_head 同形（标题 + 评审标记 + 隐藏历史）"
+assert_eq "$(review_history_for_run - 3 abc1234 failed t | jq -c '[.[0].run, .[0].sha, .[0].status]')" '[3,"abc1234","failed"]' "第 13 条：review_history_for_run 无历史时给出只含本次一行"
+assert_eq "$(review_history_for_run /nonexistent 2 abc1234 degraded t | jq -c 'length')" "1" "第 13 条：历史文件不可读时退到只有本次一行"
+
+# ---- PEM（字段级，票 10 语义 + 第 10/16/22 条）----
+# 第 22 条（P1 回退）：闭合但「不纯」的块（注释行 / 16 位折行 / 64 位折行 / AQAB 短尾）整块丢弃、零明文、零片段
+closed_impure=$(printf 'before\n%s\n# rotated 2026-09-06\n%s\n%s\nAQAB\n%s\nafter\n' "$PEM_B" "$PEM_L16" "$PEM_L64" "$PEM_E")
+out=$(printf '%s\n' "$closed_impure" | review_redact_secrets)
+assert_eq "$out" "$(printf 'before\n%s\n> ⚠️ （其间 4 行已随密钥块一并屏蔽）\nafter' "$PEM_PLACEHOLDER")" "第 22 条：闭合不纯块（注释 + 16 位折行 + 64 位折行 + AQAB）整块换成占位 + 「其间 4 行已屏蔽」提示，零明文（在 d0e3381 上会失败：正控；第 24 条：不再无声）"
+assert_not_contains "$out" "MIIE" "第 22 条：连 MIIE**** 片段都没有"
+out=$(printf '%s\nMIIEow\n%s\n' "$PEM_B" "$PEM_E" | review_redact_secrets)
+assert_eq "$out" "$(printf '%s\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）' "$PEM_PLACEHOLDER")" "第 22 条：闭合块最后一行是 6 位单一大小写短尾也整块丢弃"
+# 第 16 条：未闭合 [BEGIN, 空行, base64…] 到 EOF → 密钥行掩码而非原样（块内行判定只剩 pem_flush 一处）
+out=$(printf '%s\n\n%s\ntail\n' "$PEM_B" "$PEM_L64" | review_redact_secrets)
+assert_not_contains "$out" "$PEM_L64" "第 16 条：未闭合块里空行之后的密钥行不会原样放出"
+assert_contains "$out" "MIIE****ijkl" "第 16 条：放出的密钥行按整行 base64 掩码"
+assert_contains "$out" "没有配对的 END 行" "第 16 条：仍给未闭合提示"
+# 第 10 条：BEGIN / END 都锚定整行（去 [-+>] 前缀与首尾空白后只剩标记）
+out=$(printf '> %s\n> %s\n> %s\n' "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)
+CLOSED1="$(printf '%s\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）' "$PEM_PLACEHOLDER")"   # 一行正文的闭合块的字段级输出（第 24 条）
+assert_eq "$out" "$CLOSED1" "第 10 条：带引用前缀 > 的块照样识别、整块丢弃"
+out=$(printf -- '- %s\n- %s\n- %s\n' "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)
+assert_eq "$out" "$CLOSED1" "第 10 条：diff 删除行前缀（- 带空格）照样识别"
+out=$(printf -- '-%s\n-%s\n-%s\n' "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)
+assert_eq "$out" "$CLOSED1" "第 10 条：diff 删除行前缀紧贴标记（6 个连字符）照样识别"
+sentence_b="提交里出现了以 \`${PEM_B}\` 开头的私钥文件，必须删除并轮换"
+title_e="**1. \`c.py:3\` — 末尾提到 ${PEM_E}**"
+same_line="从 ${PEM_B} 到 ${PEM_E} 的整块私钥已经进了版本库"
+path_line="src/main/java/com/example/service/impl/UserService"
+in4=$(printf '%s\n%s\n%s\n%s\n' "$sentence_b" "$title_e" "$same_line" "$path_line")
+assert_eq "$(printf '%s\n' "$in4" | review_redact_secrets)" "$in4" "第 10 条：句中引用的 BEGIN、标题末尾的 END、同句 BEGIN…END、相邻长路径——四行逐字节不动（在 d0e3381 上会失败：正控）"
+assert_eq "$(printf '%s\n' "$in4" | review_redact_secrets --keep-lines)" "$in4" "第 10 条：文档级同样不动"
+# 非锚定行里带密钥正文的一行 .env / JSON 形态（\n 转义）：起止标记之间夹着 base64 连片 → 整段占位；只有起始标记 → 其后 base64 连片 ****
+out=$(printf 'PRIVATE_KEY="%s\\n%s\\n%s"\n' "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)
+assert_eq "$out" "PRIVATE_KEY=\"${PEM_PLACEHOLDER}\"" "PEM 一行形态：.env 里用 \\n 写成一行的密钥整段换成占位"
+out=$(printf 'x="%s\\n%s\\nAQAB\n' "$PEM_B" "$PEM_L64" | review_redact_secrets)
+assert_not_contains "$out" "$PEM_L64" "PEM 一行形态：只有起始标记时其后的 base64 连片被 ****"
+# 字段级通过真实管线：F2.fix 里一个闭合块、F1.body 末尾一个 BEGIN、F3.body 末尾一个 END → 块只在字段内消失，汇总章节/表格/标记逐行完好
+jq --arg b "$PEM_B" --arg e "$PEM_E" --arg l "$PEM_L64" \
+   '.findings[0].body += "\n\n" + $b | .findings[1].fix += "\n" + $b + "\n" + $l + "\n" + $e | .findings[2].body += "\n\n" + $e' \
+  fixtures/contract/full.json > "$tmp/pem-fields.json"
+render "$tmp/pem-fields.json" "$tmp/pem-fields.raw.md"
+render_redacted "$tmp/pem-fields.json" "$tmp/pem-fields.md"
+awk -v b="$PEM_B" -v e="$PEM_E" -v l="$PEM_L64" -v ph="$PEM_PLACEHOLDER" \
+    -v note="> ⚠️ 上面的 PEM 块没有配对的 END 行（评审员只引用了起始行，或原文被截断）；其后没有其他内容。" '
+  $0 == b && !seen_b { seen_b = 1; print ph; print note; next }   # F1.body 末尾的 BEGIN：未闭合（字段结束即 EOF）→ 占位 + 提示
+  $0 == b { print ph; inblock = 1; next }                          # F2.fix 的闭合块：占位一行 + 「其间 1 行」提示（第 24 条）
+  inblock && $0 == e { inblock = 0; print "> ⚠️ （其间 1 行已随密钥块一并屏蔽）"; next }
+  inblock { next }
+  { print }' "$tmp/pem-fields.raw.md" > "$tmp/pem-fields.expected.md"
+assert_same_file "$tmp/pem-fields.md" "$tmp/pem-fields.expected.md" \
+  "方案 C golden：字段里的 PEM 块整块丢弃（占位 + 其间 N 行提示）/ 未闭合 BEGIN 占位 + 提示 / 孤立 END 行原样，汇总其余章节、表格、标记逐字节完好"
+assert_contains "$(cat "$tmp/pem-fields.md")" "**P1 应当修复（2）**" "方案 C：夹在 BEGIN 与 END 之间的小节标题还在"
+assert_eq "$(grep -cF -- "$PEM_E" "$tmp/pem-fields.md")" "1" "方案 C：F3 里孤立的 END 行是正文，原样保留"
+assert_not_contains "$(cat "$tmp/pem-fields.md")" "$PEM_L64" "方案 C：F2 里的密钥正文零明文"
+cp "$tmp/pem-fields.md" "$tmp/pem-fields.doc.md"; review_redact_file "$tmp/pem-fields.doc.md"
+assert_same_file "$tmp/pem-fields.md" "$tmp/pem-fields.doc.md" "方案 C：文档级兜底对含占位与 END 行的汇总逐字节 no-op"
+# 文档级兜底对含 BEGIN 行的文件不删行（「对含 BEGIN 行的表格行不删行」golden）：16-fix3 第 11 条起保行模式会**就地**屏蔽正文行
+# （等行数换成占位），表格行里句中的 BEGIN 标记与 BEGIN / END 标记行本身原位保留
+printf '| 文件 | P0 |\n|---|---|\n| %s | 1 |\n%s\n%s\n%s\n' "$PEM_B" "$PEM_B" "$PEM_L64" "$PEM_E" > "$tmp/doc-pem.md"; cp "$tmp/doc-pem.md" "$tmp/doc-pem.orig"
+rc=0; review_redact_file "$tmp/doc-pem.md" || rc=$?
+assert_rc "$rc" 0 "方案 C 文档级：含锚定 BEGIN/END 行的文件 rc 0"
+printf '| 文件 | P0 |\n|---|---|\n| %s | 1 |\n%s\n%s\n%s\n' "$PEM_B" "$PEM_B" '****（PEM 正文已屏蔽）' "$PEM_E" > "$tmp/doc-pem.expected"
+assert_same_file "$tmp/doc-pem.md" "$tmp/doc-pem.expected" "方案 C 文档级：不删行——表格行与标记行原位保留，只有正文行换成等行数的占位（变异「保行模式删行」→ 行数守卫 rc 3）"
+# 第 10 条：file 取值是 BEGIN 标记 → review_validate 按不可定位处理，进「未定位」而不是表格行
+jq --arg b "$PEM_B" '.findings[0].file = $b' fixtures/contract/full.json | review_validate > "$tmp/pem-file.json"
+assert_eq "$(jq -r '.findings[0].file, .delocated_findings' "$tmp/pem-file.json" | tr '\n' ' ')" "null 1 " "第 10 条：file 以 ----- 开头按不可定位处理并计数"
+# 行内正文：标题带 BEGIN（非锚定）、fix 末尾一行 END（孤立）→ 字段级掩码后逐字节不变，标记完好
+jq --arg b "$PEM_B" --arg e "$PEM_E" '.title += " " + $b | .fix += "\n" + $e' "$tmp/item-range.json" > "$tmp/pem-item.json"
+review_render_inline_body "$tmp/pem-item.json" 90fcb05 "$fpR" > "$tmp/pem-inline.raw.md"
+jq -n --slurpfile it "$tmp/pem-item.json" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[$it[0] + {severity:"P0", file:"src/app.py"}]}' \
+  | review_validate > "$tmp/pem-item-validated.json"    # review_validate 内部已掩码，不再多调一次 review_redact_json（第 31 条）
+assert_contains "$(jq -r '.findings[0].title' "$tmp/pem-item-validated.json")" "$PEM_B" "行内 PEM：标题里句中的 BEGIN 字段级不动"
+assert_eq "$(jq -r '.findings[0].fix' "$tmp/pem-item-validated.json" | tail -1)" "$PEM_E" "行内 PEM：fix 末尾孤立的 END 行字段级不动"
+cp "$tmp/pem-inline.raw.md" "$tmp/pem-inline.md"; rc=0; review_redact_file "$tmp/pem-inline.md" || rc=$?
+assert_rc "$rc" 0 "行内 PEM：文档级 rc 0"
+assert_same_file "$tmp/pem-inline.md" "$tmp/pem-inline.raw.md" "行内 PEM：正文逐字节不变，行内标记完好"
+
+# ---- 第 21 条：字段上限（按 UTF-8 字节；summary/verdict_reason 8 KB、title 2 KB、body 32 KB、fix 16 KB）----
+big=$(python3 -c 'print("a"*9000, end="")'); cjk=$(python3 -c 'print("漏"*12000, end="")')
+jq -n --arg s "$big" --arg c "$cjk" '{contract:"codeup-reviewer/1", summary:$s, verdict:"MERGE", verdict_reason:"短", findings:[{severity:"P0",title:("t"+$s),body:$c,fix:("f"+$c+$c),file:"src/app.py",line_start:1}]}' \
+  | review_validate > "$tmp/cap.json"
+assert_eq "$(jq -r '.summary | utf8bytelength <= 8192' "$tmp/cap.json")" "true" "第 21 条 / 16-fix4 第 19 条：summary 连「（已截断）」一起 ≤ 8192 字节"
+assert_eq "$(jq -r '.summary | .[-5:]' "$tmp/cap.json")" "（已截断）" "第 21 条：summary 末尾标注已截断"
+assert_eq "$(jq -r '.findings[0].title | utf8bytelength <= 2048' "$tmp/cap.json")" "true" "第 21 条：title ≤ 2048 字节"
+assert_eq "$(jq -r '.findings[0].body | utf8bytelength <= 32768' "$tmp/cap.json")" "true" "第 21 条：body ≤ 32768 字节（多字节字符不切半）"
+assert_eq "$(jq -r '.findings[0].body | .[:-5] | test("^漏+$")' "$tmp/cap.json")" "true" "第 21 条：body 截断落在字符边界（没有半个 U+6F0F）"
+assert_eq "$(jq -r '.findings[0].fix | utf8bytelength <= 16384' "$tmp/cap.json")" "true" "第 21 条：fix ≤ 16384 字节"
+assert_eq "$(jq -r '.truncated_fields' "$tmp/cap.json")" "4" "第 21 条：截断字段计数 4（summary、title、body、fix）"
+assert_eq "$(jq -r '.verdict_reason' "$tmp/cap.json")" "短" "第 21 条：未超限字段不动"
+assert_eq "$(review_validate < fixtures/contract/full.json | jq -r '.truncated_fields')" "0" "第 21 条：正常契约计数 0"
+# 第 23 条：控制字符（NUL、…）在 _sanitize_md 剔除；换行 / 制表保留（用 JSON 的 \u 转义写进契约，源码里不放控制字符）
+jq -n '{contract:"codeup-reviewer/1", summary:"a\u0000b\u0001c\u001fd", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t\u0000x",body:"l1\n\tl2\u000bz",fix:"",file:"src/app.py",line_start:1}]}' \
+  | review_validate > "$tmp/ctl.json"
+assert_eq "$(jq -r '.summary' "$tmp/ctl.json")" "abcd" "第 23 条：summary 里的 NUL / U+0001 / U+001F 被剔除"
+assert_eq "$(jq -r '.findings[0].title' "$tmp/ctl.json")" "tx" "第 23 条：title 里的 NUL 被剔除"
+assert_eq "$(jq -r '.findings[0].body' "$tmp/ctl.json")" "$(printf 'l1\n\tl2z')" "第 23 条：body 里的换行与制表保留，U+000B 剔除"
+
+# ---- 精度规则（第 3、8、9、19、29 条）：三组 golden——仍掩 / 不掩 / 有意接受 ----
+# 仍掩：六条无数字凭证（第 29 条，在 d0e3381 上全部裸奔：正控）+ 无数字无 / 的 AWS 变体 + 引号里的路径/属性/首字符形态（第 8 条）
+assert_eq "$(rd 'SECRET_KEY=MySuperSecretPassphrase')" 'SECRET_KEY=MySu****rase' "第 29 条仍掩：全大写键 + env 形态（③④）"
+assert_eq "$(rd 'MYSQL_PASSWORD: SuperSecretPassword')" 'MYSQL_PASSWORD: Supe****word' "第 29 条仍掩：全大写键 + YAML 形态"
+assert_eq "$(rd 'spring.datasource.password=AdminPassGoesHere')" 'spring.datasource.password=Admi****Here' "第 29 条仍掩：properties 形态（④）"
+assert_eq "$(rd 'ENV API_KEY=SomeOpaqueTokenValue')" 'ENV API_KEY=Some****alue' "第 29 条仍掩：Dockerfile ENV"
+assert_eq "$(rd 'client_secret=hJKlMnOpQrStUvWxYzAbCdEfGhIj')" 'client_secret=hJKl****GhIj' "第 29 条仍掩：小写键但分隔符两侧没空格（④）"
+AWS_NODIGIT="wJalrXUtnFEMI/KMDENG/""bPxRfiCYEXAMPLEKEY"; AWS_NODIGIT_NOSLASH="wJalrXUtnFEMIKMDENG""bPxRfiCYEXAMPLEKEYxyz"   # 拆片段：完整密钥形态不进源码
+assert_eq "$(rd "AWS_SECRET_ACCESS_KEY=${AWS_NODIGIT}")" 'AWS_SECRET_ACCESS_KEY=wJal****EKEY' "第 29 条仍掩：无数字的 AWS 密钥（含 /：②）"
+assert_eq "$(rd "AWS_SECRET_ACCESS_KEY=${AWS_NODIGIT_NOSLASH}")" 'AWS_SECRET_ACCESS_KEY=wJal****Yxyz' "第 29 条仍掩：无数字无 / 的 AWS 变体（③④ 兜住）"
+assert_eq "$(rd 'SECRET_KEY=abcdefghABCDEFGHijklmn')" 'SECRET_KEY=abcd****klmn' "第 29 条仍掩：纯字母无数字（③④）"
+assert_eq "$(rd 'secret: MySecretValueHere')" 'secret: MySe****Here' "第 14 条仍掩：YAML 冒号形态 + 17 位驼峰（≥ 16 不算词形；cf29da0 放行：正控）"
+assert_eq "$(rd 'client_secret: HunterTwoPassword')" 'client_secret: Hunt****word' "第 14 条仍掩：client_secret: HunterTwoPassword（17 位）"
+assert_eq "$(rd 'password: correcthorsebattery')" 'password: corr****tery' "第 14 条仍掩：19 位全小写无连字符"
+assert_eq "$(rd 'secret: MySecretValueHereIsLongEnough')" 'secret: MySe****ough' "第 14 条仍掩：≥ 20 位大小写混合"
+assert_eq "$(rd 'private_key: MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu')" 'private_key: MIIB****t8Qu' "第 21 条仍掩：含数字 / 大小写混合的 YAML 取值"
+# 第 14 条：规则 ② 恢复否定类 [^A-Za-z0-9_]——连字符 / 波浪线是标识符外字符、不是散文信号；diceware 口令与分段密钥全掩（cf29da0 全部放行：正控）
+assert_eq "$(rd 'password: correct-horse-battery-staple')" 'password: corr****aple' "第 14 条仍掩：YAML 形态的 diceware 口令"
+assert_eq "$(rd 'password = correct-horse-battery-staple')" 'password = corr****aple' "第 14 条仍掩：代码形态的 diceware 口令（②）"
+assert_eq "$(rd 'client_secret: aB-cD-eF-gH-iJ-kL')" 'client_secret: aB-c****J-kL' "第 14 条仍掩：连字符分段的密钥"
+assert_eq "$(rd 'secret = MyPass-Phrase-Value')" 'secret = MyPa****alue' "第 14 条仍掩：连字符驼峰口令"
+assert_eq "$(rd 'api_key = abcd~efgh~ijkl~mnop')" 'api_key = abcd****mnop' "第 14 条仍掩：波浪线分段"
+assert_eq "$(rd 'password = my~secret~phrase')" 'password = my~s****rase' "第 14 条仍掩：波浪线小写词组"
+# 第 14 条有意接受：③ 的误报（键名保留、取值掩）与 ④b 词形放行的漏报
+assert_eq "$(rd 'token: rate-limited-endpoint')" 'token: rate****oint' "第 14 条有意接受的误报：连字符英文词组按 ② 掩（键名保留）"
+assert_eq "$(rd 'token = rate-limited-endpoint')" 'token = rate****oint' "第 14 条有意接受的误报：代码形态同样按 ② 掩"
+assert_eq "$(rd 'password: must-be-rotated-quarterly')" 'password: must****erly' "第 14 条有意接受的误报：连字符英文散文"
+assert_eq "$(rd 'password: SuperSecretPass')" 'password: SuperSecretPass' "第 14 条有意接受的漏报：15 位驼峰词形（与 sessionToken 一类引用不可分）"
+assert_eq "$(rd 'password: authentication')" 'password: authentication' "第 14 条 ④b：短于 16 的英文单词放行"
+assert_eq "$(rd 'password: Authentication9')" 'password: Auth****ion9' "第 14 条 ①：含数字就掩（词形判定不参与）"
+assert_eq "$(rd 'token = usr7Token9Xyz')" 'token = usr7****9Xyz' "第 29 条仍掩：代码形态但含数字（①）"
+assert_eq "$(rd 'token = "userTokenValue"')" 'token = "user****alue"' "第 8 条仍掩：加引号只看长度"
+assert_eq "$(rd 'aws_secret_access_key = "/JalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"')" 'aws_secret_access_key = "/Jal****EKEY"' "第 8 条仍掩：引号里以 / 开头的 base64（约 1/64 的密钥）"
+assert_eq "$(rd 'access_token = "ya29.a0AfH6SMBxabcdef1234"')" 'access_token = "ya29****1234"' "第 8 条仍掩：引号里含 . 的 Google 令牌"
+assert_eq "$(rd 'client_secret = "-abcDEF123456ghiJKL789"')" 'client_secret = "-abc****L789"' "第 8 条仍掩：引号里以 - 开头"
+assert_eq "$(rd 'api_key = ".eyJhbGciOiJIUzI1NiJ9abcdef123456"')" 'api_key = ".eyJ****3456"' "第 8 条仍掩：引号里以 . 开头"
+assert_eq "$(rd 'Authorization: Bearer TOKENNameXXXXXXXXXXXXXXXXX')" 'Authorization: Bearer TOKE****XXXX' "第 19 条仍掩：≥ 20 位纯字母不算散文"
+assert_eq "$(rd 'x-auth-token: abcdefghijklmnopqrst')" 'x-auth-token: abcd****qrst' "第 19 条仍掩：20 位纯小写令牌（在 d0e3381 上裸奔：正控）"
+assert_eq "$(rd 'Authorization: Bearer abcdefghijklmnopqrst')" 'Authorization: Bearer abcd****qrst' "第 19 条仍掩：Bearer 后 20 位纯小写"
+assert_eq "$(rd 'x-api-key: SECRETVALUEHEREOK')" 'x-api-key: SECR****REOK' "第 19 条仍掩：显式令牌头后 12+ 位纯大写"
+assert_eq "$(rd 'x-yunxiao-token: ABCDEFGHIJKLMNOPQRST')" 'x-yunxiao-token: ABCD****QRST' "第 19 条仍掩：本项目 PAT 头后 20 位纯大写"
+assert_eq "$(rd 'Authorization: Basic dXNlcjpwYXNz')" 'Authorization: Basic dXNl****YXNz' "第 19 条仍掩：Basic 后的 base64"
+assert_eq "$(rd 'Authorization: Bearer ya29.a0AfH6SMBxabcdefghij')" 'Authorization: Bearer ya29****ghij' "第 19 条仍掩：含 . 的 ya29. 令牌"
+assert_eq "$(rd 'https://user:s3cr3tP%40ss@host/')" 'https://user:s3cr****40ss@host/' "第 9 条仍掩：URL 里真正的 user:pass@"
+# 不掩：代码里的标识符引用（第 29 条）、散文词（第 19 条）、普通 URL（第 9 条）
+assert_eq "$(rd 'token = userToken')" 'token = userToken' "第 29 条不掩：camelCase 标识符（也在 <12 阈值下）"
+assert_eq "$(rd 'token = userTokenValue')" 'token = userTokenValue' "第 29 条不掩：≥12 位 camelCase 标识符、小写键、有空格的 ="
+assert_eq "$(rd 'String apiKey = configApiKey;')" 'String apiKey = configApiKey;' "第 29 条不掩：Java 赋值里的标识符（第 3 条样例）"
+assert_eq "$(rd 'password = getPasswordDefault')" 'password = getPasswordDefault' "第 29 条不掩：getPasswordDefault（第 3 条样例）"
+assert_eq "$(rd 'api_key = getApiKey()')" 'api_key = getApiKey()' "第 29 条不掩：函数调用"
+assert_eq "$(rd '建议改用 Basic authentication 而不是明文。')" '建议改用 Basic authentication 而不是明文。' "第 19 条不掩：Basic authentication"
+assert_eq "$(rd 'Authorization: HeaderMissing 时应返回 401')" 'Authorization: HeaderMissing 时应返回 401' "第 19 条不掩：camelCase 散文 HeaderMissing（B 方案三形状会掩：正控）"
+assert_eq "$(rd 'Authorization: RequestId')" 'Authorization: RequestId' "第 19 条不掩：RequestId"
+assert_eq "$(rd 'Authorization: ContentType')" 'Authorization: ContentType' "第 19 条不掩：ContentType"
+assert_eq "$(rd 'Authorization: header missing 时应返回 401。')" 'Authorization: header missing 时应返回 401。' "第 3 条不掩：Authorization: header"
+assert_eq "$(rd 'Authorization: missing')" 'Authorization: missing' "第 3 条不掩：Authorization: missing"
+assert_eq "$(rd 'x-api-key: required')" 'x-api-key: ****' "第 18 条仍掩：显式令牌头后 ≥ 8 位一律掩（头名本身就是上下文）"
+assert_eq "$(rd 'x-api-key: SecretValue')" 'x-api-key: ****' "第 18 条仍掩：显式令牌头后的 camelCase 短值（48aff39 裸奔：正控）"
+assert_eq "$(rd 'x-api-key: short')" 'x-api-key: short' "第 18 条：显式令牌头后 < 8 位的英文单词不掩"
+assert_eq "$(rd 'x-api-key: none')" 'x-api-key: none' "第 24 条：< 8 位词形放行——none"
+assert_eq "$(rd 'x-api-key: TODO')" 'x-api-key: TODO' "第 24 条：< 8 位词形放行——全大写 TODO"
+assert_eq "$(rd 'x-api-key: aB3.x7')" 'x-api-key: ****' "第 24 条仍掩：< 8 位但含数字与点（cf29da0 放行：正控）"
+assert_eq "$(rd 'x-api-key: A/b=c+')" 'x-api-key: ****' "第 24 条仍掩：< 8 位 base64 字符"
+assert_eq "$(rd 'private-token: ab3.x7')" 'private-token: ****' "第 24 条仍掩：private-token 头后的短值"
+assert_eq "$(rd 'x-auth-token: 1234567')" 'x-auth-token: ****' "第 24 条仍掩：7 位纯数字"
+assert_eq "$(rd 'Authorization: Bearer AbcdefGhijklm')" 'Authorization: Bearer AbcdefGhijklm' "有意接受的漏报（第 18 条）：Bearer 后 camelCase 纯字母短值——真实 bearer 几乎必含数字或 ./-/_"
+assert_eq "$(rd 'https://registry.npmjs.org:443/@babel/core')" 'https://registry.npmjs.org:443/@babel/core' "第 9 条不掩：host:port/path@scope 不是 user:pass@"
+assert_eq "$(rd 'http://localhost:8080/oauth/callback/user@example.com')" 'http://localhost:8080/oauth/callback/user@example.com' "第 9 条不掩：路径里的邮箱"
+assert_eq "$(rd 'https://proxy.golang.org:443/github.com/foo/bar/@v/list')" 'https://proxy.golang.org:443/github.com/foo/bar/@v/list' "第 9 条不掩：Go proxy URL"
+assert_eq "$(rd 'https://registry.example.com:5000/team/app@sha256:deadbeef1234')" 'https://registry.example.com:5000/team/app@sha256:deadbeef1234' "第 9 条不掩：镜像 digest 引用"
+# 有意接受（写进 setup-guide §12）：形状上与标识符引用不可区分的漏报（只在代码形态 ` = ` 下）；同一值换成 env / YAML / 引号形态就会掩
+assert_eq "$(rd 'secret = MySecretValueHere')" 'secret = MySecretValueHere' "有意接受的漏报：secret = MySecretValueHere（与 token = userToken 形状相同）"
+assert_eq "$(rd 'secret: MySecretValueHere')" 'secret: MySe****Here' "有意接受的边界：同一值写成 YAML 的 secret: … 就掩（第 14 条 ④b）"
+assert_eq "$(rd 'SECRET=MySecretValueHere')" 'SECRET=MySe****Here' "有意接受的边界：同一值写成 SECRET=… 就掩（③④a）"
+assert_eq "$(rd 'secret=MySecretValueHere')" 'secret=MySe****Here' "有意接受的边界：同一值写成 env 的 secret=… 就掩（④a 无空格的 = 不做散文判定）"
+assert_eq "$(rd 'secret = "MySecretValueHere"')" 'secret = "MySe****Here"' "有意接受的边界：同一值加引号就掩（第 8 条）"
+# 第 6 条：前缀模式合成一个交替式后结果不变（各形态各一条）
+assert_eq "$(rd "见 ${SEC_AKIA} 与 ${SEC_GHP}")" "见 ${SEC_AKIA_MASKED} 与 ${SEC_GHP_MASKED}" "第 6 条：AKIA 与 ghp_ 同一行各自掩码"
+assert_eq "$(rd "github_pat_""11ABCDEFG0abcdefghijklmnopqrstuv xoxb-""1234567890-abcdefghij AIza""SyA1234567890abcdefghijklmnopqrstu sk-""abcdefghijklmnopqrstuvwxyz")" \
+  'gith****stuv xoxb****ghij AIza****rstu sk-a****wxyz' "第 6 条：github_pat_ / xoxb- / AIza / sk- 四种前缀形态同一行（拆片段拼接）"
+assert_eq "$(rd 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c')" 'eyJh****sw5c' "第 6 条：JWT"
+
+# ============================================================================
+# 16-fix3：48aff39 闭合 diff 复审第 1–14 条（第 9 条不做）
+# ============================================================================
+rdk() { printf '%s\n' "$1" | review_redact_secrets --keep-lines; }
+PEM_L64S="MIIEvQIBADANBgkq/hkiG9w0BAQEFAASC/""BKcwggSjAgEAAoIB/AQC7x9Kf2Lm4Qz8Rt"   # 每 16 位一个 / 的正文（第 1 条：48aff39 的 [A-Za-z0-9+]{20,} 一段都凑不满）；尾巴要像随机 base64——16-fix4 第 26 条起 ≥ 2 个 / 且类别切换率 < 0.35 视为路径，原先的 fake02abcdefgh 尾巴把切换率拉到 0.30
+PEM_BODY_PH='****（PEM 正文已屏蔽）'
+# ---- 第 10 条（P1 回退）：带 Markdown 装饰的 BEGIN / END 行仍开块（48aff39 三种形态全部原样输出正文：正控）----
+for deco in '`%s`' '* %s' '1. %s' '**%s**' '> * %s'; do
+  # shellcheck disable=SC2059
+  in3=$(printf "${deco}\n%s\n${deco}\n" "$PEM_B" "$PEM_L64" "$PEM_E")
+  assert_eq "$(printf '%s\n' "$in3" | review_redact_secrets)" "$CLOSED1" "第 10 条：装饰形态 [${deco}] 的 BEGIN/END 行照样开块、整块丢弃"
+  assert_not_contains "$(printf '%s\n' "$in3" | review_redact_secrets --keep-lines)" "$PEM_L64" "第 10 条：装饰形态 [${deco}] 在保行模式下正文行同样被屏蔽"
+done
+# 兜底：一行含 BEGIN 标记（没锚定）且下一行像正文 → 视为块起始；下一行是散文 → 那一行只是引用，按普通行放出
+out=$(printf '私钥如下 %s\n%s\n%s\ntail\n' "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)
+assert_eq "$out" "$(printf '私钥如下 %s\ntail' "$CLOSED1")" "第 10 条兜底：含 BEGIN 的散文行 + 下一行像正文 → 当块起始、整块丢弃，标记前的散文保留（第 11 条）"
+out=$(printf '**F1** 硬编码私钥：%s\n%s\n%s\n影响：必须轮换\n' "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)
+assert_eq "$out" "$(printf '**F1** 硬编码私钥：%s\n影响：必须轮换' "$CLOSED1")" "第 10 条再补：BEGIN 前有任何文字、下一行是正文 → 块起始，标记前的散文保留（48aff39 整把钥匙原样输出：正控）"
+# ---- 16-fix4 第 11 条（P0 回归）：悬挂行的 BEGIN 前散文必须过掩码再打出，字段级不能吞掉它 ----
+hang_in=$(printf '硬编码凭证 %s 与私钥 %s\n%s\n%s\n影响：必须轮换\n' "$SEC_AKIA" "$PEM_B" "$PEM_L64" "$PEM_E")
+out=$(printf '%s\n' "$hang_in" | review_redact_secrets --keep-lines)
+assert_eq "$out" "$(printf '硬编码凭证 %s 与私钥 %s\n%s\n%s\n影响：必须轮换' "$SEC_AKIA_MASKED" "$PEM_B" "$PEM_BODY_PH" "$PEM_E")" "第 11 条（保行）：悬挂行的 AKIA 掩码、标记保留、正文行占位、行数不变（cf29da0 原样输出 AKIA：正控）"
+out=$(printf '%s\n' "$hang_in" | review_redact_secrets)
+assert_eq "$out" "$(printf '硬编码凭证 %s 与私钥 %s\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）\n影响：必须轮换' "$SEC_AKIA_MASKED" "$PEM_PLACEHOLDER")" "第 11 条（字段级）：BEGIN 前的问题陈述保留并掩码，标记换占位、块丢弃（cf29da0 整行换占位吞掉陈述：正控）"
+out=$(printf '硬编码凭证 %s 与私钥 %s 尾巴 %s\n%s\n%s\n' "$SEC_AKIA" "$PEM_B" "$PEM_L64" "$PEM_L64" "$PEM_E" | review_redact_secrets --keep-lines)
+assert_eq "$(printf '%s\n' "$out" | head -1)" "硬编码凭证 ${SEC_AKIA_MASKED} 与私钥 ${PEM_B} 尾巴 ****" "第 42 条（原第 11 条断言改向）：悬挂行尾巴整段 ****，与 pem_inline 一致；第 11 条（保行）：标记后同一行的尾巴按正文处理（≥ 20 位 base64 连片前 4 后 4）"
+out=$(printf '硬编码凭证 %s 与私钥 %s\n这是散文\n' "$SEC_AKIA" "$PEM_B" | review_redact_secrets --keep-lines)
+assert_eq "$out" "$(printf '硬编码凭证 %s 与私钥 %s\n这是散文' "$SEC_AKIA_MASKED" "$PEM_B")" "第 11 条对照：下一行不像正文 → emit_pending 走 redact_line（一直是掩的）"
+out=$(printf '以 \`%s\` 开头的文件\n这是散文\n' "$PEM_B" | review_redact_secrets)
+assert_eq "$out" "$(printf '以 \`%s\` 开头的文件\n这是散文' "$PEM_B")" "第 10 条兜底正控：句中引用 + 下一行散文 → 逐字节不动"
+# ---- 第 1 条：一行 .env 形态的正文含 /（48aff39 的 [A-Za-z0-9+] 字符类漏 /：正控）----
+out=$(printf 'PRIVATE_KEY="%s\\n%s\\n%s"\n' "$PEM_B" "$PEM_L64S" "$PEM_E" | review_redact_secrets)
+assert_eq "$out" "PRIVATE_KEY=\"${PEM_PLACEHOLDER}\"" "第 1 条：一行形态正文含 / 也整段占位（base64 字母表一处定义、含 /）"
+out=$(printf 'x="%s\\n%s\\nAQAB\n' "$PEM_B" "$PEM_L64S" | review_redact_secrets)
+assert_not_contains "$out" "MIIEvQIBADANBgkq/hkiG9w0BAQEFAASC" "第 1 条：只有起始标记时含 / 的 base64 连片也被 ****"
+assert_not_contains "$(printf '%s\n\n%s\n' "$PEM_B" "$PEM_L64S" | review_redact_secrets)" "$PEM_L64S" "第 1 条：未闭合块里含 / 的正文行按整行 base64 掩"
+# ---- 第 11 条：保行模式识别多行 PEM，正文行逐行就地屏蔽、不删行（48aff39 三行原样输出：正控）----
+in3=$(printf '%s\n%s\n%s\n' "$PEM_B" "$PEM_L64" "$PEM_E")
+out=$(printf '%s\n' "$in3" | review_redact_secrets --keep-lines)
+assert_eq "$out" "$(printf '%s\n%s\n%s' "$PEM_B" "$PEM_BODY_PH" "$PEM_E")" "第 11 条：保行模式三行 PEM → BEGIN/END 保留为标记、正文行换占位，行数不变"
+enc=$(printf '%s\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123456789ABCDEF\n\n%s\n%s\n' "$PEM_B" "$PEM_L64" "$PEM_E")
+out=$(printf '%s\n' "$enc" | review_redact_secrets --keep-lines)
+assert_not_contains "$out" "0123456789ABCDEF" "第 11 条：保行模式下 DEK-Info 头也屏蔽"
+
+# ---- 第 26 条：「像密钥正文」只有一份判定 b64_material（字符集 + ≥ minlen + 非十六进制 + 数字/大小写 + 路径排除）----
+rdk() { printf '%s\n' "$1" | review_redact_secrets --keep-lines; }
+PATH_A="src/main/java/com/example/v2/service/impl/UserService"           # 54 位、含数字、2 个以上 /、切换率 0.14
+PATH_B="packages/Core/src/main/java/com/acme/utf8/CodecHelper"          # 53 位、切换率 0.16
+RAND2S="ab/cD3eF/gH4iJ5kL6mN7oP8qR9sT0uV1wX2yZ3aB4cD5eF6gH7iJ8kL9m"   # 随机 base64 含 2 个 /：切换率 0.9
+SHA40="0123456789abcdef0123456789abcdef01234567"
+for mode in rd rdk; do
+  assert_eq "$($mode "$PATH_A")" "$PATH_A" "第 26 条（${mode}）：Java 长路径不是密钥正文（cf29da0 整行掩成 src/****vice：正控）"
+  assert_eq "$($mode "$PATH_B")" "$PATH_B" "第 26 条（${mode}）：packages/… 路径不是密钥正文"
+  assert_eq "$($mode "$RAND2S")" "ab/c****kL9m" "第 26 条（${mode}）：随机 base64（切换率 0.96）仍掩"
+  assert_eq "$($mode "$SHA40")" "$SHA40" "第 26 条（${mode}）：40 位十六进制 SHA 不掩"
+  assert_eq "$($mode "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7")" "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7" "第 26 条改定义（${mode}）：PKCS#8 首行（DER 常量头，切换率 0.33、无 +/=）在块外不算材料——已知代价，它对所有同规格密钥相同"
+  assert_eq "$($mode "AbstractSingletonProxyFactoryBean2Configuration")" "AbstractSingletonProxyFactoryBean2Configuration" "第 26 条改定义（${mode}）：46 位含数字的长类名原样（切换率 0.26；0d9ca83 掩成 Abst****tion：正控）"
+  assert_eq "$($mode "OAuth2AuthorizationServerConfig")" "OAuth2AuthorizationServerConfig" "第 26 条改定义（${mode}）：31 位含数字类名原样（0.27）"
+  assert_eq "$($mode "src/main/java/com/example/v2/service/impl/UserService2Impl")" "src/main/java/com/example/v2/service/impl/UserService2Impl" "第 26 条改定义（${mode}）：含数字的路径原样（0.20）"
+  assert_eq "$($mode "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu")" "MIIB****t8Qu" "第 26 条改定义（${mode}）：PKCS#1 正文行仍掩（切换率 0.59）"
+  assert_eq "$($mode "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCfake02abcdefgh+kl")" "MIIE****h+kl" "第 26 条改定义（${mode}）：含 + 的低切换率行仍掩（标识符与路径永远没有 + / =）"
+  # 第 1 条 + 补：diff / 引用前缀的 68 位正文行在整行规则下掩，前缀留下（cf29da0 只认无前缀行：正控）
+  assert_eq "$($mode "+${PEM_L64}abcd")" "+MIIE****abcd" "第 1 条（${mode}）：+ 前缀的正文行整行掩、前缀留下"
+  assert_eq "$($mode "> ${PEM_L64}abcd")" "> MIIE****abcd" "第 1 条（${mode}）：> 引用前缀的正文行整行掩"
+  assert_eq "$($mode "- ${PEM_L64}abcd")" "- MIIE****abcd" "第 1 条（${mode}）：- 前缀的正文行整行掩"
+  # 第 23 条：pem_inline 尾巴 / 散文里的候选连片也过同一判定——路径不被打碎，密钥碎片照掩
+  assert_eq "$($mode "见 ${PEM_B} 出现在 ${PATH_A}")" "见 ${PEM_B} 出现在 ${PATH_A}" "第 23 条（${mode}）：BEGIN 后同一行的 Java 路径原样（cf29da0 掩成 src/****vice：正控）"
+done
+assert_eq "$(rdk "见 ${PEM_B} Qz8RtW3vK7mN2pL9xJ4hG6fD1sA5bC0e")" "见 ${PEM_B} ****" "第 23 条（保行）：BEGIN 后同一行的密钥碎片仍整段 ****（票 10 的悬挂行形态；只有路径 / 类名被放过）"
+assert_eq "$(rd "见 ${PEM_B} Qz8RtW3vK7mN2pL9xJ4hG6fD1sA5bC0e")" "见 ${PEM_B} ****" "第 23 条（字段级）：同上"
+# 第 1 条补：兜底「下一行像正文」也认带前缀的正文行（BEGIN 悬挂 + `> MIIE…` → 进块）
+assert_eq "$(printf '%s\n' "$PEM_B" "> ${PEM_L64}" | review_redact_secrets --keep-lines | tail -1)" "$PEM_BODY_PH" "第 1 条补：保行模式兜底认 > 前缀的正文行为块内正文"
+# 第 15 条 ①：保行模式块状态最多 128 行——裸 BEGIN 后接 200 行标识符：前 128 行按块内处理、第 129 行起完全不受影响
+{ printf '%s\n' "$PEM_B"; for i in $(seq 1 200); do printf 'disableInheritingDefaultResources%s\n' "$i"; done; printf '%s\n' "$PEM_L64"; } > "$tmp/keep-bound.in"
+review_redact_secrets --keep-lines < "$tmp/keep-bound.in" > "$tmp/keep-bound.out"
+assert_eq "$(wc -l < "$tmp/keep-bound.out" | tr -d ' ')" "202" "第 15 条 ①：保行模式行数不变（不加提示行）"
+assert_eq "$(sed -n '129p' "$tmp/keep-bound.out")" "$PEM_BODY_PH" "第 15 条 ①：块内第 128 行（含数字的 ≥ 20 位标识符行）仍按正文替换——已替换的行不回退"
+assert_eq "$(sed -n '130,201p' "$tmp/keep-bound.out")" "$(sed -n '130,201p' "$tmp/keep-bound.in")" "第 15 条 ①：第 129 行起退出块状态，标识符行原样（cf29da0 全部换成占位：正控）"
+assert_eq "$(sed -n '202p' "$tmp/keep-bound.out")" "MIIE****ijkl" "第 15 条 ①：退出块状态后的 64 位正文行仍被整行规则掩"
+# 第 15 条 ②：块内 ≥ 20 位纯字母标识符行不算正文（无数字）；块内散文里的 Java 路径不被 ≥ 40 位连片规则打碎（③）
+assert_eq "$(printf '%s\n' "$PEM_B" "disableInheritingDefaultResources" | review_redact_secrets --keep-lines | tail -1)" "disableInheritingDefaultResources" "第 15 条 ②：块内无数字的长标识符行原样（cf29da0 换成占位：正控）"
+assert_eq "$(printf '%s\n' "$PEM_B" "见 ${PATH_A}Impl 一行" | review_redact_secrets --keep-lines | tail -1)" "见 ${PATH_A}Impl 一行" "第 15 条 ③：块内散文行里的 Java 长路径原样（连片走块外严格判定）"
+assert_eq "$(printf '%s\n' "$PEM_B" "${PATH_A}Impl" | review_redact_secrets --keep-lines | tail -1)" "$PEM_BODY_PH" "第 26 条改定义：块内独占一行、像 base64 且含数字的串一律算正文（块内不会有路径；第 15 条 128 行上界兜底）"
+assert_eq "$(printf '%s\n' "$PEM_B" "abcdEFGH1234" | review_redact_secrets --keep-lines | tail -1)" "$PEM_BODY_PH" "第 15 条 ②：块内短行数字 + 大小写混合仍算正文（正文尾行形态）"
+assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "6" "第 11 条：加密私钥块 6 行输入 → 6 行输出"
+out=$(printf '%s\n（下面是私钥内容，节选）\nMIIEowIBAAKCAQEAfakekey0123456\n正文片段 %s 出现在 app/key.pem\n\n总体结论：不建议合并。\n' "$PEM_B" "$PEM_L64" | review_redact_secrets --keep-lines)
+assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "6" "第 11 条：未闭合块 6 行输入 → 6 行输出（保行）"
+assert_contains "$out" "（下面是私钥内容，节选）" "第 11 条：起始行后的说明行原位保留"
+assert_not_contains "$out" "MIIEowIBAAKCAQEAfakekey0123456" "第 11 条：说明行之后的整行正文屏蔽"
+assert_contains "$out" "正文片段 MIIE****ijkl 出现在 app/key.pem" "第 11 条：起始行之后的散文继续掩 ≥ 40 位 base64 连片（票 10 语义）"
+assert_contains "$out" "总体结论：不建议合并。" "第 11 条：结论在"
+# ---- 第 12 条：URL 口令含 / 的真实粘贴形态仍掩（48aff39 裸奔：正控）；普通 URL 不掩 ----
+assert_eq "$(rd 'https://ci:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@git.example.com/x.git')" 'https://ci:wJal****EKEY@git.example.com/x.git' "第 12 条仍掩：口令含 / 的 git URL"
+assert_eq "$(rd 'postgres://admin:Ab3/xY9+zQ1/w==@db.example.com/app')" 'postgres://admin:Ab3/****/w==@db.example.com/app' "第 12 条仍掩：口令含 / 与 = 的数据库 URL"
+assert_eq "$(rd 'https://registry.npmjs.org:443/@babel/core')" 'https://registry.npmjs.org:443/@babel/core' "第 12 条不掩：user 段含 . 的是主机名"
+assert_eq "$(rd 'http://localhost:8080/oauth/callback/user@example.com')" 'http://localhost:8080/oauth/callback/user@example.com' "第 12 条不掩：口令段以端口 + 路径开头"
+assert_eq "$(rd 'https://proxy.golang.org:443/github.com/foo/bar/@v/list')" 'https://proxy.golang.org:443/github.com/foo/bar/@v/list' "第 12 条不掩：Go proxy URL"
+# ---- 第 13 条：降级渲染器的掩码失败 fail-closed（48aff39：awk 失败 → rc 0、正文空、无日志：正控）----
+printf 'P0 x %s\n' "$SEC_GHP" > "$tmp/deg-fail.raw.md"
+rc=$( ( awk() { return 1; }; review_render_degraded --text "$tmp/deg-fail.raw.md" --sha 90fcb05 --src f --dst m --ts t --diff-note n --reason r > "$tmp/deg-fail.md" 2>"$tmp/deg-fail.err"; echo $? ) )
+assert_eq "$rc" "2" "第 13 条：降级原文掩码失败 → rc 2"
+assert_eq "$(wc -c < "$tmp/deg-fail.md" | tr -d ' ')" "0" "第 13 条：失败时一个字节都不输出（不是半截评论）"
+assert_contains "$(cat "$tmp/deg-fail.err")" "review_render_degraded: 掩码失败" "第 13 条：stderr 点明原因（_review_redact_to 以调用方名开头，16-fix4 第 4 条）"
+# ---- 第 3 条：哨兵形状只在一处定义——改常量后倒出 / 掩码 / 切回仍一致 ----
+with_secrets fixtures/contract/full.json | _review_normalize > "$tmp/sent-a.json"; cp "$tmp/sent-a.json" "$tmp/sent-b.json"
+review_redact_json "$tmp/sent-a.json"
+( REVIEW_FIELD_SENTINEL_FMT='@@F[%s](%s)@@'; review_redact_json "$tmp/sent-b.json" )
+assert_same_file "$tmp/sent-a.json" "$tmp/sent-b.json" "第 3 条：改了 REVIEW_FIELD_SENTINEL_FMT（含正则元字符）后 review_redact_json 输出逐字节相同"
+assert_eq "$(_review_field_sentinel abc 7)" "<<<KIRO_FIELD:abc:7>>>" "第 3 条：哨兵由常量渲染"
+assert_eq "$(printf '%s\n' '<<<KIRO_FIELD:abc:12>>>' | grep -cE "^$(_review_field_sentinel_re abc)\$")" "1" "第 3 条：派生正则匹配任意序号"
+# 第 4 条：空字段 / 多行 body / 整字段被 PEM 删掉三种输入
+jq -n --arg b "$PEM_B" --arg e "$PEM_E" --arg l "$PEM_L64" '{contract:"codeup-reviewer/1", summary:"", verdict:"MERGE", verdict_reason:"l1\nl2", findings:[{severity:"P0",title:"t",body:"b1\n\nb3",fix:($b+"\n"+$l+"\n"+$e),file:"src/app.py",line_start:1}]}' \
+  | _review_normalize > "$tmp/rj3.json"; review_redact_json "$tmp/rj3.json"
+assert_eq "$(jq -c '[.summary, .verdict_reason, .findings[0].body, .findings[0].fix]' "$tmp/rj3.json")" "[\"\",\"l1\\nl2\",\"b1\\n\\nb3\",\"${PEM_PLACEHOLDER}\\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）\"]" "第 4 条：空字段、多行字段、整块被删的字段都按位回填"
+# ---- 第 6 / 7 条：上限在清洗之后按字节施加；被丢弃的问题不计入 truncated_fields ----
+filler=$(python3 -c 'print("<!--"*10000, end="")')   # 40000 字节，清洗后 70000 字节
+jq -n --arg c "$filler" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1},{severity:"P9",title:$c,body:$c,fix:$c,file:"x",line_start:1}]}' \
+  | review_validate > "$tmp/cap2.json"
+assert_eq "$(jq -r '.findings[0].body | utf8bytelength <= 32768' "$tmp/cap2.json")" "true" "第 7 条：body 的上限量的是清洗后的字节（48aff39 先截再洗 → 57 KB：正控）"
+assert_eq "$(jq -r '.findings[0].title | utf8bytelength <= 2048' "$tmp/cap2.json")" "true" "第 7 条：title 同理"
+assert_eq "$(jq -r '.findings[0].fix | utf8bytelength <= 16384' "$tmp/cap2.json")" "true" "第 7 条：fix 同理"
+assert_eq "$(jq -r '.truncated_fields, .dropped_findings' "$tmp/cap2.json" | tr '\n' ' ')" "3 1 " "第 6 条：被丢弃的问题（severity P9）不计入 truncated_fields，只数保留问题的三个字段"
+assert_eq "$(jq -r '.findings[0].body | .[-5:]' "$tmp/cap2.json")" "（已截断）" "第 7 条：截断标注仍在"
+# 第 6 条 / 16-fix4 第 37 条：上限常量只在 REVIEW_CAP_* 一处——覆盖式证明（改常量后 review_validate 的截断跟着变；读常量再比自己的字面量是同义反复）
+body5k=$(python3 -c 'print("b"*5000, end="")')
+assert_eq "$( ( REVIEW_CAP_BODY=100; jq -n --arg b "$body5k" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:$b,fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -r '[(.findings[0].body | utf8bytelength <= 100), .truncated_fields] | @csv' ) )" "true,1" \
+  "第 37 条：REVIEW_CAP_BODY=100 覆盖后 5000 字节 body 截到 ≤ 100 且计 1（常量确实经 --argjson 生效；写死 32768 的变异会让它失败）"
+assert_eq "$(jq -n --arg b "$body5k" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:$b,fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -r '[(.findings[0].body | utf8bytelength), .truncated_fields] | @csv')" "5000,0" \
+  "第 37 条对照：默认上限下 5000 字节 body 原样"
+# 16-fix4 第 12b / 19 条：最终结果是「清洗过的文本 + 截断标记 ≤ 上限」（不再是 ≤ 上限 + 15），最后一步一定是清洗
+assert_eq "$(jq -r '[.summary, .findings[0].title, .findings[0].body, .findings[0].fix] | map(utf8bytelength) | [.[0] == 1, (.[1] | . <= 2048 and . > 2000), (.[2] | . <= 32768 and . > 32700), (.[3] | . <= 16384 and . > 16300)] | all' "$tmp/cap2.json")" "true" \
+  "第 12b 条：三个超限字段清洗后连截断标记一起 ≤ 上限、且贴着上限（不是砍到 1/4 的兜底路径；summary 未超限原样）"
+assert_eq "$(jq -r '.findings[0].fix | test("<!--") | not' "$tmp/cap2.json")" "true" "第 19 条：截断之后仍是清洗过的文本（没有半个未转义的 <!--）"
+assert_eq "$(jq -r '.findings[0].fix | .[-5:]' "$tmp/cap2.json")" "（已截断）" "第 19 条：截断标记在清洗之外追加、已计入预算"
+# 第 12a 条：归一化先按 2 × 上限的码点预切（掩码成本绑定到上限）；id / category 切 REVIEW_CAP_ID 码点（不渲染、不计 truncated_fields）
+big=$(python3 -c 'print("é"*70000, end="")')   # 70000 码点 = 140000 字节
+jq -n --arg c "$big" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:$c,fix:"f",id:$c,category:$c,file:"src/app.py",line_start:1}]}' \
+  | _review_normalize > "$tmp/pre.json"
+assert_eq "$(jq -r '[.summary, .findings[0].body, .findings[0].id, .findings[0].category] | map(length) | @csv' "$tmp/pre.json")" "16384,65536,256,256" \
+  "第 12a 条：summary 切 2×8192 码点、body 切 2×32768 码点、id / category 切 256 码点"
+assert_eq "$(jq -n --arg c "$big" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:"b",fix:"f",id:$c,file:"src/app.py",line_start:1}]}' | review_validate | jq -r '[(.summary|utf8bytelength <= 8192), (.findings[0].id|length), .truncated_fields] | @csv')" "true,256,1" \
+  "第 12a 条：预切不影响最终字节上限（summary 8192 内）；id 只预切、不计入 truncated_fields"
+assert_eq "$(jq -n --arg v "$(python3 -c 'print("MERGE"*1000)')" '{contract:"codeup-reviewer/1", summary:"s", verdict:$v, verdict_reason:"r", findings:[]}' | review_validate | jq -r '.verdict | length')" "256" "第 12a 条补：verdict 也切 256 码点（cf29da0 5000 位原样进 ## 结论：正控）"
+assert_eq "$(jq -r '[.findings[] | has("_tc")] | any' "$tmp/cap2.json")" "false" "第 12b 条补：truncated_fields 的统计不再往 finding 上挂中间字段"
+# 第 19 条补 ①：围栏长度上限 8——40 000 个反引号的字段不再「开 40 000 + 补 40 000」（cf29da0：title 4112 / body 65552 / fix 32784：正控）
+bt=$(python3 -c 'print("`"*40000, end="")')
+jq -n --arg c "$bt" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1}]}' \
+  | review_validate > "$tmp/bt.json"
+assert_eq "$(jq -r '[(.findings[0].title|utf8bytelength <= 2048), (.findings[0].body|utf8bytelength <= 32768), (.findings[0].fix|utf8bytelength <= 16384), .truncated_fields] | @csv' "$tmp/bt.json")" "true,true,true,3" \
+  "第 19 条补 ①：40 000 反引号的三个字段都落在上限内"
+assert_eq "$(printf '%s\n' '````````' '<b>x</b>' '````````' | review_sanitize_md | sed -n 2p)" "<b>x</b>" "第 19 条补 ①：8 个反引号仍是围栏（围栏内不转义）"
+assert_eq "$(printf '%s\n' '`````````' '<b>x</b>' | review_sanitize_md | tr '\n' '|')" '\`````````|&lt;b>x&lt;/b>|' "第 19 条补 ①：9 个反引号不开围栏，首字符转义、其后照常转义（cf29da0 当围栏放行 <b>：正控）"
+# 第 19 条补 ②：切点落在 boldsafe 的 \* 转义对中间时，标记前不能剩一个孤立反斜杠（4e542ca 上 pad 1023 复现 `…\*\（已截断）`）
+for pad in 1021 1022 1023 1024 1025; do
+  t=$(python3 -c "import sys; print('a'*int(sys.argv[1]) + '*'*3000, end='')" "$pad")
+  assert_eq "$(jq -n --arg t "$t" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$t,body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -r '.findings[0].title | (capture("(?<bs>\\\\*)（已截断）$").bs | length) % 2')" "0" \
+    "第 19 条补 ②：pad ${pad} 的 title 截断标记前反斜杠成对（无孤立反斜杠）"
+done
+# 第 41 条：单行槽位里的 ``` 不能把汇总打进代码块——verdict / title 各放一个未闭合围栏串
+jq --arg v '``` MERGE' --arg t '```oops' '.verdict = $v | .findings[0].title = $t' fixtures/contract/full.json | review_validate > "$tmp/fence-inline.json"
+assert_eq "$(jq -r '.verdict' "$tmp/fence-inline.json")" '\``` MERGE' "第 41 条：verdict 里的围栏串首字符转义、仍是单行"
+assert_eq "$(jq -r '.findings[0].title' "$tmp/fence-inline.json")" '\```oops' "第 41 条：title 里的围栏串首字符转义、仍是单行"
+review_render_summary --json "$tmp/fence-inline.json" --sha 90fcb05 --src f --dst main --ts t --diff-note n > "$tmp/fence-inline.md"
+review_validate < fixtures/contract/full.json > "$tmp/fence-plain.json"
+review_render_summary --json "$tmp/fence-plain.json" --sha 90fcb05 --src f --dst main --ts t --diff-note n > "$tmp/fence-plain.md"
+assert_eq "$(( $(grep -c '^```' "$tmp/fence-inline.md" || true) % 2 ))" "0" "第 41 条：汇总全文列 0 的围栏成对"
+assert_eq "$(wc -l < "$tmp/fence-inline.md" | tr -d ' ')" "$(wc -l < "$tmp/fence-plain.md" | tr -d ' ')" "第 41 条：行数与正常渲染一致（c01b226 多出两行闭合围栏：正控）"
+assert_eq "$(jq --arg v '~~~ MERGE' '.verdict = $v' fixtures/contract/full.json | review_validate | jq -r '.verdict')" '\~~~ MERGE' "第 41 条：~~~ 围栏串同样转义"
+assert_eq "$(jq --arg i 'F```1' --arg c 'sec```' '.findings[0].id = $i | .findings[0].category = $c' fixtures/contract/full.json | review_validate | jq -r '.findings[0].id + " " + .findings[0].category')" 'F\```1 sec\```' "第 41 条：id / category 走同一份单行清洗"
+# 第 40 条：阶段盖章——「归一化 → 掩码 → 清洗 → 上限」不能只靠 review_validate 里的调用顺序成立
+review_validate < fixtures/contract/full.json > "$tmp/stamp.json"
+assert_eq "$(jq -r '.finalized' "$tmp/stamp.json")" "true" "第 40 条：review_validate 的输出盖 finalized: true"
+cp "$tmp/stamp.json" "$tmp/stamp2.json"; rc=0; review_redact_json "$tmp/stamp2.json" 2> "$tmp/stamp.err" || rc=$?
+assert_rc "$rc" 2 "第 40 条：对 validated.json 再跑 review_redact_json → rc 2（4e542ca 会照掩、清洗后再掩的 P1 原地复发：正控）"
+assert_contains "$(cat "$tmp/stamp.err")" "已清洗定稿的契约不能再掩码" "第 40 条：固定文案"
+assert_same_file "$tmp/stamp2.json" "$tmp/stamp.json" "第 40 条：拒绝时文件不动"
+rc=0; review_finalize_json "$tmp/stamp2.json" 2> "$tmp/stamp.err" || rc=$?
+assert_rc "$rc" 2 "第 40 条：再定稿 → rc 2（不幂等：再跑会再截一次、再加一个「（已截断）」）"
+assert_contains "$(cat "$tmp/stamp.err")" "已清洗定稿的契约不能再定稿" "第 40 条：固定文案"
+_review_normalize < fixtures/contract/full.json > "$tmp/stamp.norm.json"
+rc=0; review_render_summary --json "$tmp/stamp.norm.json" --sha 90fcb05 --src f --dst main --ts t --diff-note n > /dev/null 2> "$tmp/stamp.err" || rc=$?
+assert_rc "$rc" 2 "第 40 条：渲染器拒绝归一化的中间产物（没盖章）"
+assert_contains "$(cat "$tmp/stamp.err")" "finalized 盖章" "第 40 条：渲染器点明缺盖章"
+rc=0; review_plan_inline --json "$tmp/stamp.norm.json" --changed-lines "$CL" > /dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "第 40 条：规划器拒绝没盖章的输入"
+review_plan_inline --json "$tmp/stamp.json" --changed-lines "$CL" > "$tmp/stamp.plan.json"
+assert_eq "$(jq -c '[.finalized, ([.inline[].finalized] | all)]' "$tmp/stamp.plan.json")" "[true,true]" "第 40 条：计划顶层与每条行内条目都带盖章"
+jq -c '.inline[0] | del(.finalized)' "$tmp/stamp.plan.json" > "$tmp/stamp.item.json"
+rc=0; review_render_inline_body "$tmp/stamp.item.json" 90fcb05 "$fpR" > /dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "第 40 条：行内正文渲染器拒绝没盖章的条目"
+assert_eq "$(review_fingerprint src/app.py 30 t)" "$(review_fingerprint src/app.py 30 t)" "第 40 条：指纹只取 file + line + title，盖章字段不参与"
+# 第 38 条：因正文超过评论上限而没发出的行内条目，折叠区只渲染标题 + 一句说明（不搬 40 KB 正文进汇总）
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["findings"][0]["body"]="B"*40000; c["findings"][0]["fix"]="F"*40000; json.dump(c,open(sys.argv[2],"w"),ensure_ascii=False)' fixtures/contract/inline.json "$tmp/over38.json"
+review_validate < "$tmp/over38.json" > "$tmp/over38.v.json"
+review_plan_inline --json "$tmp/over38.v.json" --changed-lines "$CL" > "$tmp/over38.plan.json"
+jq -c '[.inline[] | {idx, outcome: "created"}] | .[0] += {outcome: "failed", reason: "oversize", bytes: 32900, limit: 20000}' "$tmp/over38.plan.json" > "$tmp/over38.oc.json"
+review_plan_apply_outcomes "$tmp/over38.plan.json" "$tmp/over38.oc.json" > "$tmp/over38.final.json"
+assert_eq "$(jq -c '[(.folded.failed | length), .folded.failed[0].fail_reason, .folded.failed[0].fail_bytes, .folded.failed[0].fail_limit]' "$tmp/over38.final.json")" '[1,"oversize",32900,20000]' "第 38 条：apply_outcomes 把 reason / bytes / limit 挂到 failed 条目上"
+assert_eq "$(jq -c '[.inline[] | has("fail_reason")] | any' "$tmp/over38.final.json")" "false" "第 38 条：发出去的条目不带失败字段"
+review_render_summary --json "$tmp/over38.final.json" --inline-comment 1 --sha 90fcb05 --src f --dst main --ts t --diff-note n > "$tmp/over38.md"
+assert_contains "$(cat "$tmp/over38.md")" "正文 32900 字节超过评论上限 MAX_COMMENT_BYTES=20000，未在评论中展示。" "第 38 条：折叠区那一条只有标题 + 说明句"
+assert_not_contains "$(cat "$tmp/over38.md")" "$(python3 -c 'print("B"*200, end="")')" "第 38 条：40 KB 正文没有进汇总（4e542ca 全文搬进折叠区：正控）"
+assert_eq "$([[ $(wc -c < "$tmp/over38.md") -lt 20000 ]] && echo ok)" "ok" "第 38 条：汇总总字节 < 20000（不会再触发截断）"
+jq -c '[.inline[] | {idx, outcome: "created"}] | .[0] += {outcome: "failed"}' "$tmp/over38.plan.json" > "$tmp/over38.oc2.json"
+review_plan_apply_outcomes "$tmp/over38.plan.json" "$tmp/over38.oc2.json" > "$tmp/over38b.final.json"
+review_render_summary --json "$tmp/over38b.final.json" --inline-comment 1 --sha 90fcb05 --src f --dst main --ts t --diff-note n > "$tmp/over38b.md"
+assert_contains "$(cat "$tmp/over38b.md")" "$(python3 -c 'print("B"*200, end="")')" "第 38 条对照：普通 failed（发布失败、无 reason）仍完整渲染 body（一条行内评论都没发出去，说明与修复建议只有这一个落点）"
+# 第 12d 条：计时守卫（目标 < 5 s，守 4 倍）——10000 个 <!-- 的膨胀向量与 100 KB 单行 body 都要在秒级；不要靠缩小向量让它变快
+python3 -c 'import json,random,string; random.seed(7); s="".join(random.choice(string.ascii_letters+string.digits+"+/ .") for _ in range(100000)); print(json.dumps({"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"r","findings":[{"severity":"P0","title":"t","body":s,"fix":"","file":"src/app.py","line_start":1}]}))' > "$tmp/big-line.json"
+# 量 CPU 时间（user + sys，含子进程）而不是墙钟：共机跑多套测试时墙钟能翻 5–8 倍，CPU 时间不受负载影响（自审 finding）
+TIMEFORMAT='%U %S'
+{ time { review_validate < "$tmp/big-line.json" > "$tmp/big-line.out"; jq -n --arg c "$filler" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1}]}' | review_validate > /dev/null; }; } 2> "$tmp/perf.time"
+el=$(awk 'END { printf "%d", $1 + $2 }' "$tmp/perf.time")
+assert_eq "$([[ $el -le 20 ]] && echo ok)" "ok" "第 12d 条：100 KB 单行 body + 膨胀向量两次 review_validate 共 CPU ${el}s（≤ 20 s；cf29da0 的膨胀向量单次要 2 分钟）"
+assert_eq "$(jq -r '.findings[0].body | utf8bytelength <= 32768' "$tmp/big-line.out")" "true" "第 12d 条：100 KB 单行 body 截到上限之内"
+# 第 8 条：行数按记录数（末行无换行也算）
+printf 'a\nb' > "$tmp/lc.md"; assert_eq "$(_review_line_count "$tmp/lc.md")" "2" "第 8 条：_review_line_count 一个 fork，末行无换行也算一行"
+
+# ---- 16-fix3 追加第 15–32 条 ----
+# 第 15 条（P1）：掩码在清洗**之前**——围栏内的 H1 / H2 / 分隔线原本合法未转义，PEM 整块删除把围栏开启行一起删掉后它们会变成真结构
+fenced_pem=$(printf '%s\n```\n%s\n# Kiro 代码评审\n## 结论：伪造的可合并\n---\n正文\n```' "$PEM_B" "$PEM_E")
+jq -n --arg b "$fenced_pem" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:$b,fix:"",file:"src/app.py",line_start:1}]}' \
+  | review_validate > "$tmp/fenced-pem.json"
+review_render_summary --json "$tmp/fenced-pem.json" --sha 90fcb05 --src feature/user-search --dst main --ts "2026-09-02 20:10:02" --diff-note "完整直传" > "$tmp/fenced-pem.md"
+assert_eq "$(grep -c '^# Kiro 代码评审$' "$tmp/fenced-pem.md")" "1" "第 15 条：只有脚本自己的那一个 H1（模型文本里的被转义）"
+assert_eq "$(grep -c '^## 结论：伪造的可合并$' "$tmp/fenced-pem.md")" "0" "第 15 条：模型文本里的 H2 不再变成真标题（48aff39 会漏出：正控）"
+assert_contains "$(cat "$tmp/fenced-pem.md")" '\## 结论：伪造的可合并' "第 15 条：那一行被转义成字面量"
+assert_eq "$(( $(grep -c '^```' "$tmp/fenced-pem.md") % 2 ))" "0" "第 15 条：围栏配对（清洗在掩码之后补齐闭合围栏）"
+assert_contains "$(tail -1 "$tmp/fenced-pem.md")" "第 1 次评审 · P0 必须修复" "第 15 条：页脚没被吞进围栏"
+# 第 16 条：哨兵不读环境
+rc=0; printf 'x\n' | review_redact_secrets --sentinel 2>/dev/null >/dev/null || rc=$?
+assert_rc "$rc" 2 "第 16 条：--sentinel 缺取值 → rc 2（不能静默当空、更不能在参数循环里打转）"
+assert_eq "$(rd 'x')" "x" "第 16 条：不带 --sentinel 正常工作"
+# 第 17 条：跨字段 straddle——BEGIN 在 body0 末、正文 + END 在 body1 → 正文行按整行规则掩码，END 行原样
+jq -n --arg b "$PEM_B" --arg e "$PEM_E" --arg l "$PEM_L64" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:("x\n"+$b),fix:"",file:"src/app.py",line_start:1},{severity:"P1",title:"t2",body:($l+"\n"+$e),fix:"",file:"src/app.py",line_start:2}]}' \
+  | review_validate > "$tmp/straddle.json"
+assert_eq "$(jq -r '.findings[1].body' "$tmp/straddle.json")" "$(printf 'MIIE****ijkl\n%s' "$PEM_E")" "第 17 条：下一个字段里的密钥正文行被整行规则掩掉、END 行原样（48aff39 裸奔：正控）"
+assert_eq "$(jq -r '.findings[0].body' "$tmp/straddle.json")" "$(printf 'x\n%s\n> ⚠️ 上面的 PEM 块没有配对的 END 行（评审员只引用了起始行，或原文被截断）；其后没有其他内容。' "$PEM_PLACEHOLDER")" "第 17 条：上一个字段末的 BEGIN 按未闭合处理（占位 + 提示）"
+assert_eq "$(rd 'src/main/java/com/example/service/impl/UserService')" 'src/main/java/com/example/service/impl/UserService' "第 17 条不掩：无数字的长路径不算整行密钥正文"
+assert_eq "$(rd '0123456789abcdef0123456789abcdef01234567')" '0123456789abcdef0123456789abcdef01234567' "第 17 条不掩：40 位纯十六进制（提交 SHA）"
+assert_eq "$(rd "$PEM_L64")" "MIIE****ijkl" "第 17 条仍掩：≥ 40 位、含数字与大小写的整行 base64 在任何字段 / 模式都掩"
+# 第 19 条：单行槽位走保行模式——title 是 BEGIN 标记时仍是单行
+jq -n --arg b "$PEM_B" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$b,body:"b",fix:"",file:"src/app.py",line_start:1}]}' \
+  | review_validate > "$tmp/title-pem.json"
+assert_eq "$(jq -r '.findings[0].title | test("\n")' "$tmp/title-pem.json")" "false" "第 19 条：title 为 BEGIN 标记时仍是单行（不变成占位 + 提示两行；48aff39 两行：正控）"
+render_inline_body_title=$(jq -c '.findings[0] + {file:"src/app.py", line_start:30, line_end:31, finalized:true}' "$tmp/title-pem.json" > "$tmp/title-pem-item.json"; review_render_inline_body "$tmp/title-pem-item.json" 90fcb05 "$fpR" | head -2)
+assert_eq "$(printf '%s\n' "$render_inline_body_title" | sed -n 2p)" "<!-- kiro-inline:${fpR} L30-31 sev=P0 -->" "第 19 条：行内首行之后紧跟标记行（首行没有断成两行）"
+# 第 20 条：降级原文 / stderr 进 awk 前剔 NUL
+assert_eq "$(python3 -c "import sys; sys.stdout.buffer.write(b'line one \x00 ${SEC_AKIA} tail\n')" | review_clean_text | review_redact_secrets --keep-lines)" "line one  ${SEC_AKIA_MASKED} tail" "第 20 条：NUL 先剔除，其后的密钥不再被 awk 截断吞掉（48aff39：24 字节静默消失）"
+assert_eq "$(printf '\033[38;5;141mReading\033[0m 报告正文\n' | review_clean_text)" "Reading 报告正文" "第 20 条：ANSI 剥离仍先于控制字符剔除（ESC 本身在剔除范围里）"
+# 第 22 条：问题条数上限
+assert_eq "$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[range(201) | {severity:"P2",title:"t",body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -c '[(.findings|length), .dropped_findings, .overflow_findings]')" "[200,0,1]" "第 22 条 / 16-fix4 第 28 条：201 条问题只保留 200 条，多出的计入 overflow_findings、不算不合契约"
+assert_eq "$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[range(250) | {severity:"P2",title:"t",body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -c '[(.findings|length), .dropped_findings, .overflow_findings]')" "[200,0,50]" "第 28 条：250 条合法问题 → kept 200 / dropped 0 / overflow 50（cf29da0 记成 dropped 50：正控）"
+jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:([range(205) | {severity:"P2",title:"t",body:"b",fix:"",file:"src/app.py",line_start:1}] + [{severity:"P9",title:"x",body:"y"}])}' \
+  | review_validate > "$tmp/overflow.json"
+assert_eq "$(jq -c '[(.findings|length), .dropped_findings, .overflow_findings]' "$tmp/overflow.json")" "[200,0,6]" "第 28 条：上限之外的不合契约条目算 overflow（没进校验）"
+assert_contains "$(review_render_summary --json "$tmp/overflow.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n)" "（另有 6 条超出展示上限）" "第 28 条：汇总统计行单独一段说明超出展示上限"
+assert_not_contains "$(review_render_summary --json "$tmp/overflow.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n)" "不合契约已丢弃" "第 28 条：超上限不再冒充「不合契约」"
+# 第 27 条：file 里的控制字符——先在只 trim 的值上查禁用字符，再剔控制字符；命中 → null + delocated 计数
+assert_eq "$(jq -n --arg f "$(printf 'src/\001app.py')" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P2",title:"t",body:"b",file:$f,line_start:1}]}' | review_validate | jq -c '[.findings[0].file, .delocated_findings]')" "[null,1]" \
+  "第 27 条：src/<U+0001>app.py 按不可定位处理并计数（cf29da0 先剔控制字符 → 合法路径、不计数：正控）"
+# 第 2 条：控制字符集只此一份——两份渲染与三个消费者一致
+assert_eq "$REVIEW_CTRL_TR_SET" '\000-\010\013-\014\016-\037' "第 2 条：tr 字符集由 _REVIEW_CTRL_RANGES 渲染"
+assert_eq "$REVIEW_CTRL_JQ_RE" '[\u0000-\u0008\u000b-\u000c\u000e-\u001f]' "第 2 条：jq 正则由同一份区间渲染"
+assert_eq "$(printf 'a\001b\013c\td\n' | review_clean_text | od -An -c | tr -s ' ' | sed 's/ *$//')" " a b c \t d \n" "第 2 条：review_clean_text 剔 \001 / \013、留制表"
+assert_eq "$(printf '{"contract":"codeup-reviewer/1","summary":"a\\u0001b\\u000bc\\td","verdict":"MERGE","verdict_reason":"r","findings":[]}' | review_validate | jq -r '.summary | @json')" '"abc\td"' "第 2 条：归一化的 dectl 与清洗用同一份 jq def"
+# 第 8 条补：库里任何 awk -v name="…" 的取值都不得来自环境变量（对所有名字一次性成立，而不是只防 REVIEW_REDACT_SENTINEL_RE 一个）
+assert_eq "$(grep -cE -- '-v [a-z_]+="\$\{?[A-Z_]' "$ROOT/scripts/lib/review-render.sh" || true)" "0" "第 8 条补（静态）：review-render.sh 里没有从大写环境变量取值的 awk -v"
+# 第 3 / 4 条：两个共用小函数的失败语义——jq 失败 / 掩码程序失败时目标文件一个字节不动、临时文件不残留
+printf '{"a":1}\n' > "$tmp/jqi.json"; cp "$tmp/jqi.json" "$tmp/jqi.orig"
+rc=0; _review_jq_inplace "$tmp/jqi.json" who 步骤 -c '.a |= error("boom")' 2> "$tmp/jqi.err" || rc=$?
+assert_rc "$rc" 1 "第 3 条：_review_jq_inplace 在 jq 失败时 rc 1"
+assert_same_file "$tmp/jqi.json" "$tmp/jqi.orig" "第 3 条：jq 失败时原文件不动"
+assert_contains "$(cat "$tmp/jqi.err")" "who: 步骤失败" "第 3 条：报错以调用方名 + 步骤名开头"
+assert_eq "$(ls "$tmp"/jqi.json.jq.* 2>/dev/null | wc -l | tr -d ' ')" "0" "第 3 条：失败时不残留临时文件"
+_review_jq_inplace "$tmp/jqi.json" who 步骤 -c '.a = 2'; assert_eq "$(cat "$tmp/jqi.json")" '{"a":2}' "第 3 条：成功时就地改写"
+printf 'x %s\n' "$SEC_AKIA" > "$tmp/rt.in"
+rc=0; ( awk() { return 1; }; _review_redact_to "$tmp/rt.in" "$tmp/rt.out" who "：ctx" --keep-lines 2> "$tmp/rt.err" ) || rc=$?
+assert_rc "$rc" 1 "第 4 条：_review_redact_to 在掩码程序失败时 rc 1"
+assert_eq "$([[ -e "$tmp/rt.out" ]] && echo left || echo gone)" "gone" "第 4 条：失败时删掉输出文件"
+assert_contains "$(cat "$tmp/rt.err")" "who: 掩码失败（awk 退出非零或无输出）：ctx" "第 4 条：报错以调用方名开头、带调用方给的尾巴"
+_review_redact_to "$tmp/rt.in" "$tmp/rt.out" who "" --keep-lines; assert_eq "$(cat "$tmp/rt.out")" "x ${SEC_AKIA_MASKED}" "第 4 条：成功时输出掩码结果"
+# 第 16 / 17 条：标记正则是加载期常量；两份文件的行数一次 awk 算完
+assert_eq "$REVIEW_MARKER_LINE_RE_ALL" "$(_review_marker_line_re)" "第 16 条：_review_marker_line_re 只是常量的取值口"
+printf 'a\nb\nc' > "$tmp/lc3.md"; assert_eq "$(_review_line_counts "$tmp/lc.md" "$tmp/lc3.md")" "2 3" "第 17 条：_review_line_counts 一次给出两份文件的记录数（末行无换行也算）"
+: > "$tmp/lc0.md"; assert_eq "$(_review_line_counts "$tmp/lc0.md" "$tmp/lc3.md")" "0 3" "第 17 条：第一份为空时不会把第二份的记录算给它（自审 finding）"
+assert_eq "$(_review_line_counts "$tmp/lc3.md" "$tmp/lc0.md")" "3 0" "第 17 条：第二份为空"
+# 第 29 条：截断的替换文件建在目标同目录、不残留
+cp "$GOLDEN/summary-full.md" "$tmp/tr29.md"; rc=0; review_truncate_comment "$tmp/tr29.md" 1200 || rc=$?
+assert_rc "$rc" 0 "第 29 条：1980 字节的 golden 截到 1200 成功（标记仍在）"
+assert_eq "$(ls "$tmp"/tr29.md.trunc.* 2>/dev/null | wc -l | tr -d ' ')" "0" "第 29 条：截断成功后目标同目录不残留 .trunc 临时文件"
+assert_contains "$(tail -1 "$tmp/tr29.md")" "报告超长已截断" "第 29 条：截断结果已就地写回"
+# 第 23 条：同一行两把钥匙
+assert_eq "$(printf 'A="%s\\n%s\\n%s" B="%s\\n%s\\n%s"\n' "$PEM_B" "$PEM_L64" "$PEM_E" "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)" "A=\"${PEM_PLACEHOLDER}\" B=\"${PEM_PLACEHOLDER}\"" "第 23 条：同一行两把钥匙 → 两个占位（48aff39 第二把裸奔：正控）"
+# 第 24 条：闭合块不再无声
+out=$(printf '这个文件贴了私钥：\n%s\n（内容已省略）\n%s\n%s\n影响：必须轮换\n' "$PEM_B" "$PEM_L64" "$PEM_E" | review_redact_secrets)
+assert_contains "$out" "> ⚠️ （其间 2 行已随密钥块一并屏蔽）" "第 24 条：丢弃闭合块时给出「其间 N 行已屏蔽」的提示（48aff39 无声：正控）"
+assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "4" "第 24 条：说明行 / 占位 / 提示 / 影响行"
+# 第 26 条：守卫独立返回码（4 写回失败、5 守卫命令失败）
+printf 'a\n' > "$tmp/rc26.md"
+rc=$( ( mv() { return 1; }; review_redact_file "$tmp/rc26.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "4" "第 26 条：写回（mv）失败 → rc 4"
+rc=$( ( grep() { return 2; }; review_redact_file "$tmp/rc26.md" 2>/dev/null; echo $? ) )
+assert_eq "$rc" "5" "第 26 条：守卫的 grep 本身失败 → rc 5（不是零匹配放行）"
+rc=0; review_truncate_comment "$tmp/rc26.md" 100 || rc=$?
+assert_rc "$rc" 1 "第 26 条：truncate 未超限仍是 rc 1（与替换助手的返回码不撞车）"
+# 第 31 条：id / category 也在字段级掩码清单里
+jq -n --arg a "$SEC_AKIA" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{id:$a,category:$a,severity:"P0",title:"t",body:"b",fix:"",file:"src/app.py",line_start:1}]}' \
+  | review_validate > "$tmp/idcat.json"
+assert_eq "$(jq -c '[.findings[0].id, .findings[0].category]' "$tmp/idcat.json")" "[\"${SEC_AKIA_MASKED}\",\"${SEC_AKIA_MASKED}\"]" "第 31 条：id 与 category 也过字段级掩码"
 
 if [[ "$GOLDEN_DIRTY" == "1" ]]; then
   echo "GOLDEN_UPDATE=1：golden 文件已重写，本次运行不构成通过。请人工读 git diff 确认渲染正确，再不带该变量重跑。" >&2

@@ -56,7 +56,29 @@ REVIEW_REPO_DIR="${REVIEW_REPO_DIR:-$PWD}"
 KIRO_ENGINE=v2
 
 log() { echo "[kiro-review] $*" >&2; }
+# 流水线日志也是评论出口（I3）：失败原因 / 降级原因里**不受信**的那一部分（事件流的 runFinished.status、jq 报错回显、去重日志里的
+# 文件名）打日志前先过脚本侧掩码（--keep-lines：文本级、保行）。脚本自己的固定文案与不受信取值分成两个参数传进来（16-fix4 第 6 条），
+# 掩码程序不可用时只丢不受信部分、固定文案照打——不再用「有没有 ≥ 12 位连片」去猜哪些文案能打（那会把 INLINE_COMMENT / KIRO_TIMEOUT /
+# --output-format 这类最需要运维看到的配置错误整段吞掉，也会放过短口令）。用法：_untrusted_for_log <不受信取值> → stdout（不带结尾换行）
+_untrusted_for_log() {
+  local s="${1-}" out
+  [[ -n "$s" ]] || return 0
+  if out=$(printf '%s\n' "$s" | review_redact_secrets --keep-lines 2>/dev/null) && [[ -n "$out" ]]; then printf '%s' "$out"; return 0; fi
+  printf '%s' "〈不受信取值已省略〉"   # 中性占位（第 6 条修订）：不写「失败原因」一类字样，日志读者按上下文理解
+}
 die() { log "错误：$*"; exit 1; }
+# 校验日志（review_validate 的 stderr）→ 可打日志的一行：库函数前缀的行原样（用「；」连接），其余行只报条数（第 13 条）
+_validate_err_lib_lines() {
+  local f="${1-}" lib="" n_other=0 line
+  [[ -r "$f" ]] || { printf '%s' "（校验日志不可读）"; return 0; }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # 前缀清单就是库里 echo "<name>: …" 实际用到的四个名字（_review_normalize 以 review_validate 报错，_review_jq_inplace / _review_redact_to 用调用方的名字）
+    if [[ "$line" =~ ^(review_validate|review_redact_json|review_finalize_json|review_redact_secrets):\  ]]; then
+      lib="${lib:+${lib}；}${line}"
+    elif [[ -n "$line" ]]; then n_other=$((n_other + 1)); fi
+  done < "$f"
+  printf '%s%s' "${lib:-（校验日志里没有库函数的说明行）}" "$([[ "$n_other" -gt 0 ]] && printf '；另有 %s 行 jq 诊断已省略（可能回显模型取值）' "$n_other")"
+}
 
 # 定位到 MR 后的失败：best-effort 回写"评审未完成"评论再退出
 MR_LOCATED=0
@@ -88,8 +110,43 @@ post_summary() {
   codeup_post_comment "$LOCAL_ID" "$file"
 }
 
+# 最小失败评论（die_review 的两种回退形态共用一份渲染）：仍带评审标记（下次评审才找得到这条）、隐藏历史与页脚。
+# 用法：_die_review_minimal <失败原因（可为空）> → stdout
+#   原因非空：清洗后写进正文（失败评论渲染器 rc≠0 时的回退）；
+#   原因为空：只写固定文案——给「sink 掩码本身失败」用：此时 $* 里可能带模型回显的取值（jq 报错会回显模型文本），
+#   而掩不掉它，所以一个字都不带。
+_die_review_minimal() {
+  local reason="${1-}" mh
+  mh=$(mktemp)
+  # 先带上读回来的历次记录再退化（三步回退在 review_history_for_run 一处定义）：这条最小评论同样会被 PUT 到上一条汇总上，
+  # 直接用 `-`（空历史）会把累积的 20 行 run/sha/结论/计数一次性抹掉。评论头（标题 + 评审标记 + 隐藏历史）与三个渲染器
+  # 同一份（review_render_comment_head）——以前这里手写第三份，守卫漏掉它就会在 MR 上多出一条汇总。
+  review_history_for_run "${PRIOR_HISTORY_FILE:--}" "$REVIEW_RUN" "${SHORT_SHA:-unknown}" failed die_review > "$mh"
+  review_render_comment_head "$REVIEW_TITLE_FAILED" "${SHORT_SHA:-unknown}" "$REVIEW_RUN" "$mh"
+  echo ""
+  if [[ -n "$reason" ]]; then
+    # 失败原因可能带来自事件流的取值（不受信，例如 runFinished.status）。不清洗的话，
+    # 一个含 `<!-- kiro-review:… -->` 的取值就能让这条评论带上第二个评审标记 →
+    # 下一次评审判它「标记不唯一」而不作为候选 → MR 上多出一条汇总（违反 I4）；
+    # 含 `-->` 的取值还会把上面那行隐藏历史提前闭合、把 JSON 露成正文。
+    printf '⚠️ 评审未完成（失败评论渲染异常，只保留最小信息）：'
+    printf '%s' "$reason" | review_sanitize_md
+    echo ""
+  else
+    echo "⚠️ 评审未完成（脚本侧密钥掩码不可用，为避免泄漏只保留固定文案；失败原因见流水线日志）。"
+  fi
+  echo ""
+  echo "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。"
+  echo ""
+  review_render_footer "$REVIEW_RUN"
+  rm -f "$mh"
+}
+
+# 用法：die_review <固定文案> [<不受信取值>]——固定文案是脚本自己写的，不受信取值（事件流 / 模型派生）单独传，日志里只对后者掩码
 die_review() {
-  log "错误：$*"
+  local reason_fixed="${1-}" detail="${2-}" reason_full
+  reason_full="${reason_fixed}${detail:+：$detail}"
+  log "错误：${reason_fixed}${detail:+：$(_untrusted_for_log "$detail")}"
   if [[ "$MR_LOCATED" == "1" ]]; then
     local f
     local -a hist_args=()
@@ -98,7 +155,7 @@ die_review() {
     # 与成功、降级评论同出一源：定位旧评论靠 `<!-- kiro-review:<sha> run:N -->`，
     # 失败评论若自己手写一份、哪天与渲染器走形，就会被漏掉、于是在 MR 上多出一条汇总。
     [[ -n "$PRIOR_HISTORY_FILE" ]] && hist_args=(--history "$PRIOR_HISTORY_FILE")
-    review_render_failure --reason "$*" --sha "${SHORT_SHA:-unknown}" \
+    review_render_failure --reason "$reason_full" --sha "${SHORT_SHA:-unknown}" \
       --src "${SOURCE_BRANCH:-?}" --dst "${TARGET_BRANCH:-?}" \
       --ts "$(date '+%Y-%m-%d %H:%M:%S')" --diff-note "${DIFF_NOTE:-（本次未生成 diff）}" \
       --run "$REVIEW_RUN" "${hist_args[@]+"${hist_args[@]}"}" \
@@ -108,34 +165,20 @@ die_review() {
     # 那份空文件绝不能交给 post_summary：PUT 空正文会把上一条完整报告覆盖成空白且不可恢复。
     # 退回一段最小的纯文本失败评论——仍带评审标记（下次评审才找得到这条）与本次一行历史。
     if [[ ! -s "$f" ]]; then
-      local mh
-      mh=$(mktemp)
-      # 先带上读回来的历次记录再退化：这条最小评论同样会被 PUT 到上一条汇总上，
-      # 直接用 `-`（空历史）会把累积的 20 行 run/sha/结论/计数一次性抹掉。
-      review_history_append "${PRIOR_HISTORY_FILE:--}" "$REVIEW_RUN" "${SHORT_SHA:-unknown}" "" failed - - - \
-        > "$mh" 2>/dev/null || true
-      _review_history_ok "$mh" die_review 2>/dev/null \
-        || review_history_append - "$REVIEW_RUN" "${SHORT_SHA:-unknown}" "" failed - - - > "$mh" 2>/dev/null || true
-      _review_history_ok "$mh" die_review 2>/dev/null || printf '[]\n' > "$mh"
-      {
-        echo "$REVIEW_TITLE_FAILED"
-        echo "<!-- kiro-review:${SHORT_SHA:-unknown} run:${REVIEW_RUN} -->"
-        review_render_history_marker "$mh"
-        echo ""
-        # 失败原因可能带来自事件流的取值（不受信，例如 runFinished.status）。不清洗的话，
-        # 一个含 `<!-- kiro-review:… -->` 的取值就能让这条评论带上第二个评审标记 →
-        # 下一次评审判它「标记不唯一」而不作为候选 → MR 上多出一条汇总（违反 I4）；
-        # 含 `-->` 的取值还会把上面那行隐藏历史提前闭合、把 JSON 露成正文。
-        printf '⚠️ 评审未完成（失败评论渲染异常，只保留最小信息）：'
-        printf '%s' "$*" | review_sanitize_md
-        echo ""
-        echo ""
-        echo "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。"
-        echo ""
-        review_render_footer "$REVIEW_RUN"
-      } > "$f"
-      rm -f "$mh"
+      _die_review_minimal "$reason_full" > "$f"
       log "已退回最小失败评论（保证不 PUT 空正文）"
+    fi
+    # sink 掩码（票 16）：两种形态的 --reason 都可能回显模型取值（「契约 JSON 顶层结构不符」拼的是 jq 的报错，
+    # jq 会把出错的取值回显在消息里）。掩码本身失败时退回**只含固定文案**的最小评论——不带 $*，
+    # 绝不带着掩不掉的原因回写。
+    local rrc=0
+    review_redact_file "$f" || rrc=$?
+    if [[ "$rrc" != "0" ]]; then
+      case "$rrc" in   # rc 含义见 review_redact_file 的头注释；只区分「守卫拒绝」与其余（第 9 条）
+        3) log "警告：失败评论掩码后结构守卫拒绝写回（行数或标记行变化，rc=3），改用只含固定文案的最小失败评论（不带失败原因）" ;;
+        *) log "警告：失败评论掩码失败（rc=${rrc}），改用只含固定文案的最小失败评论（不带失败原因）" ;;
+      esac
+      _die_review_minimal "" > "$f"
     fi
     post_summary "$f" || log "回写失败评论也未成功，仅保留日志"
     rm -f "$f"
@@ -286,14 +329,31 @@ publish_inline_comments() {
     # rc 1 未命中 → 照常发；rc 2 参数/文件错误 → 打警告后照常发（宁可重复，绝不因为一个坏文件吞掉一条 P0）
     hrc=0; hits=$(review_inline_overlaps "$existing_rg" "$file" "$ls" "$le" "$sev") || hrc=$?
     if [[ "$hrc" == "0" ]]; then
-      log "去重：问题 #${idx}（${sev} ${file} L${ls}$([[ "$le" =~ ^[0-9]+$ && "$le" != "$ls" ]] && printf -- '–L%s' "$le")）与已有行内评论 $(printf '%s' "$hits" | tr '\n' ',') 同文件且行区间重叠/相邻、级别不低于它，视为同一问题，跳过"
+      # file 是模型控制的取值（fpath 只拒空/禁用字符/控制字符）：它不在字段级掩码清单里（要与变更文件集合逐字比对，
+      # 掩了就定位不到），只在这个日志出口掩（第 25 条）
+      log "去重：问题 #${idx}（${sev} $(_untrusted_for_log "$file") L${ls}$([[ "$le" =~ ^[0-9]+$ && "$le" != "$ls" ]] && printf -- '–L%s' "$le")）与已有行内评论 $(printf '%s' "$hits" | tr '\n' ',') 同文件且行区间重叠/相邻、级别不低于它，视为同一问题，跳过"
       printf '{"idx":%s,"outcome":"existing"}\n' "$idx" >> "$WORK/outcomes.jsonl"; n_existing=$((n_existing + 1)); continue
     elif [[ "$hrc" != "1" ]]; then
       log "警告：问题 #${idx} 的去重判定出错（rc=${hrc}），本条按未重复处理照常发出（可能与已有评论重复）"
     fi
-    if ! review_render_inline_body "$WORK/item-${idx}.json" "$SHORT_SHA" "$fp" > "$WORK/body-${idx}.md"; then
-      log "警告：问题 #${idx} 的行内评论正文渲染失败，转入折叠区"
+    # 渲染成功后立刻过文档级兜底掩码（票 16 / 16-fix2 方案 C）：title/body/fix 已在 validated.json 字段级掩过，这一遍
+    # 兜住绕过 validated.json 的文本、严格保行。这份 body-<idx>.md 是草稿创建与「一次提交失败退回逐条发布」两条路径
+    # 共用的唯一正文文件（回退路径不重新渲染），掩一次即可。掩码失败按渲染失败处理 → 该条进折叠区（不发出）。
+    if ! review_render_inline_body "$WORK/item-${idx}.json" "$SHORT_SHA" "$fp" > "$WORK/body-${idx}.md" \
+       || ! review_redact_file "$WORK/body-${idx}.md"; then
+      log "警告：问题 #${idx} 的行内评论正文渲染或掩码失败，转入折叠区"
       printf '{"idx":%s,"outcome":"failed"}\n' "$idx" >> "$WORK/outcomes.jsonl"; n_failed=$((n_failed + 1)); continue
+    fi
+    # 行内正文没有截断逻辑（review_truncate_comment 只用于汇总）：字段上限让它正常情况下落在评论上限之内，但清洗 / 掩码的
+    # 膨胀不是零，这里加硬守卫——超过 MAX_COMMENT_BYTES 的正文不发（Codeup 会 4xx），按 failed 进折叠区（第 7 条）。
+    local body_bytes
+    body_bytes=$(wc -c < "$WORK/body-${idx}.md" | tr -d ' ') || body_bytes=""
+    if ! [[ "$body_bytes" =~ ^[0-9]+$ ]] || [[ "$body_bytes" -gt "$MAX_COMMENT_BYTES" ]]; then   # 量不出字节数按超限处理（第 30 条）
+      log "警告：问题 #${idx} 的行内评论正文 ${body_bytes} 字节超过 MAX_COMMENT_BYTES=${MAX_COMMENT_BYTES}，转入折叠区（只展示标题）"
+      # 记下原因与字节数（第 38 条）：折叠区的「行内发布失败」桶默认渲染 body + fix 全文，超大正文照搬进汇总只会让汇总也超限、
+      # 把其它问题的文本一起截掉；带 reason=oversize 的条目只渲染标题 + 一句说明
+      printf '{"idx":%s,"outcome":"failed","reason":"oversize","bytes":%s,"limit":%s}\n' "$idx" "$([[ "$body_bytes" =~ ^[0-9]+$ ]] && printf '%s' "$body_bytes" || printf 0)" "$MAX_COMMENT_BYTES" >> "$WORK/outcomes.jsonl"
+      n_failed=$((n_failed + 1)); continue
     fi
     # 必须用文件式接口而不是 `cid=$(codeup_create_inline_comment …)`：命令替换在子 shell 里跑，
     # CODEUP_HTTP_CODE 与 DRY_RUN 的 fixture 序号都传不回来（codeup-api.sh 里写明了这条约定）
@@ -544,7 +604,7 @@ fi
 
 # --- 4. 生成 diff（merge-base 三点比较；浅克隆自动加深）---
 git fetch -q origin "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}" \
-  || die_review "无法 fetch 目标分支 ${TARGET_BRANCH}"
+  || die_review "无法 fetch 目标分支" "$TARGET_BRANCH"   # 分支名是 MR 作者可控的不受信取值，走 die_review 的第二个参数（日志里掩码）
 if ! BASE=$(git merge-base "origin/${TARGET_BRANCH}" HEAD 2>/dev/null); then
   log "浅克隆缺少历史，尝试 --unshallow……"
   git fetch -q --unshallow origin 2>/dev/null || true
@@ -655,7 +715,9 @@ KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" kiro-cli chat --no-inte
   < "$WORK/input.txt" > "$WORK/stream.jsonl" 2> "$WORK/kiro-stderr.log" || kiro_rc=$?
 
 if [[ "$kiro_rc" -ne 0 ]]; then
-  tail -20 "$WORK/kiro-stderr.log" >&2 || true
+  # kiro-cli 自己的 stderr 会引用被评审文件内容、失败请求（含 bearer）——也是评论出口，过掩码再打（第 24 条）；
+  # 掩码程序不可用时宁可不打
+  tail -20 "$WORK/kiro-stderr.log" 2>/dev/null | review_clean_text | review_redact_secrets --keep-lines >&2 || true
   [[ "$kiro_rc" == "124" ]] && die_review "Kiro 评审超时（${KIRO_TIMEOUT}s）"
   die_review "Kiro 评审失败（kiro-cli 退出码 ${kiro_rc}）"
 fi
@@ -672,13 +734,13 @@ extract_rc=0
 review_extract_json "$WORK/stream.jsonl" "$REVIEW_NONCE" > "$WORK/contract.json" || extract_rc=$?
 case "$extract_rc" in
   2) die_review "Kiro 事件流中没有 runFinished 事件（评审未跑完；确认 --agent-engine ${KIRO_ENGINE} 与 --output-format stream-json 被接受）" ;;
-  3) die_review "Kiro 自报运行失败（runFinished.status=$(tr -d '\n' < "$WORK/contract.json")）" ;;
+  3) die_review "Kiro 自报运行失败（runFinished.status 取值见后）" "status=$(tr -d '\n' < "$WORK/contract.json")" ;;
   # rc 7/8 是本地故障，绝不能和「被评审代码里有假标记」（rc 6）共用一个文案
   7) die_review "读不到 Kiro 事件流文件（本地 I/O 故障，不是评审内容问题）：${WORK}/stream.jsonl" ;;
   8) die_review "内部错误：提取契约时没有传入本次标记随机串（集成包缺陷，请报告）" ;;
 esac
 
-DEGRADE_REASON=""
+DEGRADE_REASON=""; DEGRADE_DETAIL=""
 case "$extract_rc" in
   0) ;;
   4) DEGRADE_REASON="评审员输出中没有成对的 <<<KIRO_REVIEW_JSON>>> 契约标记" ;;
@@ -697,11 +759,26 @@ if [[ -z "$DEGRADE_REASON" ]]; then
   validate_rc=0
   review_validate < "$WORK/contract.json" > "$WORK/validated.json" 2> "$WORK/validate-err.log" || validate_rc=$?
   case "$validate_rc" in
-    0) ;;
+    0)
+      # review_validate 内部已按 归一化 → 字段级掩码 → 清洗 → 上限 的顺序处理（16-fix3 第 15 条）：validated.json 是结构化路径全部
+      # 模型文本的唯一收口点（方案 C），渲染器、行内正文、折叠区、截断副本与下面「评审报告：…」那行日志拿到的都是掩码后的文本。
+      [[ -s "$WORK/validated.json" ]] || die_review "review_validate 以 0 退出但 validated.json 为空（输出被截断或写失败）"   # 第 20 条
+      truncated_fields=$(jq -r '.truncated_fields // 0' "$WORK/validated.json") || die_review "读取 validated.json 失败（jq rc=$?）"
+      [[ "$truncated_fields" =~ ^[0-9]+$ ]] || die_review "validated.json 的 truncated_fields 不是数字" "$truncated_fields"   # 第 20 条
+      [[ "$truncated_fields" == "0" ]] \
+        || log "警告：${truncated_fields} 个模型字段超出上限已截断（summary/verdict_reason ${REVIEW_CAP_SUMMARY}、title ${REVIEW_CAP_TITLE}、body ${REVIEW_CAP_BODY}、fix ${REVIEW_CAP_FIX} 字节）"
+      overflow=$(jq -r '.overflow_findings // 0' "$WORK/validated.json") || die_review "读取 validated.json 失败（jq rc=$?）"
+      [[ "$overflow" =~ ^[0-9]+$ && "$overflow" -gt 0 ]] \
+        && log "警告：问题数 $((overflow + REVIEW_MAX_FINDINGS)) 超过上限 ${REVIEW_MAX_FINDINGS}，仅展示前 ${REVIEW_MAX_FINDINGS} 条"   # 第 28 条
+      ;;
+    # 字段级掩码或清洗失败：既不能把未掩码的字段往下送，也不能当「解析失败」把原文贴出去 → 失败评论。
+    # 校验日志里只有**库函数自己**写的行（`review_redact_json: …` 一类，脚本文案 + 文件路径）能进日志与失败评论；jq 的诊断会回显
+    # 出错的取值（模型文本），只报条数（第 13 条）
+    4) die_review "契约字段级掩码或清洗失败（rc=4）：$(_validate_err_lib_lines "$WORK/validate-err.log")" ;;
     # 受信 agent 未生效：contract 字段只在 agent 提示词里要求，缺了就说明模型拿的是裸提示词——
     # 拒绝路径与掩码规则都没生效，这份输出不能贴到 MR 上，所以走失败评论而不是降级。
     3) die_review "受信 agent 未生效：评审输出缺少 contract=\"${REVIEW_CONTRACT_ID}\" 标识（只在受信 agent 提示词里要求）。这份输出不是受信只读 agent 的产出，已拒绝回写其内容。请检查 ${AGENT_FILE} 的安装与 --agent ${AGENT_NAME} 是否生效" ;;
-    *) DEGRADE_REASON="契约 JSON 顶层结构不符（$(tail -1 "$WORK/validate-err.log")）" ;;
+    *) DEGRADE_REASON="契约 JSON 顶层结构不符"; DEGRADE_DETAIL="$(tail -1 "$WORK/validate-err.log")" ;;   # 校验器的最后一行 stderr 当不受信取值处理
   esac
 fi
 
@@ -716,13 +793,13 @@ render_args=(--sha "$SHORT_SHA" --src "$SOURCE_BRANCH" --dst "$TARGET_BRANCH"
 
 if [[ -n "$DEGRADE_REASON" ]]; then
   # 降级：评审已经产出、只是没按契约输出——贴清洗后的原文并在标题标明，退出码仍为 0。
-  log "警告：结构化解析失败（${DEGRADE_REASON}），降级为贴出评审员输出原文"
+  log "警告：结构化解析失败（${DEGRADE_REASON}${DEGRADE_DETAIL:+：$(_untrusted_for_log "$DEGRADE_DETAIL")}），降级为贴出评审员输出原文"
   final_rc=0
   review_stream_final_text "$WORK/stream.jsonl" > "$WORK/final.txt" || final_rc=$?
   [[ "$final_rc" == "0" ]] || die_review "结构化解析失败，且取评审员原文也失败（rc=${final_rc}）"
   review_clean_text < "$WORK/final.txt" > "$WORK/raw.md"
   [[ -s "$WORK/raw.md" ]] || die_review "结构化解析失败，且评审员输出为空"
-  review_render_degraded --text "$WORK/raw.md" --reason "$DEGRADE_REASON" "${render_args[@]}" \
+  review_render_degraded --text "$WORK/raw.md" --reason "${DEGRADE_REASON}${DEGRADE_DETAIL:+（${DEGRADE_DETAIL}）}" "${render_args[@]}" \
     > "$WORK/comment.md" || die_review "降级评论渲染失败"
 else
   dropped=$(jq -r '.dropped_findings' "$WORK/validated.json")
@@ -744,6 +821,19 @@ else
     > "$WORK/comment.md" || die_review "汇总评论渲染失败"
 fi
 [[ -s "$WORK/comment.md" ]] || die_review "渲染后的评论为空"
+# 文档级兜底掩码（票 16 / 16-fix2 方案 C，spec I3 修订）：validated.json 派生的文本已在字段级掩过，这一遍严格保行地兜住
+# 绕过 validated.json 的输出面（元信息表里的分支名、由 API 字符串拼出的 notice、降级原文）。放在渲染之后、**截断之前**：
+# comment.full.md（截断前副本）与下面两处打进流水线日志的全文因此天然是掩码后的，截断量的是掩码后的字节数——依赖的是
+# 这个**顺序**，不是「掩码只会变短」（1 字节的值会掩成 `****`、降级原文里的 PEM 会多出占位与提示行，掩码可能变长）。
+# 降级评论在渲染时已掩过一次，这里再过一遍是幂等的（golden 断言过）。掩码失败 → 失败评论：绝不能把未掩码的原文继续往下送；
+# rc 3（守卫拒绝：行数或标记行变化）与其余失败分开报（第 27 条）。
+rrc=0
+review_redact_file "$WORK/comment.md" || rrc=$?
+case "$rrc" in   # rc 含义见 review_redact_file 的头注释；只区分「守卫拒绝」与其余（第 9 条）
+  0) ;;
+  3) die_review "评论掩码后结构守卫拒绝写回（行数或标记行变化）" ;;
+  *) die_review "评论掩码失败（rc=${rrc}）" ;;
+esac
 
 # Codeup content 上限 65535 字符；按字节截断留足余量，iconv 清理截断产生的残缺 UTF-8 序列
 if [[ "$(wc -c < "$WORK/comment.md" | tr -d ' ')" -gt "$MAX_COMMENT_BYTES" ]]; then
