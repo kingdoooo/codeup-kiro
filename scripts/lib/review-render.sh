@@ -1930,15 +1930,12 @@ review_redact_secrets() {
     # 反引号；diff 删除行紧贴标记的第 6 个 `-`；尾随反引号 / `*` / 空白）后整行只剩标记才算。句中引用（「…以 BEGIN RSA PRIVATE KEY
     # 标记开头的私钥文件…」、标题末尾提到 END 标记）是正文，不是块——不锚定时那一句整行被换成占位符，其后到 EOF 全部进 held，
     # 另一条问题的长路径还会被 redact_b64 打碎。兜底：一行**含**起始标记（没锚定）且下一行像密钥正文 → 也当块起始（pend 机制）。
+    # 每条装饰正则只写一遍（16-fix4 第 35 条）：sub() 返回替换次数，命中即继续、四条都不中才停。原先每条先 `s ~ /re/` 再 `sub(/re/)`
+    # 写两遍，两份一旦不同步（测试正则比 sub 宽）不是判错而是死循环——命中的行永远 continue、sub 永远替换 0 次，awk 挂住不输出。
+    # 分支顺序、短路与结果都不变（`> * - -----BEGIN…` 等形态 golden 逐字节相同）。
     function pem_strip_deco(s) {
       sub(/^[[:space:]]+/, "", s)
-      while (1) {
-        if (s ~ /^[>*+`][[:space:]]*/) { sub(/^[>*+`][[:space:]]*/, "", s); continue }
-        if (s ~ /^-[[:space:]]+/) { sub(/^-[[:space:]]+/, "", s); continue }
-        if (s ~ /^[0-9]+\.[[:space:]]+/) { sub(/^[0-9]+\.[[:space:]]+/, "", s); continue }
-        if (s ~ /^------/) { s = substr(s, 2); continue }
-        break
-      }
+      while (sub(/^[>*+`][[:space:]]*/, "", s) || sub(/^-[[:space:]]+/, "", s) || sub(/^[0-9]+\.[[:space:]]+/, "", s) || sub(/^------/, "-----", s)) ;
       sub(/[[:space:]`*]+$/, "", s)
       return s
     }
