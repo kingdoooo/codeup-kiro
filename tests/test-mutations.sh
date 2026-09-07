@@ -954,13 +954,13 @@ assert_eq "$(mut_rd "$ROOT" 'https://ci:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 pkg=$(make_mutant m-p2-url-port 's%        if (loose && pass ~ /\^\[0-9\]+\\//) { out = out seg; continue }   # host:port/path…@ 不是凭证%        # 变异 M-p2：不排除端口 + 路径%' scripts/lib/review-render.sh)
 assert_eq "$(mut_rd "$pkg" 'http://localhost:8080/oauth/callback/user@example.com')" 'http://localhost:8080****user@example.com' "M-p2：去掉端口 + 路径排除后普通 URL 被掩——单测「不掩」断言会失败"
 # --- M-q：第 10 条——装饰剥离去掉反引号 / 列表 → 装饰 BEGIN 行不再开块 ---
-pkg=$(make_mutant m-q-deco 's|        if (s ~ /\^\[>\*+`\]\[\[:space:\]\]\*/) { sub(/\^\[>\*+`\]\[\[:space:\]\]\*/, "", s); continue }|        # 变异 M-q：不剥引用 / 列表 / 反引号装饰|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-q-deco 's|      while (sub(/\^\[>\*+`\]\[\[:space:\]\]\*/, "", s) \|\| sub(/\^-\[\[:space:\]\]+/, "", s)|      while (sub(/^-[[:space:]]+/, "", s)|' scripts/lib/review-render.sh)   # 变异 M-q：去掉「引用 / 列表 / 反引号」那条装饰规则
 # 起始行由「行末标记 + 下一行像正文」的兜底另行兜住（两道防线叠着），装饰剥离失效的可观测结果在 END 行：反引号装饰的 END
 # 不再认出 → 块到 EOF 仍未闭合 → 放出并插「没有配对的 END 行」提示（单测「整块丢弃、只剩一行占位」断言会失败）
 assert_contains "$(mut_rd_multi "$pkg" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "没有配对的 END 行" "M-q：装饰剥离失效后反引号装饰的 END 行认不出，块被当成未闭合——单测「整块丢弃」断言会失败"
 assert_eq "$(mut_rd_multi "$ROOT" "\`$PEM_B\`\n$PEM_L64\n\`$PEM_E\`\n")" "$(printf '%s\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）' "$PEM_PLACEHOLDER")" "M-q 对照：未变异实现整块丢弃、占位 + 提示"
 # --- M-t：第 10 条兜底——「含 BEGIN 且下一行像正文」不再当块起始 ---
-pkg=$(make_mutant m-t-pend 's|    pend != "" { if (!inpem \&\& (pem_body(\$0, 20, 1) \|\| pem_is_hdr(\$0))) { begin_block(pend); pend = "" } else emit_pending() }|    pend != "" { emit_pending() }  # 变异 M-t：兜底失效|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-t-pend 's|    pend != "" { if (!inpem \&\& (pem_body(\$0, 20, 1) \|\| pem_is_hdr(\$0))) { begin_block(pend, 0); pend = "" } else emit_pending() }|    pend != "" { emit_pending() }  # 变异 M-t：兜底失效|' scripts/lib/review-render.sh)
 # 载荷用 28 位正文：≥ 40 位的整行会被第 17 条的整行规则另行掩掉（两道防线叠着），只有兜底能兜住 20–39 位的正文行
 PEM_L28="MIIEvQIBADANBgkq""1hkiG9w0BAQE"
 assert_contains "$(mut_rd_multi "$pkg" "私钥如下 $PEM_B\n$PEM_L28\n$PEM_E\n")" "$PEM_L28" "M-t：兜底失效后 28 位正文行裸奔——单测「兜底当块起始」断言会失败"
@@ -993,7 +993,7 @@ assert_not_contains "$(mut_rd_multi "$pkg" "x\n$PEM_B\n（内容已省略）\n$P
 assert_contains "$(mut_rd_multi "$ROOT" "x\n$PEM_B\n（内容已省略）\n$PEM_L64\n$PEM_E\ny\n")" "其间 2 行已随密钥块一并屏蔽" "M-v 对照：未变异实现给提示"
 # ============ 16-fix4 的守卫 ============
 # --- M-w：第 11 条——begin_block 的悬挂行不再对标记前的散文过 redact_line → AKIA 原文跟着出去 ---
-pkg=$(make_mutant m-w-begin-pre 's|      if (keeplines) print redact_line(pre) mk redact_b64(redact_line(tail), 20, 0)|      if (keeplines) print pre mk redact_b64(redact_line(tail), 20, 0)  # 变异 M-w|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-w-begin-pre 's|      if (keeplines) print redact_line(pre) mk redact_b64(redact_line(tail), 20, 1)|      if (keeplines) print pre mk redact_b64(redact_line(tail), 20, 1)  # 变异 M-w|' scripts/lib/review-render.sh)
 assert_contains "$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w：悬挂行 BEGIN 前的 AKIA 原样出去——单测「悬挂行掩码」断言会失败"
 assert_not_contains "$( ( set +e; source "$ROOT/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w 对照：未变异实现掩"
 
