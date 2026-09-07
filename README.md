@@ -20,15 +20,24 @@
       2. 定位 MR（环境变量优先，OpenAPI 反查兜底，歧义即报错）；
          找出本评审员上一次的汇总评论（原地更新与 run 计数的前提）。
          此后任何失败（含第 3 步的安装失败与能力检查不通过）都会在 MR 上回写「评审未完成」
-      3. 安装/检测 kiro-cli；安装只读受信 agent（read/grep/glob，禁 shell/write/web/MCP，
-         敏感路径拒绝清单）+ 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行）
+      3. 安装/检测 kiro-cli；安装只读受信 agent（read/grep/glob，禁 shell/write/web/MCP；
+         读取**许可清单** allowedPaths = 业务库 checkout + 本次 diff chunk 目录，安装时把三处结构化写成物理路径，
+         两条路径缺任一或某工具 deniedPaths 缺失即拒绝安装，安装后按值自检（三处路径、allowedTools=[]、
+         includeMcpJson/includePowers=false、deniedPaths 含 **/.git/**）不符即拒绝运行；敏感路径、.git 与仓库相对形状
+         （**/.ssh/**、**/.aws/**、**/id_rsa*、**/id_ed25519*）的拒绝清单是第二道）
+         + 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行）+ kiro-cli 版本核对（不在 P1-15 探测过的
+         KIRO_TESTED_VERSIONS 里不失败、但日志与汇总评论带 notice）；这几次 kiro-cli 调用同样以 env -i 固定名单启动
       4. merge-base 三点 diff；>300KB 按优先级压缩，省略文件以 diff 片段索引供 Kiro 自读；
          开启行内评论时同时算出「本次变更行集合」（零上下文 diff，与评审输入同源）
-      5. 隔离（必须在 diff 算完之后、启动 Kiro 之前）：移除业务库工作树中任意深度的
-         AGENTS.md 与 .kiro/ 及根 lsp.json，设置 chat.disableInheritingDefaultResources=true
-      6. timeout 强制限时执行
+      5. 隔离（必须在 diff 算完之后、启动 Kiro 之前）：一次遍历移除业务库工作树中任意深度的
+         AGENTS.md、.kiro/、**全部符号链接**及根 lsp.json（任意深度的 .git 目录内部不动），
+         设置 chat.disableInheritingDefaultResources=true
+      6. timeout 强制限时、`env -i` **固定名单**环境（PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/
+         KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个，外加 KIRO_ENV_PASSTHROUGH 点名的变量——凭证形状的名字拒绝；
+         云效令牌与 Flow 变量不进 Kiro 进程）执行
          kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json
-                       --trust-tools=read,grep,glob --agent codeup-reviewer
+                       --agent codeup-reviewer
+         不传 --trust-tools（免确认只来自 allowedPaths），绝不传会绕过 allowedPaths 的 --trust-all-tools；
          报告取自 runFinished.data.finalText 里带本次随机串标记包裹的契约 JSON
       7. 由脚本渲染评论并回写 OpenAPI：
          · 汇总评论每个 MR 一条；配了 CODEUP_BOT_USERNAME 时重跑原地更新
@@ -43,10 +52,15 @@
 
 - 本集成包必须作为独立受信代码源引入流水线，严禁拷入业务库执行
   （否则 MR 作者可改脚本窃取流水线密钥）。
-- MR 源分支全部内容视为不受信数据：运行 Kiro 前移除业务库中任意深度的
-  `AGENTS.md`、`.kiro/`（含符号链接）与根目录 `lsp.json`；custom agent 关闭工作区
-  MCP/Powers 加载（`includeMcpJson: false`、`includePowers: false`），工具仅 read/grep/glob，
-  并对 `~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、`/var/run/secrets` 等路径配拒绝清单。
+- MR 源分支全部内容视为不受信数据：kiro-cli 从不在业务库里运行（四处调用都在一个空的临时目录下，业务库只在
+  `allowedPaths` 里、模型按绝对路径读取），运行前再移除业务库中任意深度的 `AGENTS.md`、`.kiro`（任何类型、不分大小写）、
+  全部符号链接与根目录 `lsp.json` 作为第二道；custom agent 关闭工作区
+  MCP/Powers 加载（`includeMcpJson: false`、`includePowers: false`），工具仅 read/grep/glob（安装后脚本按值自检：
+  `tools`、`allowedTools=[]`、三处 `allowedPaths`/`deniedPaths`、`resources=[]`、`permissions` 只含 deny、`toolsSettings` 无多余键），
+  读取边界是**许可清单**（`allowedPaths`：业务库 checkout 与本次 diff chunk 目录，其它路径 headless 下直接被拒；
+  业务库里的符号链接在启动前全部删除，免得 `payload -> /root/.aws/credentials` 借 allow 内的路径名读到 allow 外），
+  `~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、`/var/run/secrets`、`**/.git/**` 等拒绝清单是第二道；
+  Kiro 进程的四次 kiro-cli 调用（`chat --help`、`--version`、`settings`、`chat`）都以 `env -i` 固定名单环境启动，看不到云效令牌与 Flow 注入的其它变量。
 - Kiro 固定以 `--agent-engine v2` 运行：实测 headless 的默认引擎（v1）与预览版 v3 都不阻断
   工作区 `AGENTS.md` 注入，只有 v2 配合 `chat.disableInheritingDefaultResources` 才阻断
   （见 [docs/adr/0004-pin-kiro-cli-v2-engine.md](docs/adr/0004-pin-kiro-cli-v2-engine.md)）。
@@ -81,11 +95,12 @@
 | `scripts/lib/codeup-api.sh` | Codeup OpenAPI 薄封装：MR 反查、评论增删改查、版本列表、草稿一次提交；HTTP 状态码判成败，仅网络/429/5xx 重试（创建行内评论只重试 429，因为创建不幂等） |
 | `scripts/lib/review-render.sh` | 契约提取与校验、变更行集合、行内发布计划与区间去重、汇总/行内/降级/失败四类评论的渲染、超长截断 |
 | `scripts/lib/diff-compress.sh` | diff 超限压缩：按优先级取舍文件，省略文件落盘为 diff 片段并输出索引清单 |
-| `scripts/lib/kiro-agent.sh` | 受信 agent 安装：按 `name` 落盘、改写相对 `file://` 提示词引用、清理同名旧文件 |
+| `scripts/lib/kiro-agent.sh` | 受信 agent 安装（按 `name` 落盘、改写相对 `file://` 提示词引用、结构化写三处 allowedPaths、deniedPaths 检查、清理同名旧文件）、安装结果按值自检、Kiro 子进程环境固定名单 + `KIRO_ENV_PASSTHROUGH` 校验 |
+| `scripts/lib/isolation.sh` | 工作区隔离：一次 `find` 删除业务库工作树里任意深度的 AGENTS.md / `.kiro`（不分大小写、任何类型）/ 符号链接与根 lsp.json，任意深度 `.git` 目录内部不动；与 `tests/helpers.sh` 的枚举谓词等价 |
 | `scripts/probe/` | 环境探测脚本（真实 Codeup / 真实 kiro-cli），见下节与 `scripts/probe/README.md` |
 | `prompts/review-agent-prompt.md` | agent 提示词（稳定部分）：只读角色、不受信输入、P0/P1/P2 判定、掩码规则、输出契约 |
 | `prompts/review-prompt.md` | 运行时提示词（每次不同）：MR 元信息与本次契约标记随机串 `{{REVIEW_NONCE}}` |
-| `kiro/agent-codeup-reviewer.json` | 只读 custom agent 定义：工具仅 read/grep/glob，拒绝清单 V2/V3 双写，不加载工作区 MCP/Powers |
+| `kiro/agent-codeup-reviewer.json` | 只读 custom agent 定义：工具仅 read/grep/glob，`allowedPaths` 许可清单（两个运行时路径占位符，安装时注入），拒绝清单 V2/V3 双写，不加载工作区 MCP/Powers |
 | `pipeline/flow-pipeline.yaml` | 云效 Flow 流水线参考配置：双代码源 + MR 触发事件 + 评审任务 + 变量清单 |
 | `pipeline/setup-guide.md` | 部署指南：前提、流水线搭建、开关矩阵、验收清单、故障排查、安全隔离说明 |
 | `tests/` | 测试套件：DRY_RUN + mock kiro-cli + golden file + 变异测试，全程无网络依赖 |

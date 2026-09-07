@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # 受信 agent 定义（kiro/agent-codeup-reviewer.json）的静态契约 + 安装函数（scripts/lib/kiro-agent.sh）。
-# 双兼容：V2 引擎读 toolsSettings.*.deniedPaths，V3 引擎读 permissions.rules；两套必须同组路径（ADR-0004）。
+# 双兼容：V2 引擎读 toolsSettings.*.deniedPaths / allowedPaths，V3 引擎读 permissions.rules；deny 两套必须同组路径（ADR-0004）。
+# 读取边界（票 15 / 15-fix #3）：allowedPaths 是**许可清单**——业务库 checkout 与 diff chunk 目录两个运行时路径，定义里的
+# 占位符只是文档；安装时由 kiro_install_agent --workspace/--chunks（必填）把 read/grep/glob 三处结构化写成物理路径，
+# 与定义里写了什么无关；缺路径参数就拒绝安装、不落盘。
 set -euo pipefail
 cd "$(dirname "$0")"
 source helpers.sh
@@ -9,34 +12,57 @@ A="$ROOT/kiro/agent-codeup-reviewer.json"
 source "$ROOT/scripts/lib/kiro-agent.sh"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
+# 安装用的两条运行时路径：目录名带空格，且 mktemp 在 macOS 上给的是 /var/folders（→ /private/var/folders 的符号链接），
+# 所以 WS_P/CH_P 取物理路径，安装结果必须与之逐字相等。
+WS="$tmp/ws dir"; CH="$tmp/work/chunks"; mkdir -p "$WS" "$CH"
+WS_P=$(cd "$WS" && pwd -P); CH_P=$(cd "$CH" && pwd -P)
+PH_WS='{{REVIEW_WORKSPACE}}'; PH_CH='{{REVIEW_CHUNKS}}'
+# 安装后的定义里不得残留任何占位符（任何字符串值里都不能有 {{ ）
+leftover_count() { jq '[.. | strings | select(contains("{{"))] | length' "$1"; }
+
 # --- 基本形态 ---
-assert_rc "$(jq -e . "$A" >/dev/null 2>&1 && echo 0 || echo 1)" 0 "agent JSON 合法"
+assert_rc "$(jq -e . "$A" >/dev/null 2>&1 && echo 0 || echo 1)" 0 "agent JSON 合法（占位符是合法字符串）"
 assert_eq "$(jq -r .name "$A")" "codeup-reviewer" "name"
 # 三个工具名已在 v2 stream-json 事件的 _meta.kiro.toolName 实证（kiro-cli 对未知名字静默接受，agent validate 也不报）：
 #   read → probe-results/kiro-headless/kiro-probe-t01-v2-iso、kiro-probe-t01-v2-forced-read
 #   grep、glob → probe-results/kiro-headless/kiro-probe-t01r-toolnames（kind=search，两者均 completed）
 assert_eq "$(jq -c .tools "$A")" '["read","grep","glob"]' "tools 只有 read/grep/glob（V2 工具名，已实证；V3 把 read 当标签）"
-assert_eq "$(jq -c .allowedTools "$A")" '["read","grep","glob"]' "allowedTools 与 tools 一致"
+# allowedTools 清空：免确认只能来自 allowedPaths（路径边界），不能来自「整个工具免审」——
+# 否则 allowedPaths 形同虚设（票 15 / P1-15）。
+assert_eq "$(jq -c .allowedTools "$A")" '[]' "allowedTools 为空（免确认只来自 allowedPaths）"
+for t in read grep glob; do
+  assert_not_contains "$(jq -r '.allowedTools[]?' "$A")" "$t" "allowedTools 不含 $t"
+done
 assert_eq "$(jq -c .resources "$A")" '[]' "resources 为空（不自动载入任何工作区文件）"
 assert_eq "$(jq -r .includeMcpJson "$A")" "false" "includeMcpJson=false"
 assert_eq "$(jq -r .includePowers "$A")" "false" "includePowers=false"
 assert_eq "$(jq -r '.mcpServers // {} | length' "$A")" "0" "不内联任何 MCP server"
 assert_eq "$(jq -r '.hooks // {} | length' "$A")" "0" "不内联任何 hook"
 
-# --- V2：三种只读工具的 deniedPaths 同组且覆盖凭证路径 ---
+# --- V2：三种只读工具的 allowedPaths 同组，恰好是两个占位符（目录本身，不带 /**：P1-15 T1 实测目录路径即匹配子路径）---
+for t in read grep glob; do
+  assert_eq "$(jq -c --arg t "$t" '.toolsSettings[$t].allowedPaths' "$A")" "[\"$PH_WS\",\"$PH_CH\"]" \
+    "V2 ${t}.allowedPaths 恰好是业务库与 chunks 两个占位符"
+done
+
+# --- V2：三种只读工具的 deniedPaths 同组且覆盖凭证路径与 .git ---
 denied=$(jq -c .toolsSettings.read.deniedPaths "$A")
 assert_eq "$(jq -r '.toolsSettings.read.deniedPaths | length > 0' "$A")" "true" "V2 deniedPaths 非空"
 assert_eq "$(jq -c .toolsSettings.grep.deniedPaths "$A")" "$denied" "V2 grep.deniedPaths 与 read 同组"
 assert_eq "$(jq -c .toolsSettings.glob.deniedPaths "$A")" "$denied" "V2 glob.deniedPaths 与 read 同组"
-for p in '~/.aws' '~/.aws/**' '~/.ssh' '~/.ssh/**' '~/.kiro' '~/.kiro/**' '~/.config/**' '~/.git-credentials' '/root/.aws/**' '**/.netrc' '**/.git/config'; do
-  assert_contains "$(jq -r '.toolsSettings.read.deniedPaths[]' "$A")" "$p" "V2 deniedPaths 含 $p"
+# `**/.git` 与 `**/.git/**`：.git/FETCH_HEAD、.git/logs/* 可能带凭证 URL；diff 已在输入里，模型没有理由读 .git（票 15）
+# 仓库相对形状 `**/.aws/**` `**/.ssh/**` `**/id_rsa*` `**/id_ed25519*`（15-fix2 #21）：绝对条目落在 allow 之外永远测不到，这几条在
+# allow 内也能被探测 T9 打到——某版 kiro-cli 静默不再解析 deniedPaths 时能被发现
+for p in '~/.aws' '~/.aws/**' '~/.ssh' '~/.ssh/**' '~/.kiro' '~/.kiro/**' '~/.config/**' '~/.git-credentials' '/root/.aws/**' '**/.netrc' '**/.git/config' '**/.git' '**/.git/**' '**/.aws/**' '**/.ssh/**' '**/id_rsa*' '**/id_ed25519*'; do
+  assert_eq "$(jq -r --arg p "$p" '.toolsSettings.read.deniedPaths | index($p) != null' "$A")" "true" "V2 deniedPaths 含 $p"
 done
 
 # --- V3：permissions.rules 全部为 deny，fs_read 与 V2 同组路径，shell/fs_write/web_* 整体拒绝 ---
+# V3 不上生产（ADR-0004），不为它设计 allow 规则：只保证 deny 同组（含 .git 两条）。
 assert_eq "$(jq -r '.permissions.rules | length > 0' "$A")" "true" "V3 permissions.rules 非空"
 assert_eq "$(jq -r '[.permissions.rules[] | select(.effect != "deny")] | length' "$A")" "0" "V3 只有 deny 规则（不放行任何能力）"
 assert_eq "$(jq -c '[.permissions.rules[] | select(.capability == "fs_read" and .effect == "deny") | .match] | first' "$A")" "$denied" \
-  "V3 fs_read deny 的 match 与 V2 deniedPaths 同组"
+  "V3 fs_read deny 的 match 与 V2 deniedPaths 同组（含 .git 两条）"
 for cap in shell fs_write web_fetch web_search; do
   assert_eq "$(jq -r --arg c "$cap" '[.permissions.rules[] | select(.capability == $c and .effect == "deny" and (.match | not))] | length' "$A")" "1" \
     "V3 ${cap} 整体 deny（不带 match 限定）"
@@ -53,52 +79,512 @@ assert_eq "$([[ -r "$rel_target" ]] && echo y || echo n)" "y" "相对路径按 a
 assert_eq "$(cd "$(dirname "$rel_target")" && pwd)/$(basename "$rel_target")" "$ROOT/prompts/review-agent-prompt.md" "指向 prompts/review-agent-prompt.md"
 assert_contains "$(cat "$ROOT/prompts/review-agent-prompt.md")" "只读" "agent 提示词含只读角色描述"
 
-# --- 安装函数：按 name 落盘、prompt 改写为绝对路径、其余字段不变 ---
-dest=$(kiro_install_agent "$A" "$tmp/agents")
+# --- 安装函数：按 name 落盘、prompt 改写为绝对路径、allowedPaths 三处结构化写入、其余字段不变 ---
+# 15-fix #3：不再做模板替换。--workspace/--chunks **必填**，安装时用 jq 把 .toolsSettings.read/grep/glob.allowedPaths
+# 三处一律写成 [<workspace 物理路径>, <chunks 物理路径>]，与定义文件里写了什么无关；定义文件里的占位符只是文档。
+INJECTED=$(jq -nc --arg a "$WS_P" --arg b "$CH_P" '[$a, $b]')
+allowed_of() { jq -c --arg t "$2" '.toolsSettings[$t].allowedPaths' "$1"; }
+dest=$(kiro_install_agent "$A" "$tmp/agents" --workspace "$WS" --chunks "$CH")
 assert_eq "$dest" "$tmp/agents/codeup-reviewer.json" "安装路径 = <dest>/<name>.json"
+assert_rc "$(jq -e . "$dest" >/dev/null 2>&1 && echo 0 || echo 1)" 0 "安装后 JSON 合法（路径带空格）"
 assert_eq "$(jq -r .prompt "$dest")" "file://$ROOT/prompts/review-agent-prompt.md" "安装后 prompt 为绝对 file:// 路径"
-assert_eq "$(jq -c 'del(.prompt)' "$dest")" "$(jq -c 'del(.prompt)' "$A")" "安装只改写 prompt"
+for t in read grep glob; do
+  assert_eq "$(allowed_of "$dest" "$t")" "$INJECTED" "安装后 ${t}.allowedPaths = 业务库物理路径 + chunks 物理路径"
+done
+assert_eq "$(jq -c '.toolsSettings | [.read.allowedPaths, .grep.allowedPaths, .glob.allowedPaths] | unique | length' "$dest")" "1" "安装后三处 allowedPaths 相等"
+assert_eq "$(leftover_count "$dest")" "0" "安装后没有残留占位符"
+assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$dest")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$A")" \
+  "安装只改写 prompt、三处 allowedPaths 与三处 deniedPaths（追加注入条目），其余字段不变"
+assert_eq "$(jq -c .allowedTools "$dest")" '[]' "安装后 allowedTools 仍为空"
+# 15-fix4 #1 补（探测 kiro-probe-P1-15-t15fix4-4b30a00）：kiro-cli 2.21.1 把 **/ 开头的 deniedPaths 按 cwd 解析——kiro-cli 改在空目录下运行后，
+# 业务库里的 .git/logs/HEAD、.ssh/config 被读出（T3 / T9a–T9d FAIL）；加 <业务库>/**/.git/** 后恢复被拒。安装器对每条 **/ 形状按两条 allow 根各注入一份绝对副本。
+rel_deny=$(jq -c '[.toolsSettings.read.deniedPaths[] | select(startswith("**/"))]' "$A")
+assert_eq "$(jq -r 'length' <<<"$rel_deny")" "8" "定义里以 **/ 开头的相对拒绝形状有 8 条（.git/config .netrc .git .git/** .aws/** .ssh/** id_rsa* id_ed25519*）"
+for t in read grep glob; do
+  for pat in $(jq -r '.[]' <<<"$rel_deny"); do
+    assert_eq "$(jq -r --arg t "$t" --arg p "${WS_P}/${pat}" '.toolsSettings[$t].deniedPaths | index($p) != null' "$dest")" "true" "安装后 ${t}.deniedPaths 含业务库根前缀的 ${pat}"
+    assert_eq "$(jq -r --arg t "$t" --arg p "${CH_P}/${pat}" '.toolsSettings[$t].deniedPaths | index($p) != null' "$dest")" "true" "安装后 ${t}.deniedPaths 含 chunks 根前缀的 ${pat}"
+    assert_eq "$(jq -r --arg t "$t" --arg p "$pat" '.toolsSettings[$t].deniedPaths | index($p) != null' "$dest")" "true" "安装后 ${t}.deniedPaths 仍保留相对形状 ${pat}"
+  done
+done
+assert_eq "$(jq -r '.toolsSettings.read.deniedPaths | length' "$dest")" "$(( $(jq -r '.toolsSettings.read.deniedPaths | length' "$A") + 16 ))" "安装后 read.deniedPaths 恰好多了 8 × 2 条注入条目（不重复、不丢原条目）"
+assert_eq "$(jq -c '.toolsSettings | [.read.deniedPaths, .grep.deniedPaths, .glob.deniedPaths] | unique | length' "$dest")" "1" "安装后三处 deniedPaths 相等"
+assert_eq "$(jq -r '[.toolsSettings.read.deniedPaths[] | select(startswith("~/") or startswith("/proc"))] | length' "$dest")" "$(jq -r '[.toolsSettings.read.deniedPaths[] | select(startswith("~/") or startswith("/proc"))] | length' "$A")" "安装后绝对 / ~ 形状的条目不被前缀化"
 # 幂等：重复安装覆盖同一文件
-dest2=$(kiro_install_agent "$A" "$tmp/agents")
+dest2=$(kiro_install_agent "$A" "$tmp/agents" --workspace "$WS" --chunks "$CH")
 assert_eq "$dest2" "$dest" "重复安装落到同一路径"
-# 负向：prompt 指向不存在的文件 → 安装失败（宁可不跑评审也不能带空提示词/默认 agent 跑）
+
+# --- 结构化写入不依赖定义文件的形态（15-fix #3 / #13：靠「占位符字符串还在不在」会漏掉 grep 没写 allowedPaths 的定义）---
+ABS_PROMPT="file://$ROOT/prompts/review-agent-prompt.md"   # 派生定义落在 $tmp 下，相对 file:// 会失去解析基准
+# ① 定义里 grep 那一处根本没有 allowedPaths → 安装后三处照样都是注入值（旧实现：装成功、grep 无边界）
+jq --arg p "$ABS_PROMPT" '.prompt = $p | del(.toolsSettings.grep.allowedPaths)' "$A" > "$tmp/no-grep-allow.json"
+dest_ng=$(kiro_install_agent "$tmp/no-grep-allow.json" "$tmp/agents-ng" --workspace "$WS" --chunks "$CH")
+assert_eq "$(allowed_of "$dest_ng" grep)" "$INJECTED" "定义缺 grep.allowedPaths：安装后 grep 仍被写成注入值"
+assert_eq "$(jq -c '.toolsSettings | [.read.allowedPaths, .grep.allowedPaths, .glob.allowedPaths] | unique | length' "$dest_ng")" "1" "定义缺 grep.allowedPaths：三处相等"
+# ② 定义里三处都没有 allowedPaths → 同样注入（安装器不信任定义文件的形态）
+jq --arg p "$ABS_PROMPT" '.prompt = $p | del(.toolsSettings[].allowedPaths)' "$A" > "$tmp/no-allow.json"
+dest_na=$(kiro_install_agent "$tmp/no-allow.json" "$tmp/agents-na" --workspace "$WS" --chunks "$CH")
+for t in read grep glob; do
+  assert_eq "$(allowed_of "$dest_na" "$t")" "$INJECTED" "定义无任何 allowedPaths：安装后 ${t} 仍是注入值"
+done
+# ③ 定义里 allowedPaths 写了别的东西（多一条 /**、或干脆是 "/"）→ 整个数组被覆盖，不残留
+jq --arg p "$ABS_PROMPT" --arg s "${PH_WS}/**" '.prompt = $p | .toolsSettings.read.allowedPaths += [$s] | .toolsSettings.glob.allowedPaths = ["/"]' "$A" > "$tmp/junk-allow.json"
+dest_j=$(kiro_install_agent "$tmp/junk-allow.json" "$tmp/agents-junk" --workspace "$WS" --chunks "$CH")
+assert_eq "$(allowed_of "$dest_j" read)" "$INJECTED" "定义多写一条 /**：安装后 read 恰好两条注入值"
+assert_eq "$(allowed_of "$dest_j" glob)" "$INJECTED" "定义把 glob 写成 /：安装后 glob 仍是注入值（不是 /）"
+assert_eq "$(leftover_count "$dest_j")" "0" "覆盖后没有残留占位符"
+# ④（15-fix2 #11 改为负向）结构化写入会把不存在的 toolsSettings.<tool> 凭空建出来——那一处只有 allow 没有 deny，
+# glob 能枚举 <业务库>/.git/**。所以三个工具的 deniedPaths 都必须存在、非空且含 **/.git/**，缺一拒装、不落盘。
+jq --arg p "$ABS_PROMPT" '.prompt = $p | del(.toolsSettings)' "$A" > "$tmp/no-ts.json"
+rc=0; err=$(kiro_install_agent "$tmp/no-ts.json" "$tmp/agents-nt" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "定义无 toolsSettings：拒绝安装（三处都没有 deniedPaths）"
+assert_contains "$err" "deniedPaths" "定义无 toolsSettings：报错点名 deniedPaths"
+assert_eq "$([[ -e "$tmp/agents-nt" ]] && echo written || echo none)" "none" "定义无 toolsSettings：不落盘"
+jq --arg p "$ABS_PROMPT" '.prompt = $p | del(.toolsSettings.glob)' "$A" > "$tmp/no-glob.json"
+rc=0; err=$(kiro_install_agent "$tmp/no-glob.json" "$tmp/agents-noglob" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "定义缺 toolsSettings.glob：拒绝安装（glob 会只有 allow 没有 deny）"
+assert_contains "$err" "glob.deniedPaths" "定义缺 toolsSettings.glob：报错点名 glob.deniedPaths"
+assert_eq "$([[ -e "$tmp/agents-noglob" ]] && echo written || echo none)" "none" "定义缺 toolsSettings.glob：不落盘"
+jq --arg p "$ABS_PROMPT" '.prompt = $p | .toolsSettings.grep.deniedPaths = []' "$A" > "$tmp/empty-deny.json"
+rc=0; kiro_install_agent "$tmp/empty-deny.json" "$tmp/agents-emptydeny" --workspace "$WS" --chunks "$CH" >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "grep.deniedPaths 为空数组：拒绝安装"
+jq --arg p "$ABS_PROMPT" '.prompt = $p | .toolsSettings.read.deniedPaths -= ["**/.git/**"]' "$A" > "$tmp/no-gitdeny.json"
+rc=0; err=$(kiro_install_agent "$tmp/no-gitdeny.json" "$tmp/agents-nogitdeny" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "read.deniedPaths 不含 **/.git/**：拒绝安装"
+assert_contains "$err" '**/.git/**' "read.deniedPaths 不含 **/.git/**：报错点名"
+# 对照：deniedPaths 三处完整时照常安装（就是上面 dest 那次）
+assert_eq "$(jq -r '.toolsSettings.glob.deniedPaths | index("**/.git/**") != null' "$dest")" "true" "对照：正常定义安装后 glob.deniedPaths 含 **/.git/**"
+
+# --print-paths 协议已删（15-fix3 #12）：安装结果的核对只有 kiro_agent_selfcheck 一条路
+rc=0; kiro_install_agent "$A" "$tmp/agents-pp" --workspace "$WS" --chunks "$CH" --print-paths >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--print-paths 不再是合法参数（未知参数 → 拒绝）"
+assert_eq "$(kiro_install_agent "$A" "$tmp/agents-pp" --workspace "$WS" --chunks "$CH" | wc -l | tr -d ' ')" "1" "安装器 stdout 只有一行安装路径"
+
+# --- --allow-none（15-fix2 #20）：探测正控 agent 的唯一合法安装路——删三处 allowedPaths，其余（prompt 改写、deny 检查、同名清理）照做 ---
+mkdir -p "$tmp/agents-none"; jq '.prompt = "旧版内联提示词"' "$A" > "$tmp/agents-none/agent-codeup-reviewer.json"
+dest_none=$(kiro_install_agent "$A" "$tmp/agents-none" --allow-none 2>/dev/null)
+assert_eq "$dest_none" "$tmp/agents-none/codeup-reviewer.json" "--allow-none：按 name 落盘"
+assert_eq "$(jq -c '[.toolsSettings[] | has("allowedPaths")] | unique' "$dest_none")" "[false]" "--allow-none：三处 allowedPaths 都删掉"
+assert_eq "$(jq -r .prompt "$dest_none")" "file://$ROOT/prompts/review-agent-prompt.md" "--allow-none：prompt 仍改写为绝对 file://"
+assert_eq "$(jq -c '.toolsSettings.read.deniedPaths' "$dest_none")" "$(jq -c '.toolsSettings.read.deniedPaths' "$A")" "--allow-none：deniedPaths 原样保留（不注入绝对副本——正控 agent 要旧形态）"
+assert_eq "$([[ -e "$tmp/agents-none/agent-codeup-reviewer.json" ]] && echo kept || echo removed)" "removed" "--allow-none：同名旧文件照样清理"
+rc=0; err=$(kiro_install_agent "$A" "$tmp/agents-none2" --allow-none --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--allow-none 与 --workspace/--chunks 同给：拒绝"
+assert_contains "$err" "互斥" "--allow-none 与路径参数互斥：报错说明"
+rc=0; kiro_install_agent "$tmp/no-glob.json" "$tmp/agents-none3" --allow-none >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--allow-none 下 deniedPaths 检查照做（缺 glob 仍拒装）"
+assert_eq "$(kiro_install_agent "$A" "$tmp/agents-none4" --allow-none 2>/dev/null | wc -l | tr -d ' ')" "1" "--allow-none：stdout 同样只有一行"
+
+# --- kiro_agent_selfcheck（15-fix2 #16）：值比对 + 安全字段；执行器第 3 步用它把日志声称的事实变成断言 ---
+rc=0; kiro_agent_selfcheck "$dest" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "0" "selfcheck：正常安装结果通过"
+assert_eq "$KIRO_AGENT_SELFCHECK_ERROR" "" "selfcheck：通过时无错误文案"
+rc=0; kiro_agent_selfcheck "$dest" "$CH_P" "$WS_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：参数顺序反了 → 失败（只看形状的自检放行不了）"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "read.allowedPaths" "selfcheck：顺序反了点名 read.allowedPaths"
+rc=0; kiro_agent_selfcheck "$dest" "$WS" "$CH_P" || rc=$?
+assert_eq "$([[ "$WS" == "$WS_P" ]] && echo 0 || echo "$rc")" "$([[ "$WS" == "$WS_P" ]] && echo 0 || echo 1)" "selfcheck：逻辑路径（未 pwd -P）与物理路径不同时 → 失败"
+jq '.toolsSettings.grep.allowedPaths = ["/"]' "$dest" > "$tmp/sc-grep.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-grep.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：grep.allowedPaths 被改成 / → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "grep.allowedPaths" "selfcheck：点名 grep.allowedPaths"
+jq 'del(.toolsSettings.grep.allowedPaths)' "$dest" > "$tmp/sc-nogrep.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-nogrep.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：grep 缺 allowedPaths → 失败"
+jq '.allowedTools = ["read"]' "$dest" > "$tmp/sc-at.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-at.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：allowedTools 非空 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "allowedTools" "selfcheck：点名 allowedTools"
+jq '.includeMcpJson = true' "$dest" > "$tmp/sc-mcp.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-mcp.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：includeMcpJson=true → 失败"
+jq '.includePowers = true' "$dest" > "$tmp/sc-pow.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-pow.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：includePowers=true → 失败"
+jq '.toolsSettings.glob.deniedPaths -= ["**/.git/**"]' "$dest" > "$tmp/sc-deny.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-deny.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：glob.deniedPaths 少了 **/.git/** → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "glob.deniedPaths" "selfcheck：点名 glob.deniedPaths"
+# 15-fix4 #1 补：少了任一条按 allow 根注入的绝对形状 → 失败（对 903af43 必须失败，正控：那里没有注入也没有这道检查）
+jq --arg p "${WS_P}/**/.git/**" '.toolsSettings.grep.deniedPaths -= [$p]' "$dest" > "$tmp/sc-absdeny.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-absdeny.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：grep.deniedPaths 少了业务库根前缀的 **/.git/** → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "grep.deniedPaths 缺少按 allow 根注入的绝对拒绝形状" "selfcheck：点名缺的是注入条目"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "${WS_P}/**/.git/**" "selfcheck：写出缺的那条"
+jq --arg p "${CH_P}/**/id_rsa*" '.toolsSettings.read.deniedPaths -= [$p]' "$dest" > "$tmp/sc-absdeny2.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-absdeny2.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：read.deniedPaths 少了 chunks 根前缀的 **/id_rsa* → 失败"
+# 对照：把注入条目全删、但 cwd 参数（ws/ch）换成别的也不能蒙混——按当前 ws/ch 重算期望
+rc=0; kiro_agent_selfcheck "$dest" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "0" "selfcheck 对照：正常安装结果（含注入条目）通过"
+rc=0; kiro_agent_selfcheck "$tmp/does-not-exist.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：文件不存在 → 失败"
+# 15-fix4 #11：jq 里 `,` 比 `|` 绑定更紧，`("read","grep","glob") as $t | A, B, C` 把尾部检查也放进了 $t 的作用域——三条尾部检查对每个
+# 工具各发一次、与逐工具条目交错，first 可能先取到尾部检查。实测 glob.allowedPaths=["/WRONG"] + allowedTools=["execute_bash"] 在
+# 5462175 报「allowedTools 不为空」（3d44f2e 报 glob.allowedPaths）：两边都拒绝，但 MR 失败评论把运维指向错的字段。
+# 顺序固定：read/grep/glob 逐工具（allow → deny），再 allowedTools、includeMcpJson、includePowers。
+jq '.toolsSettings.glob.allowedPaths = ["/WRONG"] | .allowedTools = ["execute_bash"]' "$dest" > "$tmp/sc-order.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-order.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：glob.allowedPaths 错 + allowedTools 非空 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "glob.allowedPaths" "selfcheck：两处都错时先报逐工具的 glob.allowedPaths（不是尾部的 allowedTools）"
+assert_not_contains "$KIRO_AGENT_SELFCHECK_ERROR" "allowedTools" "selfcheck：只报第一条不符"
+jq '.toolsSettings.grep.deniedPaths = [] | .includeMcpJson = true' "$dest" > "$tmp/sc-order2.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-order2.json" "$WS_P" "$CH_P" || rc=$?
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "grep.deniedPaths" "selfcheck：grep.deniedPaths 空 + includeMcpJson=true → 先报 grep.deniedPaths"
+jq '.toolsSettings.read.allowedPaths = ["/WRONG"] | .toolsSettings.read.deniedPaths = []' "$dest" > "$tmp/sc-order3.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-order3.json" "$WS_P" "$CH_P" || rc=$?
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "read.allowedPaths" "selfcheck：同一工具 allow 与 deny 都错 → 先报 allowedPaths"
+# 15-fix4 #5：deny 谓词、工具三元组、deny 报错文案在库里各只有一份（安装器的 _kiro_agent_deny_missing 与自检都拼同一段 jq）——
+# 只改一处的两种后果都是静默的：安装器放行自检拒绝（每次评审都失败），或安装器拒绝自检放行（自检形同虚设）
+lib_code() { grep -v '^[[:space:]]*#' "$ROOT/scripts/lib/kiro-agent.sh"; }   # 只看代码行，注释里的说明不算
+assert_eq "$(lib_code | grep -c 'index("\*\*/.git/\*\*")')" "1" "库里 deny 谓词（index **/.git/**）只出现一次"
+assert_eq "$(lib_code | grep -c '"read","grep","glob"')" "1" "库里工具三元组字面量只出现一次"
+assert_eq "$(lib_code | grep -c 'deniedPaths 缺失、为空或不含')" "1" "库里 deny 报错文案只出现一次"
+
+# 15-fix4 #19：自检按值核对 tools / toolsSettings 键集 / resources / permissions——隔离步骤存在的目的就是阻止工作区文件被自动加载，
+# 非空 resources 恰好把它重新引入；tools 带 execute_bash、toolsSettings 多出第四个键（其 allowedPaths 从不被改写）、permissions 放宽成 allow，
+# 5462175 的自检照过（正控：四条在 5462175 上都是 rc 0）
+jq '.tools = ["read","grep","glob","execute_bash"]' "$dest" > "$tmp/sc-tools.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-tools.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：tools 多了 execute_bash → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "tools 不是恰好" "selfcheck：点名 tools"
+jq '.tools = ["read","grep"]' "$dest" > "$tmp/sc-tools2.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-tools2.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：tools 少了 glob → 失败（精确相等，不是子集）"
+jq '.toolsSettings.execute_bash = {"allowedPaths": ["/"]}' "$dest" > "$tmp/sc-ts.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-ts.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：toolsSettings 多出 execute_bash 键 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "toolsSettings 多出工具键" "selfcheck：点名多出的键"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "execute_bash" "selfcheck：写出多出的键名"
+jq '.resources = ["file://AGENTS.md"]' "$dest" > "$tmp/sc-res.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-res.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：resources 非空 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "resources 不为空" "selfcheck：点名 resources"
+jq '.permissions.rules += [{"capability":"shell","effect":"allow"}]' "$dest" > "$tmp/sc-perm.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-perm.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：permissions.rules 混入 allow 规则 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "非 deny" "selfcheck：点名非 deny 规则"
+jq '.permissions.extra = true' "$dest" > "$tmp/sc-perm2.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-perm2.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：permissions 多出 rules 之外的键 → 失败"
+# 对照：resources 缺失 / permissions 缺失（更严格的定义）照样通过——检查的是「不放宽」，不是「必须存在」
+jq 'del(.resources) | del(.permissions)' "$dest" > "$tmp/sc-min.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-min.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "0" "selfcheck 对照：resources / permissions 缺失（更严格）→ 通过"
+# 安装器一侧同样核对 tools 精确相等（带 execute_bash 的定义不该先落盘再靠自检拒）
+jq --arg p "$ABS_PROMPT" '.prompt = $p | .tools += ["execute_bash"]' "$A" > "$tmp/bad-tools.json"
+rc=0; err=$(kiro_install_agent "$tmp/bad-tools.json" "$tmp/agents-badtools" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "安装器：tools 带 execute_bash → 拒装"
+assert_contains "$err" "tools 不是恰好" "安装器：报错点名 tools"
+assert_eq "$([[ -e "$tmp/agents-badtools" ]] && echo written || echo none)" "none" "安装器：tools 不合规不落盘"
+
+# --- 15-fix4 #13：空 / 纯空白 / 非对象 / 多值的定义文件必须 fail-closed ---
+# 5462175 及之前：单次 jq 对空输入不输出且退出 0 → reason="" → 自检返回 0。--print-paths 交叉核对已删（15-fix3 #12），自检是**唯一**
+# 一道门：长驻构建机上一份被截断 / 清零 / 误编辑的 ~/.kiro/agents/codeup-reviewer.json 会通过自检，评审带着 kiro-cli 回退的 agent 跑——
+# 没有 allowedPaths、没有 deniedPaths。两个（各自合格的）定义拼在同一文件里同样放行（两行空 reason 被 $(…) 吃掉）。
+# 正控（对 5462175）：空文件、纯空白、双对象三条必须失败（实测 rc=0）。
+: > "$tmp/sc-empty.json"; printf ' \n\t \n' > "$tmp/sc-ws.json"; echo null > "$tmp/sc-null.json"; echo '{}' > "$tmp/sc-obj.json"
+echo '[]' > "$tmp/sc-arr.json"; cat "$dest" "$dest" > "$tmp/sc-two.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-empty.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：空文件（0 字节）→ 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "0 字节" "selfcheck：空文件的固定文案点明 0 字节"
+rc=0; kiro_agent_selfcheck "$tmp/sc-ws.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：纯空白文件 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "恰好一个 JSON 值" "selfcheck：纯空白的固定文案（0 个 JSON 值）"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "0 个" "selfcheck：纯空白的文案点明 0 个"
+rc=0; kiro_agent_selfcheck "$tmp/sc-null.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：null → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "不是 JSON 对象" "selfcheck：null 的固定文案（顶层不是对象）"
+rc=0; kiro_agent_selfcheck "$tmp/sc-obj.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：{} → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "read.allowedPaths" "selfcheck：{} 点名 read.allowedPaths（对象但什么都没有）"
+rc=0; kiro_agent_selfcheck "$tmp/sc-arr.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：[] → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "不是 JSON 对象" "selfcheck：[] 的固定文案（顶层不是对象）"
+rc=0; kiro_agent_selfcheck "$tmp/sc-two.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：两个各自合格的定义拼在一个文件里 → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "2 个" "selfcheck：多值文件的固定文案点明 2 个"
+# 对照：正常安装结果仍通过（上面的 dest）
+rc=0; kiro_agent_selfcheck "$dest" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "0" "selfcheck 对照：正常安装结果仍通过"
+# 安装器侧的 deny 检查（_kiro_agent_deny_missing）同样 fail-closed：空 / 纯空白 / 非对象 / 多值 → 非零（不是「都合格」的空输出）
+for f in sc-empty sc-ws sc-null sc-arr sc-two; do
+  rc=0; out=$(_kiro_agent_deny_missing "$tmp/$f.json") || rc=$?
+  assert_eq "$([[ $rc -ne 0 ]] && echo nonzero || echo "rc0 out=[$out]")" "nonzero" "deny 检查：${f} → 非零（不能当成「三处都合格」）"
+done
+assert_eq "$(_kiro_agent_deny_missing "$tmp/sc-obj.json")" "read" "deny 检查：{} 是对象但 read 没有 deniedPaths → 点名 read"
+assert_eq "$(_kiro_agent_deny_missing "$A")" "" "deny 检查对照：仓库定义三处都合格 → 空输出"
+# 安装器整体：空源文件 / 双对象源文件都拒装、不落盘
+rc=0; kiro_install_agent "$tmp/sc-empty.json" "$tmp/agents-scempty" --workspace "$WS" --chunks "$CH" >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "安装器：空源文件拒装"
+assert_eq "$([[ -e "$tmp/agents-scempty" ]] && echo written || echo none)" "none" "安装器：空源文件不落盘"
+rc=0; err=$(kiro_install_agent "$tmp/sc-two.json" "$tmp/agents-sctwo" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "安装器：双对象源文件拒装（否则会写出一份两个 JSON 值的 agent 文件）"
+assert_eq "$([[ -e "$tmp/agents-sctwo" ]] && echo written || echo none)" "none" "安装器：双对象源文件不落盘"
+
+# --- 占位符注入：路径规范化与 JSON 转义 ---
+# 相对路径 → 绝对（安装函数自己 cd && pwd -P，不信任调用方给的形态）
+dest_rel=$(cd "$tmp" && kiro_install_agent "$A" "$tmp/agents-rel" --workspace "./ws dir" --chunks "./work/chunks")
+assert_eq "$(allowed_of "$dest_rel" read)" "$INJECTED" "相对路径注入后为绝对物理路径"
+# 符号链接 → 物理路径（kiro-cli 按解析后的路径比对，写逻辑路径会全部落在 allow 之外：P1-15）
+ln -s "$WS" "$tmp/wslink"
+dest_ln=$(kiro_install_agent "$A" "$tmp/agents-ln" --workspace "$tmp/wslink" --chunks "$CH")
+assert_eq "$(jq -r '.toolsSettings.read.allowedPaths[0]' "$dest_ln")" "$WS_P" "符号链接路径注入后为物理路径"
+# 含引号、反斜杠、美元号、非 ASCII 的目录名：经 jq 转义后 JSON 仍合法且逐字相等
+WEIRD="$tmp/ws \"q\" back\\slash \$d 中文"
+mkdir -p "$WEIRD"; WEIRD_P=$(cd "$WEIRD" && pwd -P)
+dest_w=$(kiro_install_agent "$A" "$tmp/agents-weird" --workspace "$WEIRD" --chunks "$CH")
+assert_rc "$(jq -e . "$dest_w" >/dev/null 2>&1 && echo 0 || echo 1)" 0 "特殊字符路径：安装后 JSON 合法"
+assert_eq "$(jq -r '.toolsSettings.read.allowedPaths[0]' "$dest_w")" "$WEIRD_P" "特殊字符路径：逐字注入"
+assert_eq "$(jq -r '.toolsSettings.glob.allowedPaths[0]' "$dest_w")" "$WEIRD_P" "特殊字符路径：三个工具同样注入（glob）"
+
+# --- 负向：--workspace / --chunks 缺任一 → 拒绝安装、不落盘（allow 空在 headless 下等于每次读取都被拒，宁可不跑）---
+rc=0; err=$(kiro_install_agent "$A" "$tmp/agents-nows" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "缺 --workspace 与 --chunks：安装失败"
+assert_contains "$err" "--workspace" "缺参数：报错点名 --workspace"
+assert_contains "$err" "--chunks" "缺参数：报错点名 --chunks"
+assert_eq "$([[ -e "$tmp/agents-nows" ]] && echo written || echo none)" "none" "缺参数：目标目录连半成品都没有"
+rc=0; err=$(kiro_install_agent "$A" "$tmp/agents-noch" --workspace "$WS" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "只给 --workspace 缺 --chunks：安装失败"
+assert_eq "$([[ -e "$tmp/agents-noch" ]] && echo written || echo none)" "none" "缺 --chunks：不落盘"
+rc=0; err=$(kiro_install_agent "$A" "$tmp/agents-nows2" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "只给 --chunks 缺 --workspace：安装失败"
+assert_eq "$([[ -e "$tmp/agents-nows2" ]] && echo written || echo none)" "none" "缺 --workspace：不落盘"
+# 定义没有任何 allowedPaths 也一样必填（旧实现允许「无占位符 + 无参数 → 原样安装」，那会装出一份没有边界的 agent）
+rc=0; kiro_install_agent "$tmp/no-allow.json" "$tmp/agents-na-noargs" >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "定义无 allowedPaths 且不传路径参数：同样拒绝安装"
+assert_eq "$([[ -e "$tmp/agents-na-noargs" ]] && echo written || echo none)" "none" "定义无 allowedPaths 且不传路径参数：不落盘"
+# 负向：目录不存在 / 不是目录 / 取值为空 → 失败（路径必须能 cd 进去取物理路径）
+rc=0; err=$(kiro_install_agent "$A" "$tmp/agents-nodir" --workspace "$tmp/does-not-exist" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--workspace 目录不存在：安装失败"
+assert_contains "$err" "does-not-exist" "--workspace 目录不存在：报错点名路径"
+assert_eq "$([[ -e "$tmp/agents-nodir" ]] && echo written || echo none)" "none" "--workspace 目录不存在：不落盘"
+: > "$tmp/a-file"
+rc=0; kiro_install_agent "$A" "$tmp/agents-file" --workspace "$WS" --chunks "$tmp/a-file" >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--chunks 指向文件而非目录：安装失败"
+rc=0; kiro_install_agent "$A" "$tmp/agents-empty" --workspace "" --chunks "$CH" >/dev/null 2>&1 || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--workspace 取值为空：安装失败"
+# 负向：未知参数 → 失败（拼错 --workspce 不能静默变成「没给」）
+rc=0; err=$(kiro_install_agent "$A" "$tmp/agents-typo" --workspce "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "未知参数：安装失败"
+assert_contains "$err" "--workspce" "未知参数：报错点名"
+
+# --- 负向：prompt 相关（传全路径参数，确保失败原因就是 prompt 本身）---
+# prompt 指向不存在的文件 → 安装失败（宁可不跑评审也不能带空提示词/默认 agent 跑）
 jq '.prompt = "file://../prompts/does-not-exist.md"' "$A" > "$tmp/bad-prompt.json"
-rc=0; err=$(kiro_install_agent "$tmp/bad-prompt.json" "$tmp/agents-bad" 2>&1 >/dev/null) || rc=$?
+rc=0; err=$(kiro_install_agent "$tmp/bad-prompt.json" "$tmp/agents-bad" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "prompt 文件缺失：安装失败"
 assert_contains "$err" "does-not-exist.md" "prompt 文件缺失：报错点名文件"
 assert_eq "$([[ -e "$tmp/agents-bad/codeup-reviewer.json" ]] && echo written || echo none)" "none" "prompt 文件缺失：不落盘半成品"
-# 负向：缺 name → 失败
+# 缺 name → 失败
 jq 'del(.name)' "$A" > "$tmp/no-name.json"
-rc=0; kiro_install_agent "$tmp/no-name.json" "$tmp/agents-noname" >/dev/null 2>&1 || rc=$?
+rc=0; kiro_install_agent "$tmp/no-name.json" "$tmp/agents-noname" --workspace "$WS" --chunks "$CH" >/dev/null 2>&1 || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "缺 name：安装失败"
-# 负向：缺 prompt → 失败（只读角色约束就在 prompt 里，缺了等于用默认系统提示词跑）
+# 缺 prompt → 失败（只读角色约束就在 prompt 里，缺了等于用默认系统提示词跑）
 jq 'del(.prompt)' "$A" > "$tmp/no-prompt.json"
-rc=0; err=$(kiro_install_agent "$tmp/no-prompt.json" "$tmp/agents-noprompt" 2>&1 >/dev/null) || rc=$?
+rc=0; err=$(kiro_install_agent "$tmp/no-prompt.json" "$tmp/agents-noprompt" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "缺 prompt：安装失败"
 assert_contains "$err" "prompt" "缺 prompt：报错点名 prompt"
 assert_eq "$([[ -e "$tmp/agents-noprompt/codeup-reviewer.json" ]] && echo written || echo none)" "none" "缺 prompt：不落盘"
-# 负向：绝对 file:// 指向不存在的文件 → 失败
+# 绝对 file:// 指向不存在的文件 → 失败
 jq '.prompt = "file:///nonexistent/dir/nope.md"' "$A" > "$tmp/abs-missing.json"
-rc=0; err=$(kiro_install_agent "$tmp/abs-missing.json" "$tmp/agents-absmissing" 2>&1 >/dev/null) || rc=$?
+rc=0; err=$(kiro_install_agent "$tmp/abs-missing.json" "$tmp/agents-absmissing" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "绝对 prompt 文件缺失：安装失败"
 assert_contains "$err" "/nonexistent/dir/nope.md" "绝对 prompt 文件缺失：报错点名文件"
 assert_eq "$([[ -e "$tmp/agents-absmissing/codeup-reviewer.json" ]] && echo written || echo none)" "none" "绝对 prompt 文件缺失：不落盘"
-# 绝对路径 prompt 原样保留
-jq --arg p "file://$ROOT/prompts/review-agent-prompt.md" '.prompt = $p' "$A" > "$tmp/abs-prompt.json"
-dest3=$(kiro_install_agent "$tmp/abs-prompt.json" "$tmp/agents-abs")
-assert_eq "$(jq -r .prompt "$dest3")" "file://$ROOT/prompts/review-agent-prompt.md" "绝对 prompt 原样保留"
-# 内联文本 prompt 原样保留
+# 绝对路径 prompt 原样保留（allowedPaths 照样注入）
+jq --arg p "$ABS_PROMPT" '.prompt = $p' "$A" > "$tmp/abs-prompt.json"
+dest3=$(kiro_install_agent "$tmp/abs-prompt.json" "$tmp/agents-abs" --workspace "$WS" --chunks "$CH")
+assert_eq "$(jq -r .prompt "$dest3")" "$ABS_PROMPT" "绝对 prompt 原样保留"
+assert_eq "$(allowed_of "$dest3" read)" "$INJECTED" "绝对 prompt 分支同样注入 allowedPaths"
+# 内联文本 prompt 原样保留（allowedPaths 照样注入）
 jq '.prompt = "你是只读评审助手。"' "$A" > "$tmp/inline-prompt.json"
-dest4=$(kiro_install_agent "$tmp/inline-prompt.json" "$tmp/agents-inline")
+dest4=$(kiro_install_agent "$tmp/inline-prompt.json" "$tmp/agents-inline" --workspace "$WS" --chunks "$CH")
 assert_eq "$(jq -r .prompt "$dest4")" "你是只读评审助手。" "内联 prompt 原样保留"
+assert_eq "$(allowed_of "$dest4" grep)" "$INJECTED" "内联 prompt 分支同样注入 allowedPaths"
 # 清理同名旧文件：常驻执行器上旧版集成包按 agent-codeup-reviewer.json 装过同名 agent
 mkdir -p "$tmp/agents-stale"
 jq '.prompt = "旧版内联提示词"' "$A" > "$tmp/agents-stale/agent-codeup-reviewer.json"
 jq '.name = "someone-else"' "$A" > "$tmp/agents-stale/other.json"
-dest5=$(kiro_install_agent "$A" "$tmp/agents-stale" 2>/dev/null)
+dest5=$(kiro_install_agent "$A" "$tmp/agents-stale" --workspace "$WS" --chunks "$CH" 2>/dev/null)
 assert_eq "$([[ -e "$tmp/agents-stale/agent-codeup-reviewer.json" ]] && echo kept || echo removed)" "removed" "同名旧 agent 文件被移除"
 assert_eq "$([[ -e "$tmp/agents-stale/other.json" ]] && echo kept || echo removed)" "kept" "不同 name 的文件不受影响"
 assert_eq "$(ls "$tmp/agents-stale" | sort | paste -sd, -)" "codeup-reviewer.json,other.json" "安装目录只剩新文件与无关文件"
+
+# --- 15-fix4 #17：setup-guide §12 写出的固定名单必须与代码 KIRO_ENV_FIXED_NAMES 逐名相等（文档漂移过一次：少了 15-fix2 补的五个名字）---
+doc_line=$(grep -m1 '^  固定名单（KIRO_ENV_FIXED_NAMES）：' "$ROOT/pipeline/setup-guide.md" || true)
+assert_eq "$([[ -n "$doc_line" ]] && echo found || echo missing)" "found" "setup-guide §12 有「固定名单（KIRO_ENV_FIXED_NAMES）：」一行"
+doc_names=$(printf '%s' "${doc_line#*：}" | tr '、' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' | sort)
+code_names=$(printf '%s\n' "${KIRO_ENV_FIXED_NAMES[@]}" | sort)
+assert_eq "$doc_names" "$code_names" "setup-guide §12 的固定名单与代码 KIRO_ENV_FIXED_NAMES 逐名相等"
+assert_eq "$(printf '%s\n' "${KIRO_ENV_FIXED_NAMES[@]}" | sort | uniq -d | wc -l | tr -d ' ')" "0" "KIRO_ENV_FIXED_NAMES 无重复名字"
+
+# --- 子进程环境许可清单 kiro_env_allowlist：**固定名单** + KIRO_ENV_PASSTHROUGH 逃生口（15-fix #11/#12）---
+# 不做形状匹配：KIRO_* / *_PROXY 会放行 CORP_SECRET_PROXY、客户自定义的 KIRO_…；额外需要的变量走 KIRO_ENV_PASSTHROUGH（只放名字）。
+LIB="$ROOT/scripts/lib/kiro-agent.sh"
+names_under() { # 在可控环境里跑 kiro_env_allowlist，输出透传的变量名（每行一个）；$@ = VAR=值
+  env -i PATH="$PATH" "$@" bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; kiro_env_allowlist_names' _ "$LIB"
+}
+env_names=$(names_under HOME="$tmp/h" USER=u TERM=dumb TMPDIR="$tmp" LANG=C.UTF-8 LANGUAGE=zh_CN LC_ALL=C LC_CTYPE=C.UTF-8 LC_MESSAGES=C LC_TIME=C \
+  KIRO_API_KEY=k KIRO_FOO=1 KIRO_LOG_NO_COLOR=0 \
+  HTTP_PROXY=http://p:1 HTTPS_PROXY=http://p:1 FTP_PROXY=http://p:1 ALL_PROXY=socks5://p:1 NO_PROXY=localhost \
+  http_proxy=http://p:1 https_proxy=http://p:1 ftp_proxy=http://p:1 all_proxy=socks5://p:1 no_proxy=localhost \
+  CORP_SECRET_PROXY=s PROXY_USER=pu SSL_CERT_FILE=/c.pem SSL_CERT_DIR=/certs CURL_CA_BUNDLE=/b.pem \
+  XDG_CONFIG_HOME=/x1 XDG_DATA_HOME=/x2 XDG_CACHE_HOME=/x3 XDG_STATE_HOME=/x4 XDG_RUNTIME_DIR=/x5 XDG_SESSION_TYPE=tty \
+  YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=o CODEUP_REPO_ID=r CODEUP_BOT_USERNAME=b AWS_SECRET_ACCESS_KEY=a GIT_ASKPASS=/g CI_COMMIT_REF_NAME=x LD_LIBRARY_PATH=/l)
+# 15-fix2 #14：ALL_PROXY/all_proxy、FTP_PROXY/ftp_proxy、XDG_RUNTIME_DIR、LC_MESSAGES、LANGUAGE 补进固定名单（A/B 实测用 ALL_PROXY 的构建机升级后评审全部在网络层失败）
+for v in PATH HOME USER TERM TMPDIR LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES KIRO_API_KEY \
+         HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy ftp_proxy all_proxy no_proxy \
+         SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR KIRO_LOG_NO_COLOR; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "1" "固定名单透传 ${v}（恰好一次）"
+done
+for v in LC_TIME KIRO_FOO CORP_SECRET_PROXY PROXY_USER XDG_SESSION_TYPE LD_LIBRARY_PATH \
+         YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID CODEUP_BOT_USERNAME AWS_SECRET_ACCESS_KEY GIT_ASKPASS CI_COMMIT_REF_NAME; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "0" "固定名单不透传 ${v}（名单之外，即使形状像 KIRO_* / *_PROXY / XDG_*）"
+done
+# 取值原样；KIRO_LOG_NO_COLOR 固定为 1（用户设成 0 也被覆盖）
+env_pairs=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_API_KEY='k=with=equals and space' KIRO_LOG_NO_COLOR=0 \
+  bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; printf "%s\n" "${KIRO_ENV_ALLOW[@]}"' _ "$LIB")
+assert_contains "$env_pairs" "KIRO_API_KEY=k=with=equals and space" "取值原样（含等号与空格）"
+assert_eq "$(printf '%s\n' "$env_pairs" | grep -c '^KIRO_LOG_NO_COLOR=')" "1" "KIRO_LOG_NO_COLOR 只出现一次"
+assert_contains "$env_pairs" "KIRO_LOG_NO_COLOR=1" "KIRO_LOG_NO_COLOR 固定为 1"
+assert_not_contains "$env_pairs" "KIRO_LOG_NO_COLOR=0" "用户设的 KIRO_LOG_NO_COLOR=0 被覆盖"
+assert_contains "$env_pairs" "HOME=$tmp/h" "HOME 原样透传（登录态与 agent 目录都靠它）"
+# 只透传已导出的变量：未导出的 shell 变量本来也到不了子进程
+seen_unexported=$(env -i PATH="$PATH" HOME="$tmp/h" bash -c 'set -euo pipefail; source "$1"; KIRO_API_KEY=notexported; kiro_env_allowlist; kiro_env_allowlist_names' _ "$LIB")
+assert_eq "$(printf '%s\n' "$seen_unexported" | grep -c -x KIRO_API_KEY)" "0" "未导出的同名 shell 变量不透传"
+# 15-fix2 #12：带额外属性的导出变量（declare -rx / -ix / -ax）也是导出——bash 3.2 上 `declare -rx TMPDIR` 曾被丢掉，
+# env -i 起 kiro 时没有 TMPDIR/PATH/HOME
+attr_pairs=$(env -i PATH="$PATH" HOME="$tmp/h" bash -c 'set -euo pipefail; declare -rx TMPDIR=/ro-tmp; declare -ix XDG_RUNTIME_DIR=7; declare -ax XDG_DATA_HOME=(/d1 /d2); declare -rx LC_ALL=C; source "$1"; kiro_env_allowlist; printf "%s\n" "${KIRO_ENV_ALLOW[@]}"' _ "$LIB")
+assert_contains "$attr_pairs" "TMPDIR=/ro-tmp" "declare -rx 的变量透传"
+assert_contains "$attr_pairs" "XDG_RUNTIME_DIR=7" "declare -ix 的变量透传"
+assert_contains "$attr_pairs" "XDG_DATA_HOME=/d1" "declare -ax 的变量透传（取首元素，与 env 看到的一致）"
+assert_contains "$attr_pairs" "LC_ALL=C" "declare -rx 的 LC_ALL 透传"
+# 正控：同一批变量若只是 declare -r（未导出）则不透传
+ro_pairs=$(env -i PATH="$PATH" HOME="$tmp/h" bash -c 'set -euo pipefail; declare -r TMPDIR=/ro-tmp; source "$1"; kiro_env_allowlist; printf "%s\n" "${KIRO_ENV_ALLOW[@]}"' _ "$LIB")
+assert_not_contains "$ro_pairs" "TMPDIR=" "declare -r（未导出）的变量不透传"
+# 真跑一次 env -i：子进程只看得到清单里的变量
+seen=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_API_KEY=k YUNXIAO_TOKEN=t KIRO_FOO=1 \
+  bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; env -i "${KIRO_ENV_ALLOW[@]}" bash -c "compgen -e" | sort' _ "$LIB")
+assert_eq "$(printf '%s\n' "$seen" | grep -c -x -- "KIRO_API_KEY")" "1" "env -i 后子进程看得到 KIRO_API_KEY"
+assert_eq "$(printf '%s\n' "$seen" | grep -c -x -- "YUNXIAO_TOKEN")" "0" "env -i 后子进程看不到 YUNXIAO_TOKEN"
+assert_eq "$(printf '%s\n' "$seen" | grep -c -x -- "KIRO_FOO")" "0" "env -i 后子进程看不到 KIRO_FOO（不在固定名单）"
+
+# --- KIRO_ENV_PASSTHROUGH：逗号分隔的变量名，只放名字不放值 ---
+pt_names=$(names_under HOME="$tmp/h" KIRO_FOO=1 LD_LIBRARY_PATH=/opt/lib JAVA_HOME=/jdk YUNXIAO_TOKEN=t \
+  KIRO_ENV_PASSTHROUGH=' KIRO_FOO, LD_LIBRARY_PATH ,,JAVA_HOME,NOT_SET_ANYWHERE,')
+for v in KIRO_FOO LD_LIBRARY_PATH JAVA_HOME; do
+  assert_eq "$(printf '%s\n' "$pt_names" | grep -c -x -- "$v")" "1" "KIRO_ENV_PASSTHROUGH 透传 ${v}（空白与空项被忽略）"
+done
+assert_eq "$(printf '%s\n' "$pt_names" | grep -c -x -- "NOT_SET_ANYWHERE")" "0" "KIRO_ENV_PASSTHROUGH 里未设置的名字：跳过、不报错"
+assert_eq "$(printf '%s\n' "$pt_names" | grep -c -x -- "YUNXIAO_TOKEN")" "0" "KIRO_ENV_PASSTHROUGH 不影响名单外的其它变量"
+assert_eq "$(printf '%s\n' "$pt_names" | grep -c -x -- "KIRO_ENV_PASSTHROUGH")" "0" "KIRO_ENV_PASSTHROUGH 自己不透传"
+# 名字重复（固定名单里已有 / 列了两次）→ 只透传一次
+dup_names=$(names_under HOME="$tmp/h" TMPDIR="$tmp" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH='TMPDIR,KIRO_FOO,KIRO_FOO')
+assert_eq "$(printf '%s\n' "$dup_names" | grep -c -x -- "TMPDIR")" "1" "与固定名单重复的名字只透传一次"
+assert_eq "$(printf '%s\n' "$dup_names" | grep -c -x -- "KIRO_FOO")" "1" "列两次的名字只透传一次"
+# 非法名字 → 返回非零并点名；KIRO_ENV_ALLOW_ERROR 带同一段文案（执行器的 die_review 用它，文案只有一处）
+for bad in 'KIRO_FOO=1' 'bad-name' '1ABC' 'A B' 'KIRO_FOO,$HOME'; do
+  rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH="KIRO_FOO,${bad}" \
+    bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
+  assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含非法名字 [${bad}]：返回非零"
+  assert_contains "$err" "非法变量名" "KIRO_ENV_PASSTHROUGH 含非法名字 [${bad}]：报错说明"
+done
+err_var=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH='bad-name' bash -c 'source "$1"; kiro_env_allowlist 2>/dev/null; printf "%s" "$KIRO_ENV_ALLOW_ERROR"' _ "$LIB")
+assert_contains "$err_var" "非法变量名" "KIRO_ENV_ALLOW_ERROR 带失败原因（供 die_review 使用）"
+# 15-fix2 #17 / 15-fix3 #6 / 15-fix4 #4 补：语法错误分支打**完整标识符** + ****（`LD_LIBRARY_PATH=/opt/lib` 是手误不是秘密），只隐藏 = 后面的取值；
+# 掩到首段只在凭证形状分支。`ghp-liveSecret123` 的标识符段只有 ghp，连字符后面的部分不进报错
+for pair in 'KIRO_FOO=s3cr3t|KIRO_FOO****|s3cr3t' 'LD_LIBRARY_PATH=/opt/lib|LD_LIBRARY_PATH****|/opt/lib' 'ghp-liveSecret123|ghp****|liveSecret' '1ABC|****|1ABC' 'A B|A****|A B' "$(fake_token svc)=zz|$(fake_token svc)****|=zz"; do
+  IFS='|' read -r tok want leak <<<"$pair"   # G8：一次拆三列
+  rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH="$tok" bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
+  assert_contains "$err" "$want" "非法 token [${tok}]：掩码为 ${want}"
+  assert_not_contains "${err#*非法变量名：}" "$leak" "非法 token [${tok}]：原文 ${leak} 不进报错"
+done
+# 令牌形态的假字面量由 helpers.sh 的 fake_token 片段拼出（15-fix4 #9）：仓库是公开的，密钥扫描器会把 ghp_<36 位> 这类完整形态当真令牌
+# 15-fix2 #13 / 15-fix3 #6 / 15-fix4 #4：凭证形状的名字（语法合法）也拒绝——规则表 KIRO_ENV_CRED_RULES：YUNXIAO_* / CODEUP_* / AWS_* /
+# *TOKEN* / *SECRET* / *PASSWORD* / *CREDENTIAL* / *_KEY / *_PAT / *_PAT_* / DCKR_PAT_*，加令牌前缀 GHP_* / GHO_* / GITHUB_PAT_* / AKIA* / ASIA*，
+# 大小写不敏感；被拒名字**掩码**（首段 + ****）——`svc_SECRET_9f3ab21c7de4` 这种合法标识符形态的密钥会进 MR 失败评论。
+# 第三列 = 期望命中的规则名（评论里「第 N 项 掩码（命中 规则）」）。XOX* 已删（真实 Slack 令牌带连字符，先被语法规则拒）。
+for pair in 'YUNXIAO_TOKEN|YUNXIAO****|YUNXIAO_*' 'yunxiao_org_id|yunxiao****|YUNXIAO_*' 'CODEUP_REPO_ID|CODEUP****|CODEUP_*' 'AWS_SECRET_ACCESS_KEY|AWS****|AWS_*' \
+            'AWS_ACCESS_KEY_ID|AWS****|AWS_*' 'AWS_SESSION_TOKEN|AWS****|AWS_*' 'aws_foo|aws****|AWS_*' \
+            'GITHUB_TOKEN|GITHUB****|*TOKEN*' 'MY_SECRET|MY****|*SECRET*' 'DB_PASSWORD|DB****|*PASSWORD*' 'GCP_CREDENTIALS|GCP****|*CREDENTIAL*' 'SIGNING_KEY|SIGNING****|*_KEY' 'KIRO_API_KEY|KIRO****|*_KEY' \
+            "$(fake_token svc)|svc****|*SECRET*" '_FOO_SECRET|_FOO****|*SECRET*' \
+            'MY_PAT|MY****|*_PAT' 'MY_PAT_2|MY****|*_PAT_*' 'DCKR_PAT_abc|DCKR****|DCKR_PAT_*' 'dckr_pat_xyz|dckr****|DCKR_PAT_*' \
+            "$(fake_token ghp)|ghp****|GHP_*" "$(fake_token gho)|gho****|GHO_*" "$(fake_token ghpat)|github****|GITHUB_PAT_*" \
+            "$(fake_token akia)|AKIA****|AKIA*" "$(fake_token asia)|ASIA****|ASIA*"; do
+  IFS='|' read -r cn want_mask want_rule <<<"$pair"   # G8：一次拆三列
+  rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH="KIRO_FOO,${cn}" \
+    bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
+  assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：返回非零"
+  assert_contains "$err" "凭证形状" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：报错说明"
+  err_var=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH="KIRO_FOO,${cn}" bash -c 'source "$1"; kiro_env_allowlist 2>/dev/null; printf "%s" "$KIRO_ENV_ALLOW_ERROR"' _ "$LIB")
+  assert_contains "$err_var" "第 2 项 ${want_mask}（命中 ${want_rule}）" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：MR 文案按「第 N 项 掩码（命中 规则）」列出"
+  assert_not_contains "${err_var#*拒绝透传：}" "$cn" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：原名不进 MR 文案"
+  # 流水线日志（stderr）：名字类规则给完整名字 + 规则；令牌前缀类规则（GHP_*/GHO_*/GITHUB_PAT_*/AKIA*/ASIA*）像贴了真令牌，日志也只留掩码
+  case "$want_rule" in
+    GHP_\*|GHO_\*|GITHUB_PAT_\*|AKIA\*|ASIA\*)
+      assert_not_contains "${err#*拒绝透传：}" "$cn" "KIRO_ENV_PASSTHROUGH 含令牌前缀名字 [${cn}]：日志里也只留掩码（像贴了真令牌）"
+      assert_contains "$err" "第 2 项 ${want_mask}（命中 ${want_rule}" "KIRO_ENV_PASSTHROUGH 含令牌前缀名字 [${cn}]：日志按序号 + 掩码 + 规则" ;;
+    *)
+      assert_contains "$err" "第 2 项 ${cn}（命中 ${want_rule}）" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：流水线日志给完整名字 + 命中规则（运维自己写的配置，不是模型文本）" ;;
+  esac
+done
+# 15-fix4 #4：显式放行的 AWS 配置名（不是凭证）照常透传；AWS_* 其余仍拒（上面已覆盖）
+aws_ok=$(names_under HOME="$tmp/h" AWS_PROFILE=p AWS_REGION=r AWS_DEFAULT_REGION=d KIRO_ENV_PASSTHROUGH='AWS_PROFILE,AWS_REGION,AWS_DEFAULT_REGION')
+for v in AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION; do
+  assert_eq "$(printf '%s\n' "$aws_ok" | grep -c -x -- "$v")" "1" "KIRO_ENV_PASSTHROUGH 显式放行 ${v}（配置不是凭证）"
+done
+# 多个被拒条目：序号按运维写的顺序（放行的条目也占序号），同首段的两个 AWS_* 靠序号与规则分得开（A8）
+multi_err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH='AWS_PROFILE,AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY ,JAVA_HOME,_FOO_SECRET' bash -c 'source "$1"; kiro_env_allowlist 2>/dev/null; printf "%s" "$KIRO_ENV_ALLOW_ERROR"' _ "$LIB")
+assert_contains "$multi_err" "第 2 项 AWS****（命中 AWS_*）、第 3 项 AWS****（命中 AWS_*）、第 5 项 _FOO****（命中 *SECRET*）" "多个被拒条目：按序号列出、以 _ 开头的名字掩码保留前 4 个字符"
+assert_not_contains "$multi_err" "第 1 项" "多个被拒条目：放行的 AWS_PROFILE 不在列表里（但占序号）"
+assert_not_contains "$multi_err" "第 4 项" "多个被拒条目：合法的 JAVA_HOME 不在列表里"
+# XOX* 规则已删：xoxb_ 形态的合法标识符现在照常透传（真实 Slack 令牌 xoxb-… 带连字符，被语法规则拒，见上面非法名字用例）
+xox_ok=$(names_under HOME="$tmp/h" "$(fake_token xoxb)=1" KIRO_ENV_PASSTHROUGH="$(fake_token xoxb)")
+assert_eq "$(printf '%s\n' "$xox_ok" | grep -c -x -- "$(fake_token xoxb)")" "1" "XOX* 规则已删：xoxb_ 形态的合法标识符照常透传"
+# 正控：形状相近但不命中的名字照常透传（KEYBOARD 不是 *_KEY；TOKENIZER 命中 *TOKEN*——它就该被拒）
+ok_names=$(names_under HOME="$tmp/h" KEYBOARD=1 MONKEY_PATCH=1 KIRO_ENV_PASSTHROUGH='KEYBOARD,MONKEY_PATCH')
+assert_eq "$(printf '%s\n' "$ok_names" | grep -c -x KEYBOARD)" "1" "KEYBOARD 不命中 *_KEY：正常透传"
+assert_eq "$(printf '%s\n' "$ok_names" | grep -c -x MONKEY_PATCH)" "1" "MONKEY_PATCH 不命中：正常透传"
+# 空值 / 只有空白 → 等于没配
+empty_names=$(names_under HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH='  ')
+assert_eq "$(printf '%s\n' "$empty_names" | grep -c -x -- "KIRO_FOO")" "0" "KIRO_ENV_PASSTHROUGH 只有空白：等于没配"
+
+# --- 日志用的变量名列表：按数组元素取 %%=*，不按行切（15-fix #7：取值含换行时半个取值会进日志）---
+nl_names=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_API_KEY="$(printf 'k\nSECRETFRAG=leaked')" \
+  bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; kiro_env_allowlist_names' _ "$LIB")
+assert_eq "$(printf '%s\n' "$nl_names" | grep -c -x -- "KIRO_API_KEY")" "1" "取值含换行：名字列表里有 KIRO_API_KEY"
+assert_not_contains "$nl_names" "SECRETFRAG" "取值含换行：换行后的半个取值不进名字列表"
+# 正控：旧写法（按行 cut）确实会把半个取值当成名字放出来——证明上面这条断言测得到东西
+nl_old=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_API_KEY="$(printf 'k\nSECRETFRAG=leaked')" \
+  bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; printf "%s\n" "${KIRO_ENV_ALLOW[@]}" | cut -d= -f1' _ "$LIB")
+assert_contains "$nl_old" "SECRETFRAG" "正控：按行 cut 的旧写法会泄出换行后的半个取值"
+
+# --- kiro_cli_version（15-fix4 #7 / A6）：stdout 与 stderr 分开捕获、按程序名锚定、退出码单独返回；执行器与探测脚本共用 ---
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.1')" "2.21.1" "版本提取：kiro-cli 2.21.1"
+assert_eq "$(_kiro_cli_version_pick $'warn: A new version (2.30.0) of kiro-cli is available (installed 2.21.1).\nkiro-cli 2.21.1')" "2.21.1" "版本提取：升级提示里的 2.30.0 不算，锚定 kiro-cli 后面的数字"
+assert_eq "$(_kiro_cli_version_pick 'A new version (2.30.0) of kiro-cli is available')" "" "版本提取：只有升级提示、没有「kiro-cli <版本>」→ 空"
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli   2.21')" "2.21" "版本提取：多个空白、两段版本号"
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli version 2.21.1')" "" "版本提取：kiro-cli 与数字之间夹了别的词 → 不认（形态未知就当未知，宁可 notice）"
+assert_eq "$(_kiro_cli_version_pick 'mykiro-cli 9.9.9 kiro-cli 2.21.1')" "2.21.1" "版本提取：程序名前面粘着字母的不算"
+assert_eq "$(_kiro_cli_version_pick '')" "" "版本提取：空输入 → 空"
+# 真跑一次替身：stderr 先打升级提示 → 取已装版本；stderr 也打版本 → 回退到 stderr；退出码非零 → 返回 1 且带退出码
+mkdir -p "$tmp/vh/.kiro-mock"; mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_WARN=1
+TB=""; command -v timeout >/dev/null && TB=timeout; [[ -z "$TB" ]] && command -v gtimeout >/dev/null && TB=gtimeout
+ver_run() { env -i PATH="$ROOT/tests/mockbin:$PATH" HOME="$tmp/vh" bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist; kiro_cli_version "$3" "$2"; rc=$?; printf "rc=%s ver=[%s] err=[%s]" "$rc" "$KIRO_CLI_VERSION" "$KIRO_CLI_VERSION_ERROR"' _ "$LIB" "$tmp" "$TB" 2>/dev/null; }
+if command -v timeout >/dev/null || command -v gtimeout >/dev/null; then
+  assert_eq "$(ver_run)" "rc=0 ver=[2.21.1] err=[]" "kiro_cli_version：替身 stderr 先打升级提示 → 取到已装 2.21.1、无错误"
+  mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_STDERR=1 MOCK_KIRO_VERSION=3.0.0
+  assert_eq "$(ver_run)" "rc=0 ver=[3.0.0] err=[]" "kiro_cli_version：stdout 空、版本在 stderr → 回退到 stderr 取到 3.0.0"
+  mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_WARN=1 MOCK_KIRO_VERSION_STDERR=1
+  assert_eq "$(ver_run)" "rc=0 ver=[2.21.1] err=[]" "kiro_cli_version：升级提示与版本都在 stderr → 锚定程序名仍取 2.21.1"
+  mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_RC=127
+  ver_out=$(ver_run)
+  assert_contains "$ver_out" "rc=1 ver=[]" "kiro_cli_version：--version 退出 127 → 返回 1、版本为空"
+  assert_contains "$ver_out" "退出码 127" "kiro_cli_version：错误文案带退出码"
+else
+  echo "INFO: 本机无 timeout/gtimeout，跳过 kiro_cli_version 的替身用例" >&2
+fi
 
 # --- 真实 kiro-cli（若本机有）：集成包内与安装后的定义都通过 agent validate ---
 # 注意：kiro-cli 2.21 的 agent validate 无论结果如何都 exit 0，错误只打印在输出里（实测），所以看输出而不是退出码，

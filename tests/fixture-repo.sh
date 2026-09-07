@@ -30,3 +30,13 @@ make_fixture_repo() {
     git add -A && git commit -qam "add secret and untrusted injection files" && git push -q origin feature/x
   )
 }
+
+# .kiro 大小写 / 类型变体（15-fix3 #1 #2 / 15-fix4 #10）：在 <目录>/work（cwd）里把 fixture 改造成三种变体并提交——端到端 kirocase 用例与
+# 变异 M5t / M5u 都用这一份夹具；以前两处各写一份、变异那份少了 src/x/.KIRO，M5t / M5u 声称的「端到端断言会失败」跑在更小的树上。
+# 大小写变体各放在**不同目录**里：macOS APFS 默认大小写不敏感，同一目录下 .Kiro 与 .kiro 是同一个条目。
+make_kiro_case_variants() {   # 在 fixture 工作克隆根目录下调用
+  rm -rf .kiro && printf 'plain file named .kiro\n' > .kiro            # 根 .kiro 是普通文件
+  mkdir -p src/.Kiro/settings && echo '{"chat.disableInheritingDefaultResources": false}' > src/.Kiro/settings/cli.json
+  mkdir -p src/x && echo x > src/x/.KIRO                                 # 子目录里大写的普通文件
+  git add -A && git commit -qm "kiro case variants"
+}

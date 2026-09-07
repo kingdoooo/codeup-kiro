@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # 极简断言库。失败即打印并退出非零。
+# 规则（15-fix4 #8）：**辅助函数不得把捕获的大字符串管进可能提前停读的程序**（grep -q、head、sed …q 之类）——下游一停读，上游 printf 就收
+# SIGPIPE/EPIPE，测试文件都开了 pipefail，整个文件以 141 静默退出、连 FAIL 行都没有（assert_contains 与 meta_row 都踩过）。
+# 需要「第一条」就让 awk 读完再挑（见 meta_row）；子串判断用 bash 的 [[ == *x* ]]。test-kiro-review.sh 里有一条静态断言守着本文件。
 TESTS_PASSED=0
 
 assert_eq() {  # 实际值 期望值 说明
@@ -11,11 +14,11 @@ assert_eq() {  # 实际值 期望值 说明
   fi
 }
 
-# 不用 grep -q：-q 在第一处命中就退出，pipefail 下还没写完的 printf 会被 SIGPIPE 杀掉（rc 141）、整条管道判失败——
-# 内容一大、机器一忙就随机出现「明明有子串却报未找到」的假阴性（2026-09-06/07 两次全套在负载 40+ 时各踩到一次）。
-# 让 grep 读完全部输入（输出丢弃）即可，语义不变。
+# 子串断言用 bash 自己的 [[ == *"$sub"* ]]（逐字节、多行同样适用），**不走 printf | grep -qF**：grep -q 命中即退出，
+# 内容较长时 printf 会收到 EPIPE，测试文件都开了 pipefail，于是管道整体非零——明明包含却报 FAIL
+# （2026-09-07 全套与别的会话并发运行时实测复现：「渲染：统计行注明已标注到行的条数」内容里明明有那一行）。
 assert_contains() {  # 内容 子串 说明
-  if printf '%s' "$1" | grep -F -- "$2" >/dev/null; then
+  if [[ "$1" == *"$2"* ]]; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
   else
     echo "FAIL: $3 — 未找到子串 [$2]，内容: [$1]" >&2
@@ -24,7 +27,13 @@ assert_contains() {  # 内容 子串 说明
 }
 
 assert_not_contains() {  # 内容 子串 说明
-  if printf '%s' "$1" | grep -F -- "$2" >/dev/null; then
+  # 多行 needle 对否定断言是**放宽**（15-fix4 #8 / B8）：以前按行 OR 匹配、任一行出现即命中，改成连续子串后一条多行密钥泄漏断言会因折行变化而假通过。
+  # 直接拒绝，fail loudly：请逐行断言。
+  if [[ "$2" == *$'\n'* ]]; then
+    echo "FAIL: $3 — 否定断言不接受多行 needle，请逐行断言" >&2
+    exit 1
+  fi
+  if [[ "$1" == *"$2"* ]]; then
     echo "FAIL: $3 — 不应出现子串 [$2]" >&2
     exit 1
   else
@@ -80,10 +89,63 @@ inline_bodies() {
 # 所以实现只能有一份——提取管道一变，两处拷贝里没改的那一处会静静地返回空串，
 # 然后以「过滤失效」的名义失败，把维护者引向错误的方向（与 req_count/inline_bodies 同一理由）。
 # 没匹配到时返回空串而不是让调用方在 pipefail 下直接中止（调用方要能打出自己的诊断）。
-meta_row() { printf '%s\n' "$1" | { grep -F '| `' || true; } | { grep -F ' → ' || true; } | head -1; }
+# 用 awk 读完全部输入再只打第一条：`… | head -1` 会在第一行后关管道，上游 printf 收 SIGPIPE → pipefail 下 141 静默退出（15-fix4 #8 / E6）
+meta_row() { printf '%s\n' "$1" | awk 'index($0, "| `") && index($0, " → ") && !done { print; done = 1 }'; }
+
+# 假令牌由片段拼出（15-fix4 #9）：仓库是公开的，密钥扫描器会把 ghp_<36 位> 这类完整形态当真令牌——单测、端到端与替身都从这里取，片段只写一处。
+# 用法：fake_token ghp|gho|ghpat|akia|asia|pem1|pem2|svc|xoxb
+fake_token() {
+  local body="ABCDEFGHIJKLMNOPQRSTUVWXYZ""abcdefghij"
+  case "$1" in
+    ghp)   printf 'ghp_%s' "$body" ;;
+    gho)   printf 'gho_%s' "$body" ;;
+    ghpat) printf 'github_pat_%s' "11ABCDEFG_abcdef" ;;
+    akia)  printf 'AKIA%s%s' "IOSFODNN7" "EXAMPLE" ;;
+    asia)  printf 'ASIA%s%s' "IOSFODNN7" "EXAMPLE" ;;
+    pem1)  printf '%s%s' "MIIEowIBAAKCAQEA" "fakekey0123456" ;;
+    pem2)  printf '%s%s' "MIIEvQIBADANBgkqhkiG9w0BAQEF" "AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4" ;;   # 尾巴像随机 base64（16-fix4 第 26 条：块外判定看类别切换率，原 fake02 只有 0.28）
+    svc)   printf 'svc_SECRET_%s' "9f3ab21c7de4" ;;        # 合法标识符形态、本身像密钥的名字
+    xoxb)  printf 'xoxb_%s_%s' "123456" "abcdef" ;;         # 下划线形态（真实 Slack 令牌带连字符）
+    *) echo "fake_token: 未知类型 [$1]" >&2; return 2 ;;
+  esac
+}
 
 # 端到端 fixture 里机器人账号的用户名（取自 spec §4.7.1 P1-00 实测值）
 TEST_BOT_USERNAME='aliyun:kingdooo_hvFXC'
+
+# ---- 替身 kiro-cli 的配置通道（15-fix #14 / 15-fix2 #19）----
+# 生产脚本以 env -i + 许可清单启动 kiro-cli，MOCK_* 环境变量到不了替身。替身只从 **$HOME/.kiro-mock/** 取配置与写记录：
+# HOME 在固定名单里（真实 kiro-cli 的登录态与 agent 目录也靠它），每个用例都有自己的 $CASE/home，所以不需要借道
+# KIRO_ENV_PASSTHROUGH——那是一个安全控制，端到端与变异测试不该与它耦合（收紧它就全红）；passthrough/badpass 是仅有的逃生口用例。
+# 目录下：mock.env  行为开关，每行 MOCK_X=值（由 mock_config_write 写、mock_config_load 读——解析与写入只有这一份）
+#         args stdin settings cwdscan calls helpcwd env env-help env-settings allowscan nonce   替身的记录文件（固定名字）
+# 拿不到该目录时替身**非零退出（97）并报错**：漏配要变成红测试，而不是「记不了 args 于是『Kiro 未启动』恒真」。
+mock_dir_of_home() { printf '%s/.kiro-mock' "$1"; }
+mock_config_write() { # <HOME 目录> [MOCK_X=值 ...]（非 MOCK_ 开头的参数忽略，便于把 run_case 的 "$@" 原样传进来）
+  local dir; dir=$(mock_dir_of_home "$1"); shift
+  local a
+  mkdir -p "$dir"; : > "$dir/mock.env"
+  for a in "$@"; do [[ "$a" == MOCK_* ]] && printf '%s\n' "$a" >> "$dir/mock.env"; done
+  return 0
+}
+mock_config_load() { # <HOME 目录>：把 .kiro-mock/mock.env 里的 MOCK_X=值 导出到当前 shell（同名后者覆盖前者，与 env 的语义一致）
+  local dir line n v; dir=$(mock_dir_of_home "$1")
+  [[ -r "$dir/mock.env" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^(MOCK_[A-Z0-9_]+)=(.*)$ ]] || continue
+    n="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
+    export "$n=$v"
+  done < "$dir/mock.env"
+}
+
+# ---- 注入面扫描（15-fix2 #23 / 15-fix4 #6）：**转调**生产 scripts/lib/isolation.sh 的单一发射器 review_isolation_scan，谓词只有一份 ----
+# 在 cwd（业务库根）执行，每行一个相对路径（去掉 class 列、NUL 换成换行；路径含换行的会拆成两行——只用于替身 cwdscan 与端到端
+# leftovers() 这类「有没有残留」的断言，集合相等的断言直接比 NUL 清单）。以前这里是第二份 find 表达式，本票内就与生产分叉过一次。
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../scripts/lib/isolation.sh"
+injection_surface_scan() {
+  review_isolation_scan | tr '\0' '\n' | cut -f2-
+  return 0
+}
 
 report() { echo "OK: ${TESTS_PASSED} 个断言通过（$0）"; }
 

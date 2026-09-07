@@ -52,6 +52,24 @@ assert_contains "$(cat "$del_chunk")" "-line1" "big: 删除内容可读"
 # 含空格路径正常处理
 assert_contains "$(cat "$tmp/out2.diff")$omitted" "conf file.yaml" "big: 含空格路径被处理"
 
+# --- 超限 + 通过符号链接给出的 chunk 目录：清单里的 chunk 路径必须是**物理路径**（票 15）---
+# 执行器把 $WORK/chunks 的物理路径注入受信 agent 的 allowedPaths（探测 P1-15 T1 只验证过「按物理路径读」可读）；
+# 索引里喂给模型的 chunk 路径若是逻辑路径（macOS 的 /var/folders → /private/var/folders，或 TMPDIR 本身是符号链接），
+# 模型按索引去读时路径形态与 allowedPaths 不一致——kiro-cli 是否会先解析符号链接再比对未经实测，不能依赖它。
+mkdir -p "$tmp/real-chunks-dir"; ln -s "$tmp/real-chunks-dir" "$tmp/chunks-link"
+rc=0
+DIFF_SIZE_LIMIT=120 build_review_input "$BASE" "$HEAD_SHA" "$tmp/out2s.diff" "$tmp/omitted2s.txt" "$tmp/chunks-link" || rc=$?
+assert_rc "$rc" 10 "symlink chunk dir: 返回 10（已截断）"
+chunks_phys=$(cd "$tmp/real-chunks-dir" && pwd -P)
+assert_eq "$(jq -r '.chunk | sub("/[^/]*$"; "")' "$tmp/omitted2s.txt" | sort -u)" "$chunks_phys" \
+  "symlink chunk dir: 清单里每条 chunk 的目录都是物理路径（与执行器注入 allowedPaths 的形态一致）"
+assert_eq "$(jq -r '.chunk | test("chunks-link")' "$tmp/omitted2s.txt" | sort -u)" "false" "symlink chunk dir: 清单里不出现符号链接形态的路径"
+while IFS= read -r line; do
+  chunk_path=$(printf '%s' "$line" | jq -r .chunk)
+  [[ -s "$chunk_path" ]] || { echo "FAIL: symlink chunk dir: chunk 不存在 $chunk_path" >&2; exit 1; }
+done < "$tmp/omitted2s.txt"
+TESTS_PASSED=$((TESTS_PASSED + 1))
+
 # --- 超限 + 相对 chunk 目录：省略清单必须给出绝对路径 ---
 cd "$tmp/repo"
 rc=0
@@ -143,11 +161,12 @@ rc=0
 DIFF_SIZE_LIMIT=50 build_review_input "$INJ_BASE" "$INJ_HEAD" "$tmp/out6.diff" "$tmp/omitted6.txt" "$tmp/chunks6" || rc=$?
 assert_rc "$rc" 10 "inject: 返回 10（已截断）"
 assert_not_contains "$(cat "$tmp/out6.diff")" "FAKE-SENTINEL" "inject: chunk 目录外的文件不得进入直传 diff"
-# 清单里每条的 chunk 都在 chunk 目录内且非空
+# 清单里每条的 chunk 都在 chunk 目录内且非空（chunk 路径是物理路径，比较基准同样取 pwd -P）
+chunks6_p=$(cd "$tmp/chunks6" && pwd -P)
 while IFS= read -r line; do
   chunk_path=$(printf '%s' "$line" | jq -r .chunk)
   case "$chunk_path" in
-    "$tmp/chunks6"/*) ;;
+    "$chunks6_p"/*) ;;
     *) echo "FAIL: inject: 清单 chunk 路径不在 chunk 目录内 [$chunk_path]" >&2; exit 1 ;;
   esac
   [[ -s "$chunk_path" ]] || { echo "FAIL: inject: chunk 不存在 $chunk_path" >&2; exit 1; }

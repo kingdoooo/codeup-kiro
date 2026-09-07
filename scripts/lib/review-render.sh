@@ -1262,16 +1262,19 @@ _review_verdict_cn() {
   esac
 }
 
-# --- 内部：参数解析（两个渲染函数共用）---
+# --- 内部：参数解析（三个渲染函数共用）---
 # 解析结果写入 _RR_* 变量；未知参数或缺值 → rc 2（拼错参数不能静默按默认值渲染）。
+# _RR_GIVEN 记下实际给出的参数名（15-fix4 #3）：三个渲染器各自只实现声明集的一个子集，合法却不渲染的参数（例如给汇总传 --log-hint）
+# 与拼错一样不能静默——每个渲染器用 _review_render_args_only 对自己不渲染的参数返回 rc 2。
 _review_parse_render_args() {
   _RR_JSON=""; _RR_TEXT=""; _RR_SHA=""; _RR_SRC=""; _RR_DST=""; _RR_TS=""
   _RR_DIFF_NOTE=""; _RR_RUN=1; _RR_INLINE=0; _RR_REASON=""; _RR_HISTORY=""; _RR_LOG_HINT=""
-  _RR_NOTICE=""
+  _RR_NOTICE=""; _RR_GIVEN=" "
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --json|--text|--sha|--src|--dst|--ts|--diff-note|--run|--inline-comment|--reason|--history|--log-hint|--notice)
         [[ $# -ge 2 ]] || { echo "review 渲染：参数 $1 缺少取值" >&2; return 2; }
+        _RR_GIVEN+="${1#--} "
         case "$1" in
           --json) _RR_JSON="$2" ;;
           --text) _RR_TEXT="$2" ;;
@@ -1299,6 +1302,34 @@ _review_parse_render_args() {
   # --history 拼错路径不能静默按「无历史」渲染：那会把历次表悄悄清空，而评论上看不出异常
   [[ -z "$_RR_HISTORY" || -r "$_RR_HISTORY" ]] \
     || { echo "review 渲染：--history 指定的历史文件不可读：${_RR_HISTORY}" >&2; return 2; }
+}
+
+# --- 内部：渲染器只接受自己会渲染的参数（15-fix4 #3）---
+# 用法：_review_render_args_only <渲染器名> <参数名…>（不带 --）。_RR_GIVEN 里出现了不在列表里的名字 → rc 2 固定文案。
+# 解析器 1102 行「拼错参数不能静默按默认值渲染」的对偶：合法却被忽略的参数同样不能静默——那会让调用方以为 notice / 日志线索已经上了评论。
+_review_render_args_only() {
+  local who="$1" given name ok; shift
+  for given in $_RR_GIVEN; do
+    ok=0; for name in "$@"; do [[ "$given" == "$name" ]] && { ok=1; break; }; done
+    [[ "$ok" == "1" ]] || { echo "${who}: 不渲染参数 --${given}（声明了却不会出现在评论里，拒绝静默忽略）" >&2; return 2; }
+  done
+  return 0
+}
+# --- 内部：一句话 notice 的引用块（三个渲染器共用，15-fix4 #3）---
+# 取值由脚本自己拼（可能带 HTTP 状态码、kiro-cli 版本号之类），仍过一遍结构清洗：评论的结构只能来自渲染器。空取值不输出任何东西。
+_review_render_notice() {
+  [[ -n "$_RR_NOTICE" ]] || return 0
+  echo ""
+  printf '> ⚠️ '
+  printf '%s' "$_RR_NOTICE" | review_sanitize_md
+  echo ""
+}
+# --- 内部：日志线索一句话（失败评论用；抽成函数与 notice 同一约定）---
+_review_render_log_hint() {
+  [[ -n "$_RR_LOG_HINT" ]] || return 0
+  echo ""
+  printf '%s' "$_RR_LOG_HINT" | review_sanitize_md
+  echo ""
 }
 
 # --- 内部：追加后的历次记录必须是合法 JSON 数组 ---
@@ -1584,6 +1615,7 @@ _review_render_folded() {
 #   INLINE_COMMENT=0 渲染并带上原因——阿里云侧开发者看不到流水线日志（I10 失败可见）。
 review_render_summary() {
   _review_parse_render_args "$@" || return $?
+  _review_render_args_only review_render_summary json sha src dst ts diff-note run inline-comment history notice || return $?
   [[ -n "$_RR_JSON" ]] || { echo "review_render_summary: 缺少必填参数 --json" >&2; return 2; }
   [[ -r "$_RR_JSON" ]] || { echo "review_render_summary: 契约 JSON 不可读：${_RR_JSON}" >&2; return 2; }
   if [[ "$_RR_INLINE" != "0" && "$_RR_INLINE" != "1" ]]; then
@@ -1678,13 +1710,7 @@ review_render_summary() {
   [[ "$overflow" -gt 0 ]] && stat="${stat}（另有 ${overflow} 条超出展示上限）"
   [[ "$delocated" -gt 0 ]] && stat="${stat}（${delocated} 条的文件路径不合规，已按未定位处理）"
   echo "$stat"
-  if [[ -n "$_RR_NOTICE" ]]; then
-    echo ""
-    # 取值由脚本自己拼（可能带 HTTP 状态码之类），仍过一遍结构清洗：评论的结构只能来自渲染器
-    printf '> ⚠️ '
-    printf '%s' "$_RR_NOTICE" | review_sanitize_md
-    echo ""
-  fi
+  _review_render_notice
 
   # 重点关注文件：按 P0→P1→P2 计数降序、同计数按路径升序，最多 10 行；无可归属文件时整节省略。
   if [[ "$(jq -r '[.findings[] | select(.file != null)] | length' "$_RR_JSON")" -gt 0 ]]; then
@@ -2355,6 +2381,7 @@ review_redact_file() {
 # 同一 fail-closed 契约，绝不能让一份未掩码或半截的原文以「渲染成功」的样子发出去（第 13 条）。
 review_render_degraded() {
   _review_parse_render_args "$@" || return $?
+  _review_render_args_only review_render_degraded text sha src dst ts diff-note run reason history notice || return $?
   [[ -n "$_RR_TEXT" ]] || { echo "review_render_degraded: 缺少必填参数 --text" >&2; return 2; }
   [[ -r "$_RR_TEXT" ]] || { echo "review_render_degraded: 原文文件不可读：${_RR_TEXT}" >&2; return 2; }
   local hist masked
@@ -2374,6 +2401,8 @@ review_render_degraded() {
   echo "> HTML 注释降级为普通文本——评论的结构只能来自脚本，否则原文里可以伪造标题与评审标记）。"
   # 「怎么重新评审」与页脚同一份取值：两处写死同一句话时，换档位只改一处会留下另一处的假承诺
   echo "> 结构化输出通常在下一次评审就能恢复——$(_review_rerun_hint)。"
+  # 调用方的一句话 notice（如 kiro-cli 版本未经探测）：与汇总评论同一个渲染函数，降级路径不能把它丢掉（15-fix3 #3）
+  _review_render_notice
   echo ""
   echo "---"
   echo ""
@@ -2388,7 +2417,8 @@ review_render_degraded() {
 
 # --- 失败评论：评审没跑完时唯一能到达 MR 的信息通道（spec I10 失败可见）---
 # 用法：review_render_failure --reason <失败说明> --sha X --src A --dst B --ts T --diff-note N
-#                            [--run N] [--history <历史 JSON 文件>] [--log-hint <一句话>]
+#                            [--run N] [--history <历史 JSON 文件>] [--log-hint <一句话>] [--notice <一句话>]
+# --notice（15-fix4 #3）：与汇总 / 降级评论同一个渲染函数——kiro-cli 非零退出时 MR 上只剩这条评论，「未探测版本」的告警恰在最需要它的路径上不能丢
 # 与成功/降级评论**同形**：标题、评审标记、历史标记、元信息表、历次表、页脚全部出自同一份代码。
 # 早先这段是在 kiro-review.sh 里手写第二份的，结果是「形态一致」这个不变量靠人肉维护，
 # 而给两个渲染函数加的历次记录守卫漏掉了第三份拷贝。
@@ -2397,6 +2427,7 @@ review_render_degraded() {
 # --reason 里可能带上 runFinished.status 之类来自事件流的取值（不受信），所以过一遍结构清洗。
 review_render_failure() {
   _review_parse_render_args "$@" || return $?
+  _review_render_args_only review_render_failure reason sha src dst ts diff-note run history log-hint notice || return $?
   [[ -n "$_RR_REASON" ]] || { echo "review_render_failure: 缺少必填参数 --reason" >&2; return 2; }
   local hist
   hist=$(mktemp)
@@ -2406,11 +2437,8 @@ review_render_failure() {
   printf '⚠️ 评审未完成：'
   printf '%s' "$_RR_REASON" | review_sanitize_md
   echo ""
-  if [[ -n "$_RR_LOG_HINT" ]]; then
-    echo ""
-    printf '%s' "$_RR_LOG_HINT" | review_sanitize_md
-    echo ""
-  fi
+  _review_render_notice
+  _review_render_log_hint
   echo ""
   review_render_history_table "$hist"
   rm -f "$hist"

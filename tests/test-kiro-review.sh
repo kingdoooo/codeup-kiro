@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source helpers.sh
 source fixture-repo.sh
+source ../scripts/lib/isolation.sh   # 15-fix2 #23：等价性用例直接调生产的隔离函数
 
 # kiro-review.sh 把 timeout/gtimeout 当强制依赖（无超时能力时拒绝运行），
 # 本机缺失时它在第一步就退出，本套件的每条断言都测不到真实行为。
@@ -28,26 +29,33 @@ export MR_LOCAL_ID=7 MR_TARGET_BRANCH=master CI_COMMIT_REF_NAME=feature/x
 # 回退与 `cd "$PKG_ROOT"` 保护都处在真实条件下）。
 # 用法：run_case <名字> [VAR=值 ...]   额外的 VAR=值 只作用于这一次调用（VAR= 表示置空）。
 # 可选：CASE_TWEAK=<函数名> 在运行前于 checkout 目录内执行，用来改造 fixture。
-# 结果：CASE（用例目录）、RC、OUT；替身记录在 $CASE/{args,stdin,settings,cwdscan,calls,helpcwd}。
+# 结果：CASE（用例目录）、MD（替身记录目录 = $CASE/home/.kiro-mock）、RC、OUT；
+# 替身记录在 $MD/{args,stdin,settings,cwdscan,calls,helpcwd,env,env-help,env-settings,allowscan,nonce}。
+# 替身 kiro-cli 的配置通道（票 15 / 15-fix #14 / 15-fix2 #19）：生产脚本以 `env -i` + 许可清单启动 kiro-cli 的每次调用，MOCK_*
+# 环境变量到不了替身。替身只从 $HOME/.kiro-mock/ 取配置与写记录（HOME 在固定名单里、每个用例各有 $CASE/home）——不借道
+# KIRO_ENV_PASSTHROUGH，那是安全控制，测试不该与它耦合；passthrough/badpass 是仅有的逃生口用例。行为开关写在
+# $MD/mock.env（helpers.sh 的 mock_config_write，与替身的解析器同一份）。拿不到该目录的替身非零退出（97），所以漏配会让用例变红，
+# 而不是让「Kiro 未被启动」类断言恒真。直接调用脚本的用例同样要先 mock_config_write "$CASE/home"。
+# NO_MOCK_DIR=1 run_case x：故意不建配置目录（测 fail-closed）。
 run_case() {
   local name="$1"; shift
-  CASE="$tmp/case-$name"; mkdir -p "$CASE/home"
+  CASE="$tmp/case-$name"; mkdir -p "$CASE/home"; MD="$CASE/home/.kiro-mock"
   make_fixture_repo "$CASE"
   if [[ -n "${CASE_TWEAK:-}" ]]; then (cd "$CASE/work" && "$CASE_TWEAK"); fi
   # 显式清空：`CASE_TWEAK=f run_case x` 这种赋值前缀是否在函数返回后仍然生效，POSIX 未定义
   # （bash 3.2 不保留，POSIX 模式下保留）。不清掉的话，后面每个用例都会跑在被改造过的 fixture 上。
   CASE_TWEAK=""
+  if [[ -z "${NO_MOCK_DIR:-}" ]]; then mock_config_write "$CASE/home" "$@"; fi
+  NO_MOCK_DIR=""
   RC=0
   OUT=$(cd "$CASE/work" && env HOME="$CASE/home" REVIEW_REPO_DIR="$CASE/work" \
-        MOCK_ARGS_FILE="$CASE/args" MOCK_STDIN_FILE="$CASE/stdin" MOCK_SETTINGS_FILE="$CASE/settings" \
-        MOCK_CWD_SCAN_FILE="$CASE/cwdscan" MOCK_CALLS_FILE="$CASE/calls" MOCK_HELP_CWD_FILE="$CASE/helpcwd" \
         "$@" "$ROOT/scripts/kiro-review.sh" 2>&1) || RC=$?
 }
 # 某个 kiro-cli 子命令被调用了几次。calls 文件在「脚本还没调过任何 kiro-cli 子命令」时
 # 根本不存在（例如变量校验在安装/能力检查之前就失败了），所以缺文件按 0 处理。
 call_count() { local f="$1" name="$2"; [[ -f "$f" ]] || { echo 0; return 0; }; grep -c "^${name}$" "$f" || true; }
 # 注入面文件是否还在（任意深度 AGENTS.md / 任意深度 .kiro / 根 lsp.json）
-leftovers() { (cd "$CASE/work" && { [[ -e lsp.json ]] && echo ./lsp.json; find . -not -path './.git/*' \( -iname AGENTS.md -not -type d \) -o \( -name .kiro -not -path './.git/*' \); } | sort | paste -sd' ' -); }
+leftovers() { (cd "$CASE/work" && injection_surface_scan | sort | paste -sd' ' -); }   # 谓词只在 helpers.sh 一份（15-fix2 #23）
 
 # 从 DRY_RUN 输出里取出将要回写的评论正文（OUT 同时含日志与超长时回显的全文，
 # 有些断言必须只看评论本身）。用法：posted_comment "$OUT"
@@ -79,18 +87,52 @@ except Exception:
 run_case ok
 out=$OUT
 assert_rc "$RC" 0 "成功路径退出码 0"
-assert_contains "$(cat "$CASE/args")" "--no-interactive" "kiro 参数：no-interactive"
-# 参数文件每行一个参数：用整行精确匹配，避免 --trust-tools=read,grep,glob,shell 或 --agent-engine 也能蒙混过关
-assert_eq "$(grep -c -x -- '--trust-tools=read,grep,glob' "$CASE/args")" "1" "kiro 参数：--trust-tools 精确等于 read,grep,glob"
-assert_eq "$(grep -c -- '^--trust-tools=' "$CASE/args")" "1" "kiro 参数：只有一个 --trust-tools"
-args_line=$(paste -sd' ' "$CASE/args")
+assert_contains "$(cat "$MD/args")" "--no-interactive" "kiro 参数：no-interactive"
+# 读取边界来自受信 agent 的 allowedPaths（票 15 / P1-15）：参数里不得有任何 --trust-* 开关。
+# --trust-tools 让「整个工具免审」与路径边界叠加、语义不透明；--trust-all-tools（拒绝信息里推荐的那个）
+# 实测**绕过** allowedPaths（P1-15 T7）。参数文件每行一个参数，按行首匹配，等号与空格两种写法都拦。
+assert_eq "$(grep -c -- '^--trust' "$MD/args")" "0" "kiro 参数：没有任何 --trust-* 开关"
+args_line=$(paste -sd' ' "$MD/args")
+assert_not_contains "$args_line" "--trust-tools" "kiro 参数：不传 --trust-tools（免确认只来自 allowedPaths）"
+assert_not_contains "$args_line" "--trust-all-tools" "kiro 参数：绝不传 --trust-all-tools（它绕过 allowedPaths）"
+# Kiro 子进程环境 = env -i + 许可清单：替身记下 chat 时环境里的变量名
+env_names=$(cat "$MD/env")
+for v in YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID DRY_RUN MR_LOCAL_ID MR_TARGET_BRANCH CI_COMMIT_REF_NAME KIRO_ENV_PASSTHROUGH REVIEW_REPO_DIR; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "0" "Kiro 进程环境：没有 $v"
+done
+for v in PATH HOME KIRO_API_KEY KIRO_LOG_NO_COLOR; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "1" "Kiro 进程环境：有 $v"
+done
+# 第 3 步自检（15-fix2 #16）：日志声称的事实要有断言——这行只在 kiro_agent_selfcheck 通过时打出（值比对 + 安全字段）
+assert_contains "$out" "受信 agent 自检通过" "第 3 步自检通过并留痕"
+# kiro-cli 版本在 KIRO_TESTED_VERSIONS 名单内（替身默认 2.21.1）→ 不出 notice（15-fix2 #24）
+assert_contains "$out" "在 P1-15 探测过的版本名单内" "kiro-cli 版本核对：名单内"
+assert_not_contains "$out" "未经 P1-15 探测" "kiro-cli 版本核对：名单内时无警告"
+# 另三处 kiro-cli 调用（chat --help、--version、settings）同样走 env -i + 许可清单（15-fix #8 / 15-fix4 #18）：README 与指南的
+# 「Kiro 进程看不到…」才是绝对表述。替身把四次调用各自收到的环境变量名分别记在 env-help / env-version / env-settings / env。
+for f in env-help env-version env-settings; do
+  names_f=$(cat "$MD/$f")
+  for v in YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID KIRO_ENV_PASSTHROUGH; do
+    assert_eq "$(printf '%s\n' "$names_f" | grep -c -x -- "$v")" "0" "${f}：这次 kiro-cli 调用的环境里没有 $v"
+  done
+  for v in PATH HOME KIRO_API_KEY; do
+    assert_eq "$(printf '%s\n' "$names_f" | grep -c -x -- "$v")" "1" "${f}：这次 kiro-cli 调用的环境里有 $v"
+  done
+done
+assert_eq "$(call_count "$MD/calls" version)" "1" "kiro-cli --version 被调用一次（版本核对）"
+assert_eq "$(cat "$MD/cwdscan")" "" "Kiro 启动时工作区里没有残留的注入面文件与符号链接"
+assert_contains "$out" "Kiro 进程环境许可清单" "日志打出透传的变量名清单"
+env_log_line=$(printf '%s\n' "$out" | grep -F "Kiro 进程环境许可清单" | head -1)
+assert_contains "$env_log_line" "KIRO_API_KEY" "许可清单日志行列出 KIRO_API_KEY（只有名字）"
+assert_not_contains "$env_log_line" "YUNXIAO_TOKEN" "许可清单日志行不含 YUNXIAO_TOKEN"
+assert_not_contains "$out" "KIRO_API_KEY=k" "日志里不出现变量取值"
 assert_contains "$args_line" "--agent codeup-reviewer" "kiro 参数：套用受信 custom agent codeup-reviewer"
 assert_contains "$args_line" "--agent-engine v2" "kiro 参数：固定 --agent-engine v2"
 assert_contains "$out" "引擎：v2" "日志显式记录所用引擎为 v2"
 # 结构化输出契约依赖 stream-json（v1 引擎不支持该参数）：整行精确匹配，避免别的取值蒙混过关
-assert_eq "$(grep -c -x -- '--output-format' "$CASE/args")" "1" "kiro 参数：只有一个 --output-format"
+assert_eq "$(grep -c -x -- '--output-format' "$MD/args")" "1" "kiro 参数：只有一个 --output-format"
 assert_contains "$args_line" "--output-format stream-json" "kiro 参数：固定 --output-format stream-json"
-assert_contains "$(cat "$CASE/stdin")" "SECRET_KEY" "diff 已喂入 stdin"
+assert_contains "$(cat "$MD/stdin")" "SECRET_KEY" "diff 已喂入 stdin"
 assert_contains "$out" "changeRequests/7/comments" "回写到 MR 7"
 
 # --- 汇总评论（INLINE_COMMENT=0）：由脚本按契约渲染，不再是模型原文 ---
@@ -138,11 +180,11 @@ assert_not_contains "$out" "结论不在契约内" "票 17 B 正控：契约内�
 assert_not_contains "$out" "完全重复的问题已合并" "票 17 C 正控：没有重复问题时不打警告"
 
 # --- 隔离：diff 先算好，随后业务库工作树中的注入面文件在 Kiro 启动前被移除 ---
-assert_contains "$(cat "$CASE/stdin")" "CANARY-AGENTSMD-ROOT" "diff 先算：stdin 仍含根 AGENTS.md 的改动"
-assert_contains "$(cat "$CASE/stdin")" "CANARY-AGENTSMD-NESTED" "diff 先算：stdin 仍含子目录 AGENTS.md 的改动"
-assert_contains "$(cat "$CASE/stdin")" "+++ b/lsp.json" "diff 先算：stdin 仍含 lsp.json 的改动"
-assert_contains "$(cat "$CASE/stdin")" "mcpServers" "diff 先算：stdin 仍含 .kiro/settings/mcp.json 的改动"
-assert_eq "$(cat "$CASE/cwdscan")" "" "Kiro 启动时工作区已无 AGENTS.md（任意深度）/根 lsp.json/.kiro（任意深度）"
+assert_contains "$(cat "$MD/stdin")" "CANARY-AGENTSMD-ROOT" "diff 先算：stdin 仍含根 AGENTS.md 的改动"
+assert_contains "$(cat "$MD/stdin")" "CANARY-AGENTSMD-NESTED" "diff 先算：stdin 仍含子目录 AGENTS.md 的改动"
+assert_contains "$(cat "$MD/stdin")" "+++ b/lsp.json" "diff 先算：stdin 仍含 lsp.json 的改动"
+assert_contains "$(cat "$MD/stdin")" "mcpServers" "diff 先算：stdin 仍含 .kiro/settings/mcp.json 的改动"
+assert_eq "$(cat "$MD/cwdscan")" "" "Kiro 启动时工作区已无 AGENTS.md（任意深度）/根 lsp.json/.kiro（任意深度）"
 assert_eq "$(leftovers)" "" "运行后工作树无残留注入面文件"
 assert_eq "$([[ -f "$CASE/work/src/app.py" ]] && echo y || echo n)" "y" "其余业务文件未被误删"
 assert_eq "$([[ -d "$CASE/work/.git" ]] && echo y || echo n)" "y" ".git 未被触碰"
@@ -152,10 +194,27 @@ assert_eq "$([[ -n "$diff_ln" && -n "$iso_ln" && "$iso_ln" -gt "$diff_ln" ]] && 
   "隔离步骤的日志出现在 diff 生成之后（diff_ln=${diff_ln:-?} iso_ln=${iso_ln:-?}）"
 
 # --- 隔离：执行环境禁止继承工作区默认资源，且在 Kiro 启动前生效 ---
-assert_contains "$(cat "$CASE/settings")" "chat.disableInheritingDefaultResources true" "Kiro 启动前设置 chat.disableInheritingDefaultResources=true"
-assert_eq "$(awk '/^settings$/{s=NR} /^chat$/{c=NR} END{print (s && c && s<c) ? "ok" : "bad"}' "$CASE/calls")" "ok" \
+assert_contains "$(cat "$MD/settings")" "chat.disableInheritingDefaultResources true" "Kiro 启动前设置 chat.disableInheritingDefaultResources=true"
+assert_eq "$(awk '/^settings$/{s=NR} /^chat$/{c=NR} END{print (s && c && s<c) ? "ok" : "bad"}' "$MD/calls")" "ok" \
   "调用顺序：settings 先于 chat"
-assert_eq "$(cat "$CASE/helpcwd")" "$ROOT" "kiro-cli chat --help 在集成包目录下执行，而不是尚未隔离的业务库 checkout"
+# 15-fix4 #1：四处 kiro-cli 调用（--help / --version / settings / chat）都在 $WORK/cwd 空目录下运行——kiro-cli 相对 cwd 发现的每一个面
+# （$CWD/.kiro/agents 顶替同名受信 agent、.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、lsp.json）都落在没有文件的目录里；
+# 业务库只在 allowedPaths 里。三个 cwd 记录必须相同、名为 cwd、与 chunks 同父目录（同一个 $WORK）、不是业务库也不是集成包、chat 时为空。
+ws_p=$(cd "$CASE/work" && pwd -P)
+kcwd=$(cat "$MD/chatcwd")
+assert_eq "$(cat "$MD/helpcwd")" "$kcwd" "kiro-cli chat --help 与 chat 在同一个运行目录下执行"
+assert_eq "$(cat "$MD/settingscwd")" "$kcwd" "kiro-cli settings 与 chat 在同一个运行目录下执行"
+assert_eq "$(basename "$kcwd")" "cwd" "Kiro 运行目录是 \$WORK/cwd（实际：${kcwd}）"
+assert_eq "$([[ "$kcwd" == "$ws_p" || "$kcwd" == "$ws_p"/* ]] && echo in-repo || echo outside)" "outside" "Kiro 运行目录不是业务库 checkout、也不在其内"
+assert_eq "$([[ "$kcwd" == "$ROOT" || "$kcwd" == "$ROOT"/* ]] && echo in-pkg || echo outside)" "outside" "Kiro 运行目录不在集成包内"
+assert_eq "$(cat "$MD/chatcwd-entries")" "0" "chat 启动时运行目录为空（没有任何文件可被 kiro-cli 相对 cwd 发现）"
+assert_contains "$out" "Kiro 运行目录：${kcwd}" "日志打出 Kiro 运行目录"
+# 业务库绝对路径穿进运行时提示词：模型在空目录下必须按绝对路径读文件（相对路径会被拒、静默降低评审质量）
+prompt_arg=$(cat "$MD/args")   # 提示词是最后一个位置参数、多行；args 文件按参数逐行落盘，整份看即可（别的参数里没有路径）
+assert_contains "$prompt_arg" "$ws_p" "运行时提示词含业务库 checkout 的物理路径"
+assert_contains "$prompt_arg" "${ws_p}/src/app.py" "运行时提示词用业务库路径举例绝对路径的写法"
+assert_not_contains "$prompt_arg" "{{REVIEW_WORKSPACE}}" "运行时提示词里的 {{REVIEW_WORKSPACE}} 已替换"
+assert_not_contains "$prompt_arg" "{{" "运行时提示词里没有任何占位符残留"
 
 # --- 受信 agent 安装：按 name 落盘，prompt 改写为集成包内提示词的绝对 file:// 路径 ---
 inst="$CASE/home/.kiro/agents/codeup-reviewer.json"
@@ -165,7 +224,29 @@ assert_eq "$([[ "$inst_prompt" == file:///*/prompts/review-agent-prompt.md ]] &&
   "安装后的 prompt 为绝对 file:// 路径（实际：${inst_prompt}）"
 assert_eq "$([[ -r "${inst_prompt#file://}" ]] && echo y || echo n)" "y" "prompt 引用的提示词文件存在且可读"
 assert_eq "$(jq -c '[.includeMcpJson, .includePowers]' "$inst")" "[false,false]" "安装后的 agent 不含 MCP/Powers"
-assert_eq "$(jq -c 'del(.prompt)' "$inst")" "$(jq -c 'del(.prompt)' "$ROOT/kiro/agent-codeup-reviewer.json")" "安装只改写 prompt，其余字段与集成包一致"
+assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$inst")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$ROOT/kiro/agent-codeup-reviewer.json")" \
+  "安装只改写 prompt、三处 allowedPaths 与三处 deniedPaths（追加按 allow 根注入的绝对副本），其余字段与集成包一致"
+assert_eq "$(jq -c '.toolsSettings.read.deniedPaths[:32]' "$inst")" "$(jq -c '.toolsSettings.read.deniedPaths' "$ROOT/kiro/agent-codeup-reviewer.json")" "安装后 deniedPaths 前段就是集成包的原条目（顺序不变，只在末尾追加）"
+# --- 读取边界（票 15）：allowedPaths = 业务库 checkout 物理路径 + 本次 $WORK/chunks；allowedTools 为空 ---
+assert_eq "$(jq -r '.toolsSettings.read.allowedPaths | length' "$inst")" "2" "安装后 allowedPaths 恰好两条"
+assert_eq "$(jq -r '.toolsSettings.read.allowedPaths[0]' "$inst")" "$ws_p" "allowedPaths[0] = 业务库 checkout 的物理路径"
+chunks_p=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$inst")
+assert_eq "$([[ "$chunks_p" == /*/chunks ]] && echo y || echo n)" "y" "allowedPaths[1] 是绝对路径下的 chunks 目录（实际：${chunks_p}）"
+assert_eq "$([[ "$chunks_p" == "$ws_p"/* ]] && echo inside || echo outside)" "outside" "chunks 目录不在业务库 checkout 之内（是 mktemp 出来的工作目录）"
+assert_eq "$(dirname "$chunks_p")" "$(dirname "$kcwd")" "Kiro 运行目录与 chunks 同在本次 \$WORK 下"
+assert_eq "$(jq -c '.toolsSettings | [.read.allowedPaths, .grep.allowedPaths, .glob.allowedPaths] | unique | length' "$inst")" "1" "read/grep/glob 的 allowedPaths 同组"
+assert_eq "$(jq -c .allowedTools "$inst")" "[]" "安装后 allowedTools 为空"
+# 15-fix4 #1 补：kiro-cli 把 **/ 形状按 cwd 解析，空 cwd 下要靠按 allow 根注入的绝对副本护住业务库里的 .git / .ssh（探测 t15fix4-4b30a00 T3/T9 实测）
+for pat in '**/.git/**' '**/.git' '**/.ssh/**' '**/.aws/**' '**/id_rsa*' '**/id_ed25519*'; do
+  assert_eq "$(jq -r --arg p "${ws_p}/${pat}" '.toolsSettings.read.deniedPaths | index($p) != null' "$inst")" "true" "安装后 deniedPaths 含业务库根前缀的 ${pat}"
+  assert_eq "$(jq -r --arg p "${chunks_p}/${pat}" '.toolsSettings.read.deniedPaths | index($p) != null' "$inst")" "true" "安装后 deniedPaths 含 chunks 根前缀的 ${pat}"
+done
+assert_contains "$out" "已按两条 allow 根注入绝对副本（8 条 × 2）" "自检日志写明注入条目数"
+assert_eq "$(jq '[.. | strings | select(contains("{{"))] | length' "$inst")" "0" "安装后没有残留占位符"
+assert_contains "$out" "受信 agent 许可路径：${ws_p}、${chunks_p}" "日志打出许可路径两条（与安装文件一致）"
+# chat 时两条许可路径都真实存在（chunks 目录在 Kiro 启动前已建好——否则 build_review_input 之前装的 agent 指向一个还没有的目录）
+assert_eq "$(awk -F'\t' '{print $2}' "$MD/allowscan" | sort -u)" "dir" "Kiro 启动时两条许可路径都是存在的目录"
+assert_eq "$(grep -c . "$MD/allowscan")" "2" "allowscan 记录了两条路径"
 
 # ============ REVIEW_REPO_DIR 未设置：回退到 cwd（Flow 里 PROJECT_DIR 就是 cwd）============
 run_case fallback REVIEW_REPO_DIR=
@@ -178,7 +259,7 @@ tweak_lsp_dir() { rm -rf lsp.json .kiro; mkdir -p lsp.json/sub && echo x > lsp.j
 CASE_TWEAK=tweak_lsp_dir run_case lspdir
 assert_rc "$RC" 0 "lsp.json 为目录 / .kiro 为文件：评审仍成功"
 assert_eq "$(leftovers)" "" "lsp.json 目录、.kiro 文件与子目录 .kiro/、AGENTS.md 都已移除"
-assert_eq "$(cat "$CASE/cwdscan")" "" "Kiro 启动时工作区干净"
+assert_eq "$(cat "$MD/cwdscan")" "" "Kiro 启动时工作区干净"
 
 # ============ 误把集成包自身当业务库：拒绝运行，且集成包内的文件确实还在 ============
 # 用集成包的**副本**跑，不拿开发者的真实 checkout 当靶子；并在副本里放一个哨兵 AGENTS.md，
@@ -194,17 +275,17 @@ sentinel_intact() {
 }
 assert_eq "$(sentinel_intact)" "intact" "前置：哨兵文件已就位（否则下面的断言恒真）"
 
-RC=0; CASE="$tmp/case-selftarget"; mkdir -p "$CASE/home"
+RC=0; CASE="$tmp/case-selftarget"; mkdir -p "$CASE/home"; MD="$CASE/home/.kiro-mock"; mock_config_write "$CASE/home"
 OUT=$(cd "$PKGCOPY" && env HOME="$CASE/home" REVIEW_REPO_DIR="$PKGCOPY" \
       MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
 assert_nonzero "$RC" "REVIEW_REPO_DIR=集成包：非零退出"
 assert_contains "$OUT" "互相包含" "REVIEW_REPO_DIR=集成包：报错说明"
-assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "REVIEW_REPO_DIR=集成包：Kiro 未被启动"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "REVIEW_REPO_DIR=集成包：Kiro 未被启动"
 assert_eq "$(sentinel_intact)" "intact" "REVIEW_REPO_DIR=集成包：集成包内的 AGENTS.md 与 .kiro/ 都还在"
 
 # 符号链接不能绕过这道保护（R10①：路径规范化必须用 pwd -P）
 ln -s "$PKGCOPY" "$tmp/pkglink"
-RC=0; CASE="$tmp/case-selflink"; mkdir -p "$CASE/home"
+RC=0; CASE="$tmp/case-selflink"; mkdir -p "$CASE/home"; MD="$CASE/home/.kiro-mock"; mock_config_write "$CASE/home"
 OUT=$(cd "$tmp" && env HOME="$CASE/home" REVIEW_REPO_DIR="$tmp/pkglink" \
       MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
 assert_nonzero "$RC" "REVIEW_REPO_DIR=指向集成包的符号链接：非零退出"
@@ -212,7 +293,7 @@ assert_contains "$OUT" "互相包含" "符号链接：同样被这道保护拦�
 assert_eq "$(sentinel_intact)" "intact" "符号链接：集成包内的哨兵文件仍在"
 
 # REVIEW_REPO_DIR 在集成包**内部**同样会删到集成包的文件，反向包含也要拦
-RC=0; CASE="$tmp/case-selfinner"; mkdir -p "$CASE/home" "$PKGCOPY/nested"
+RC=0; CASE="$tmp/case-selfinner"; mkdir -p "$CASE/home" "$PKGCOPY/nested"; MD="$CASE/home/.kiro-mock"; mock_config_write "$CASE/home"
 OUT=$(cd "$tmp" && env HOME="$CASE/home" REVIEW_REPO_DIR="$PKGCOPY/nested" \
       MOCK_ARGS_FILE="$CASE/args" "$PKGCOPY/scripts/kiro-review.sh" 2>&1) || RC=$?
 assert_nonzero "$RC" "REVIEW_REPO_DIR=集成包内的子目录：非零退出"
@@ -230,7 +311,7 @@ CASE_TWEAK=
 assert_rc "$RC" 0 ".kiro 是符号链接：评审仍成功"
 assert_eq "$([[ -e "$CASE/work/src/sub/.kiro" || -L "$CASE/work/src/sub/.kiro" ]] && echo exists || echo gone)" "gone" \
   ".kiro 为符号链接时同样被移除（原来 find -type d 漏掉链接）"
-assert_eq "$(cat "$CASE/cwdscan")" "" ".kiro 为符号链接：Kiro 启动时工作区干净"
+assert_eq "$(cat "$MD/cwdscan")" "" ".kiro 为符号链接：Kiro 启动时工作区干净"
 assert_eq "$([[ -f "$CASE/evilcfg/settings/mcp.json" ]] && echo y || echo n)" "y" \
   "只删链接本身，不跟着链接把目标目录的内容删掉"
 
@@ -254,7 +335,7 @@ run_case settingsfail MOCK_SETTINGS_FAIL=1
 assert_nonzero "$RC" "settings 失败：非零退出"
 assert_contains "$OUT" "评审未完成" "settings 失败：回写说明评论"
 assert_contains "$OUT" "disableInheritingDefaultResources" "settings 失败：日志点名失败的设置项"
-assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "settings 失败：Kiro 未被启动"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "settings 失败：Kiro 未被启动"
 
 # ============ 失败路径：kiro-cli 不支持 --agent-engine（旧版）→ 拒绝运行，且 MR 上可见（spec I10）============
 run_case oldcli MOCK_KIRO_NO_ENGINE_FLAG=1
@@ -262,7 +343,7 @@ assert_nonzero "$RC" "旧版 kiro-cli：非零退出"
 assert_contains "$OUT" "--agent-engine" "旧版 kiro-cli：报错点名 --agent-engine"
 assert_contains "$OUT" "评审未完成" "旧版 kiro-cli：回写「评审未完成」评论（失败可见）"
 assert_contains "$OUT" "changeRequests/7/comments" "旧版 kiro-cli：评论发到 MR 7"
-assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "旧版 kiro-cli：Kiro 未被启动"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "旧版 kiro-cli：Kiro 未被启动"
 
 # ============ 评论截断：MAX_COMMENT_BYTES 很小时评论被截断并注明 ============
 run_case truncate MAX_COMMENT_BYTES=200
@@ -273,7 +354,7 @@ assert_contains "$OUT" "已截断" "截断注明"
 run_case noprompt PROMPT_FILE=/nonexistent
 assert_nonzero "$RC" "提示词缺失：非零退出"
 assert_contains "$OUT" "提示词文件不可读" "提示词缺失：报错说明"
-assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "提示词缺失：Kiro 未被启动"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "提示词缺失：Kiro 未被启动"
 
 # ============ 降级：finalText 无契约标记 → 标题标明「结构化解析失败」+ 贴原文 + 退出码 0 ============
 run_case nomarker MOCK_KIRO_NO_MARKER=1
@@ -333,7 +414,7 @@ run_case inlinebad INLINE_COMMENT=yes
 assert_nonzero "$RC" "INLINE_COMMENT=yes：非零退出"
 assert_contains "$OUT" "INLINE_COMMENT=yes" "INLINE_COMMENT=yes：报错点名开关取值"
 assert_contains "$OUT" "评审未完成" "INLINE_COMMENT=yes：回写失败评论（失败可见）"
-assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "INLINE_COMMENT=yes：不浪费额度，Kiro 未被启动"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "INLINE_COMMENT=yes：不浪费额度，Kiro 未被启动"
 
 # ============ INLINE_COMMENT 显式为 0：与默认一致 ============
 run_case inline0 INLINE_COMMENT=0
@@ -426,11 +507,18 @@ run_case nostreamflag MOCK_KIRO_NO_STREAM_FLAG=1
 assert_nonzero "$RC" "不支持 --output-format：非零退出"
 assert_contains "$OUT" "不支持 --output-format" "不支持 --output-format：报错点名参数"
 assert_contains "$OUT" "评审未完成" "不支持 --output-format：回写失败评论（失败可见）"
-assert_eq "$([[ -e "$CASE/args" ]] && echo launched || echo not-launched)" "not-launched" "不支持 --output-format：Kiro 未被启动"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "不支持 --output-format：Kiro 未被启动"
 
 # ============ 失败评论的标题与标记必须与成功/降级评论同形（供后续票原地更新）============
 run_case failheader MOCK_KIRO_FAIL=1
 assert_contains "$OUT" "# Kiro 代码评审 · ⚠️ 评审未完成" "失败评论：标题与成功评论同一产品名"
+# 15-fix4 #3：kiro-cli 非零退出 + 未探测版本 → 失败评论带版本告警（这条路径上 MR 只剩失败评论，告警不能丢；对 5462175 必须失败）
+run_case failnotice MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "失败 + 未探测版本：非零退出"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "评审未完成" "失败 + 未探测版本：是失败评论"
+assert_contains "$comment" "> ⚠️ 注意：本次 kiro-cli 版本 9.9.9 未经 P1-15 探测" "失败 + 未探测版本：失败评论带版本告警引用块"
+assert_contains "$comment" "构建号" "失败 + 未探测版本：日志线索仍在"
 assert_not_contains "$OUT" "Kiro 自动代码评审" "失败评论：不再使用旧标题"
 assert_eq "$(printf '%s' "$OUT" | grep -c 'kiro-review:[0-9a-f]* run:1')" "1" "失败评论：标记带 run 字段，与成功评论同形"
 
@@ -1463,7 +1551,7 @@ IDX_HDR='=== 未直传的变更文件索引'
 assert_eq "$(grep -c -F "$IDX_HDR" "$ROOT/prompts/review-prompt.md")" "1" "超限契约：提示词里引用的是同一个节标题"
 run_case overlimit DIFF_SIZE_LIMIT=1
 assert_rc "$RC" 0 "超限：退出码 0"
-stdin_ol=$(cat "$CASE/stdin")
+stdin_ol=$(cat "$MD/stdin")
 assert_eq "$(printf '%s\n' "$stdin_ol" | grep -c -F "$IDX_HDR")" "1" "超限：stdin 里恰好一个索引节标题"
 # 索引节 = 标题行之后、下一个空行之前的所有行：每行必须是含 chunk/file/added/removed 的 JSON 对象
 idx_lines=$(printf '%s\n' "$stdin_ol" | awk -v h="$IDX_HDR" 'index($0, h) == 1 {on=1; next} on && $0 == "" {exit} on {print}')
@@ -1476,10 +1564,35 @@ assert_not_contains "$idx_lines" "=> " '超限：索引里没有旧的 `=> 路�
 assert_contains "$idx_lines" '"file":"src/app.py"' "超限：file 字段是文件名本身"
 assert_eq "$(printf '%s\n' "$idx_lines" | jq -r 'select(.file == "src/app.py") | .added')" "1" "超限：src/app.py 的增行数按 numstat 算（+1 行密钥）"
 assert_contains "$stdin_ol" "=== DIFF ===" "超限：DIFF 节仍在（此时为空）"
+# 许可路径里的 chunks 目录就是 chunk 真正落盘的目录：Kiro 启动时那个目录里已有 0000.diff（票 15）
+allow_chunks_row=$(awk -F'\t' '$1 ~ /\/chunks$/ {print}' "$MD/allowscan")
+assert_eq "$(printf '%s\n' "$allow_chunks_row" | grep -cE '(^|,)[0-9]{4}\.diff(,|$)')" "1" \
+  "超限：Kiro 启动时许可清单里的 chunks 目录内已有 NNNN.diff chunk 文件（就是 build_review_input 的落盘目录；实际：${allow_chunks_row})"
+assert_eq "$(printf '%s\n' "$idx_lines" | jq -r '.chunk | test("/chunks/[0-9]{4}\\.diff$")' | sort -u)" "true" "超限：索引里的 chunk 路径都在 chunks 目录下"
+# 索引里的 chunk 目录与 allowedPaths[1] 必须**逐字同一形态**（物理路径）：模型按索引去读，形态不同就落在 allow 之外
+# （kiro-cli 会不会先解析符号链接再比对未经实测，P1-15 T1 只按物理路径读过）。要让「逻辑路径 ≠ 物理路径」在任何平台上
+# 都成立：macOS 的 mktemp -d 落在 /var/folders（→ /private/var/folders 的符号链接，且它不理 TMPDIR）；Linux 的 /tmp 通常
+# 是真目录，所以给一个符号链接 TMPDIR（GNU mktemp 按它创建 $WORK）。断言不写死哪一种：只要求 allowedPaths[1] 已是物理
+# 形态、索引里的 chunk 目录与之逐字相同。
+mkdir -p "$tmp/tmp-real"; ln -s "$tmp/tmp-real" "$tmp/tmp-link"
+run_case overlimit-symtmp DIFF_SIZE_LIMIT=1 TMPDIR="$tmp/tmp-link"
+assert_rc "$RC" 0 "超限+符号链接 TMPDIR：退出码 0"
+allow_chunks_st=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$CASE/home/.kiro/agents/codeup-reviewer.json")
+assert_eq "$([[ "$allow_chunks_st" == /*/chunks ]] && echo y || echo n)" "y" "超限+符号链接 TMPDIR：allowedPaths[1] 是绝对路径下的 chunks（实际：${allow_chunks_st}）"
+idx_st=$(awk -v h="$IDX_HDR" 'index($0, h) == 1 {on=1; next} on && $0 == "" {exit} on {print}' "$MD/stdin")
+assert_eq "$(printf '%s\n' "$idx_st" | grep -c .)" "$(git -C "$CASE/work" diff --no-renames --name-only master HEAD | wc -l | tr -d ' ')" "超限+符号链接 TMPDIR：索引非空、条数与变更文件数一致"
+idx_st_dir=$(printf '%s\n' "$idx_st" | jq -r '.chunk | sub("/[^/]*$"; "")' | sort -u)
+assert_eq "$idx_st_dir" "$allow_chunks_st" "超限+符号链接 TMPDIR：索引里每条 chunk 的目录与 allowedPaths[1] 逐字相同"
+# 前提自检：allowedPaths[1] 已是物理形态（$WORK 已被 trap 删掉，用其父目录——TMPDIR 或 /var/folders/…/T——的 pwd -P 判）
+allow_gp=$(dirname "$(dirname "$allow_chunks_st")")
+assert_eq "$allow_gp" "$(cd "$allow_gp" && pwd -P)" "超限+符号链接 TMPDIR：allowedPaths[1] 是物理形态（父目录 pwd -P 与原文一致）"
+# chunk 目录在 Kiro 启动时已存在（allowscan 记录的是 chat 时的状态），此刻 $WORK 已被脚本 trap 删掉，
+# 物理形态的判据用 allowscan 里的路径与 chunks 目录的父目录 pwd -P 对照：allowscan 每行首列就是 allowedPaths 原文
+assert_eq "$(awk -F'\t' '$1 ~ /\/chunks$/ {print $2}' "$MD/allowscan")" "dir" "超限+符号链接 TMPDIR：Kiro 启动时 chunks 许可路径是存在的目录"
 assert_contains "$(posted_comment "$OUT")" "已按优先级截断" "超限：汇总评论的 diff 说明写明已截断"
 # 正控：阈值足够大时没有索引节
 run_case underlimit DIFF_SIZE_LIMIT=1000000
-assert_eq "$(grep -c -F "$IDX_HDR" "$CASE/stdin")" "0" "未超限：stdin 里没有索引节（正控）"
+assert_eq "$(grep -c -F "$IDX_HDR" "$MD/stdin")" "0" "未超限：stdin 里没有索引节（正控）"
 
 # ---- KIRO_TIMEOUT / DIFF_SIZE_LIMIT 必须是正整数：非法取值是「静默走偏」，必须硬失败 ----
 # KIRO_TIMEOUT=15m → timeout 会以 rc 125 退出，MR 上只剩「Kiro 评审失败（退出码 125）」
@@ -1487,7 +1600,7 @@ run_case badtimeout KIRO_TIMEOUT=15m
 assert_rc "$RC" 1 "KIRO_TIMEOUT 非整数：拒绝运行"
 assert_contains "$OUT" "KIRO_TIMEOUT=15m 不是纯数字" "KIRO_TIMEOUT 非整数：报错点名变量与取值"
 assert_contains "$OUT" "不支持 15m / 300KB 这类带单位的写法" "KIRO_TIMEOUT 非整数：告诉运维正确写法"
-assert_eq "$(call_count "$CASE/calls" chat)" "0" "KIRO_TIMEOUT 非整数：没白跑 Kiro（不烧额度）"
+assert_eq "$(call_count "$MD/calls" chat)" "0" "KIRO_TIMEOUT 非整数：没白跑 Kiro（不烧额度）"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "⚠️ 评审未完成" "KIRO_TIMEOUT 非整数：MR 上看得见（I10）"
 assert_contains "$comment" "KIRO_TIMEOUT=15m" "KIRO_TIMEOUT 非整数：失败评论写明原因"
@@ -1495,7 +1608,7 @@ assert_contains "$comment" "KIRO_TIMEOUT=15m" "KIRO_TIMEOUT 非整数：失败�
 run_case baddiffsize DIFF_SIZE_LIMIT=300KB
 assert_rc "$RC" 1 "DIFF_SIZE_LIMIT 非整数：拒绝运行"
 assert_contains "$OUT" "DIFF_SIZE_LIMIT=300KB 不是纯数字" "DIFF_SIZE_LIMIT 非整数：报错点名变量与取值"
-assert_eq "$(call_count "$CASE/calls" chat)" "0" "DIFF_SIZE_LIMIT 非整数：没白跑 Kiro"
+assert_eq "$(call_count "$MD/calls" chat)" "0" "DIFF_SIZE_LIMIT 非整数：没白跑 Kiro"
 assert_not_contains "$(posted_comment "$OUT")" "300KBB" "DIFF_SIZE_LIMIT 非整数：不会渲染出 300KBB 这种说明"
 run_case zerotimeout KIRO_TIMEOUT=0
 assert_rc "$RC" 1 "KIRO_TIMEOUT=0：拒绝运行（0 会让 timeout 变成不限时）"
@@ -1507,12 +1620,317 @@ assert_rc "$RC" 0 "前导零取值：按十进制归一化后照常运行"
 assert_not_contains "$OUT" "value too great for base" "前导零取值：不漏 bash 算术报错"
 assert_contains "$OUT" "超时 900s" "前导零取值：日志里是归一化后的 900 秒"
 # 校验必须在装 kiro-cli 之前：一眼可辨的配置错误不该先花几分钟装 CLI 再失败
-assert_eq "$(call_count "$tmp/case-badtimeout/calls" help)" "0" "取值校验早于 kiro-cli 能力检查（没白跑 --help）"
+assert_eq "$(call_count "$tmp/case-badtimeout/home/.kiro-mock/calls" help)" "0" "取值校验早于 kiro-cli 能力检查（没白跑 --help）"
 # 合法取值仍照常工作（正控：上面三条不是靠「任何取值都失败」蒙对的）
 run_case goodlimits KIRO_TIMEOUT=60 DIFF_SIZE_LIMIT=1000000
 assert_rc "$RC" 0 "合法的秒数/字节数：评审照常成功"
 
 # ---- REVIEW_RERUN_HINT：AWS 档位可把提示语换成评论命令（Flow 默认不承诺它）----
+# ============ Kiro 子进程环境许可清单（票 15）：Flow 注入的任何东西都不进 Kiro 进程 ============
+# 固定名单内的变量各放一个（区域设置、代理、证书、XDG），名单外放几个像凭证的 canary，以及几个**形状像**名单但不在名单里的
+# （KIRO_FOO、LC_TIME、CORP_SECRET_PROXY——15-fix #12：名单是固定名字，不是 KIRO_* / *_PROXY 这类模式）。
+run_case envscrub CODEUP_BOT_USERNAME=bot-x FLOW_CANARY_SECRET=s3cr3t AWS_SECRET_ACCESS_KEY=aws GIT_ASKPASS=/askpass \
+  LC_ALL=C LC_TIME=C HTTPS_PROXY=http://proxy.example:3128 http_proxy=http://proxy.example:3128 no_proxy=localhost CORP_SECRET_PROXY=s \
+  XDG_CACHE_HOME=/tmp/xdg-canary XDG_CONFIG_HOME=/tmp/xdg-cfg SSL_CERT_FILE=/etc/ssl/cert.pem SSL_CERT_DIR=/etc/ssl/certs CURL_CA_BUNDLE=/etc/ssl/cert.pem KIRO_FOO=1
+assert_rc "$RC" 0 "环境许可清单：评审正常完成（名单内的变量足够 kiro-cli 启动）"
+env_names=$(cat "$MD/env")
+for v in CODEUP_BOT_USERNAME FLOW_CANARY_SECRET AWS_SECRET_ACCESS_KEY GIT_ASKPASS YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID KIRO_FOO LC_TIME CORP_SECRET_PROXY; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "0" "环境许可清单：Kiro 进程看不到 $v"
+done
+for v in PATH HOME KIRO_API_KEY KIRO_LOG_NO_COLOR LC_ALL HTTPS_PROXY http_proxy no_proxy XDG_CACHE_HOME XDG_CONFIG_HOME SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "1" "环境许可清单：Kiro 进程看得到 $v"
+done
+# 替身按 --agent 在 $HOME/.kiro/agents 下找定义、找不到就失败：rc 0 已证明 HOME 透传的是安装 agent 的那个 HOME
+assert_contains "$(paste -sd' ' "$MD/args")" "--agent codeup-reviewer" "环境许可清单：仍以受信 agent 运行"
+
+# ---- KIRO_ENV_PASSTHROUGH：名单之外要额外透传的变量**名**（逗号分隔；自建执行机的 LD_LIBRARY_PATH / AWS_PROFILE 这类）----
+run_case passthrough KIRO_ENV_PASSTHROUGH=" KIRO_FOO,LD_LIBRARY_PATH" KIRO_FOO=1 LD_LIBRARY_PATH=/opt/lib
+assert_rc "$RC" 0 "KIRO_ENV_PASSTHROUGH：评审正常完成"
+env_names=$(cat "$MD/env")
+for v in KIRO_FOO LD_LIBRARY_PATH PATH HOME KIRO_API_KEY; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "1" "KIRO_ENV_PASSTHROUGH：点名的 $v 透传了"
+done
+for v in YUNXIAO_TOKEN CODEUP_REPO_ID KIRO_ENV_PASSTHROUGH; do
+  assert_eq "$(printf '%s\n' "$env_names" | grep -c -x -- "$v")" "0" "KIRO_ENV_PASSTHROUGH：没点名的 $v 仍看不到"
+done
+env_log_line=$(printf '%s\n' "$OUT" | grep -F "Kiro 进程环境许可清单" | head -1)
+assert_contains "$env_log_line" "LD_LIBRARY_PATH" "KIRO_ENV_PASSTHROUGH：日志的变量名清单里列出了额外透传的名字"
+# 非法名字（写成 NAME=value / 带连字符）→ 拒绝运行并回写失败评论；取值不进评论也不进日志；校验早于 --help、Kiro 未启动
+run_case badpass KIRO_ENV_PASSTHROUGH="KIRO_FOO,YUNXIAO_TOKEN=leakedvalue" KIRO_FOO=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含 NAME=value：非零退出"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "KIRO_ENV_PASSTHROUGH" "KIRO_ENV_PASSTHROUGH 含 NAME=value：失败评论点名该变量"
+assert_contains "$comment" "非法变量名" "KIRO_ENV_PASSTHROUGH 含 NAME=value：失败评论说明原因"
+assert_not_contains "$OUT" "leakedvalue" "KIRO_ENV_PASSTHROUGH 含 NAME=value：取值既不进评论也不进日志"
+# 15-fix4 #4 补：语法错误分支打完整标识符 + ****（名字带了 = 是手误、不是秘密），只隐藏 = 后面的取值；掩到首段只在凭证形状分支
+assert_contains "$comment" "第 2 项 YUNXIAO_TOKEN****" "KIRO_ENV_PASSTHROUGH 含 NAME=value：评论按序号列出完整标识符 + ****"
+assert_eq "$(call_count "$MD/calls" help)" "0" "KIRO_ENV_PASSTHROUGH 非法：校验早于 kiro-cli 能力检查（没跑 --help）"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "KIRO_ENV_PASSTHROUGH 非法：Kiro 未被启动"
+run_case badpass2 KIRO_ENV_PASSTHROUGH="bad-name"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含连字符名字：非零退出"
+assert_contains "$(posted_comment "$OUT")" "KIRO_ENV_PASSTHROUGH" "KIRO_ENV_PASSTHROUGH 含连字符名字：失败评论点名该变量"
+# 15-fix2 #17：不含 = 的非法 token 也无条件掩码——原来 `ghp-liveSecret123` 会原样进流水线日志
+run_case badpass3 KIRO_ENV_PASSTHROUGH="ghp-liveSecret123"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 贴了一个像令牌的非法 token：非零退出"
+assert_not_contains "$OUT" "liveSecret" "像令牌的非法 token：原文不进日志也不进评论"
+assert_contains "$(posted_comment "$OUT")" "ghp****" "像令牌的非法 token：评论里只有掩码"
+# 15-fix3 #6：`ghp_<36 位>` 是**合法标识符**，不带 = 也不带连字符——原来不匹配任何凭证形状、被静默接受并透传；现在按 GHP_* 前缀拒绝并掩码
+FAKE_GHP=$(fake_token ghp)   # 片段拼接只在 helpers.sh 的 fake_token 一处（15-fix4 #9）：公开仓库里不留完整的令牌形态字面量
+run_case badpass3b KIRO_ENV_PASSTHROUGH="$FAKE_GHP"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 贴了一个真形态 ghp_ 令牌：拒绝运行"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "凭证形状" "ghp_ 令牌：按凭证形状拒绝"
+assert_contains "$comment" "ghp****" "ghp_ 令牌：评论里只有掩码"
+assert_not_contains "$OUT" "ABCDEFGHIJ" "ghp_ 令牌：原文不进日志也不进评论"
+# 15-fix2 #13：语法合法但凭证形状的名字（YUNXIAO_* / CODEUP_* / AWS_* / *TOKEN* / *SECRET* / *PASSWORD* / *CREDENTIAL* / *_KEY）→ 拒绝运行；名字掩码进评论
+run_case badpass4 KIRO_ENV_PASSTHROUGH="KIRO_FOO,YUNXIAO_TOKEN" KIRO_FOO=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：拒绝运行（固定名单刚关掉的洞不能被一个变量名重新打开）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "凭证形状" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：失败评论说明原因"
+assert_contains "$comment" "YUNXIAO****" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：失败评论列出被拒名字的掩码（15-fix3 #6）"
+assert_not_contains "$comment" "YUNXIAO_TOKEN" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：完整名字不进评论（svc_SECRET_… 这类名字本身就是密钥）"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：Kiro 未被启动"
+# 15-fix4 #4：AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 是配置不是凭证，显式放行；AWS_* 其余仍拒
+run_case awscfg KIRO_ENV_PASSTHROUGH="AWS_PROFILE,AWS_REGION,AWS_DEFAULT_REGION" AWS_PROFILE=p AWS_REGION=cn-north-1 AWS_DEFAULT_REGION=cn-north-1
+assert_rc "$RC" 0 "KIRO_ENV_PASSTHROUGH=AWS_PROFILE,AWS_REGION,AWS_DEFAULT_REGION：放行、评审正常完成"
+for v in AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION; do
+  assert_eq "$(grep -c -x -- "$v" "$MD/env")" "1" "KIRO_ENV_PASSTHROUGH：$v 透传到 Kiro 进程"
+done
+# 被拒条目按「第 N 项 掩码（命中 规则）」列出（A8：两个 AWS_* 名字掩码后都是 AWS****，靠序号与规则区分）；流水线日志给完整名字，评论不给
+run_case badpass5 KIRO_ENV_PASSTHROUGH="AWS_PROFILE,AWS_ACCESS_KEY_ID,MY_PAT" AWS_PROFILE=p
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含 AWS_ACCESS_KEY_ID：拒绝运行"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "第 2 项 AWS****（命中 AWS_*）" "凭证形状：评论按条目序号 + 掩码 + 命中规则列出（第 2 项）"
+assert_contains "$comment" "第 3 项 MY****（命中 *_PAT）" "凭证形状：*_PAT 规则命中、序号 3"
+assert_not_contains "$comment" "AWS_ACCESS_KEY_ID" "凭证形状：完整名字不进评论"
+assert_contains "$OUT" "第 2 项 AWS_ACCESS_KEY_ID（命中 AWS_*）" "凭证形状：流水线日志给完整名字 + 规则（名字是运维自己写的配置）"
+assert_not_contains "$comment" "第 1 项" "凭证形状：放行的 AWS_PROFILE 不在被拒条目里"
+
+# ---- 替身通道是 fail-closed（15-fix #14 / 15-fix2 #18 #19）：拿不到 $HOME/.kiro-mock 或加载不了 helpers.sh 的替身以 97 退出并报错 ----
+mkdir -p "$tmp/nohome"
+rc=0; err=$(cd "$tmp" && env -i PATH="$PATH" HOME="$tmp/nohome" kiro-cli chat --help 2>&1 >/dev/null) || rc=$?
+assert_eq "$rc" "97" "替身拿不到 \$HOME/.kiro-mock：以 97 退出"
+assert_contains "$err" ".kiro-mock" "替身拿不到配置目录：报错点名"
+rc=0; err=$(cd "$tmp" && env -i PATH="$PATH" kiro-cli chat --help 2>&1 >/dev/null) || rc=$?
+assert_eq "$rc" "97" "替身没有 HOME：以 97 退出"
+mkdir -p "$tmp/okhome/.kiro-mock"
+rc=0; help_out=$(env -i PATH="$PATH" HOME="$tmp/okhome" kiro-cli chat --help 2>&1) || rc=$?
+assert_rc "$rc" 0 "替身正控：HOME 下有 .kiro-mock 就正常工作"
+assert_contains "$help_out" "--agent-engine" "替身正控：--help 输出正常"
+# helpers.sh 加载不了（把替身单独拷到没有 ../helpers.sh 的目录）→ 97，而不是故障注入开关静默失效
+mkdir -p "$tmp/lonely/mockbin"; cp "$ROOT/tests/mockbin/kiro-cli" "$tmp/lonely/mockbin/kiro-cli"
+rc=0; err=$(env -i PATH="$tmp/lonely/mockbin:$PATH" HOME="$tmp/okhome" kiro-cli chat --help 2>&1 >/dev/null) || rc=$?
+assert_eq "$rc" "97" "替身加载不了 helpers.sh：以 97 退出"
+assert_contains "$err" "helpers.sh" "替身加载不了 helpers.sh：报错点名"
+# 端到端层面：测试忘了 mock_config_write → 第一次 kiro-cli 调用（--help）就失败 → 用例红（不是假绿）
+NO_MOCK_DIR=1 run_case nomockdir
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "漏建替身配置目录：评审失败（替身拒绝运行）"
+assert_eq "$([[ -e "$MD/args" || -e "$MD/calls" ]] && echo recorded || echo none)" "none" "漏建替身配置目录：替身什么都没记（而不是记了一半）"
+# Kiro 进程环境里不再有 KIRO_ENV_PASSTHROUGH/KIRO_MOCK_DIR 这类测试专用变量——替身通道完全走 HOME
+assert_eq "$(grep -c -x -- 'KIRO_MOCK_DIR' "$tmp/case-ok/home/.kiro-mock/env")" "0" "成功路径：Kiro 进程环境里没有测试专用的 KIRO_MOCK_DIR"
+
+# ---- kiro-cli 版本 vs KIRO_TESTED_VERSIONS（15-fix2 #24）：不在名单里不失败，但日志与汇总评论都要有 notice ----
+run_case oldver MOCK_KIRO_VERSION=9.9.9
+assert_rc "$RC" 0 "kiro-cli 版本不在名单：评审照常完成（不失败）"
+assert_contains "$OUT" "未经 P1-15 探测" "kiro-cli 版本不在名单：日志警告"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "未经 P1-15 探测" "kiro-cli 版本不在名单：汇总评论带 notice"
+assert_contains "$comment" "9.9.9" "kiro-cli 版本不在名单：notice 写出实际版本"
+assert_contains "$comment" "2.21.1" "kiro-cli 版本不在名单：notice 写出已探测版本"
+run_case nover MOCK_KIRO_VERSION=
+assert_rc "$RC" 0 "kiro-cli 版本取不到：评审照常完成"
+assert_contains "$(posted_comment "$OUT")" "未知" "kiro-cli 版本取不到：notice 写「未知」"
+# 15-fix3 #8：版本打到 stderr 的 CLI 也要取得到（否则每条评论永久带「版本未知」notice 且无法清除）
+run_case verstderr MOCK_KIRO_VERSION_STDERR=1
+assert_rc "$RC" 0 "kiro-cli --version 打到 stderr：评审照常完成"
+assert_contains "$OUT" "在 P1-15 探测过的版本名单内" "kiro-cli --version 打到 stderr：仍取得到版本、名单内"
+assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "kiro-cli --version 打到 stderr：无 notice"
+# 15-fix4 #7：stderr 上先到的升级提示不能被当成已装版本。旧写法 `2>&1 | head -1 | grep -oE 数字` 取到的是先 flush 的那个流的第一行——
+# stderr 无缓冲、stdout 进管道块缓冲，升级提示「… 2.30.0 …」先到 → 脚本据以判定的是**可用**版本；等 2.30.0 进 KIRO_TESTED_VERSIONS，
+# 装着未探测 2.21.x 的机器反而不再告警。新取法：stdout 与 stderr 分开捕获，先在 stdout 里按程序名锚定 `kiro-cli <X.Y.Z>`，取不到再看 stderr。
+run_case verwarn MOCK_KIRO_VERSION_WARN=1
+assert_rc "$RC" 0 "stderr 先打升级提示：评审照常完成"
+assert_contains "$OUT" "kiro-cli 版本 2.21.1：在 P1-15 探测过的版本名单内" "stderr 先打升级提示：取到的是已装版本 2.21.1，不是提示里的 2.30.0"
+assert_not_contains "$OUT" "2.30.0 未经" "stderr 先打升级提示：没把 2.30.0 当成本次版本"
+assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "stderr 先打升级提示：无 notice"
+# 升级提示 + 版本打到 stderr（两条都在 stderr）：仍按程序名锚定取到已装版本
+run_case verwarn2 MOCK_KIRO_VERSION_WARN=1 MOCK_KIRO_VERSION_STDERR=1
+assert_contains "$OUT" "kiro-cli 版本 2.21.1：在 P1-15 探测过的版本名单内" "升级提示与版本都在 stderr：按程序名锚定仍取到 2.21.1"
+# --version 跑不起来（退出码 127）：走失败评论（固定文案），不再是软 notice 后在 chat 上烧掉整个 KIRO_TIMEOUT
+run_case verfail MOCK_KIRO_VERSION_RC=127
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "kiro-cli --version 退出 127：评审失败"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "评审未完成" "kiro-cli --version 退出 127：失败评论"
+assert_contains "$comment" "kiro-cli --version 失败" "kiro-cli --version 退出 127：失败评论固定文案点名 --version"
+assert_contains "$comment" "127" "kiro-cli --version 退出 127：失败评论带退出码"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "kiro-cli --version 退出 127：Kiro chat 未被启动（不烧额度）"
+assert_eq "$(call_count "$MD/calls" settings)" "0" "kiro-cli --version 退出 127：settings 也未调用（在能力检查处就停）"
+# 15-fix3 #3：降级路径（结构化解析失败）同样要带版本 notice——原来只在结构化分支并入
+run_case degnotice MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
+assert_rc "$RC" 0 "降级 + 版本不在名单：退出码 0"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "结构化解析失败" "降级 + 版本不在名单：是降级评论"
+assert_contains "$comment" "未经 P1-15 探测" "降级 + 版本不在名单：降级评论也带版本 notice"
+assert_contains "$comment" "9.9.9" "降级 + 版本不在名单：notice 写出实际版本"
+assert_not_contains "$(posted_comment "$out")" "未经 P1-15 探测" "成功路径（2.21.1）：汇总评论无版本 notice"
+
+# 15-fix4 #3 / A7：降级评论只带 REVIEW_NOTICE——INLINE_NOTICE（「全部问题都归入未定位」这类关于分桶的提示）不该出现在一份没有问题清单的评论里。
+# 纯删除 MR + INLINE_COMMENT=1 让第 4.5 步产生 INLINE_NOTICE，再让评审员不守契约走降级。对 5462175 必须失败（那里降级评论继承 ALL_NOTICE）。
+tweak_pure_delete() { git reset -q --hard origin/master; git rm -q src/app.py; git commit -qm "delete app"; git push -qf origin feature/x; }
+CASE_TWEAK=tweak_pure_delete run_case degnoinline INLINE_COMMENT=1 MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
+assert_rc "$RC" 0 "降级 + 纯删除 MR：退出码 0"
+assert_contains "$OUT" "全部问题都归入" "降级 + 纯删除 MR：日志里有分桶提示（INLINE_NOTICE 确实产生了）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "结构化解析失败" "降级 + 纯删除 MR：是降级评论"
+assert_contains "$comment" "未经 P1-15 探测" "降级 + 纯删除 MR：版本 notice 在"
+assert_not_contains "$comment" "全部问题都归入" "降级 + 纯删除 MR：分桶提示（INLINE_NOTICE）不进降级评论"
+
+# ---- 日志里的变量名清单按数组元素取名字（15-fix #7）：取值含换行时，换行后的半个取值不能进日志 ----
+run_case nlkey KIRO_API_KEY="$(printf 'k\nSECRETFRAG=leaked')"
+assert_rc "$RC" 0 "取值含换行：评审正常完成"
+assert_not_contains "$OUT" "SECRETFRAG" "取值含换行：日志里不出现换行后的半个取值"
+assert_contains "$(printf '%s\n' "$OUT" | grep -F "Kiro 进程环境许可清单" | head -1)" "KIRO_API_KEY" "取值含换行：清单里仍列出 KIRO_API_KEY 这个名字"
+
+# ---- 业务库里的符号链接在 Kiro 启动前全部删除（15-fix #1）：`payload -> /root/.aws/credentials` 的请求路径字面上在 allow 内 ----
+tweak_symlinks() {
+  ln -s /etc/hosts link-to-hosts
+  mkdir -p src/sub2 && ln -s /etc src/sub2/link-to-etc-dir
+  ln -s ../outside-target src/link-rel-dangling
+  git add -A && git commit -qm "add symlinks"
+}
+CASE_TWEAK=tweak_symlinks run_case symlinks
+assert_rc "$RC" 0 "符号链接：评审正常完成"
+assert_eq "$(cat "$MD/cwdscan")" "" "符号链接：Kiro 启动时工作区里没有任何符号链接（含指向目录的、悬空的）"
+assert_contains "$OUT" "3 个符号链接" "符号链接：日志计数 3 个"
+assert_contains "$(cat "$MD/stdin")" "link-to-hosts" "符号链接：链接本身的改动仍在 diff 里（diff 先算好，删链接不影响评审输入）"
+assert_eq "$([[ -d "$CASE/work/src/sub2" ]] && echo kept || echo gone)" "kept" "符号链接：只删链接，普通目录保留"
+assert_eq "$([[ -e "$CASE/work/src/app.py" ]] && echo kept || echo gone)" "kept" "符号链接：普通文件保留"
+assert_eq "$(git -C "$CASE/work" rev-parse --is-inside-work-tree 2>/dev/null)" "true" "符号链接：.git 未被触碰"
+
+# ---- 嵌套 .git（15-fix2 #15）：旧写法 -path ./.git -prune 只剪根目录那一份，vendored clone / fixture 仓库的 .git 内部会被改动 ----
+tweak_nested_git() {
+  mkdir -p vendor/lib/.git/hooks
+  ln -s /etc/hosts vendor/lib/.git/nestedlink
+  printf 'inside nested .git\n' > vendor/lib/.git/AGENTS.md
+  mkdir -p vendor/lib/.git/.kiro && echo '{}' > vendor/lib/.git/.kiro/x.json
+  mkdir -p sub && ln -s /etc sub/.git          # .git 本身是符号链接：不是目录、不剪枝，按符号链接删掉
+  ln -s /etc/hosts vendor/lib/link-outside-git  # 嵌套 .git **旁边**的链接照常删
+}
+CASE_TWEAK=tweak_nested_git run_case nestedgit
+assert_rc "$RC" 0 "嵌套 .git：评审正常完成"
+assert_eq "$([[ -L "$CASE/work/vendor/lib/.git/nestedlink" ]] && echo kept || echo gone)" "kept" "嵌套 .git：目录内部的符号链接不动"
+assert_eq "$([[ -f "$CASE/work/vendor/lib/.git/AGENTS.md" ]] && echo kept || echo gone)" "kept" "嵌套 .git：目录内部的 AGENTS.md 不动"
+assert_eq "$([[ -d "$CASE/work/vendor/lib/.git/.kiro" ]] && echo kept || echo gone)" "kept" "嵌套 .git：目录内部的 .kiro 不动"
+assert_eq "$([[ -L "$CASE/work/sub/.git" || -e "$CASE/work/sub/.git" ]] && echo kept || echo gone)" "gone" "嵌套 .git：名为 .git 的符号链接按符号链接删掉"
+assert_eq "$([[ -L "$CASE/work/vendor/lib/link-outside-git" ]] && echo kept || echo gone)" "gone" "嵌套 .git：旁边的符号链接照常删"
+assert_eq "$(cat "$MD/cwdscan")" "" "嵌套 .git：Kiro 启动时扫描不到残留（扫描谓词同样剪掉嵌套 .git）"
+assert_contains "$OUT" "2 个符号链接" "嵌套 .git：只删了 sub/.git 与 link-outside-git 两个链接（计数 2）"
+
+# ---- .kiro 大小写不敏感 + 根 .kiro 普通文件（15-fix3 #1 #2）：macOS/Windows 执行器上 .Kiro/ 按 .kiro/ 读到；旧代码无条件 rm -rf ./.kiro 没搬进新库 ----
+# 夹具在 tests/fixture-repo.sh 的 make_kiro_case_variants（与变异 M5t / M5u 同一份，15-fix4 #10）
+CASE_TWEAK=make_kiro_case_variants run_case kirocase
+assert_rc "$RC" 0 ".kiro 变体：评审正常完成"
+assert_eq "$([[ -e "$CASE/work/.kiro" ]] && echo kept || echo gone)" "gone" ".kiro 变体：根 .kiro 普通文件被删"
+assert_eq "$([[ -e "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "gone" ".kiro 变体：src/.Kiro/ 目录被删（不分大小写）"
+assert_eq "$([[ -e "$CASE/work/src/x/.KIRO" ]] && echo kept || echo gone)" "gone" ".kiro 变体：子目录 .KIRO 文件被删"
+assert_eq "$([[ -e "$CASE/work/src/sub/.kiro" ]] && echo kept || echo gone)" "gone" ".kiro 变体：原有子目录 .kiro/ 照删"
+assert_eq "$(cat "$MD/cwdscan")" "" ".kiro 变体：Kiro 启动时扫描不到残留（扫描谓词同样不分大小写、不限类型）"
+assert_eq "$(leftovers)" "" ".kiro 变体：运行后无残留"
+assert_contains "$OUT" "4 个 .kiro、" ".kiro 变体：计数 4（根文件 + .Kiro + src/x/.KIRO + src/sub/.kiro）"
+
+# ---- 谓词等价（15-fix2 #23 / 15-fix4 #6）：生产隔离函数实际删除的集合 == 枚举版列出的集合（在一棵刻意刁难的合成树上）----
+# 15-fix4 #6 起两者转调同一个发射器 review_isolation_scan，等价现在是恒等；用例保留为「删除清单 == 扫描结果」与计数口径的 golden。
+EQ="$tmp/eqtree"; mkdir -p "$EQ"
+( cd "$EQ" && mkdir -p .git/hooks nested/repo/.git a/b c .kiro/settings d
+  ln -s /etc/hosts .git/rootgitlink; printf 'x' > .git/AGENTS.md            # 根 .git 内部：不动
+  ln -s /etc/hosts nested/repo/.git/innerlink; printf 'x' > nested/repo/.git/AGENTS.md; mkdir nested/repo/.git/.kiro   # 嵌套 .git 内部：不动
+  ln -s /etc c/.git                                                          # 名为 .git 的符号链接：按符号链接删
+  printf 'x' > AGENTS.md; printf 'x' > a/agents.md; mkdir a/b/AGENTS.md      # 大小写不敏感；同名目录不算
+  echo '{}' > .kiro/settings/cli.json; ln -s ../evil d/.kiro                # .kiro 目录 + .kiro 符号链接
+  ln -s /etc/hosts filelink; ln -s /etc dirlink; ln -s nowhere dangling; ln -s /etc/hosts a/b/deeplink
+  printf 'x' > lsp.json; printf 'x' > a/lsp.json                            # 只有根 lsp.json 算
+  printf 'x' > .kiro/settings/inner-agents.md )                               # .kiro 内部：随 .kiro 整体删，不单列
+expected=$(cd "$EQ" && injection_surface_scan | sort)
+assert_eq "$(printf '%s\n' "$expected" | grep -c .)" "10" "谓词等价前置：枚举版在合成树上列出 10 条（2 AGENTS.md + 2 .kiro + 5 符号链接 + 根 lsp.json）"
+pre_scan=$(cd "$EQ" && review_isolation_scan | od -An -c | tr -d ' \n')   # 删除前发射器的原始 NUL 流
+counts=$(cd "$EQ" && review_isolate_workspace "$tmp/eq-removed.zlist")
+actual=$(tr '\0' '\n' < "$tmp/eq-removed.zlist" | cut -f2- | sort)
+assert_eq "$actual" "$expected" "谓词等价：生产隔离函数删除的集合 == 测试谓词枚举的集合"
+assert_eq "$(od -An -c "$tmp/eq-removed.zlist" | tr -d ' \n')" "$pre_scan" "谓词等价：删除清单逐字节等于删除前发射器的 NUL 流（先写清单再删）"
+assert_eq "$(tr '\0' '\n' < "$tmp/eq-removed.zlist" | cut -f1 | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')" "agents=2 kiro=2 links=5 lsp=1 " "谓词等价：清单里的 class 列与四个计数一致"
+assert_eq "$counts" "2 2 5 1" "谓词等价：计数 = 2 个 AGENTS.md（根 + a/agents.md）、2 个 .kiro（目录 + 链接）、5 个符号链接（filelink dirlink dangling a/b/deeplink c/.git）、1 个根 lsp.json"
+assert_eq "$(cd "$EQ" && injection_surface_scan | wc -l | tr -d ' ')" "0" "谓词等价：隔离后枚举版扫描为空"
+assert_eq "$([[ -L "$EQ/.git/rootgitlink" && -f "$EQ/.git/AGENTS.md" ]] && echo kept || echo gone)" "kept" "谓词等价：根 .git 内部不动"
+assert_eq "$([[ -L "$EQ/nested/repo/.git/innerlink" && -f "$EQ/nested/repo/.git/AGENTS.md" && -d "$EQ/nested/repo/.git/.kiro" ]] && echo kept || echo gone)" "kept" "谓词等价：嵌套 .git 内部不动"
+assert_eq "$([[ -d "$EQ/a/b/AGENTS.md" && -f "$EQ/a/lsp.json" ]] && echo kept || echo gone)" "kept" "谓词等价：同名目录 AGENTS.md/ 与非根 lsp.json 不动"
+# 第二棵树（15-fix3 #1 #2 #11）：根 .kiro 普通文件、.Kiro/ 目录、.KIRO 符号链接、**符号链接形态的根 lsp.json**（枚举版曾把它输出两次）
+EQ2="$tmp/eqtree2"; mkdir -p "$EQ2"
+( cd "$EQ2" && mkdir -p .git a/.Kiro/settings b c
+  printf 'plain' > .kiro; echo '{}' > a/.Kiro/settings/cli.json; ln -s ../nowhere b/.KIRO     # 大小写变体各在不同目录（APFS 大小写不敏感）
+  ln -s /etc/hosts lsp.json; printf 'x' > c/lsp.json )
+expected2=$(cd "$EQ2" && injection_surface_scan | sort)
+assert_eq "$(printf '%s\n' "$expected2" | grep -c .)" "4" "谓词等价 2：枚举版列出 4 条（.kiro 文件、a/.Kiro 目录、b/.KIRO 链接、lsp.json 链接）"
+assert_eq "$(printf '%s\n' "$expected2" | grep -c -x './lsp.json')" "1" "谓词等价 2：符号链接形态的根 lsp.json 只出现一次"
+counts2=$(cd "$EQ2" && review_isolate_workspace "$tmp/eq2-removed.zlist")
+assert_eq "$(tr '\0' '\n' < "$tmp/eq2-removed.zlist" | cut -f2- | sort)" "$expected2" "谓词等价 2：生产隔离函数删除的集合 == 枚举版集合"
+# 15-fix4 #6 / B7：符号链接形态的根 lsp.json 归 lsp 类（日志「根 lsp.json（N 个）」与实际一致），不再落进符号链接桶
+assert_eq "$counts2" "0 3 0 1" "谓词等价 2：计数 = 0 AGENTS.md、3 个 .kiro（文件/.Kiro/.KIRO 链接）、0 个符号链接、1 个根 lsp.json（符号链接形态也算 lsp）"
+assert_eq "$(tr '\0' '\n' < "$tmp/eq2-removed.zlist" | grep -c $'^lsp\t./lsp.json$')" "1" "谓词等价 2：清单里 ./lsp.json 的 class 是 lsp"
+assert_eq "$(cd "$EQ2" && injection_surface_scan | wc -l | tr -d ' ')" "0" "谓词等价 2：隔离后枚举版扫描为空"
+assert_eq "$([[ -f "$EQ2/c/lsp.json" ]] && echo kept || echo gone)" "kept" "谓词等价 2：非根 lsp.json 不动"
+# 15-fix3 #10 / 15-fix4 #6：计数按 find 匹配时的类别记账；清单按 NUL 分隔——路径含换行时清单里仍是**一条**、且逐字等于那个名字（对 5462175 必须失败：那里按行写，一条拆成两行）
+EQ3="$tmp/eqtree3"; mkdir -p "$EQ3/.git" && ( cd "$EQ3" && ln -s /etc/hosts "$(printf 'weird\nname')" )
+counts3=$(cd "$EQ3" && review_isolate_workspace "$tmp/eq3-removed.zlist")
+assert_eq "$counts3" "0 0 1 0" "谓词等价 3：含换行的符号链接只算 1 个（按 find 匹配计数，不按列表行数、不按字符串重分类）"
+assert_eq "$(ls -A "$EQ3" | grep -v '^.git$' | wc -l | tr -d ' ')" "0" "谓词等价 3：含换行名字的符号链接已删除"
+assert_eq "$(tr -cd '\0' < "$tmp/eq3-removed.zlist" | wc -c | tr -d ' ')" "1" "谓词等价 3：NUL 清单恰好一条记录"
+assert_eq "$(tr '\0' '\n' < "$tmp/eq3-removed.zlist" | head -c -1 2>/dev/null || tr '\0' '\n' < "$tmp/eq3-removed.zlist")" "$(printf 'links\t./weird\nname\n')" "谓词等价 3：那条记录逐字是 links<TAB>./weird<换行>name（集合相等，不只是计数）"
+# 15-fix4 #6 / E4：被删目录（.kiro/、目录形态的根 lsp.json/）内部的嵌套 .git 随目录一起删——不是工作树的版本库；工作树自己的 .git（根、a/.git）不动
+EQ4="$tmp/eqtree4"; mkdir -p "$EQ4/.git" "$EQ4/x/.kiro/fixtures/repo/.git/objects" "$EQ4/a/.git/objects" "$EQ4/lsp.json/.git"
+( cd "$EQ4" && printf 'x' > x/.kiro/fixtures/repo/.git/HEAD && printf 'x' > a/.git/HEAD && printf 'x' > .git/HEAD && printf 'x' > lsp.json/.git/HEAD )
+counts4=$(cd "$EQ4" && review_isolate_workspace "$tmp/eq4-removed.zlist")
+assert_eq "$counts4" "0 1 0 1" "谓词等价 4：1 个 .kiro（含内部嵌套 .git）+ 1 个目录形态的根 lsp.json（含内部 .git）"
+assert_eq "$([[ -e "$EQ4/x/.kiro" ]] && echo kept || echo gone)" "gone" "谓词等价 4：x/.kiro/ 连同内部嵌套的 .git 一起删除（不是工作树的版本库）"
+assert_eq "$([[ -e "$EQ4/lsp.json" ]] && echo kept || echo gone)" "gone" "谓词等价 4：目录形态的根 lsp.json/ 连同内部 .git 一起删除"
+assert_eq "$([[ -f "$EQ4/.git/HEAD" && -f "$EQ4/a/.git/HEAD" ]] && echo kept || echo gone)" "kept" "谓词等价 4：工作树自己的根 .git 与不在被删目录内的 a/.git 不动"
+# 15-fix4 #6：多批 -exec +（大量符号链接、长名字让 find 分多批调用 sh -c）——计数与清单都必须完整
+EQ5="$tmp/eqtree5"; mkdir -p "$EQ5/.git" "$EQ5/d"
+( cd "$EQ5/d" && longname=$(printf 'l%.0s' $(seq 1 150)) && for i in $(seq 1 7000); do ln -s /etc/hosts "${longname}-${i}"; done )
+counts5=$(cd "$EQ5" && review_isolate_workspace "$tmp/eq5-removed.zlist")
+assert_eq "$counts5" "0 0 7000 0" "谓词等价 5：7000 个符号链接（多批 -exec +）计数完整"
+assert_eq "$(tr -cd '\0' < "$tmp/eq5-removed.zlist" | wc -c | tr -d ' ')" "7000" "谓词等价 5：清单 7000 条"
+assert_eq "$(ls -A "$EQ5/d" | wc -l | tr -d ' ')" "0" "谓词等价 5：全部删除"
+# 15-fix4 #6：任一条删除失败 → 返回非零（清单已写、计数不打）：把一个 .kiro 目录设为不可删（父目录只读）
+if [[ "$(id -u)" != "0" ]]; then
+  EQ6="$tmp/eqtree6"; mkdir -p "$EQ6/.git" "$EQ6/ro/.kiro"; chmod 555 "$EQ6/ro"
+  rc6=0; out6=$(cd "$EQ6" && review_isolate_workspace "$tmp/eq6-removed.zlist" 2>/dev/null) || rc6=$?
+  chmod 755 "$EQ6/ro"
+  assert_eq "$([[ $rc6 -ne 0 ]] && echo nonzero)" "nonzero" "谓词等价 6：删不掉时返回非零"
+  assert_eq "$out6" "" "谓词等价 6：失败时不打计数（调用方 die_review）"
+  assert_eq "$(tr '\0' '\n' < "$tmp/eq6-removed.zlist" | cut -f2-)" "./ro/.kiro" "谓词等价 6：清单在删除之前已写好（先持久化再删）"
+fi
+
+# ---- 静态：scripts/ 里不得再有多字节分隔符的 paste（GNU coreutils 会截成单字节，产出非法 UTF-8；15-fix3 #4）与 --print-paths（#12）----
+# 只看 paste 的分隔符参数：-d / -sd 后接单引号或双引号字面量，以及 --delimiters=… 的两种引号（15-fix4 #12）。
+# 非 ASCII 判定用 LC_ALL=C 下的**否定可打印类** `[^ -~[:space:]]`：BSD grep 在 C locale 下对 `[\x80-\xff]` 字节范围匹配不到任何东西
+# （macOS 上旧守卫恒为 0，正控只证明 paste -d 存在，D3 实测），否定类在 BSD / GNU 都按字节生效。
+paste_delims() { LC_ALL=C grep -rhoE "paste[[:space:]]+(-[a-z]*d[[:space:]]*|--delimiters=)('[^']*'|\"[^\"]*\")" "$@" || true; }   # 无匹配时输出空、不让 set -e 中止
+non_ascii_count() { LC_ALL=C grep -c '[^ -~[:space:]]' || true; }
+assert_eq "$(paste_delims "$ROOT/scripts" | non_ascii_count)" "0" "静态：scripts/ 里 paste 的每个分隔符字面量都是单字节 ASCII（GNU coreutils 会把多字节截成单字节）"
+assert_eq "$([[ "$(paste_delims "$ROOT/scripts" | wc -l | tr -d ' ')" -ge 1 ]] && echo some || echo none)" "some" "静态前置：scripts/ 里确有 paste -d 调用（否则上一条恒真）"
+# 正控（本平台上跑一次）：四种写法的多字节分隔符都必须被正则认出、且被非 ASCII 判定抓到——否则上面那条在本平台上是空的
+printf "%s\n" "x | paste -sd'、' -" 'y | paste -d"、" -' "z | paste --delimiters='、' -" 'w | paste -sd"，" -' "ok | paste -sd' ' -" > "$tmp/paste-ctl.txt"
+paste_ctl=$(paste_delims "$tmp/paste-ctl.txt")
+assert_eq "$(printf '%s\n' "$paste_ctl" | wc -l | tr -d ' ')" "5" "静态正控：五种 paste 分隔符写法都被正则认出"
+assert_eq "$(printf '%s\n' "$paste_ctl" | non_ascii_count)" "4" "静态正控：四个多字节分隔符在本平台上都被非 ASCII 判定抓到（单字节那个不算）"
+assert_eq "$(grep -rn -- '--print-paths\|print_paths' "$ROOT/scripts" | wc -l | tr -d ' ')" "0" "静态：--print-paths 协议已从 scripts/ 删除"
+# 15-fix4 #8：tests/helpers.sh 的辅助函数不得把 printf 出来的大字符串管进可能提前停读的程序（grep -q / head）——下游一停读上游 printf 收
+# SIGPIPE，pipefail 下整个测试文件以 141 静默退出、连 FAIL 行都没有（assert_contains 与 meta_row 都踩过）。只看代码行，不看注释。
+early_exit_pipes() { grep -v '^[[:space:]]*#' "$1" | grep -cE 'printf .*\|.*(grep -q|head( |$))' || true; }
+assert_eq "$(early_exit_pipes "$ROOT/tests/helpers.sh")" "0" "静态：helpers.sh 里没有 printf … | grep -q / head 这类会提前停读的管道"
+printf '%s\n' 'meta_row() { printf "%s\n" "$1" | { grep -F x || true; } | head -1; }' 'x() { printf "%s" "$1" | grep -qF y; }' '# printf | head 注释不算' > "$tmp/helpers-old-shape.sh"
+assert_eq "$(early_exit_pipes "$tmp/helpers-old-shape.sh")" "2" "静态正控：旧 meta_row（… | head -1）与 printf | grep -q 两种形状都被认出、注释不算"
+
 run_case rerunhint REVIEW_RERUN_HINT='评论 `/kiro review` 可重新评审'
 assert_rc "$RC" 0 "REVIEW_RERUN_HINT：评审成功"
 comment=$(posted_comment "$OUT")

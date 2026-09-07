@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# 测试替身：模拟 kiro-cli 的三种用法，并把观察到的东西写进 MOCK_* 指定的文件。
-#   kiro-cli chat --help        → 打印支持的参数名（含 --agent、--agent-engine、--output-format）
-#   kiro-cli settings KEY VALUE → 追加 "KEY VALUE" 到 MOCK_SETTINGS_FILE
-#   kiro-cli chat ...           → 记录参数(MOCK_ARGS_FILE)与 stdin(MOCK_STDIN_FILE)；扫描启动时 cwd
-#                                 里残留的 AGENTS.md（任意深度）/根 lsp.json/.kiro（任意深度）写入
-#                                 MOCK_CWD_SCAN_FILE；再输出评审结果
-# 每次调用把子命令名（help 调用记为 "help"）追加到 MOCK_CALLS_FILE，用于断言调用顺序；
-# help 调用时的 cwd 写入 MOCK_HELP_CWD_FILE。
+# 测试替身：模拟 kiro-cli 的几种用法，并把观察到的东西写进 $HOME/.kiro-mock/ 下固定名字的文件。
+#   kiro-cli --version          → 打印 "kiro-cli <版本>"（默认 2.21.1；MOCK_KIRO_VERSION 可换，测 KIRO_TESTED_VERSIONS 的 notice；
+#                                 MOCK_KIRO_VERSION_STDERR=1 打到 stderr；MOCK_KIRO_VERSION_WARN=1 stderr 先打带 2.30.0 的升级提示；
+#                                 MOCK_KIRO_VERSION_RC=<n> 以退出码 n 失败）
+#   kiro-cli chat --help        → 打印支持的参数名（含 --agent、--agent-engine、--output-format）；环境变量名 → env-help
+#   kiro-cli settings KEY VALUE → 追加 "KEY VALUE" 到 settings；环境变量名 → env-settings
+#   kiro-cli chat ...           → 记录参数(args)与 stdin(stdin)；扫描启动时**业务库**（agent 定义 allowedPaths[0]）里残留的
+#                                 AGENTS.md（任意深度）/根 lsp.json/.kiro（任意深度）/**符号链接**（任意深度）写入 cwdscan；环境变量名 → env；
+#                                 再输出评审结果
+# 每次调用把子命令名（help 调用记为 "help"）追加到 calls，用于断言调用顺序；help / settings / chat 三次调用的 cwd（pwd -P）分别写入
+# helpcwd / settingscwd / chatcwd，chat 时 cwd 的条目数写入 chatcwd-entries（生产四处调用都在 $WORK/cwd 空目录下，15-fix4 #1）。
 #
 # 输出形态跟着参数走，与真实 kiro-cli 2.21.0 一致：
 #   带 `--output-format stream-json` → JSON Lines 事件流（runStarted / sessionUpdate / metadata /
@@ -42,21 +45,61 @@
 #   MOCK_KIRO_TRUNCATED=1       finalText 被截断且 finalTextTruncated=true（→ 降级原因应点明截断）
 #   MOCK_KIRO_LEAK_SECRET=1     无标记且原文里带未掩码的真实形态密钥（→ 脚本侧掩码应生效）
 #   MOCK_KIRO_NO_STREAM_FLAG=1  模拟 --help 不列出 --output-format 的版本（→ 脚本应拒绝运行）
+#
+# 配置的来路（票 15 / 15-fix #14 / 15-fix2 #18 #19）：生产脚本用 `env -i` + 许可清单启动 kiro-cli，MOCK_* 这类变量到不了本替身。
+# 替身只从 **$HOME/.kiro-mock/** 取配置与写记录（HOME 在固定名单里、每个用例各有 $CASE/home；不借道 KIRO_ENV_PASSTHROUGH——
+# 那是安全控制，测试不该与它耦合）：行为开关从 mock.env 读（解析器在 tests/helpers.sh 的 mock_config_load，与写入方同一份），
+# 记录文件全部落在该目录下固定名字。环境里的 MOCK_* 一律不认。拿不到该目录、或 helpers.sh 加载不了时**非零退出（97）并报错**
+# ——漏配要变成红测试，而不是「记不了 args 于是『Kiro 未启动』类断言恒真」、或「故障注入开关静默失效」（fail-closed）。
+# 整个替身跑在 set -euo pipefail 下：任何一步意外失败都让用例红，而不是假绿。
+# 与真实 kiro-cli 一致的一点：`--agent X` 必须能在 $HOME/.kiro/agents/X.json 找到定义，找不到就失败退出——
+# HOME 没透传或 agent 没装到位时，评审不能「静默用默认 agent 跑」。
+# 额外记录：env / env-help / env-settings / env-version ← 四种调用各自收到的环境变量名（每行一个，只记名字不记值）；
+#           allowscan ← agent 定义里 read.allowedPaths 每条路径在 chat 时是否为目录及目录内容
+#           （`路径<TAB>dir|MISSING<TAB>逗号分隔的目录内容`），用于断言 chunks 目录就是 diff chunk 的落盘目录。
+set -euo pipefail
 MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -n "${MOCK_CALLS_FILE:-}" ]]; then
-  if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$MOCK_CALLS_FILE"; else printf '%s\n' "${1:-}" >> "$MOCK_CALLS_FILE"; fi
+# 先记下**收到的**环境里的变量名（再往下会从配置文件导出 MOCK_*，那些不算 kiro-cli 收到的环境）
+MOCK_RECEIVED_ENV=$(compgen -e | sort)
+M="${HOME:-/nonexistent}/.kiro-mock"
+if [[ -z "${HOME:-}" || ! -d "$M" ]]; then
+  echo "mock kiro-cli: 拿不到配置目录 \$HOME/.kiro-mock（HOME='${HOME:-}'）——HOME 没透传、或测试没先 mock_config_write？替身拒绝运行（fail-closed），不会假装成功" >&2
+  exit 97
 fi
+# helpers.sh 是解析器与扫描谓词的唯一来源：加载不了就拒绝运行，不能让故障注入开关静默失效（15-fix2 #18）
+# 先测可读再 source：bash 3.2 把 source 一个不存在的文件当致命错误，`||` 根本轮不到执行
+[[ -r "$MOCK_DIR/../helpers.sh" ]] || { echo "mock kiro-cli: 找不到 tests/helpers.sh（$MOCK_DIR/../helpers.sh），替身拒绝运行" >&2; exit 97; }
+source "$MOCK_DIR/../helpers.sh" || { echo "mock kiro-cli: 加载 tests/helpers.sh 失败，替身拒绝运行" >&2; exit 97; }
+declare -F mock_config_load >/dev/null && declare -F injection_surface_scan >/dev/null \
+  || { echo "mock kiro-cli: tests/helpers.sh 里缺少 mock_config_load / injection_surface_scan，替身拒绝运行" >&2; exit 97; }
+mock_config_load "$HOME"
+if [[ "${1:-}" == "--version" ]]; then
+  echo "version" >> "$M/calls"
+  printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-version"   # 第四处 kiro-cli 调用的环境（15-fix4 #18）
+  # MOCK_KIRO_VERSION_RC=<n>：--version 跑不起来（例如 127）——脚本必须按退出码走失败评论，而不是软 notice 后在 chat 上烧掉整个 KIRO_TIMEOUT（15-fix4 #7）
+  if [[ "${MOCK_KIRO_VERSION_RC:-0}" != "0" ]]; then echo "mock: kiro-cli --version 模拟失败" >&2; exit "${MOCK_KIRO_VERSION_RC}"; fi
+  # MOCK_KIRO_VERSION_WARN=1：stderr 上**先**打一条升级提示（带更高的版本号，不带「kiro-cli <版本>」形态），再在 stdout 打已装版本——
+  # `2>&1 | head -1` 会取到可用版本 2.30.0 而不是已装版本（15-fix4 #7）
+  if [[ "${MOCK_KIRO_VERSION_WARN:-0}" == "1" ]]; then echo "warn: A new version (2.30.0) of kiro-cli is available (installed ${MOCK_KIRO_VERSION-2.21.1}). Run kiro-cli update." >&2; fi
+  # MOCK_KIRO_VERSION_STDERR=1：版本打到 stderr（有的 CLI 这么干）——脚本 stdout 取不到时要回退看 stderr，否则每条评论永久带「版本未知」notice
+  if [[ "${MOCK_KIRO_VERSION_STDERR:-0}" == "1" ]]; then echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}" >&2; else echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}"; fi
+  exit 0
+fi
+if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$M/calls"; else printf '%s\n' "${1:-}" >> "$M/calls"; fi
 case "${1:-}" in
   settings)
     shift
-    [[ -n "${MOCK_SETTINGS_FILE:-}" ]] && printf '%s\n' "$*" >> "$MOCK_SETTINGS_FILE"
+    printf '%s\n' "$*" >> "$M/settings"
+    printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-settings"
+    pwd -P > "$M/settingscwd"   # 断言 settings 不在业务库目录里跑（15-fix4 #1）
     if [[ "${MOCK_SETTINGS_FAIL:-0}" == "1" ]]; then echo "mock: 模拟 settings 失败" >&2; exit 1; fi
     exit 0 ;;
   chat) ;;
   *) echo "mock kiro-cli: 不支持的子命令: $*" >&2; exit 2 ;;
 esac
 if [[ "${2:-}" == "--help" ]]; then
-  [[ -n "${MOCK_HELP_CWD_FILE:-}" ]] && pwd > "$MOCK_HELP_CWD_FILE"   # 断言 --help 不在未隔离的业务库目录里跑
+  pwd -P > "$M/helpcwd"   # 断言 --help 不在业务库目录里跑（四处调用都在 $WORK/cwd 空目录下，15-fix4 #1）
+  printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-help"
   if [[ "${MOCK_KIRO_NO_ENGINE_FLAG:-0}" == "1" ]]; then
     echo "--no-interactive --trust-tools --agent"
   elif [[ "${MOCK_KIRO_NO_STREAM_FLAG:-0}" == "1" ]]; then
@@ -79,16 +122,34 @@ for a in "$@"; do
 done
 # 本次 nonce 从运行时提示词里取——提示词是位置参数，真实 kiro-cli 也是从那里读到它的。
 # 取不到就用一个占位串：脚本会因为标记对不上而降级，正好暴露「提示词没带 nonce」这种回归。
-MOCK_NONCE=$(printf '%s\n' "$@" | grep -oE '<<<KIRO_REVIEW_JSON:[0-9a-f]+>>>' | head -1 | sed -E 's/^<<<KIRO_REVIEW_JSON:([0-9a-f]+)>>>$/\1/')
+MOCK_NONCE=$({ printf '%s\n' "$@" | grep -oE '<<<KIRO_REVIEW_JSON:[0-9a-f]+>>>' || true; } | head -1 | sed -E 's/^<<<KIRO_REVIEW_JSON:([0-9a-f]+)>>>$/\1/')
 [[ -n "$MOCK_NONCE" ]] || MOCK_NONCE="nononcefound000"
-[[ -n "${MOCK_ARGS_FILE:-}" ]] && printf '%s\n' "$@" > "$MOCK_ARGS_FILE"
-[[ -n "${MOCK_NONCE_FILE:-}" ]] && printf '%s\n' "$MOCK_NONCE" > "$MOCK_NONCE_FILE"
-if [[ -n "${MOCK_STDIN_FILE:-}" ]]; then cat > "$MOCK_STDIN_FILE"; else cat > /dev/null; fi
-if [[ -n "${MOCK_CWD_SCAN_FILE:-}" ]]; then
-  {
-    [[ -e lsp.json ]] && echo "./lsp.json"
-    find . -not -path './.git/*' \( -iname AGENTS.md -not -type d \) -o \( -name .kiro -not -path './.git/*' \)
-  } > "$MOCK_CWD_SCAN_FILE"
+printf '%s\n' "$@" > "$M/args"
+printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env"
+# chat 时的运行目录与其内容数（15-fix4 #1：生产在 $WORK/cwd 空目录下运行；cwd 里有东西 = 又回到了业务库、或空目录被写脏）
+pwd -P > "$M/chatcwd"; ls -A | wc -l | tr -d ' ' > "$M/chatcwd-entries"
+# --agent X → $HOME/.kiro/agents/X.json 必须存在（真实 kiro-cli 按 name 在 agent 目录里找）
+AGENT_ARG=""; prev=""
+for a in "$@"; do [[ "$prev" == "--agent" ]] && AGENT_ARG="$a"; prev="$a"; done
+if [[ -n "$AGENT_ARG" ]]; then
+  AGENT_JSON="${HOME:-/nonexistent}/.kiro/agents/${AGENT_ARG}.json"
+  if [[ ! -r "$AGENT_JSON" ]]; then
+    echo "mock kiro-cli: agent '${AGENT_ARG}' not found under ${HOME:-<HOME 未设置>}/.kiro/agents" >&2; exit 1
+  fi
+  : > "$M/allowscan"
+  while IFS= read -r p; do
+    if [[ -d "$p" ]]; then printf '%s\tdir\t%s\n' "$p" "$(ls -A "$p" | paste -sd, -)"
+    else printf '%s\tMISSING\t\n' "$p"; fi
+  done < <(jq -r '.toolsSettings.read.allowedPaths[]?' "$AGENT_JSON") >> "$M/allowscan"
+fi
+printf '%s\n' "$MOCK_NONCE" > "$M/nonce"
+cat > "$M/stdin"
+# 启动时**业务库**（allowedPaths[0]）里残留的注入面：与生产隔离谓词等价的枚举版（tests/helpers.sh injection_surface_scan，15-fix2 #23）。
+# 生产的 cwd 是 $WORK/cwd 空目录（15-fix4 #1），扫 cwd 会恒空；要扫的是模型能读到的那棵树。没装 agent（变异 M4 删掉 --agent）时退回扫 cwd。
+if [[ -n "$AGENT_ARG" ]] && ws_scan=$(jq -r '.toolsSettings.read.allowedPaths[0] // empty' "$AGENT_JSON") && [[ -n "$ws_scan" && -d "$ws_scan" ]]; then
+  ( cd "$ws_scan" && injection_surface_scan ) > "$M/cwdscan"
+else
+  injection_surface_scan > "$M/cwdscan"
 fi
 [[ "${MOCK_KIRO_HANG:-0}" == "1" ]] && sleep 300
 [[ -n "${MOCK_KIRO_STDERR_TEXT:-}" ]] && printf '%s\n' "$MOCK_KIRO_STDERR_TEXT" >&2
@@ -144,13 +205,13 @@ elif [[ "${MOCK_KIRO_LEAK_SECRET:-0}" == "1" ]]; then
   # 不守契约（无标记）**并且**没按掩码规则脱敏：降级路径必须由脚本再掩一次。
   # 三种形态都放进来：裸值、base64 补位（值里含 `=`）、只引用起始行的 PEM 块。
   # 后两种在票 10 之前都会失效——补位形态整段裸奔，未配对的 BEGIN 会把它之后的结论全吞掉。
-  # PEM 与 base64 值都由片段拼出来，不在仓库里留下完整的凭证形态字面量（与单测同一理由）。
+  # PEM 与 base64 值都由片段拼出来，不在仓库里留下完整的凭证形态字面量（与单测同一理由；PEM 片段取自 helpers.sh 的 fake_token）。
   D5="-----"
   PADDED="dGhpcyBpcyBh""IHNlY3JldA=="
   # 整行正文刻意只有 30 字符：≥20 走「整行 base64」规则，但不到 40、不会被「连片 base64」规则顺手掩掉——
   # 否则 M43 变异（关掉整行规则）观察不到任何变化（2026-09-05 实测踩过）。
-  PEM_BODY="MIIEowIBAAKCAQEA""fakekey0123456"
-  PEM_BODY2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4"   # 尾巴像随机 base64（16-fix4 第 26 条改定义：块外判定看类别切换率）
+  PEM_BODY=$(fake_token pem1)      # 片段拼接只在 tests/helpers.sh 的 fake_token 一处（15-fix4 #9）
+  PEM_BODY2=$(fake_token pem2)
   # 起始行后先来一句说明，再是整行正文与夹在句子里的正文片段：三种形态都要在放出时被掩掉
   FINAL=$(printf '# 代码评审报告\n\nP0：src/app.py 里写死了凭证 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY，还有 AKIAIOSFODNN7EXAMPLE。\nP0：src/conf.py 里 api_key = "%s" 也是明文。\nP0：仓库里还提交了私钥：\n%sBEGIN RSA PRIVATE KEY%s\n（下面是私钥内容，节选）\n%s\n正文片段 %s 出现在 app/key.pem\n\n总体结论：不建议合并。\n' \
           "$PADDED" "$D5" "$D5" "$PEM_BODY" "$PEM_BODY2")

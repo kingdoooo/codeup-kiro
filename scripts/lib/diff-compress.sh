@@ -92,8 +92,11 @@ build_review_input() {
   : > "$out_diff" || return 1
   : > "$out_omitted" || return 1
   mkdir -p "$chunk_dir" || return 1
-  # 省略清单契约要求 chunk 为绝对路径（下游读取方 cwd 不一定等于调用方 cwd）
-  chunk_dir=$(cd "$chunk_dir" && pwd) || return 1
+  # 省略清单契约要求 chunk 为绝对路径（下游读取方 cwd 不一定等于调用方 cwd）。
+  # 且必须是**物理路径**（pwd -P，票 15）：执行器把同一个目录的物理路径注入受信 agent 的 allowedPaths，模型按索引
+  # 去读时路径形态要与之一致；写逻辑路径（macOS 的 /var/folders → /private/var/folders、TMPDIR 是符号链接）就落在
+  # allow 之外——kiro-cli 会不会先解析符号链接再比对未经实测（探测 P1-15 T1 只按物理路径读过），不能依赖它。
+  chunk_dir=$(cd "$chunk_dir" && pwd -P) || return 1
 
   # --no-renames：重命名按删除+新增处理，保证总量与 chunk 大小口径一致。
   # 整份 diff 先落盘再量大小：`$(git … | wc -c | tr …)` 报的是管道最后一个命令的退出码，git 中途死掉会得到
