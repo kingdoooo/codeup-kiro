@@ -16,6 +16,11 @@ if ! command -v timeout >/dev/null && ! command -v gtimeout >/dev/null; then
 fi
 
 assert_rc "$(bash -n "$PROBE" && echo 0 || echo 1)" 0 "探测脚本语法合法"
+# 15-fix4 #20：脚本头部的退出码表与 README 里的表逐字一致（15-fix3 #5 改了正控 agent 装不上的行为，头部那行没跟着改，同文件两段注释互相矛盾）
+hdr_table=$(grep -E '^#   [0-5] = ' "$PROBE" | sed 's/^#   //')
+readme_table=$(awk '/退出码分级.*逐字一致/{f=1; next} f && /^  ```$/{c++; if (c==2) exit; next} f && c==1 {sub(/^  /, ""); print}' "$ROOT/scripts/probe/README.md")
+assert_eq "$(printf '%s\n' "$hdr_table" | grep -c .)" "6" "探测头部退出码表有 0–5 六行"
+assert_eq "$readme_table" "$hdr_table" "探测头部退出码表与 README 的表逐字一致"
 
 # 假 kiro-cli：只回答 whoami / --version；任何 chat 调用都记录下来（用于断言零调用）
 mkdir -p "$tmp/fakebin" "$tmp/home"

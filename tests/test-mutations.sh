@@ -232,6 +232,13 @@ assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5l：执行器的自�
 assert_contains "$(posted_comment "$OUT")" "grep.allowedPaths" "M5l：失败评论点名 grep.allowedPaths"
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "M5l：Kiro 未被启动（grep 无边界的 agent 不能拿去跑）"
 
+# --- M5ae：安装器不再按 allow 根注入绝对拒绝形状（15-fix4 #1 补）→ 自检按值拦下、Kiro 未启动（单变异可杀）---
+pkg=$(make_mutant m5ae-no-abs-deny 's/= ($d + ($d | deny_abs($ws)) + ($d | deny_abs($ch)))/= $d/' scripts/lib/kiro-agent.sh)
+run_case m5ae "$pkg"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5ae：执行器自检拒绝运行"
+assert_contains "$(posted_comment "$OUT")" "缺少按 allow 根注入的绝对拒绝形状" "M5ae：失败评论点名缺的是注入条目"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "M5ae：Kiro 未被启动（.git / .ssh 在空 cwd 下没有绝对拒绝形状护着的 agent 不能拿去跑）"
+
 # --- M5m：删掉执行器第 3 步的自检调用（单变异）→ 「受信 agent 自检通过」那行日志消失（端到端断言它必须在）---
 pkg=$(make_mutant m5m-no-selfcheck '/^if kiro_agent_selfcheck "\$INSTALLED_AGENT"/,/^fi$/d')
 run_case m5m "$pkg"
@@ -265,7 +272,7 @@ assert_rc "$RC" 0 "M5q：变异体仍能跑完"
 assert_eq "$([[ -L "$CASE/work/vendor/lib/.git/nestedlink" ]] && echo kept || echo gone)" "gone" "M5q：嵌套 .git 内部的符号链接被删——端到端「嵌套 .git：目录内部的符号链接不动」断言会失败"
 
 # --- M5r：非法 token 不再掩码 → 像令牌的 token 原文进日志与评论（15-fix2 #17）---
-pkg=$(make_mutant m5r-no-mask 's/bad+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")")/bad+=("第 ${idx} 项 $tok")/' scripts/lib/kiro-agent.sh)
+pkg=$(make_mutant m5r-no-mask 's/bad+=("第 ${idx} 项 $(_kiro_env_mask_syntax "$tok")")/bad+=("第 ${idx} 项 $tok")/' scripts/lib/kiro-agent.sh)
 run_case m5r "$pkg" KIRO_ENV_PASSTHROUGH="ghp-liveSecret123"
 assert_contains "$OUT" "liveSecret123" "M5r：像令牌的 token 原文进了输出——端到端「原文不进日志也不进评论」断言会失败"
 
@@ -308,9 +315,9 @@ assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5ad：失
 
 # --- M5w：被拒的凭证形状名字不再掩码 → 完整名字进失败评论（15-fix3 #6）---
 pkg=$(make_mutant m5w-cred-mask 's/cred+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")（命中 ${rule}）")/cred+=("第 ${idx} 项 ${tok}（命中 ${rule}）")/' scripts/lib/kiro-agent.sh)
-run_case m5w "$pkg" KIRO_ENV_PASSTHROUGH="svc_SECRET_9f3ab21c7de4"
+run_case m5w "$pkg" KIRO_ENV_PASSTHROUGH="$(fake_token svc)"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5w：仍拒绝运行"
-assert_contains "$(posted_comment "$OUT")" "svc_SECRET_9f3ab21c7de4" "M5w：完整名字进了评论——端到端「完整名字不进评论」断言会失败"
+assert_contains "$(posted_comment "$OUT")" "$(fake_token svc)" "M5w：完整名字进了评论——端到端「完整名字不进评论」断言会失败"
 
 # --- M5x：kiro_cli_version 去掉 stderr 回退 → 版本打到 stderr 的 CLI 让版本永远「未知」（15-fix3 #8 / 15-fix4 #7）---
 pkg=$(make_mutant m5x-version-stderr '/KIRO_CLI_VERSION=$(_kiro_cli_version_pick "$err")/d' scripts/lib/kiro-agent.sh)

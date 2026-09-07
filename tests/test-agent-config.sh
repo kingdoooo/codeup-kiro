@@ -93,9 +93,23 @@ for t in read grep glob; do
 done
 assert_eq "$(jq -c '.toolsSettings | [.read.allowedPaths, .grep.allowedPaths, .glob.allowedPaths] | unique | length' "$dest")" "1" "安装后三处 allowedPaths 相等"
 assert_eq "$(leftover_count "$dest")" "0" "安装后没有残留占位符"
-assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths)' "$dest")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths)' "$A")" \
-  "安装只改写 prompt 与三处 allowedPaths，其余字段不变"
+assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$dest")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$A")" \
+  "安装只改写 prompt、三处 allowedPaths 与三处 deniedPaths（追加注入条目），其余字段不变"
 assert_eq "$(jq -c .allowedTools "$dest")" '[]' "安装后 allowedTools 仍为空"
+# 15-fix4 #1 补（探测 kiro-probe-P1-15-t15fix4-4b30a00）：kiro-cli 2.21.1 把 **/ 开头的 deniedPaths 按 cwd 解析——kiro-cli 改在空目录下运行后，
+# 业务库里的 .git/logs/HEAD、.ssh/config 被读出（T3 / T9a–T9d FAIL）；加 <业务库>/**/.git/** 后恢复被拒。安装器对每条 **/ 形状按两条 allow 根各注入一份绝对副本。
+rel_deny=$(jq -c '[.toolsSettings.read.deniedPaths[] | select(startswith("**/"))]' "$A")
+assert_eq "$(jq -r 'length' <<<"$rel_deny")" "8" "定义里以 **/ 开头的相对拒绝形状有 8 条（.git/config .netrc .git .git/** .aws/** .ssh/** id_rsa* id_ed25519*）"
+for t in read grep glob; do
+  for pat in $(jq -r '.[]' <<<"$rel_deny"); do
+    assert_eq "$(jq -r --arg t "$t" --arg p "${WS_P}/${pat}" '.toolsSettings[$t].deniedPaths | index($p) != null' "$dest")" "true" "安装后 ${t}.deniedPaths 含业务库根前缀的 ${pat}"
+    assert_eq "$(jq -r --arg t "$t" --arg p "${CH_P}/${pat}" '.toolsSettings[$t].deniedPaths | index($p) != null' "$dest")" "true" "安装后 ${t}.deniedPaths 含 chunks 根前缀的 ${pat}"
+    assert_eq "$(jq -r --arg t "$t" --arg p "$pat" '.toolsSettings[$t].deniedPaths | index($p) != null' "$dest")" "true" "安装后 ${t}.deniedPaths 仍保留相对形状 ${pat}"
+  done
+done
+assert_eq "$(jq -r '.toolsSettings.read.deniedPaths | length' "$dest")" "$(( $(jq -r '.toolsSettings.read.deniedPaths | length' "$A") + 16 ))" "安装后 read.deniedPaths 恰好多了 8 × 2 条注入条目（不重复、不丢原条目）"
+assert_eq "$(jq -c '.toolsSettings | [.read.deniedPaths, .grep.deniedPaths, .glob.deniedPaths] | unique | length' "$dest")" "1" "安装后三处 deniedPaths 相等"
+assert_eq "$(jq -r '[.toolsSettings.read.deniedPaths[] | select(startswith("~/") or startswith("/proc"))] | length' "$dest")" "$(jq -r '[.toolsSettings.read.deniedPaths[] | select(startswith("~/") or startswith("/proc"))] | length' "$A")" "安装后绝对 / ~ 形状的条目不被前缀化"
 # 幂等：重复安装覆盖同一文件
 dest2=$(kiro_install_agent "$A" "$tmp/agents" --workspace "$WS" --chunks "$CH")
 assert_eq "$dest2" "$dest" "重复安装落到同一路径"
@@ -152,7 +166,7 @@ dest_none=$(kiro_install_agent "$A" "$tmp/agents-none" --allow-none 2>/dev/null)
 assert_eq "$dest_none" "$tmp/agents-none/codeup-reviewer.json" "--allow-none：按 name 落盘"
 assert_eq "$(jq -c '[.toolsSettings[] | has("allowedPaths")] | unique' "$dest_none")" "[false]" "--allow-none：三处 allowedPaths 都删掉"
 assert_eq "$(jq -r .prompt "$dest_none")" "file://$ROOT/prompts/review-agent-prompt.md" "--allow-none：prompt 仍改写为绝对 file://"
-assert_eq "$(jq -r '.toolsSettings.read.deniedPaths | index("**/.git/**") != null' "$dest_none")" "true" "--allow-none：deniedPaths 原样保留"
+assert_eq "$(jq -c '.toolsSettings.read.deniedPaths' "$dest_none")" "$(jq -c '.toolsSettings.read.deniedPaths' "$A")" "--allow-none：deniedPaths 原样保留（不注入绝对副本——正控 agent 要旧形态）"
 assert_eq "$([[ -e "$tmp/agents-none/agent-codeup-reviewer.json" ]] && echo kept || echo removed)" "removed" "--allow-none：同名旧文件照样清理"
 rc=0; err=$(kiro_install_agent "$A" "$tmp/agents-none2" --allow-none --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "--allow-none 与 --workspace/--chunks 同给：拒绝"
@@ -191,6 +205,18 @@ jq '.toolsSettings.glob.deniedPaths -= ["**/.git/**"]' "$dest" > "$tmp/sc-deny.j
 rc=0; kiro_agent_selfcheck "$tmp/sc-deny.json" "$WS_P" "$CH_P" || rc=$?
 assert_eq "$rc" "1" "selfcheck：glob.deniedPaths 少了 **/.git/** → 失败"
 assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "glob.deniedPaths" "selfcheck：点名 glob.deniedPaths"
+# 15-fix4 #1 补：少了任一条按 allow 根注入的绝对形状 → 失败（对 903af43 必须失败，正控：那里没有注入也没有这道检查）
+jq --arg p "${WS_P}/**/.git/**" '.toolsSettings.grep.deniedPaths -= [$p]' "$dest" > "$tmp/sc-absdeny.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-absdeny.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：grep.deniedPaths 少了业务库根前缀的 **/.git/** → 失败"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "grep.deniedPaths 缺少按 allow 根注入的绝对拒绝形状" "selfcheck：点名缺的是注入条目"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "${WS_P}/**/.git/**" "selfcheck：写出缺的那条"
+jq --arg p "${CH_P}/**/id_rsa*" '.toolsSettings.read.deniedPaths -= [$p]' "$dest" > "$tmp/sc-absdeny2.json"
+rc=0; kiro_agent_selfcheck "$tmp/sc-absdeny2.json" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "1" "selfcheck：read.deniedPaths 少了 chunks 根前缀的 **/id_rsa* → 失败"
+# 对照：把注入条目全删、但 cwd 参数（ws/ch）换成别的也不能蒙混——按当前 ws/ch 重算期望
+rc=0; kiro_agent_selfcheck "$dest" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "0" "selfcheck 对照：正常安装结果（含注入条目）通过"
 rc=0; kiro_agent_selfcheck "$tmp/does-not-exist.json" "$WS_P" "$CH_P" || rc=$?
 assert_eq "$rc" "1" "selfcheck：文件不存在 → 失败"
 # 15-fix4 #11：jq 里 `,` 比 `|` 绑定更紧，`("read","grep","glob") as $t | A, B, C` 把尾部检查也放进了 $t 的作用域——三条尾部检查对每个
@@ -466,9 +492,9 @@ for bad in 'KIRO_FOO=1' 'bad-name' '1ABC' 'A B' 'KIRO_FOO,$HOME'; do
 done
 err_var=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH='bad-name' bash -c 'source "$1"; kiro_env_allowlist 2>/dev/null; printf "%s" "$KIRO_ENV_ALLOW_ERROR"' _ "$LIB")
 assert_contains "$err_var" "非法变量名" "KIRO_ENV_ALLOW_ERROR 带失败原因（供 die_review 使用）"
-# 15-fix2 #17 / 15-fix3 #6：非法 token **无条件掩码**——只留首段（第一个 _ 之前；没有 _ 就前 4 个字符）+ ****。
-# 原来只在含 = 时掩码，`ghp-liveSecret123` 会原样进日志；原来保留整个标识符前缀，`svc_deploy_9f3ab21c=…` 的标识符部分本身就像密钥
-for pair in 'KIRO_FOO=s3cr3t|KIRO****|s3cr3t' 'ghp-liveSecret123|ghp****|liveSecret' '1ABC|****|1ABC' 'A B|A****|A B' 'svc_deploy_9f3ab21c=zz|svc****|9f3ab21c'; do
+# 15-fix2 #17 / 15-fix3 #6 / 15-fix4 #4 补：语法错误分支打**完整标识符** + ****（`LD_LIBRARY_PATH=/opt/lib` 是手误不是秘密），只隐藏 = 后面的取值；
+# 掩到首段只在凭证形状分支。`ghp-liveSecret123` 的标识符段只有 ghp，连字符后面的部分不进报错
+for pair in 'KIRO_FOO=s3cr3t|KIRO_FOO****|s3cr3t' 'LD_LIBRARY_PATH=/opt/lib|LD_LIBRARY_PATH****|/opt/lib' 'ghp-liveSecret123|ghp****|liveSecret' '1ABC|****|1ABC' 'A B|A****|A B' "$(fake_token svc)=zz|$(fake_token svc)****|=zz"; do
   IFS='|' read -r tok want leak <<<"$pair"   # G8：一次拆三列
   rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH="$tok" bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
   assert_contains "$err" "$want" "非法 token [${tok}]：掩码为 ${want}"
@@ -482,7 +508,7 @@ done
 for pair in 'YUNXIAO_TOKEN|YUNXIAO****|YUNXIAO_*' 'yunxiao_org_id|yunxiao****|YUNXIAO_*' 'CODEUP_REPO_ID|CODEUP****|CODEUP_*' 'AWS_SECRET_ACCESS_KEY|AWS****|AWS_*' \
             'AWS_ACCESS_KEY_ID|AWS****|AWS_*' 'AWS_SESSION_TOKEN|AWS****|AWS_*' 'aws_foo|aws****|AWS_*' \
             'GITHUB_TOKEN|GITHUB****|*TOKEN*' 'MY_SECRET|MY****|*SECRET*' 'DB_PASSWORD|DB****|*PASSWORD*' 'GCP_CREDENTIALS|GCP****|*CREDENTIAL*' 'SIGNING_KEY|SIGNING****|*_KEY' 'KIRO_API_KEY|KIRO****|*_KEY' \
-            'svc_SECRET_9f3ab21c7de4|svc****|*SECRET*' '_FOO_SECRET|_FOO****|*SECRET*' \
+            "$(fake_token svc)|svc****|*SECRET*" '_FOO_SECRET|_FOO****|*SECRET*' \
             'MY_PAT|MY****|*_PAT' 'MY_PAT_2|MY****|*_PAT_*' 'DCKR_PAT_abc|DCKR****|DCKR_PAT_*' 'dckr_pat_xyz|dckr****|DCKR_PAT_*' \
             "$(fake_token ghp)|ghp****|GHP_*" "$(fake_token gho)|gho****|GHO_*" "$(fake_token ghpat)|github****|GITHUB_PAT_*" \
             "$(fake_token akia)|AKIA****|AKIA*" "$(fake_token asia)|ASIA****|ASIA*"; do
@@ -514,8 +540,8 @@ assert_contains "$multi_err" "第 2 项 AWS****（命中 AWS_*）、第 3 项 AW
 assert_not_contains "$multi_err" "第 1 项" "多个被拒条目：放行的 AWS_PROFILE 不在列表里（但占序号）"
 assert_not_contains "$multi_err" "第 4 项" "多个被拒条目：合法的 JAVA_HOME 不在列表里"
 # XOX* 规则已删：xoxb_ 形态的合法标识符现在照常透传（真实 Slack 令牌 xoxb-… 带连字符，被语法规则拒，见上面非法名字用例）
-xox_ok=$(names_under HOME="$tmp/h" xoxb_123456_abcdef=1 KIRO_ENV_PASSTHROUGH='xoxb_123456_abcdef')
-assert_eq "$(printf '%s\n' "$xox_ok" | grep -c -x -- "xoxb_123456_abcdef")" "1" "XOX* 规则已删：xoxb_ 形态的合法标识符照常透传"
+xox_ok=$(names_under HOME="$tmp/h" "$(fake_token xoxb)=1" KIRO_ENV_PASSTHROUGH="$(fake_token xoxb)")
+assert_eq "$(printf '%s\n' "$xox_ok" | grep -c -x -- "$(fake_token xoxb)")" "1" "XOX* 规则已删：xoxb_ 形态的合法标识符照常透传"
 # 正控：形状相近但不命中的名字照常透传（KEYBOARD 不是 *_KEY；TOKENIZER 命中 *TOKEN*——它就该被拒）
 ok_names=$(names_under HOME="$tmp/h" KEYBOARD=1 MONKEY_PATCH=1 KIRO_ENV_PASSTHROUGH='KEYBOARD,MONKEY_PATCH')
 assert_eq "$(printf '%s\n' "$ok_names" | grep -c -x KEYBOARD)" "1" "KEYBOARD 不命中 *_KEY：正常透传"

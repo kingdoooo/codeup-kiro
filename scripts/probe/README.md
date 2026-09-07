@@ -112,14 +112,24 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
 
 - `probe-kiro-allowlist.sh`：探测 agent 就是**生产定义**改名换成中性提示词，三处 allowedPaths 由生产的 `kiro_install_agent
   --workspace/--chunks` 结构化写入、`env -i` 许可清单用生产的 `kiro_env_allowlist`——测的就是生产要跑的那份规则。
-  **退出码分级**：0 = 八个门禁用例（T1 T1b T1c T2 T3 T4 T8 T9）全部实际运行且全 PASS（走主方案）；1 = 门禁 FAIL
-  （`allowedPaths` 不能作为 headless 读取边界 / deny 未生效 / `../` 越界未被拒，**不得上线**）；2 = 参数错（`PROBE_CASES` 含未知
-  用例名，零调用）；3 = INCONCLUSIVE（门禁用例证据不全，**或** T5 正控不成立 / T6、T7 无法判定——那说明**探测本身不可信**，
-  不是 allowedPaths 的结论）；4 = 门禁用例未全部运行（`PROBE_CASES` 子集，已跑的全 PASS，不作发布判定）；5 = 环境准备失败
-  （缺 kiro-cli/jq/timeout、未登录、装探测 agent 失败、预检不符）。「实际运行」的集合从 `PROBE_CASES ∩ 已知用例` 推导，不手工记账。
+  **退出码分级**（与脚本头部的六行逐字一致，`tests/test-probe-args.sh` 守卫）：
+
+  ```
+  0 = 十二个门禁用例（T1 T1b T1c T2 T3 T4 T8a T8b T9a T9b T9c T9d）全部实际运行且全部 PASS → 走主方案
+  1 = 门禁用例有 FAIL（allowedPaths 不是边界 / deny 未生效 / ../ 越界未被拒），不得上线
+  2 = 参数错（PROBE_CASES 含未知用例名；零调用）
+  3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过 kiro_agent_selfcheck）——探测本身不可信，不是 allowedPaths 的结论
+  4 = 门禁用例未全部运行（PROBE_CASES 子集），已跑的全 PASS，不作发布判定
+  5 = 环境准备失败（缺 kiro-cli/jq/timeout、未登录、主方案探测 agent 装不上、前置夹具不成立）
+  ```
+
+  「实际运行」的集合从 `PROBE_CASES ∩ 已知用例` 推导，不手工记账。
   T5 的正控 agent 由安装器的 `--allow-none` 装（唯一合法的第二调用方：file:// 改写、deny 检查、同名旧文件清理照做）；正控 agent
   装不上时记为 T5 INCONCLUSIVE 进入汇总（不是 exit 5——门禁用例此时已跑完，直接退出会把真正的门禁 FAIL 降级成「环境准备失败」且不写 summary.json）。
-  多 canary 用例（T8/T9）的拒绝痕迹**按文件名逐项归因**（同 toolCallId 的 tool_call_update 或本身带路径的 update 事件），一条拒绝不能替四个文件作证。
+  每个 canary 一次调用（T8a/T8b、T9a–T9d），拒绝痕迹按运行归因、不按文件名回扫：一次运行读多个文件时模型会把路径合并进同一次 read 调用，
+  逐文件归因在那种形态下不成立。
+  **deny 的 `**/` 形状按 cwd 解析**（2026-09-07 实测，`kiro-probe-P1-15-t15fix4-4b30a00`）：kiro-cli 在空目录下运行后 `**/.git/**` 等只覆盖
+  空目录，T3 / T9 FAIL；安装器按两条 allow 根注入绝对副本后恢复 PASS。这一点是 P1-15 的补充结论，升级 kiro-cli 后 T3 / T9 同样要重跑。
   - **T1b/T1c**：去掉 `--trust-tools` 后 grep / glob 若落入权限申请，headless 下会被直接拒绝，评审员的搜索会静默降级成
     「读不到」——PASS 要求标记出现**且**事件流里有对应工具（`_meta.kiro.toolName` = grep / glob）的调用。
   - **T3** 读 `.git/logs/HEAD`（提交后必存在、含提交信息标记）：它只被新加的 `**/.git`、`**/.git/**` 覆盖，旧 deny 里的

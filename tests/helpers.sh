@@ -74,7 +74,7 @@ inline_bodies() {
 meta_row() { printf '%s\n' "$1" | awk 'index($0, "| `") && index($0, " → ") && !done { print; done = 1 }'; }
 
 # 假令牌由片段拼出（15-fix4 #9）：仓库是公开的，密钥扫描器会把 ghp_<36 位> 这类完整形态当真令牌——单测、端到端与替身都从这里取，片段只写一处。
-# 用法：fake_token ghp|gho|ghpat|akia|asia|pem1|pem2
+# 用法：fake_token ghp|gho|ghpat|akia|asia|pem1|pem2|svc|xoxb
 fake_token() {
   local body="ABCDEFGHIJKLMNOPQRSTUVWXYZ""abcdefghij"
   case "$1" in
@@ -85,6 +85,8 @@ fake_token() {
     asia)  printf 'ASIA%s%s' "IOSFODNN7" "EXAMPLE" ;;
     pem1)  printf '%s%s' "MIIEowIBAAKCAQEA" "fakekey0123456" ;;
     pem2)  printf '%s%s' "MIIEvQIBADANBgkqhkiG9w0BAQEF" "AASCBKcwggSjAgEAAoIBAQCfake02" ;;
+    svc)   printf 'svc_SECRET_%s' "9f3ab21c7de4" ;;        # 合法标识符形态、本身像密钥的名字
+    xoxb)  printf 'xoxb_%s_%s' "123456" "abcdef" ;;         # 下划线形态（真实 Slack 令牌带连字符）
     *) echo "fake_token: 未知类型 [$1]" >&2; return 2 ;;
   esac
 }

@@ -18,6 +18,11 @@
 #   · 三个工具的 toolsSettings.<tool>.deniedPaths 必须**存在、非空且含 `**/.git/**`**，缺一拒装（15-fix2 #11）：
 #     结构化写 allowedPaths 会把不存在的 toolsSettings.<tool> 对象凭空建出来——那一处就只有 allow 没有 deny，
 #     glob 能枚举 <业务库>/.git/**。
+#   · **仓库相对拒绝形状按 allow 根注入绝对副本**（15-fix4 #1 补，探测 kiro-probe-P1-15-t15fix4-4b30a00 实测）：kiro-cli 2.21.1 把 `**/…`
+#     开头的 deniedPaths 按 **cwd** 解析——kiro-cli 改在空目录 $WORK/cwd 下运行后，`**/.git/**`、`**/.ssh/**` 这些形状只覆盖那个空目录，
+#     allow 内的 .git/logs/HEAD、.ssh/config 被 completed 读出（T3 / T9a–T9d FAIL）；加上 `<业务库物理路径>/**/.git/**` 后恢复被拒。
+#     所以安装时对定义里每条以 `**/` 开头的 deny 形状，按两条 allow 根各写一份 `<根>/<形状>`（原相对条目保留：cwd 恰好等于某个根时它仍有效），
+#     三个工具各自注入；--allow-none 不注入（正控 agent 要的是旧形态）。自检按值核对两组注入条目都在。
 #   · --allow-none（15-fix2 #20）：探测脚本的**正控** agent 要的是「没有 allowedPaths」的旧形态。这是唯一合法的第二调用方，
 #     走安装器而不是裸 cp：file:// 改写与同名旧文件清理照做，deny 检查照做；与 --workspace/--chunks 互斥。
 #   · 安装结果的核对不在这里做：调用方用 kiro_agent_selfcheck 读安装文件按值比对（15-fix3 #12 删掉了与之冗余的「安装器打回路径」stdout 协议）。
@@ -42,6 +47,10 @@ _kiro_agent_physical_dir() {
 # 这段 jq 前导拼进自己的程序。两份谓词只改一处的两种后果都是静默的——安装器放行而自检拒绝（每次评审都失败），或反过来（自检形同虚设）。
 KIRO_AGENT_TOOLS_JQ='("read","grep","glob")'
 _KIRO_DENY_OK_JQ='def deny_ok($t): (.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null);'
+# 按 allow 根注入的绝对拒绝形状（15-fix4 #1 补）：deny_abs($root) = 数组里每条以 **/ 开头的形状前面接上 <根>/；
+# deny_abs_missing($t; $ws; $ch) = 安装后该工具的 deniedPaths 里缺的注入条目（空数组 = 齐全）。安装器与自检共用这一份定义。
+_KIRO_DENY_ABS_JQ='def deny_abs($root): [ .[] | select(type == "string" and startswith("**/")) | $root + "/" + . ];
+  def deny_abs_missing($t; $ws; $ch): (.toolsSettings[$t].deniedPaths // []) as $d | [ ($d | deny_abs($ws)), ($d | deny_abs($ch)) | .[] | . as $e | select(($d | index($e)) == null) ];'
 KIRO_AGENT_DENY_MSG='deniedPaths 缺失、为空或不含 **/.git/**'
 # 三个工具的 deniedPaths 是否都合格（存在、非空、含 **/.git/**）——一次 jq 查完三处（15-fix3 #13）。
 # $1=定义文件；stdout 打出第一个不合格的工具名（都合格则为空）；文件为空 / 不是恰好一个 JSON 对象 / 不是合法 JSON 时返回非零。
@@ -103,13 +112,14 @@ kiro_install_agent() {
     abs="$(cd "$(dirname "$abs")" && pwd)/$(basename "$abs")"
     prompt_new="file://${abs}"
   fi
-  # 一次 jq 渲染：改写 prompt（如需）+ 三处 allowedPaths 结构化覆盖（--allow-none 则三处删除）
-  rendered=$(jq --arg p "$prompt_new" --arg ws "$ws" --arg ch "$ch" --argjson none "$allow_none" '
+  # 一次 jq 渲染：改写 prompt（如需）+ 三处 allowedPaths 结构化覆盖 + 三处 deniedPaths 追加按 allow 根注入的绝对形状（--allow-none 则只删 allowedPaths）
+  rendered=$(jq --arg p "$prompt_new" --arg ws "$ws" --arg ch "$ch" --argjson none "$allow_none" "$_KIRO_DENY_ABS_JQ"'
       (if $p != "" then .prompt = $p else . end)
       | if $none == 1 then del(.toolsSettings[].allowedPaths)
-        else .toolsSettings.read.allowedPaths = [$ws, $ch]
-           | .toolsSettings.grep.allowedPaths = [$ws, $ch]
-           | .toolsSettings.glob.allowedPaths = [$ws, $ch]
+        else reduce '"$KIRO_AGENT_TOOLS_JQ"' as $t (.;
+               .toolsSettings[$t].allowedPaths = [$ws, $ch]
+               | .toolsSettings[$t].deniedPaths as $d
+               | .toolsSettings[$t].deniedPaths = ($d + ($d | deny_abs($ws)) + ($d | deny_abs($ch))))
         end
     ' "$src") || { echo "kiro_install_agent: 渲染 agent 定义失败：${src}" >&2; return 1; }
   mkdir -p "$dest_dir" || return 1
@@ -130,7 +140,7 @@ kiro_install_agent() {
 # ── kiro_agent_selfcheck ────────────────────────────────────────────────────────────────────────
 # 安装结果的**值比对 + 安全字段**（15-fix2 #16）：$1=安装后的定义文件 $2=业务库物理路径 $3=chunks 物理路径。
 #   · read/grep/glob 三处 allowedPaths 逐字等于 [$2, $3]（顺序、物理形态都算）
-#   · 三处 deniedPaths 存在、非空、含 **/.git/**
+#   · 三处 deniedPaths 存在、非空、含 **/.git/**，且定义里每条 **/ 形状都有按 $2、$3 两条 allow 根注入的绝对副本（15-fix4 #1 补）
 #   · allowedTools == []（免确认只来自 allowedPaths）、includeMcpJson == false、includePowers == false
 #   · tools 恰好 == [read, grep, glob]、toolsSettings 的键 ⊆ {read, grep, glob}（多出的键其 allowedPaths 从不被改写）、resources 缺失或 []
 #     （非空 resources 会把隔离步骤要阻止的工作区文件重新自动载入）、permissions.rules 只含 deny 规则（V3 deny 是设计的一部分，
@@ -151,7 +161,7 @@ kiro_agent_selfcheck() {
   # 原因顺序固定（15-fix4 #11）：read/grep/glob 逐工具（allowedPaths → deniedPaths），再 allowedTools、includeMcpJson、includePowers。
   # jq 里 `,` 比 `|` 绑定更紧：`… as $t | A, B, C` 会把尾部检查也放进 $t 的作用域（对每个工具各发一次、与逐工具条目交错，first 可能先取到
   # 尾部检查——MR 失败评论把运维指向错的字段），所以 `as $t` 的体用括号收住只包逐工具检查。first(...) 取第一条不符（15-fix4 #5 补）。
-  reason=$(jq -e -r --slurp --arg ws "$ws" --arg ch "$ch" --arg deny_msg "$KIRO_AGENT_DENY_MSG" "$_KIRO_DENY_OK_JQ"'
+  reason=$(jq -e -r --slurp --arg ws "$ws" --arg ch "$ch" --arg deny_msg "$KIRO_AGENT_DENY_MSG" "$_KIRO_DENY_OK_JQ""$_KIRO_DENY_ABS_JQ"'
       def want: [$ws, $ch];
       if length != 1 then "安装后的定义文件里不是恰好一个 JSON 值（\(length) 个；纯空白文件算 0 个）"
       elif (.[0] | type) != "object" then "安装后的定义顶层不是 JSON 对象（是 \(.[0] | type)）"
@@ -159,7 +169,8 @@ kiro_agent_selfcheck() {
         ( '"$KIRO_AGENT_TOOLS_JQ"' as $t
           | ( select(.toolsSettings[$t].allowedPaths != want)
               | "\($t).allowedPaths 写入的是 \(.toolsSettings[$t].allowedPaths | tojson)，预期 \(want | tojson)（业务库 checkout 物理路径 + chunks 物理路径，顺序固定）" ),
-            ( select(deny_ok($t) | not) | "\($t).\($deny_msg)" ) ),
+            ( select(deny_ok($t) | not) | "\($t).\($deny_msg)" ),
+            ( select(deny_abs_missing($t; $ws; $ch) != []) | "\($t).deniedPaths 缺少按 allow 根注入的绝对拒绝形状 \(deny_abs_missing($t; $ws; $ch) | tojson)（kiro-cli 把 **/ 形状按 cwd 解析，空 cwd 下只有绝对副本能护住业务库里的 .git / .ssh / .aws / id_rsa*）" ) ),
         ( select(.allowedTools != []) | "allowedTools 不为空（\(.allowedTools | tojson)）——免确认只能来自 allowedPaths" ),
         ( select(.tools != ['"$KIRO_AGENT_TOOLS_JQ"']) | "tools 不是恰好 [read, grep, glob]（\(.tools | tojson)）" ),
         ( select((((.toolsSettings // {}) | keys) - ['"$KIRO_AGENT_TOOLS_JQ"']) != []) | "toolsSettings 多出工具键 \((((.toolsSettings // {}) | keys) - ['"$KIRO_AGENT_TOOLS_JQ"']) | tojson)——其 allowedPaths 从不被改写" ),
@@ -225,7 +236,8 @@ kiro_cli_version() {
 #   诊断（15-fix4 #4 ③ / A8）：MR 失败评论（KIRO_ENV_ALLOW_ERROR）按**条目序号 + 掩码名 + 命中规则**列出（「第 2 项 AWS****（命中 AWS_*）」），
 #   同一首段的几个名字才分得开；**流水线日志**（stderr）对命中名字类规则的条目打完整名字 + 规则（名字是运维自己写的配置，不是模型文本），
 #   命中令牌前缀规则（GHP_* / GHO_* / GITHUB_PAT_* / AKIA* / ASIA*）的条目在日志里也只留掩码——那更像是贴了个真令牌。
-#   掩码 = 首段（第一个 _ 之前；首段为空——名字以 _ 开头——或没有 _ 时取前 4 个字符）+ ****；取值从不出现在任何输出里。
+#   凭证形状分支的掩码 = 首段（第一个 _ 之前；首段为空——名字以 _ 开头——或没有 _ 时取前 4 个字符）+ ****；语法错误分支打完整标识符 + ****
+#   （`LD_LIBRARY_PATH=/opt/lib` 是手误不是秘密，只隐藏 = 后面的取值）。取值从不出现在任何输出里。
 #   名字对应的变量未设置 → 跳过。KIRO_ENV_PASSTHROUGH 自己不透传。
 # YUNXIAO_* / CODEUP_* 以及 Flow 注入的一切都不进 Kiro 进程（/proc 已在拒绝清单里，这是零成本的第二道）。
 # KIRO_LOG_NO_COLOR=1 固定追加（用户设成别的值也被覆盖）。只透传**已导出**的变量：未导出的本来也到不了子进程。
@@ -237,6 +249,11 @@ KIRO_ENV_ALLOW=()
 KIRO_ENV_ALLOW_ERROR=""
 # 被拒 token / 名字的掩码：先取开头的合法标识符字符段（没有就只有 ****），再只留它的首段——第一个 _ 之前；首段为空（以 _ 开头，A8）
 # 或没有 _ 时取前 4 个字符——加 ****。`KIRO_FOO=s3cr3t`→KIRO****，`ghp-liveSecret123`→ghp****，`svc_SECRET_9f3a`→svc****，`_FOO_SECRET`→_FOO****，`1ABC`→****
+# 语法错误分支的掩码（15-fix4 #4 补 / 主报告第 8 条）：`LD_LIBRARY_PATH=/opt/lib` 是名字带了 = 的手误、不是秘密——打**完整标识符** + ****，
+# 只隐藏 = 后面的取值；掩到首段只在凭证形状分支
+_kiro_env_mask_syntax() {
+  if [[ "$1" =~ ^([A-Za-z_][A-Za-z0-9_]*) ]]; then printf '%s****' "${BASH_REMATCH[1]}"; else printf '****'; fi
+}
 _kiro_env_mask_token() {
   local id seg
   if [[ "$1" =~ ^([A-Za-z_][A-Za-z0-9_]*) ]]; then id="${BASH_REMATCH[1]}"; else printf '****'; return 0; fi
@@ -268,7 +285,7 @@ kiro_env_allowlist() {
       tok="${tok#"${tok%%[![:space:]]*}"}"; tok="${tok%"${tok##*[![:space:]]}"}"   # 去首尾空白
       [[ -z "$tok" ]] && continue
       idx=$((idx + 1))
-      if [[ ! "$tok" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then bad+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")"); continue; fi
+      if [[ ! "$tok" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then bad+=("第 ${idx} 项 $(_kiro_env_mask_syntax "$tok")"); continue; fi
       up=$(printf '%s' "$tok" | tr '[:lower:]' '[:upper:]')
       rule=$(_kiro_env_cred_rule "$up")
       if [[ -n "$rule" ]]; then

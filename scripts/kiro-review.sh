@@ -569,7 +569,7 @@ log "已安装受信 custom agent：${AGENT_NAME}（${INSTALLED_AGENT}）"
 # allowedTools=[]、includeMcpJson/includePowers=false（kiro_agent_selfcheck，一次 jq）。任何一项不符都拒绝运行——某个工具
 # 没有边界的 agent 不能拿去跑。if/else 而不是 `a && log || die`：log 写 stderr 失败时后者会带着空原因走 die 分支（15-fix3 #7）。
 if kiro_agent_selfcheck "$INSTALLED_AGENT" "$WS_P" "$CH_P"; then
-  log "受信 agent 自检通过：allowedPaths 值比对（read/grep/glob 三处 = 业务库 checkout + chunks 物理路径）、allowedTools=[]、includeMcpJson/includePowers=false、deniedPaths 三处含 **/.git/**"
+  log "受信 agent 自检通过：allowedPaths 值比对（read/grep/glob 三处 = 业务库 checkout + chunks 物理路径）、allowedTools=[]、includeMcpJson/includePowers=false、deniedPaths 三处含 **/.git/** 且仓库相对形状已按两条 allow 根注入绝对副本（$(jq -r '[.toolsSettings.read.deniedPaths[] | select(startswith("**/"))] | length' "$INSTALLED_AGENT") 条 × 2）"
 else
   die_review "受信 agent 安装结果异常：${KIRO_AGENT_SELFCHECK_ERROR}（集成包缺陷，请报告）"
 fi

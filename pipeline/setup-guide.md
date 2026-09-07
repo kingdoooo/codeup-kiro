@@ -477,7 +477,7 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 | `CI_COMMIT_REF_NAME` | 由 Flow 注入 | 未注入时取 `git rev-parse --abbrev-ref HEAD` | 多代码源下须显式 `export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"`（带下标的内置变量，见第 5.1 节与 flow-pipeline.yaml） | 不带下标的取值在多代码源下不可预期（可能是集成包的分支） | Flow |
 | `REVIEW_REPO_DIR` | `$PWD` | 把当前目录当业务库 | 多代码源下必须显式指向业务库 checkout 目录 | 不得与集成包目录互相包含（隔离步骤会删文件，脚本直接拒绝运行） | Flow |
 | `KIRO_INSTALL_URL` | 官方安装脚本 | 云托管构建机上按需 `curl \| bash` 安装 | 指向内部镜像源 | 自建构建机预装固定版本时不会触发安装 | Flow |
-| `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行机可能需要 `LD_LIBRARY_PATH`、`JAVA_HOME` 这类；例：`LD_LIBRARY_PATH,JAVA_HOME` | 任一名字不合法（写成 `NAME=value`、带连字符/空格、或直接贴了个令牌）时**拒绝运行**并回写「评审未完成」；**凭证形状的名字也拒绝**：`YUNXIAO_*`、`CODEUP_*`、`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/`AWS_DEFAULT_REGION` 是配置不是凭证，显式放行）、含 `TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`、以 `_KEY`/`_PAT` 结尾或含 `_PAT_`、`DCKR_PAT_*`，以及 `ghp_`/`gho_`/`github_pat_`/`AKIA`/`ASIA` 开头的名字一律不放行。这份黑名单是**防运维手滑**，不是安全边界（受信 agent 没有 shell/env 工具，变量到不了模型手里）。失败评论按**条目序号 + 掩码 + 命中规则**列出（「第 2 项 `AWS****`（命中 `AWS_*`）」；掩码 = 首段 + `****`，形如 `svc_SECRET_9f3a…` 的名字本身就是密钥，不能原样进 MR）；**流水线日志**里给完整名字 + 规则（贴了令牌形态的条目除外，日志也只留掩码）。点名的变量未设置时跳过 | Flow |
+| `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行机可能需要 `LD_LIBRARY_PATH`、`JAVA_HOME` 这类；例：`LD_LIBRARY_PATH,JAVA_HOME` | 任一名字不合法（写成 `NAME=value`、带连字符/空格、或直接贴了个令牌）时**拒绝运行**并回写「评审未完成」；**凭证形状的名字也拒绝**：`YUNXIAO_*`、`CODEUP_*`、`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/`AWS_DEFAULT_REGION` 是配置不是凭证，显式放行）、含 `TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`、以 `_KEY`/`_PAT` 结尾或含 `_PAT_`、`DCKR_PAT_*`，以及 `ghp_`/`gho_`/`github_pat_`/`AKIA`/`ASIA` 开头的名字一律不放行。这份黑名单是**防运维手滑**，不是安全边界（受信 agent 没有 shell/env 工具，变量到不了模型手里）。失败评论按**条目序号 + 掩码 + 命中规则**列出（「第 2 项 `AWS****`（命中 `AWS_*`）」；掩码 = 首段 + `****`，形如 `svc_SECRET_9f3a…` 的名字本身就是密钥，不能原样进 MR）；**流水线日志**里给完整名字 + 规则（贴了令牌形态的条目除外，日志也只留掩码）。写成 `NAME=value` 的语法错误条目打完整标识符 + `****`（手误不是秘密，只隐藏 `=` 后面的取值）。点名的变量未设置时跳过 | Flow |
 
 ### 11.2.1 测试/高级变量（生产流水线不要设）
 这些变量脚本确实会读，但它们是给本仓库的测试与排障用的。**生产流水线里一个都不要配**——
@@ -587,7 +587,10 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   拒绝清单**仍在、且先于 allow 判定**，作为第二道：敏感路径（`~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、
   `/var/run/secrets` 等）加 `**/.git`、`**/.git/**`（`.git/FETCH_HEAD`、`.git/logs/*` 可能带凭证 URL；
   diff 已在输入里，模型没有理由读 `.git`），以及仓库相对形状 `**/.aws/**`、`**/.ssh/**`、`**/id_rsa*`、`**/id_ed25519*`
-  （绝对条目落在 allow 之外永远测不到；这几条在 allow 内也能被探测 T9 打到，某版 kiro-cli 静默不再解析 deny 时能被发现）。v2 走 `toolsSettings`，v3 走 `permissions.rules`；V3 不上生产
+  （绝对条目落在 allow 之外永远测不到；这几条在 allow 内也能被探测 T9 打到，某版 kiro-cli 静默不再解析 deny 时能被发现）。
+  **`**/` 开头的形状 kiro-cli 按 cwd 解析**（2.21.1 实测，探测 `kiro-probe-P1-15-t15fix4-4b30a00`：kiro-cli 改在空目录下运行后
+  业务库里的 `.git/logs/HEAD`、`.ssh/config` 被读出），所以安装器对定义里每条 `**/` 形状按两条 allow 根各写一份绝对副本
+  （`<业务库>/**/.git/**`、`<chunks>/**/.git/**` …，原相对条目保留），自检按值核对两组副本都在。v2 走 `toolsSettings`，v3 走 `permissions.rules`；V3 不上生产
   （ADR-0004），只同步 deny 规则、不为它设计 allow 规则。
   **`allowedTools` 为空、调用行不传 `--trust-tools`**：免确认只能来自路径边界，不能来自「整个工具免审」
   （两者叠加时读者会以为 trust 才是免确认的来源）。**绝不能传 `--trust-all-tools`**——被拒时 kiro-cli 的

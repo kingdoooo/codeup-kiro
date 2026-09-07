@@ -221,8 +221,9 @@ assert_eq "$([[ "$inst_prompt" == file:///*/prompts/review-agent-prompt.md ]] &&
   "安装后的 prompt 为绝对 file:// 路径（实际：${inst_prompt}）"
 assert_eq "$([[ -r "${inst_prompt#file://}" ]] && echo y || echo n)" "y" "prompt 引用的提示词文件存在且可读"
 assert_eq "$(jq -c '[.includeMcpJson, .includePowers]' "$inst")" "[false,false]" "安装后的 agent 不含 MCP/Powers"
-assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths)' "$inst")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths)' "$ROOT/kiro/agent-codeup-reviewer.json")" \
-  "安装只改写 prompt 与 allowedPaths 占位符，其余字段与集成包一致"
+assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$inst")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$ROOT/kiro/agent-codeup-reviewer.json")" \
+  "安装只改写 prompt、三处 allowedPaths 与三处 deniedPaths（追加按 allow 根注入的绝对副本），其余字段与集成包一致"
+assert_eq "$(jq -c '.toolsSettings.read.deniedPaths[:32]' "$inst")" "$(jq -c '.toolsSettings.read.deniedPaths' "$ROOT/kiro/agent-codeup-reviewer.json")" "安装后 deniedPaths 前段就是集成包的原条目（顺序不变，只在末尾追加）"
 # --- 读取边界（票 15）：allowedPaths = 业务库 checkout 物理路径 + 本次 $WORK/chunks；allowedTools 为空 ---
 assert_eq "$(jq -r '.toolsSettings.read.allowedPaths | length' "$inst")" "2" "安装后 allowedPaths 恰好两条"
 assert_eq "$(jq -r '.toolsSettings.read.allowedPaths[0]' "$inst")" "$ws_p" "allowedPaths[0] = 业务库 checkout 的物理路径"
@@ -232,6 +233,12 @@ assert_eq "$([[ "$chunks_p" == "$ws_p"/* ]] && echo inside || echo outside)" "ou
 assert_eq "$(dirname "$chunks_p")" "$(dirname "$kcwd")" "Kiro 运行目录与 chunks 同在本次 \$WORK 下"
 assert_eq "$(jq -c '.toolsSettings | [.read.allowedPaths, .grep.allowedPaths, .glob.allowedPaths] | unique | length' "$inst")" "1" "read/grep/glob 的 allowedPaths 同组"
 assert_eq "$(jq -c .allowedTools "$inst")" "[]" "安装后 allowedTools 为空"
+# 15-fix4 #1 补：kiro-cli 把 **/ 形状按 cwd 解析，空 cwd 下要靠按 allow 根注入的绝对副本护住业务库里的 .git / .ssh（探测 t15fix4-4b30a00 T3/T9 实测）
+for pat in '**/.git/**' '**/.git' '**/.ssh/**' '**/.aws/**' '**/id_rsa*' '**/id_ed25519*'; do
+  assert_eq "$(jq -r --arg p "${ws_p}/${pat}" '.toolsSettings.read.deniedPaths | index($p) != null' "$inst")" "true" "安装后 deniedPaths 含业务库根前缀的 ${pat}"
+  assert_eq "$(jq -r --arg p "${chunks_p}/${pat}" '.toolsSettings.read.deniedPaths | index($p) != null' "$inst")" "true" "安装后 deniedPaths 含 chunks 根前缀的 ${pat}"
+done
+assert_contains "$out" "已按两条 allow 根注入绝对副本（8 条 × 2）" "自检日志写明注入条目数"
 assert_eq "$(jq '[.. | strings | select(contains("{{"))] | length' "$inst")" "0" "安装后没有残留占位符"
 assert_contains "$out" "受信 agent 许可路径：${ws_p}、${chunks_p}" "日志打出许可路径两条（与安装文件一致）"
 # chat 时两条许可路径都真实存在（chunks 目录在 Kiro 启动前已建好——否则 build_review_input 之前装的 agent 指向一个还没有的目录）
@@ -1397,8 +1404,8 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" "KIRO_ENV_PASSTHROUGH" "KIRO_ENV_PASSTHROUGH 含 NAME=value：失败评论点名该变量"
 assert_contains "$comment" "非法变量名" "KIRO_ENV_PASSTHROUGH 含 NAME=value：失败评论说明原因"
 assert_not_contains "$OUT" "leakedvalue" "KIRO_ENV_PASSTHROUGH 含 NAME=value：取值既不进评论也不进日志"
-assert_contains "$comment" "YUNXIAO****" "KIRO_ENV_PASSTHROUGH 含 NAME=value：评论里只有首段掩码（15-fix2 #17 / 15-fix3 #6）"
-assert_not_contains "$comment" "YUNXIAO_TOKEN" "KIRO_ENV_PASSTHROUGH 含 NAME=value：完整名字不进评论"
+# 15-fix4 #4 补：语法错误分支打完整标识符 + ****（名字带了 = 是手误、不是秘密），只隐藏 = 后面的取值；掩到首段只在凭证形状分支
+assert_contains "$comment" "第 2 项 YUNXIAO_TOKEN****" "KIRO_ENV_PASSTHROUGH 含 NAME=value：评论按序号列出完整标识符 + ****"
 assert_eq "$(call_count "$MD/calls" help)" "0" "KIRO_ENV_PASSTHROUGH 非法：校验早于 kiro-cli 能力检查（没跑 --help）"
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "KIRO_ENV_PASSTHROUGH 非法：Kiro 未被启动"
 run_case badpass2 KIRO_ENV_PASSTHROUGH="bad-name"

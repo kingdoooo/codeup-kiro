@@ -36,13 +36,13 @@
 #   在 allow 之外、也**不在**拒绝清单里（~/.ssh、~/.aws、~/.kiro、~/.config、~/.docker 之外），这正是要测的位置；
 #   业务库、chunks、canary、agent 文件（含 kiro-cli 自己写的 <name>.json.backup*）在 trap 里全部删除。
 # 认证：KIRO_API_KEY，或本机已 `kiro-cli login`。原始事件流保留在 ${PROBE_KEEP_DIR}（默认 /tmp/kiro-probe-allowlist-<时间>）。
-# 退出码分级（15-fix2 #22）：
+# 退出码分级（15-fix2 #22；下面六行与 scripts/probe/README.md 的表逐字一致，tests/test-probe-args.sh 守卫——15-fix4 #20）：
 #   0 = 十二个门禁用例（T1 T1b T1c T2 T3 T4 T8a T8b T9a T9b T9c T9d）全部实际运行且全部 PASS → 走主方案
-#   1 = 门禁用例有 FAIL（allowedPaths 不是边界 / deny 未生效 / ../ 越界未被拒）
+#   1 = 门禁用例有 FAIL（allowedPaths 不是边界 / deny 未生效 / ../ 越界未被拒），不得上线
 #   2 = 参数错（PROBE_CASES 含未知用例名；零调用）
-#   3 = 有 INCONCLUSIVE（门禁用例证据不全，或 T5 正控不成立 / T6、T7 无法判定 = 探测本身不可信）
+#   3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过 kiro_agent_selfcheck）——探测本身不可信，不是 allowedPaths 的结论
 #   4 = 门禁用例未全部运行（PROBE_CASES 子集），已跑的全 PASS，不作发布判定
-#   5 = 环境准备失败（缺 kiro-cli/jq/timeout、未登录、装探测 agent 失败、预检不符）
+#   5 = 环境准备失败（缺 kiro-cli/jq/timeout、未登录、主方案探测 agent 装不上、前置夹具不成立）
 # PROBE_CASES="T1 T2 T4"（空格分隔）只跑子集；默认 = 门禁十二个 + T5 正控（13 次调用）；T6/T7 是 INFO、结论已写在文件头，
 #   要跑得显式列出（15-fix2 #9）。每个用例一次调用（约 0.3 credit、15–55 s）。
 set -euo pipefail
