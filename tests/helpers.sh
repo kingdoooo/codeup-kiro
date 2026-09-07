@@ -135,12 +135,14 @@ assert_no_secrets() {  # 内容 说明前缀：三种原文都不在（掩码形
 # 否则 diff/变更行的 awk 也会挂，评审在到达出口之前就失败了，测不到「掩码失败」这一段。
 # 真 awk 的路径在这里就解析好并写死进替身，不在替身里靠剥 PATH 首项去找：kiro-review.sh 找不到 kiro-cli 时
 # 会往 PATH 前面再插一段，那时首项就不是替身目录，剥错了就会 exec 到自己、无限递归。
-# 用法：make_bad_awk <目录> [all|doc|inline]   → 在 <目录>/awk 写好替身；调用方把 <目录> 放到 PATH 最前面
-#   all（默认）：字段级与文档级都失败（→ review_redact_json 先失败，评审走失败评论）
-#   doc：只让**评论出口**的文档级掩码失败（--keep-lines 且 stdin 带 <!-- kiro- 标记）——字段级（含单行槽位的保行模式）照常，
+# 用法：make_bad_awk <目录> [all|doc|inline|raw]   → 在 <目录>/awk 写好替身；调用方把 <目录> 放到 PATH 最前面
+#   判定顺序（16-fix4 第 21 条 + 补）：先看**参数**——带 -v sentre=<非空>（--sentinel）的是字段级掩码，doc / inline / raw 三种模式一律放行；
+#   无哨兵的 keep-lines 调用再看 stdin。
+#   all（默认）：所有掩码调用都失败（→ review_redact_json 先失败，评审走失败评论）
+#   doc：只让**评论出口**的文档级掩码失败（无哨兵 + stdin 带 <!-- kiro- 标记：comment.md / body-N.md）——字段级照常，
 #        用来测出口兜底的失败分支
-#   inline：只让**行内正文**的文档级掩码失败（stdin 里带 <!-- kiro-inline: 标记）——汇总照常发出，用来测「掩码失败 → 折叠区」
-#   raw：只让**原文**（stdin 里没有任何 <!-- kiro- 标记：降级原文、日志行）的保行掩码失败——渲染好的评论照常过文档级兜底，
+#   inline：只让**行内正文**的文档级掩码失败（无哨兵 + stdin 带 <!-- kiro-inline: 标记）——汇总照常发出，用来测「掩码失败 → 折叠区」
+#   raw：只让**原文**（无哨兵 + stdin 里没有任何 <!-- kiro- 标记：降级原文、日志行）的保行掩码失败——渲染好的评论照常过文档级兜底，
 #        用来单独观察降级渲染器自己的 fail-closed（第 13 条）
 make_bad_awk() {
   local dir="$1" mode="${2:-all}" real
