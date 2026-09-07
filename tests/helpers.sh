@@ -148,9 +148,10 @@ make_bad_awk() {
   mkdir -p "$dir"
   {
     echo '#!/usr/bin/env bash'
-    # 文档级 / 字段级按**参数**区分（16-fix4 第 21 条）：字段级掩码带 -v sentre=<非空>（--sentinel），文档级（review_redact_file /
-    # 降级原文 / 日志行）没有；stdin 内容不参与判定——清洗挪到掩码之后，模型 title 里伪造的 <!-- kiro-review:… --> 会原样进 dump-k，
-    # 靠「stdin 含标记」判定会让字段级在 doc 模式下失败、走 die_review 而不是它声称隔离的汇总出口退路
+    # 字段级 / 文档级 / 原文三种调用先按**参数**区分（16-fix4 第 21 条 + 补）：字段级掩码带 -v sentre=<非空>（--sentinel），一律放行；
+    # 没有哨兵的 keep-lines 调用再看 stdin：含 <!-- kiro- 标记的是 comment.md / body-N.md（doc），不含的是降级原文 / 日志行（raw）。
+    # 原先 doc 模式靠 stdin 含标记判定，会把 dump-k 单行槽位（模型 title 里伪造的标记原样进 dump-k）一起打坏；raw 模式反过来把
+    # dump-k 与 _untrusted_for_log 一起打坏（M-s 只因走降级路径没调 review_redact_json 才侥幸）。
     echo 'is_mask=0; is_doc=0; has_sent=0'
     echo 'for a in "$@"; do'
     echo '  [[ "$a" == *"function mask(s)"* ]] && is_mask=1'
@@ -159,13 +160,17 @@ make_bad_awk() {
     echo 'done'
     case "$mode" in
       all)    echo '[[ $is_mask == 1 ]] && { echo "badawk: 模拟掩码程序失败" >&2; exit 1; }' ;;
-      doc)    echo 'if [[ $is_mask == 1 && $is_doc == 1 && $has_sent == 0 ]]; then echo "badawk: 模拟文档级掩码失败" >&2; exit 1; fi' ;;
+      doc)    echo 'if [[ $is_mask == 1 && $is_doc == 1 && $has_sent == 0 ]]; then'
+              echo '  buf=$(mktemp); cat > "$buf"'
+              echo '  if grep -q "<!-- kiro-" "$buf"; then rm -f "$buf"; echo "badawk: 模拟文档级掩码失败" >&2; exit 1; fi'
+              printf '  %q "$@" < "$buf"; rc=$?; rm -f "$buf"; exit $rc\n' "$real"
+              echo 'fi' ;;
       inline) echo 'if [[ $is_mask == 1 && $is_doc == 1 && $has_sent == 0 ]]; then'
               echo '  buf=$(mktemp); cat > "$buf"'
               echo '  if grep -q "<!-- kiro-inline:" "$buf"; then rm -f "$buf"; echo "badawk: 模拟行内正文掩码失败" >&2; exit 1; fi'
               printf '  %q "$@" < "$buf"; rc=$?; rm -f "$buf"; exit $rc\n' "$real"
               echo 'fi' ;;
-      raw)    echo 'if [[ $is_mask == 1 && $is_doc == 1 ]]; then'
+      raw)    echo 'if [[ $is_mask == 1 && $is_doc == 1 && $has_sent == 0 ]]; then'
               echo '  buf=$(mktemp); cat > "$buf"'
               echo '  if ! grep -q "<!-- kiro-" "$buf"; then rm -f "$buf"; echo "badawk: 模拟原文掩码失败" >&2; exit 1; fi'
               printf '  %q "$@" < "$buf"; rc=$?; rm -f "$buf"; exit $rc\n' "$real"
