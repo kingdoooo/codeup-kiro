@@ -1943,15 +1943,15 @@ review_redact_secrets() {
       return s
     }
     function pem_marker(l, re) { return (pem_strip_deco(l) ~ ("^" re "$")) }
-    # base64 连片掩码（第 1 / 5 条：字母表只在 B64C 一处定义）：每个候选连片都要过 b64_material（第 23 / 26 条：含数字 + 大小写、
-    # 非纯十六进制、不是路径），否则原样——`见 <BEGIN 标记> 出现在 src/main/java/…/UserService` 的路径尾巴、块内散文里的 Java 长路径
-    # 都不能被打碎；full=1 整段 ****，否则前 4 后 4
+    # base64 连片掩码（第 1 / 5 条：字母表只在 B64C 一处定义）：每个候选连片都要过 b64_material 的严格分支（第 23 / 26 条：含数字、
+    # 非纯十六进制、含 +/= 或类别切换率 ≥ 0.35），否则原样——`见 <BEGIN 标记> 出现在 src/main/java/…/UserService` 的路径尾巴、
+    # 块内散文里的 Java 长路径与长类名都不能被打碎；full=1 整段 ****，否则前 4 后 4
     function redact_b64(s, minlen, full,   out, m, re) {
       re = "[" B64C "]{" minlen ",}={0,2}"
       out = ""
       while (match(s, re) > 0) {
         m = substr(s, RSTART, RLENGTH)
-        out = out substr(s, 1, RSTART - 1) (b64_material(m, minlen) ? (full ? "****" : mask(m)) : m)
+        out = out substr(s, 1, RSTART - 1) (b64_material(m, minlen, 1) ? (full ? "****" : mask(m)) : m)
         s = substr(s, RSTART + RLENGTH)
       }
       return out s
@@ -1980,8 +1980,8 @@ review_redact_secrets() {
     function pem_is_hdr(l) { return tolower(l) ~ /^[[:space:]]*[-+>]?[[:space:]]*(proc-type|dek-info):[[:print:]]*$/ }
     # 「像密钥正文」的行——一份判定、两种松紧（16-fix4 第 1 条：原先 pem_body_like 剥 diff/引用前缀而 pem_body_key 不剥，
     # `+MIIE…` 这种带前缀的正文行整行规则与兜底都会漏掉）。都先去掉 `[-+>]?` 前缀与首尾空白、要求整行是 base64 字符集；
-    #   strict=1（第 10 条兜底 / 第 17 条整行规则）：b64_material(s, minlen)；
-    #   strict=0（票 10 的 pem_body_like，块内正文行）：b64_material(s, 20)、或以补位 `=` 结尾、或 < 20 的短行含数字 + 大小写混合
+    #   strict=1（块外：第 10 条兜底前瞻 / 第 17 条整行规则）：b64_material(s, minlen, 1)；
+    #   strict=0（锚定 BEGIN 之后的块内，票 10 的 pem_body_like）：b64_material(s, 20, 0)、或以补位 `=` 结尾、或 < 20 的短行含数字 + 大小写混合
     #     （收住正文最后一行 `short==`、`AbCd1234EfGh`，而 `DONOTMERGE`、`P0`、`MERGE`、`disableInheritingDefaultResources` 一条都不满足——
     #     第 15 条 ②：≥ 20 分支不再放过无数字的纯字母标识符行）。
     function pem_body(l, minlen, strict,   s) {
@@ -1989,34 +1989,33 @@ review_redact_secrets() {
       sub(/^[[:space:]]*[-+>]?[[:space:]]*/, "", s)
       sub(/[[:space:]]+$/, "", s)
       if (s !~ ("^[" B64C "=]+$")) return 0
-      if (strict) return b64_material(s, minlen)
-      if (b64_material(s, 20) || s ~ /=$/) return 1
-      return (length(s) < 20 && s ~ /[0-9]/ && s ~ /[a-z]/ && s ~ /[A-Z]/)   # ≥ 20 的只认 b64_material（路径排除也要生效）
+      if (strict) return b64_material(s, minlen, 1)
+      if (b64_material(s, 20, 0) || s ~ /=$/) return 1
+      return (length(s) < 20 && s ~ /[0-9]/ && s ~ /[a-z]/ && s ~ /[A-Z]/)
     }
-    # 「就是密钥正文 / 密钥碎片」的**唯一**判定（第 26 条；pem_body 的严格分支、redact_b64 的每个候选连片都调它）：
-    #   base64 字符集、≥ minlen、非纯十六进制（40 位提交 SHA、64 位 SHA-256）、同时含数字 + 小写 + 大写
-    #   （64 位随机 base64 无数字的概率 ~1e-6；`disableInheritingDefaultResources` 这类长标识符无数字）；
-    #   **路径排除**：`/` 出现 ≥ 2 次且类别切换率 < 0.35——切换率 = 相邻字母数字字符之间（小写 / 大写 / 数字）类别变化次数 ÷ 相邻对数。
-    #   `src/main/java/com/example/v2/service/impl/UserService` 0.14、`packages/Core/src/main/java/com/acme/utf8/CodecHelper` 0.16 排除；
-    #   随机 base64 0.65–0.98 不排除；PKCS#8 首行 `MIIEvQIBADANBgkq…` 0.33 但没有 `/`、不进路径分支（仍掩）。
-    #   为什么要 `/` 门控：单靠切换率区分不了 ASN.1 结构化首行（0.33）与长驼峰标识符（0.27）；路径必然多 `/`，而含 ≥ 2 个 `/` 的
-    #   随机 base64 行切换率仍 ≥ 0.6，两者一起才干净。
-    function b64_material(s, minlen,   n, i, c, cls, prev, sw, pairs, slashes) {
+    # 「就是密钥正文 / 密钥碎片」的**唯一**判定（第 26 条改定义，补充八；pem_body 与 redact_b64 的每个候选连片都调它）：
+    #   共同条件：base64 字符集、≥ minlen、非纯十六进制（40 位提交 SHA、64 位 SHA-256）、含数字；
+    #   strict=1（块外：整行规则、pend 前瞻、pem_inline 尾巴、散文里的连片）再要求：含 `+` 或 `=`（标识符与路径永远没有这两个字符），
+    #     **或**大小写 / 数字类别切换率 ≥ 0.35——切换率 = 相邻字母数字字符之间（小写 / 大写 / 数字）类别变化次数 ÷ 相邻对数。
+    #     随机 base64 0.6–0.98；标识符 / 路径 0.14–0.27（`AbstractSingletonProxyFactoryBean2Configuration` 0.26、
+    #     `OAuth2AuthorizationServerConfig` 0.27、`src/main/java/com/example/v2/service/impl/UserService2Impl` 0.20）。
+    #     已知代价：PKCS#8 首行 `MIIEvQIBADANBgkq…`（DER 常量头，0.33、无 `+`）在块外不算材料——它对所有同规格密钥相同，不是秘密；
+    #     随后各行随机（≥ 0.6）照掩。20 位短行判错概率约 0.4%（仅块外兜底场景）。
+    #   strict=0（块内）：只要共同条件——块内不会有路径 / 类名，第 15 条 128 行上界兜住装饰性 BEGIN。
+    function b64_material(s, minlen, strict,   n, i, c, cls, prev, sw, pairs) {
       if (s !~ ("^[" B64C "=]+$")) return 0
       if (length(s) < minlen || is_hex(s)) return 0
-      if (s !~ /[0-9]/ || s !~ /[a-z]/ || s !~ /[A-Z]/) return 0
-      slashes = gsub(/\//, "/", s)
-      if (slashes >= 2) {
-        prev = ""; sw = 0; pairs = 0; n = length(s)
-        for (i = 1; i <= n; i++) {
-          c = substr(s, i, 1)
-          if (c ~ /[a-z]/) cls = "l"; else if (c ~ /[A-Z]/) cls = "u"; else if (c ~ /[0-9]/) cls = "d"; else continue
-          if (prev != "") { pairs++; if (cls != prev) sw++ }
-          prev = cls
-        }
-        if (pairs > 0 && sw / pairs < 0.35) return 0
+      if (s !~ /[0-9]/) return 0
+      if (!strict) return 1
+      if (s ~ /[+=]/) return 1
+      prev = ""; sw = 0; pairs = 0; n = length(s)
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c ~ /[a-z]/) cls = "l"; else if (c ~ /[A-Z]/) cls = "u"; else if (c ~ /[0-9]/) cls = "d"; else continue
+        if (prev != "") { pairs++; if (cls != prev) sw++ }
+        prev = cls
       }
-      return 1
+      return (pairs > 0 && sw / pairs >= 0.35)
     }
     # 纯十六进制串不算 base64 大块：40 位提交 SHA、64 位 SHA-256 在评审正文里很常见，而一行真正的
     # 密钥正文（64 个 base64 字符）全落在 [0-9a-f] 里的概率约 (22/64)^64，可以忽略。
@@ -2074,14 +2073,16 @@ review_redact_secrets() {
     # 起始行。锚定的（整行只有标记 + 装饰）：保行模式原样打出（只是标记），字段级换成占位（票 10 的形态：闭合 / 未闭合都在这一行
     # 之后补提示）。**悬挂行**（第 10 条再补的兜底：标记前面有散文、下一行才像正文）：标记前的散文必须过 redact_line 再打出——
     # 16-fix3 一度整行原样（保行）/ 整行换占位（字段级），`硬编码凭证 AKIA… 与私钥 -----BEGIN…-----` 里的 AKIA 就跟着原样出去、
-    # 或者整段问题陈述被无声吞掉（第 11 条 P0 回归）。标记后同一行的尾巴：保行按正文处理（掩 ≥ 20 位 base64 连片），字段级随块丢弃。
-    function begin_block(l,   pre, mk, tail) {
+    # 或者整段问题陈述被无声吞掉（第 11 条 P0 回归）。标记后同一行的尾巴：保行整段 ****（第 42 条，与 pem_inline 一致），字段级随块丢弃。
+    # anchored 由调用方传入（第 1 条补：锚定 BEGIN 规则与 pend 规则都已经算过 pem_marker，不再剥一次装饰）
+    function begin_block(l, anchored,   pre, mk, tail) {
       inpem = 1; kb_lines = 0
-      if (pem_marker(l, PEM_BEGIN_RE)) { if (keeplines) print l; else print PEM_PLACEHOLDER; return }
+      if (anchored) { if (keeplines) print l; else print PEM_PLACEHOLDER; return }
       match(l, PEM_BEGIN_RE)
       # 三段先切好再掩：redact_line 内部的 match() 会改写 RSTART / RLENGTH
       pre = substr(l, 1, RSTART - 1); mk = substr(l, RSTART, RLENGTH); tail = substr(l, RSTART + RLENGTH)
-      if (keeplines) print redact_line(pre) mk redact_b64(redact_line(tail), 20, 0)
+      # 尾巴（同一行紧跟标记的密钥正文）整段 ****（第 42 条）：与 pem_inline 一致——PEM 正文没有保留前 4 后 4 的意义
+      if (keeplines) print redact_line(pre) mk redact_b64(redact_line(tail), 20, 1)
       else           print redact_line(pre) PEM_PLACEHOLDER
     }
     BEGIN {
@@ -2105,7 +2106,7 @@ review_redact_secrets() {
     # 字段分隔行（review_redact_json 用随机 nonce 拼出，模型伪造不出）：一个字段结束——悬而未决的上一行放出、未闭合的 PEM 就地放出，
     # 分隔行原样透传
     sentre != "" && $0 ~ sentre { emit_pending(); if (inpem) { if (keeplines) inpem = 0; else pem_flush() } print; next }
-    pend != "" { if (!inpem && (pem_body($0, 20, 1) || pem_is_hdr($0))) { begin_block(pend); pend = "" } else emit_pending() }
+    pend != "" { if (!inpem && (pem_body($0, 20, 1) || pem_is_hdr($0))) { begin_block(pend, 0); pend = "" } else emit_pending() }
     inpem && pem_marker($0, PEM_END_RE) { if (keeplines) { print; inpem = 0 } else pem_close_block(); next }
     inpem && !keeplines { pem_hold($0); next }
     inpem && keeplines {
@@ -2119,7 +2120,7 @@ review_redact_secrets() {
       if ($0 ~ /^[[:space:]]*$/) { print; next }
       print redact_b64(redact_line($0), 40, 0); next                    # 起始行之后的散文：继续掩码，并掩 ≥ 40 位 base64 连片（连片须像密钥碎片）
     }
-    pem_marker($0, PEM_BEGIN_RE) { begin_block($0); next }
+    pem_marker($0, PEM_BEGIN_RE) { begin_block($0, 1); next }
     # 兜底是主规则（第 10 条再补）：一行**含**起始标记（前面有任何文字：`**F1** 硬编码私钥：-----BEGIN…-----`）且下一行就是密钥正文
     # （pem_body_key：≥ 20 位 base64、含数字与大小写——长路径 src/main/java/…/UserService 无数字不中）→ 块起始；
     # 下一行不是正文的是句中引用，按普通行放出。同一行已带 END 标记的（一行 .env 形态、「从 BEGIN 到 END」的散文）交给 pem_inline。

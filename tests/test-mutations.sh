@@ -703,7 +703,7 @@ assert_eq "$(sha_row_pipes "$(mut_render "$ROOT" "$nl_branch")")" "5" \
 #     降级路径走保行模式，字段级的 pem_flush 只在 review_redact_json 里跑，端到端向量换成保行模式的 M-r；M41 与 PEM 无关：
 #     redact_assign 的分隔符扫描方向（16-fix4 第 25 条补回）---
 D5="-----"; PEM_B="${D5}BEGIN RSA PRIVATE KEY${D5}"; PEM_E="${D5}END RSA PRIVATE KEY${D5}"   # 拆片段：完整 PEM 头字面量不进源码
-PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02abcdefghijkl"
+PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4ijkl"   # 尾巴像随机 base64（第 26 条改定义）
 PEM_PLACEHOLDER="**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
 mut_rd_multi() { ( set +e; source "$1/scripts/lib/review-render.sh"; printf '%b' "$2" | review_redact_secrets ); }   # <包根> <多行文本（printf %b）>
 unclosed_in="$PEM_B\n（下面是私钥内容，节选）\nMIIEowIBAAKCAQEAfakekey0123456\n正文片段 $PEM_L64 出现在 app/key.pem\n\n总体结论：不建议合并。\n"
@@ -988,12 +988,13 @@ assert_contains "$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; printf
 assert_not_contains "$( ( set +e; source "$ROOT/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w 对照：未变异实现掩"
 
 # --- M-x：第 26 条——b64_material 的路径排除 / 数字要求各去掉一条 → Java 路径被掩 / 无数字长标识符被掩（单测 golden 会失败）---
-pkg=$(make_mutant m-x1-no-path-branch 's|^      if (slashes >= 2) {$|      if (slashes >= 99) {  # 变异 M-x1：路径排除失效|' scripts/lib/review-render.sh)
-assert_eq "$(mut_rd "$pkg" 'src/main/java/com/example/v2/service/impl/UserService')" 'src/****vice' "M-x1：Java 长路径整行掩成碎片——单测「路径不是密钥正文」断言会失败"
+pkg=$(make_mutant m-x1-no-switch-rate 's|^      return (pairs > 0 \&\& sw / pairs >= 0.35)$|      return 1  # 变异 M-x1：块外不再看类别切换率|' scripts/lib/review-render.sh)
+assert_eq "$(mut_rd "$pkg" 'src/main/java/com/example/v2/service/impl/UserService')" 'src/****vice' "M-x1：Java 长路径整行掩成碎片——单测「路径 / 类名不是密钥正文」断言会失败"
+assert_eq "$(mut_rd "$pkg" 'AbstractSingletonProxyFactoryBean2Configuration')" 'Abst****tion' "M-x1：长类名整行掩成碎片——单测第 26 条改定义断言会失败"
 assert_eq "$(mut_rd "$ROOT" 'src/main/java/com/example/v2/service/impl/UserService')" 'src/main/java/com/example/v2/service/impl/UserService' "M-x1 对照：未变异实现原样"
-pkg=$(make_mutant m-x2-no-digit 's|^      if (s !~ /\[0-9\]/ \|\| s !~ /\[a-z\]/ \|\| s !~ /\[A-Z\]/) return 0$|      if (s !~ /[a-z]/ \|\| s !~ /[A-Z]/) return 0  # 变异 M-x2：不要求数字|' scripts/lib/review-render.sh)
-assert_eq "$(mut_rd "$pkg" 'disableInheritingDefaultResourcesForAllTenantsNow')" 'disa****sNow' "M-x2：无数字的 48 位标识符整行掩——单测「无数字的长标识符不算正文」断言会失败"
-assert_eq "$(mut_rd "$ROOT" 'disableInheritingDefaultResourcesForAllTenantsNow')" 'disableInheritingDefaultResourcesForAllTenantsNow' "M-x2 对照：未变异实现原样"
+pkg=$(make_mutant m-x2-no-digit 's|^      if (s !~ /\[0-9\]/) return 0$|      # 变异 M-x2：不要求数字|' scripts/lib/review-render.sh)
+assert_eq "$(mut_rd "$pkg" 'aBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgH')" 'aBcD****eFgH' "M-x2：无数字但高切换率的 60 位纯字母串整行掩——单测「共同条件含数字」断言会失败"
+assert_eq "$(mut_rd "$ROOT" 'aBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgH')" 'aBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgHiJkLmNoPqRsTuVwXyZaBcDeFgH' "M-x2 对照：未变异实现原样（无数字不算材料）"
 
 # --- M-y：第 27 条——fpath 回到先剔控制字符再查禁用字符 → src/<U+0001>app.py 洗成合法路径、不计数（单测「按不可定位处理并计数」会失败）---
 pkg=$(make_mutant m-y-fpath-dectl-first 's|^    def fpath(v): (if (v \| type) == "string" then .*$|    def fpath(v): (tr(v)) as $t   # 变异 M-y：先 dectl|' scripts/lib/review-render.sh)

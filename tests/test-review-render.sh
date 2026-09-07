@@ -626,7 +626,7 @@ assert_eq "$(printf '%s\n' "$neg_in" | review_redact_secrets)" "$neg_in" "掩码
 # 状态机原先只在 END 行清 inpem：模型只引用起始行（或 finalText 被截断）时，
 # BEGIN 之后的所有行——包括真正的评审结论——都被丢弃，读者完全看不出正文缺失。
 d5="-----"
-pem_head="MIIEowIBAAKCAQEA""s3cret"   # 含一个数字：16-fix4 第 15 条 ② 起无数字的 ≥ 20 位纯字母行不再算正文（真实正文行几乎必含数字）
+pem_head="MIIEowIBAAKCAQEA""s3cR9tX"   # 含数字且切换率 0.41：第 15 条 ② / 第 26 条改定义起，块外兜底前瞻要求含数字并像随机 base64（真实正文行如此）
 unclosed=$(printf '## 结论：不可合并\n%sBEGIN RSA PRIVATE KEY%s\n%s\n\nP0：私钥写死在仓库里。\n位置 src/key.pem:1\n请立即轮换这把私钥。\n' "$d5" "$d5" "$pem_head")
 printf '%s\n' "$unclosed" | review_redact_secrets > "$tmp/unclosed-pem.md"
 out=$(cat "$tmp/unclosed-pem.md")
@@ -685,7 +685,7 @@ assert_not_contains "$out" "没有配对的 END 行" "掩码②：END 行在时�
 # 复审 c1：带 diff 前缀（`-`/`+`）或引用前缀（`> `）的正文行不像 base64，第一版实现遇到就退出块、
 # 把随后的密钥正文按普通行放出来（每行漏前 4 后 4），而块尾的 END 行明明还在。现在判定推迟到
 # END/EOF：有 END 就整块丢弃，与修复前逐字节一致、零泄漏，也不打「未闭合」的假提示。
-body64="MIIEowIBAAKCAQEAsecretmaterial""0123456789abcdefghijklmnopqrstuvwxyz"
+body64="MIIEowIBAAKCAQEAs3cR9tXq7Lm2Nz8P""wK4vB6yH1jD5gF0aT3eU9iO2qW7eR1tY"   # 像随机 base64 的正文行（第 26 条改定义：块外判定看类别切换率）
 out=$(printf -- '-%sBEGIN RSA PRIVATE KEY%s\n-%s\n-%s\n-%sEND RSA PRIVATE KEY%s\n结论在这里。\n' "$d5" "$d5" "$body64" "$body64" "$d5" "$d5" | review_redact_secrets)
 assert_not_contains "$out" "$body64" "掩码②：diff 前缀的正文行整块丢弃（不放出）"
 assert_not_contains "$out" "MIIE****" "掩码②：diff 前缀的正文行连前 4 后 4 都不漏"
@@ -707,7 +707,7 @@ sha40="3f2a1b9c4d5e6f708192a3b4c5d6e7f8091a2b3c"
 out=$(printf '%sBEGIN RSA PRIVATE KEY%s\n说明\n提交 %s 已修，正文 %s 泄漏\n' "$d5" "$d5" "$sha40" "$body64" | review_redact_secrets)
 assert_contains "$out" "提交 $sha40 已修" "掩码②：未闭合之后的 40 位提交 SHA 原样保留（纯十六进制不算 base64 大块）"
 assert_not_contains "$out" "$body64" "掩码②：同一行的非十六进制 base64 连片被掩掉（正控）"
-assert_contains "$out" "MIIE****wxyz" "掩码②：连片掩码保留前 4 后 4"
+assert_contains "$out" "MIIE****R1tY" "掩码②：连片掩码保留前 4 后 4"
 # 复审（标准 2 反例）：不足 40 的 base64 连片不掩（长标识符可读），恰好 40 的非十六进制连片掩
 run39="AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abc"
 run40="${run39}d"
@@ -1970,7 +1970,7 @@ render_redacted() {  # <契约> <输出 md> [额外参数…]：与 render 同�
 }
 D5="-----"; PEM_B="${D5}BEGIN RSA PRIVATE KEY${D5}"; PEM_E="${D5}END RSA PRIVATE KEY${D5}"   # 拼接：完整 PEM 头字面量不进源码（Code Defender）
 PEM_PLACEHOLDER="**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
-PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02abcdefghijkl"   # 64 位折行的密钥正文形态
+PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4ijkl"   # 64 位折行的密钥正文形态；尾巴要像随机 base64（切换率 0.41）——第 26 条改定义后块外判定看类别切换率，原 fake02abcdefghijkl 尾巴只有 0.28
 PEM_L16="MIIEvQIBADANBgkq"                                                             # 16 位折行
 rd() { printf '%s\n' "$1" | review_redact_secrets; }               # 字段级（默认）
 
@@ -2113,12 +2113,12 @@ done
 assert_eq "$([[ $n_golden -ge 13 ]] && echo enough)" "enough" "票 16 golden②：覆盖了全部 golden（≥13 个，实际 ${n_golden}）"
 
 # ---- golden③：降级路径的原文含**两个未闭合 BEGIN 行**（第 28 条）——渲染时掩过一遍，出口再过文档级兜底必须逐字节 no-op ----
-printf '# 代码评审报告\n\nP0：写死了 token = %s，还有 %s。\napi_key = "%s"\n%s\nMIIEowIBAAKCAQEAs3cret\n又一处：\n%s\n\n总体结论：不建议合并。\n' \
+printf '# 代码评审报告\n\nP0：写死了 token = %s，还有 %s。\napi_key = "%s"\n%s\nMIIEowIBAAKCAQEAs3cR9tX\n又一处：\n%s\n\n总体结论：不建议合并。\n' \
   "$SEC_GHP" "$SEC_AKIA" "$SEC_B64" "$PEM_B" "$PEM_B" > "$tmp/deg-secrets.raw.md"
 review_render_degraded --text "$tmp/deg-secrets.raw.md" --sha 90fcb05 --src feature/user-search --dst master \
   --ts "2026-09-02 20:10:02" --diff-note "完整直传" --reason "输出中未找到契约标记" > "$tmp/deg-secrets.md"
 assert_masked "$(cat "$tmp/deg-secrets.md")" "票 16 降级"
-assert_not_contains "$(cat "$tmp/deg-secrets.md")" "MIIEowIBAAKCAQEAs3cret" "票 16 降级：未闭合块后紧跟的密钥正文行被就地屏蔽（第 14 条：保行模式）"
+assert_not_contains "$(cat "$tmp/deg-secrets.md")" "MIIEowIBAAKCAQEAs3cR9tX" "票 16 降级：未闭合块后紧跟的密钥正文行被就地屏蔽（第 14 条：保行模式）"
 assert_eq "$(grep -c -F -- "$PEM_B" "$tmp/deg-secrets.md")" "2" "票 16 降级（第 14 / 28 条）：两条 BEGIN 行都作为标记原位保留（保行模式不删行、不换占位）"
 assert_eq "$(grep -c -F '****（PEM 正文已屏蔽）' "$tmp/deg-secrets.md")" "1" "票 16 降级（第 14 条）：正文行换成等行数的屏蔽占位"
 assert_not_contains "$(cat "$tmp/deg-secrets.md")" "没有配对的 END 行" "票 16 降级（第 14 条）：保行模式不插提示行"
@@ -2342,7 +2342,7 @@ assert_eq "$out" "$(printf '硬编码凭证 %s 与私钥 %s\n%s\n%s\n影响：�
 out=$(printf '%s\n' "$hang_in" | review_redact_secrets)
 assert_eq "$out" "$(printf '硬编码凭证 %s 与私钥 %s\n> ⚠️ （其间 1 行已随密钥块一并屏蔽）\n影响：必须轮换' "$SEC_AKIA_MASKED" "$PEM_PLACEHOLDER")" "第 11 条（字段级）：BEGIN 前的问题陈述保留并掩码，标记换占位、块丢弃（cf29da0 整行换占位吞掉陈述：正控）"
 out=$(printf '硬编码凭证 %s 与私钥 %s 尾巴 %s\n%s\n%s\n' "$SEC_AKIA" "$PEM_B" "$PEM_L64" "$PEM_L64" "$PEM_E" | review_redact_secrets --keep-lines)
-assert_eq "$(printf '%s\n' "$out" | head -1)" "硬编码凭证 ${SEC_AKIA_MASKED} 与私钥 ${PEM_B} 尾巴 MIIE****ijkl" "第 11 条（保行）：标记后同一行的尾巴按正文处理（≥ 20 位 base64 连片前 4 后 4）"
+assert_eq "$(printf '%s\n' "$out" | head -1)" "硬编码凭证 ${SEC_AKIA_MASKED} 与私钥 ${PEM_B} 尾巴 ****" "第 42 条（原第 11 条断言改向）：悬挂行尾巴整段 ****，与 pem_inline 一致；第 11 条（保行）：标记后同一行的尾巴按正文处理（≥ 20 位 base64 连片前 4 后 4）"
 out=$(printf '硬编码凭证 %s 与私钥 %s\n这是散文\n' "$SEC_AKIA" "$PEM_B" | review_redact_secrets --keep-lines)
 assert_eq "$out" "$(printf '硬编码凭证 %s 与私钥 %s\n这是散文' "$SEC_AKIA_MASKED" "$PEM_B")" "第 11 条对照：下一行不像正文 → emit_pending 走 redact_line（一直是掩的）"
 out=$(printf '以 \`%s\` 开头的文件\n这是散文\n' "$PEM_B" | review_redact_secrets)
@@ -2370,9 +2370,14 @@ SHA40="0123456789abcdef0123456789abcdef01234567"
 for mode in rd rdk; do
   assert_eq "$($mode "$PATH_A")" "$PATH_A" "第 26 条（${mode}）：Java 长路径不是密钥正文（cf29da0 整行掩成 src/****vice：正控）"
   assert_eq "$($mode "$PATH_B")" "$PATH_B" "第 26 条（${mode}）：packages/… 路径不是密钥正文"
-  assert_eq "$($mode "$RAND2S")" "ab/c****kL9m" "第 26 条（${mode}）：含 2 个 / 的随机 base64 仍掩（切换率门控）"
+  assert_eq "$($mode "$RAND2S")" "ab/c****kL9m" "第 26 条（${mode}）：随机 base64（切换率 0.96）仍掩"
   assert_eq "$($mode "$SHA40")" "$SHA40" "第 26 条（${mode}）：40 位十六进制 SHA 不掩"
-  assert_eq "$($mode "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7")" "MIIE****AQC7" "第 26 条（${mode}）：PKCS#8 首行（切换率 0.33、无 /）仍掩"
+  assert_eq "$($mode "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7")" "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7" "第 26 条改定义（${mode}）：PKCS#8 首行（DER 常量头，切换率 0.33、无 +/=）在块外不算材料——已知代价，它对所有同规格密钥相同"
+  assert_eq "$($mode "AbstractSingletonProxyFactoryBean2Configuration")" "AbstractSingletonProxyFactoryBean2Configuration" "第 26 条改定义（${mode}）：46 位含数字的长类名原样（切换率 0.26；0d9ca83 掩成 Abst****tion：正控）"
+  assert_eq "$($mode "OAuth2AuthorizationServerConfig")" "OAuth2AuthorizationServerConfig" "第 26 条改定义（${mode}）：31 位含数字类名原样（0.27）"
+  assert_eq "$($mode "src/main/java/com/example/v2/service/impl/UserService2Impl")" "src/main/java/com/example/v2/service/impl/UserService2Impl" "第 26 条改定义（${mode}）：含数字的路径原样（0.20）"
+  assert_eq "$($mode "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu")" "MIIB****t8Qu" "第 26 条改定义（${mode}）：PKCS#1 正文行仍掩（切换率 0.59）"
+  assert_eq "$($mode "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCfake02abcdefgh+kl")" "MIIE****h+kl" "第 26 条改定义（${mode}）：含 + 的低切换率行仍掩（标识符与路径永远没有 + / =）"
   # 第 1 条 + 补：diff / 引用前缀的 68 位正文行在整行规则下掩，前缀留下（cf29da0 只认无前缀行：正控）
   assert_eq "$($mode "+${PEM_L64}abcd")" "+MIIE****abcd" "第 1 条（${mode}）：+ 前缀的正文行整行掩、前缀留下"
   assert_eq "$($mode "> ${PEM_L64}abcd")" "> MIIE****abcd" "第 1 条（${mode}）：> 引用前缀的正文行整行掩"
@@ -2380,8 +2385,8 @@ for mode in rd rdk; do
   # 第 23 条：pem_inline 尾巴 / 散文里的候选连片也过同一判定——路径不被打碎，密钥碎片照掩
   assert_eq "$($mode "见 ${PEM_B} 出现在 ${PATH_A}")" "见 ${PEM_B} 出现在 ${PATH_A}" "第 23 条（${mode}）：BEGIN 后同一行的 Java 路径原样（cf29da0 掩成 src/****vice：正控）"
 done
-assert_eq "$(rdk "见 ${PEM_B} MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw")" "见 ${PEM_B} ****" "第 23 条（保行）：BEGIN 后同一行的密钥碎片仍整段 ****（票 10 的悬挂行形态；只有路径被放过）"
-assert_eq "$(rd "见 ${PEM_B} MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw")" "见 ${PEM_B} ****" "第 23 条（字段级）：同上"
+assert_eq "$(rdk "见 ${PEM_B} Qz8RtW3vK7mN2pL9xJ4hG6fD1sA5bC0e")" "见 ${PEM_B} ****" "第 23 条（保行）：BEGIN 后同一行的密钥碎片仍整段 ****（票 10 的悬挂行形态；只有路径 / 类名被放过）"
+assert_eq "$(rd "见 ${PEM_B} Qz8RtW3vK7mN2pL9xJ4hG6fD1sA5bC0e")" "见 ${PEM_B} ****" "第 23 条（字段级）：同上"
 # 第 1 条补：兜底「下一行像正文」也认带前缀的正文行（BEGIN 悬挂 + `> MIIE…` → 进块）
 assert_eq "$(printf '%s\n' "$PEM_B" "> ${PEM_L64}" | review_redact_secrets --keep-lines | tail -1)" "$PEM_BODY_PH" "第 1 条补：保行模式兜底认 > 前缀的正文行为块内正文"
 # 第 15 条 ①：保行模式块状态最多 128 行——裸 BEGIN 后接 200 行标识符：前 128 行按块内处理、第 129 行起完全不受影响
@@ -2393,7 +2398,8 @@ assert_eq "$(sed -n '130,201p' "$tmp/keep-bound.out")" "$(sed -n '130,201p' "$tm
 assert_eq "$(sed -n '202p' "$tmp/keep-bound.out")" "MIIE****ijkl" "第 15 条 ①：退出块状态后的 64 位正文行仍被整行规则掩"
 # 第 15 条 ②：块内 ≥ 20 位纯字母标识符行不算正文（无数字）；块内散文里的 Java 路径不被 ≥ 40 位连片规则打碎（③）
 assert_eq "$(printf '%s\n' "$PEM_B" "disableInheritingDefaultResources" | review_redact_secrets --keep-lines | tail -1)" "disableInheritingDefaultResources" "第 15 条 ②：块内无数字的长标识符行原样（cf29da0 换成占位：正控）"
-assert_eq "$(printf '%s\n' "$PEM_B" "${PATH_A}Impl" | review_redact_secrets --keep-lines | tail -1)" "${PATH_A}Impl" "第 15 条 ③：块内散文行的 Java 路径原样"
+assert_eq "$(printf '%s\n' "$PEM_B" "见 ${PATH_A}Impl 一行" | review_redact_secrets --keep-lines | tail -1)" "见 ${PATH_A}Impl 一行" "第 15 条 ③：块内散文行里的 Java 长路径原样（连片走块外严格判定）"
+assert_eq "$(printf '%s\n' "$PEM_B" "${PATH_A}Impl" | review_redact_secrets --keep-lines | tail -1)" "$PEM_BODY_PH" "第 26 条改定义：块内独占一行、像 base64 且含数字的串一律算正文（块内不会有路径；第 15 条 128 行上界兜底）"
 assert_eq "$(printf '%s\n' "$PEM_B" "abcdEFGH1234" | review_redact_secrets --keep-lines | tail -1)" "$PEM_BODY_PH" "第 15 条 ②：块内短行数字 + 大小写混合仍算正文（正文尾行形态）"
 assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "6" "第 11 条：加密私钥块 6 行输入 → 6 行输出"
 out=$(printf '%s\n（下面是私钥内容，节选）\nMIIEowIBAAKCAQEAfakekey0123456\n正文片段 %s 出现在 app/key.pem\n\n总体结论：不建议合并。\n' "$PEM_B" "$PEM_L64" | review_redact_secrets --keep-lines)
