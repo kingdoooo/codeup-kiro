@@ -133,6 +133,9 @@ assert_not_contains "$out" "${esc}[" "清洗：不含 ANSI 控制序列"
 assert_contains "$out" "Kiro 用量：credits=0.2609" "日志记录 credits 用量（累加 meteringUsage）"
 assert_contains "$out" "context=3.8%" "日志记录上下文占用"
 assert_contains "$out" "评审报告：P0 1 · P1 1 · P2 1" "日志记录各级别问题数"
+# 票 17 B/C：契约内的结论、没有重复问题时，两条警告都不该出现（正控）
+assert_not_contains "$out" "结论不在契约内" "票 17 B 正控：契约内结论不打警告"
+assert_not_contains "$out" "完全重复的问题已合并" "票 17 C 正控：没有重复问题时不打警告"
 
 # --- 隔离：diff 先算好，随后业务库工作树中的注入面文件在 Kiro 启动前被移除 ---
 assert_contains "$(cat "$CASE/stdin")" "CANARY-AGENTSMD-ROOT" "diff 先算：stdin 仍含根 AGENTS.md 的改动"
@@ -661,33 +664,32 @@ E2E_CONTRACT="$ROOT/tests/fixtures/contract/inline-e2e.json"
 # fixture 仓库里 src/app.py 只有第 2 行是新增行（base: import os/def main/pass），
 # 所以 inline-e2e.json 里锚在第 2 行的问题可定位，锚在第 99 行与没有 file 的不可定位。
 IFX_DIR=""
-# 在 $CASE/work 里执行（CASE_TWEAK）：版本列表 fixture 必须带**真实 HEAD sha**，
-# 否则每个用例都会打「版本提交与 HEAD 不一致」的警告，那条警告本身就测不出来了。
-mk_inline_fixture() {
-  local head base n
-  mkdir -p "$IFX_DIR"
-  head=$(git rev-parse HEAD)
-  # MERGE_TARGET 的 commitId 必须就是本地 merge-base：不然每个用例都会打「比较基准不一致」的
-  # 警告并往汇总评论里塞一句 notice，那条警告本身就再也测不出来了（R8）
-  base=$(git merge-base origin/master HEAD)
-  jq -n --arg sha "$head" --arg base "$base" '[
-    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
-    {patchSetBizId:"src-1", versionNo:1, relatedMergeItemType:"MERGE_SOURCE", commitId:"0000111122223333"},
-    {patchSetBizId:"src-2", versionNo:2, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
-  ]' > "$IFX_DIR/list-patchsets.json"
-  for n in 1 2 3 4 5 6; do
-    [[ -e "$IFX_DIR/create-comment-inline.${n}.json" ]] \
-      || jq -n --arg id "draft-${n}" '{comment_biz_id:$id, comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true}' \
-           > "$IFX_DIR/create-comment-inline.${n}.json"
-  done
+# 版本列表 fixture 的**唯一**入口（票 17-fix2 C⑦：原先六个 mk_* 各写一份，改一处 schema 要同步六处）。
+# 由 CASE_TWEAK 在 $CASE/work 里执行，读下面这几个全局量；每次 run_inline_case 之后复位成默认值。
+#   PS_SRC     最新 MERGE_SOURCE 的 commitId：HEAD（默认，真实全 sha）/ HEAD12（前 12 位缩写）/
+#              HEADUP（全大写）/ PARENT（HEAD^，模拟版本列表滞后）/ OMIT（不带该字段）/ 其它值原样写入
+#   PS_TGT     最新 MERGE_TARGET 的 commitId：BASE（默认，真实 merge-base）/ OMIT / NONE（整条不写，
+#              于是选不出版本对）/ 其它值原样写入
+#   PS_SRC_ID / PS_TGT_ID  两个版本的 patchSetBizId（默认 src-2 / tgt-1；断言点名版本时才改）
+#   CASE_EXTRA_TWEAK       再跑一个函数（改业务库、写别的 fixture），在写完版本列表之后执行
+# 默认值让每个用例都拿到「to = 真实 HEAD、from = 真实 merge-base」——否则每个用例都会打
+# 「与 HEAD 不一致」或「不等于 merge-base」的警告，那两条警告本身就再也测不出来了。
+CASE_EXTRA_TWEAK=""
+# 版本列表 fixture 的实现在 tests/helpers.sh 的 mk_patchsets_fixture（票 17-fix3 ⑫：只留一份，
+# 两个套件共用；未知模式硬错误）。这里只做「设好目录 → 调它 → 再跑用例自己的 tweak」。
+mk_patchsets() {
+  PS_FIXTURE_DIR="$IFX_DIR" mk_patchsets_fixture
+  [[ -z "$CASE_EXTRA_TWEAK" ]] || "$CASE_EXTRA_TWEAK"
 }
-# 用法：run_inline_case <用例名> <fixture 目录名> [VAR=值 …]
+# 用法：run_inline_case <用例名> <fixture 目录名> [VAR=值 …]；版本列表形态与额外改造走上面那几个全局量
 run_inline_case() {
   local name="$1" fx="$2"; shift 2
   IFX_DIR="$tmp/$fx"
-  CASE_TWEAK=mk_inline_fixture run_case "$name" \
+  CASE_TWEAK=mk_patchsets run_case "$name" \
     DRY_RUN_FIXTURE_DIR="$IFX_DIR" CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 \
     MOCK_KIRO_CONTRACT="$E2E_CONTRACT" "$@"
+  # 复位：`PS_SRC=… run_inline_case …` 这种赋值前缀是否在函数返回后仍生效，POSIX 未定义
+  reset_ps_vars; CASE_EXTRA_TWEAK=""
 }
 # inline_bodies（本次创建了哪些行内评论）在 helpers.sh 里，与变异测试共用同一份实现。
 # 提交草稿那一次请求的 body
@@ -697,7 +699,8 @@ submit_body() { printf '%s\n' "$1" | grep -F 'DRY_RUN body: {"submitDraftComment
 run_inline_case ok1 ifx-ok1
 assert_rc "$RC" 0 "行内开启：退出码 0"
 assert_contains "$OUT" "changeRequests/7/diffs/patches" "行内开启：先查 MR 版本列表"
-assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "行内开启：版本列表只查一次"
+# 票 17-fix3 ⑥ 起是两次：Kiro 之前预采样一次（提前发现滞后/配置错），发布前再采样一次（两次比对证明成因）
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "2" "行内开启：版本列表查两次（Kiro 之前预采样 + 发布前采样）"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "行内开启：quiet 下发出 3 条可定位的 P0/P1"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "1" "行内开启：草稿一次提交（只调一次 review）"
 # 三个版本字段必传（P1-03 实测缺一即 400），且 line_number 是新文件侧行号
@@ -771,8 +774,7 @@ jq -n --arg fp "$fp_dup" --arg bot "$BOT" '[
    filePath:"src/app.py", line_number:2, author:{username:$bot},
    content:("### P1 · 上一次的措辞完全不同\n<!-- kiro-inline:" + $fp + " -->\n\n上一次发的。\n")}
 ]' > "$IFX_DIR/list-comments-inline.json"
-CASE_TWEAK=mk_inline_fixture run_case dedup DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case dedup ifx-dedup
 assert_rc "$RC" 0 "去重：退出码 0"
 assert_contains "$OUT" "changeRequests/7/comments/list" "去重：发布前先查现有行内评论"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "2" "去重：同一处已有一条 P1 → 两条 P0 照发、P1 那条被压（3 → 2）"
@@ -788,8 +790,7 @@ assert_not_contains "$comment" "缺少启动时的配置校验" "去重：跳过
 # 同一处旧评论是 P0 → 三条全压（级别门槛只挡「旧的比新的低」）
 IFX_DIR="$tmp/ifx-dedup-p0"; mkdir -p "$IFX_DIR"
 jq 'map(.content |= sub("### P1 · "; "### P0 · "))' "$tmp/ifx-dedup/list-comments-inline.json" > "$IFX_DIR/list-comments-inline.json"
-CASE_TWEAK=mk_inline_fixture run_case dedupp0 DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case dedupp0 ifx-dedup-p0
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "去重：同一处已有一条 P0 → 三条（P0/P0/P1）全部跳过"
 assert_contains "$OUT" "已存在跳过 3 条" "去重：日志计数 3"
 assert_contains "$(posted_comment "$OUT")" "其中 3 条已标注在「文件改动」对应行" "去重：3 条问题并到同一条已有评论上，计数按问题算"
@@ -805,8 +806,7 @@ jq -n --arg fp "$fp_dup" --arg bot "$BOT" '[
    filePath:"src/app.py", line_number:2, author:{username:$bot},
    content:("**P0 · 上一次的结论**\n<!-- kiro-inline:" + $fp + " -->\n\n上一次发的。\n")}
 ]' > "$IFX_DIR/list-comments-inline.json"
-CASE_TWEAK=mk_inline_fixture run_case dedupbold DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case dedupbold ifx-dedup-bold
 assert_rc "$RC" 0 "票 11 加粗旧评论：退出码 0"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "票 11 加粗旧评论：旧 P0 的级别从「**P0 · 」解析得出，同一处 P0/P0/P1 三条全压（去重生效）"
 assert_contains "$OUT" "已存在跳过 3 条" "票 11 加粗旧评论：三条都记为已存在"
@@ -814,8 +814,7 @@ assert_contains "$(posted_comment "$OUT")" "其中 3 条已标注在「文件改
 # 首行被人改掉、级别解析不出：按「最严」处理 = 不能压制任何级别
 IFX_DIR="$tmp/ifx-dedup-nosev"; mkdir -p "$IFX_DIR"
 jq 'map(.content |= sub("\\*\\*P0 · 上一次的结论\\*\\*"; "上一次（标题被人改过）"))' "$tmp/ifx-dedup-bold/list-comments-inline.json" > "$IFX_DIR/list-comments-inline.json"
-CASE_TWEAK=mk_inline_fixture run_case dedupnosev DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case dedupnosev ifx-dedup-nosev
 assert_rc "$RC" 0 "票 11 级别未知：退出码 0"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "票 11 级别未知：解析不出级别的旧评论不压任何一条（宁可重复，不能吞掉 P0）"
 assert_contains "$OUT" "已存在跳过 0 条" "票 11 级别未知：没有一条被压"
@@ -826,11 +825,13 @@ assert_contains "$OUT" "已存在跳过 0 条" "票 11 级别未知：没有一�
 REAL_LIST="$ROOT/tests/fixtures/inline/real-rerun/list-comments-inline.json"
 REAL_CONTRACT="$ROOT/tests/fixtures/contract/inline-rerun-real.json"
 # 业务库里得有 app/download.py 且这些行都是本次新增的（新文件 → 全部行可定位）
+# 由 CASE_EXTRA_TWEAK 在 mk_patchsets **之前**改业务库不行——它要先提交（HEAD 变了），
+# 版本列表才写得出真实 HEAD。所以这里自己提交完再调 mk_patchsets（它会顺带把草稿 fixture 补齐）。
 mk_real_repo() {
   mkdir -p app
   for i in $(seq 1 50); do echo "line_${i} = ${i}"; done > app/download.py
-  git add app/download.py && git commit -qm "add download endpoint" 
-  mk_inline_fixture
+  git add app/download.py && git commit -qm "add download endpoint"
+  mk_patchsets
   cp "$REAL_LIST" "$IFX_DIR/list-comments-inline.json"
 }
 IFX_DIR="$tmp/ifx-real"; mkdir -p "$IFX_DIR"
@@ -916,8 +917,7 @@ jq -n --arg a "$fp1" --arg b "$fp2" --arg c "$fp3" --arg bot "$BOT" '
     comment_type:"INLINE_COMMENT", state:"OPENED", draft:false,
     filePath:"src/app.py", line_number:2, author:{username:$bot},
     content:("### P0 · 上一次\n<!-- kiro-inline:" + .value + " -->\n")})' > "$IFX_DIR/list-comments-inline.json"
-CASE_TWEAK=mk_inline_fixture run_case rerun DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case rerun ifx-rerun
 assert_rc "$RC" 0 "重跑：退出码 0"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "重跑：三条都已存在 → 一条都不重发（A3 重跑不重复）"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "重跑：没有新草稿就不调提交接口"
@@ -930,15 +930,13 @@ jq -n --arg fp "$fp_dup" '[
    filePath:"src/app.py", line_number:2, author:{username:"aliyun:human_dev"},
    content:("### P0 · 我把机器人的评论复制了一份\n<!-- kiro-inline:" + $fp + " -->\n")}
 ]' > "$IFX_DIR/list-comments-inline.json"
-CASE_TWEAK=mk_inline_fixture run_case otherbotdup DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case otherbotdup ifx-otherbot
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
   "去重：带指纹的评论是别人发的 → 不算已发出（否则任何人都能压掉一条 P0）"
 
 # ---- 未配置机器人账号：去重退化为只按标记，必须留痕提示 ----
 IFX_DIR="$tmp/ifx-noid"; mkdir -p "$IFX_DIR"
-CASE_TWEAK=mk_inline_fixture run_case inlinenoid DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME= INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case inlinenoid ifx-noid CODEUP_BOT_USERNAME=
 assert_rc "$RC" 0 "未配置机器人账号：行内评论仍照发"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "未配置机器人账号：3 条照发"
 assert_contains "$OUT" "去重无法按作者过滤" "未配置机器人账号：日志说明去重的局限"
@@ -972,9 +970,7 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "R5：三条各只�
 
 # ---- 版本列表查不到 → 回落成「一条含完整问题清单的汇总」，并在评论里说明原因 ----
 IFX_DIR="$tmp/ifx-nops"; mkdir -p "$IFX_DIR"
-CASE_TWEAK=mk_inline_fixture run_case nopatchsets DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT" \
-  DRY_RUN_FAIL_ROUTES="list-patchsets:403"
+run_inline_case nopatchsets ifx-nops DRY_RUN_FAIL_ROUTES="list-patchsets:403"
 assert_rc "$RC" 0 "版本列表失败：评审仍成功"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "版本列表失败：一条行内评论都不发（不拿猜的版本去挂行）"
 comment=$(posted_comment "$OUT")
@@ -984,39 +980,306 @@ assert_contains "$comment" "硬编码疑似应用密钥" "版本列表失败：�
 assert_not_contains "$comment" "已标注在" "版本列表失败：不谎报行内计数"
 
 # ---- 版本列表里选不出版本对（只有合并源版本）----
-IFX_DIR="$tmp/ifx-nopair"; mkdir -p "$IFX_DIR"
-mk_nopair() {
-  mkdir -p "$IFX_DIR"
-  jq -n '[{patchSetBizId:"src-1", versionNo:1, relatedMergeItemType:"MERGE_SOURCE", commitId:"x"}]' \
-    > "$IFX_DIR/list-patchsets.json"
-}
-CASE_TWEAK=mk_nopair run_case nopair DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+PS_TGT=NONE run_inline_case nopair ifx-nopair
 assert_rc "$RC" 0 "选不出版本对：评审仍成功"
 assert_contains "$OUT" "MERGE_TARGET" "选不出版本对：日志点名缺哪一侧"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "选不出版本对：不发行内评论"
 assert_contains "$(posted_comment "$OUT")" "## 问题清单" "选不出版本对：回落成完整清单"
 
-# ---- 最新合并源版本的提交与 HEAD 不一致 → 记 warning，但仍以 API 版本为准 ----
-IFX_DIR="$tmp/ifx-shamismatch"; mkdir -p "$IFX_DIR"
-mk_mismatch() {
-  mkdir -p "$IFX_DIR"
-  jq -n '[{patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:"aaaa1111"},
-          {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}]' \
-    > "$IFX_DIR/list-patchsets.json"
-  jq -n '{comment_biz_id:"draft-1"}' > "$IFX_DIR/create-comment-inline.json"
-}
-CASE_TWEAK=mk_mismatch run_case shamismatch DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
-assert_rc "$RC" 0 "版本提交与 HEAD 不一致：评审仍成功"
-assert_contains "$OUT" "与当前 HEAD" "版本提交与 HEAD 不一致：记 warning"
-assert_eq "$(inline_bodies "$OUT" | jq -r '.to_patchset_biz_id' | sort -u | paste -sd, -)" "src-9" \
-  "版本提交与 HEAD 不一致：仍以 API 给的版本为准（Codeup 侧真值）"
-# 票 05 复审修复：这条不确定性也必须进汇总评论——阿里云侧开发者看不到流水线日志（I10）
+# ---- A11（票 17 → 17-fix2 B③）：最新合并源版本的提交解析不出 ⇒ 评审期间有新推送 → fail-closed ----
+# 行号是按本次评审的提交算的，绑到另一个版本上同一行号可能是完全不同的代码（I5，ADR-0005）。
+# 这个 commitId 在克隆里找不到 ⇒ 它是本次 checkout 之后推上去的 ⇒ 成因是新推送，**会自愈**（那次推送
+# 自己会触发新一轮评审），所以文案就直说新推送。滞后与历史改写各有自己的用例，见下。
+# from 用默认的真实 merge-base：只让 to 异常，隔离成因（from≠BASE 是另一条分支，见下面 R8）
+PS_SRC=RAW:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 run_inline_case shamismatch ifx-shamismatch
+assert_rc "$RC" 0 "A11 新推送：评审仍成功（退出码 0）"
+assert_contains "$OUT" "不在本地克隆里" "A11 新推送：日志点明成因是提交不在克隆里"
+assert_contains "$OUT" "fail-closed" "A11 新推送：日志点明是 fail-closed，不是发了再提醒"
+# 预采样就判定绑不上（这个 fixture 从头到尾都是那个不在克隆里的提交），发布前不再重查 ⇒ 只有预采样那一次
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "A11 新推送：预采样已判定，发布前不再查版本列表"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "A11 新推送：0 次创建行内评论（不拿旧 HEAD 的行号去绑新版本）"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "A11 新推送：POST …/comments 只有汇总评论那一次，没有草稿"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "A11 新推送：不调提交接口"
+assert_eq "$(req_count "$OUT" DELETE)" "0" "A11 新推送：没有任何删除请求（没建草稿，也不清理孤儿）"
+# 判定在草稿创建之前——也在拉现有行内评论（第 5 步）之前：除了查版本列表，一个副作用都没有
+assert_eq "$(printf '%s\n' "$OUT" | grep -cF 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}')" "0" "A11 新推送：连现有行内评论都不查"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "不是 Codeup 侧最新的合并源版本" "版本提交与 HEAD 不一致：汇总评论里说明（I10）"
-assert_contains "$comment" "行号可能有偏移" "版本提交与 HEAD 不一致：说清后果"
-assert_contains "$comment" "已标注在「文件改动」对应行" "版本提交与 HEAD 不一致：不影响行内计数"
+assert_contains "$comment" "行内评论未发出：评审期间源分支有新推送（Codeup 侧最新合并源版本是 deadbeefdead，本次评审的是 $(cd "$CASE/work" && git rev-parse HEAD | cut -c1-12)），下面是完整问题清单；新推送触发的评审会补上行内评论。" \
+  "A11 新推送：notice 点名成因与两个 12 位提交号，并给出会自愈的处置"
+assert_not_contains "$comment" "重跑流水线即可" "A11 新推送：不给「重跑流水线」这条相反的建议（那是滞后的处置）"
+assert_not_contains "$comment" "滞后" "A11 新推送：不把成因说成版本列表滞后"
+assert_contains "$comment" "## 问题清单" "A11 新推送：回落成完整展开的问题清单（INLINE_COMMENT=0 形态）"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '行内评论未发出')" "1" "A11 新推送：汇总里只有一句成因（票 17-fix3 ⑬：漏一处 return 就会变成两句）"
+assert_contains "$comment" "硬编码疑似应用密钥" "A11 新推送：问题明细仍在汇总里（信息不丢，I10）"
+assert_contains "$comment" "仓库级问题：没有统一的密钥管理" "A11 新推送：未定位问题也在完整清单里"
+assert_not_contains "$comment" "已标注在" "A11 新推送：不谎报行内计数（INLINE_ACTIVE 仍为 0）"
+assert_not_contains "$comment" "行号可能有偏移" "A11 新推送：不再有「行号可能有偏移」这种发了再提醒的文案"
+# 按结构判（契约 fixture 的 G5 正文里本来就有「折叠区」二字，完整清单会把它展开出来）
+assert_not_contains "$comment" "<details><summary>折叠区" "A11 新推送：没有折叠区（完整清单形态）"
+# 正控：to = HEAD（mk_patchsets 默认写的就是真实 HEAD）→ 行内照发。成功路径 ok1 已断言 3 条，这里并排再钉一次
+run_inline_case a11control ifx-a11control
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "A11 正控：to = HEAD 时行内照发 3 条"
+assert_not_contains "$OUT" "fail-closed" "A11 正控：日志没有 fail-closed"
+assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出" "A11 正控：没有 fail-closed 的 notice"
+
+# ---- A11 复审补充：两个核对同时不成立（to≠HEAD 且 from≠BASE）----
+# from 侧那条警告是「P1-14 的结论失效了」的探针，必须先于 fail-closed 落进日志：否则最需要它的那种运行
+# （目标语义变了、同一个 MR 又在评审期间被推送）反而没有它，运维只会看到「推送太频繁」。
+# 汇总里仍然只写 fail-closed 的成因：一条行内评论都没发，「行内评论的行号可能有偏移」会让读者去找不存在的东西。
+PS_SRC=RAW:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 \
+  PS_TGT=RAW:feedfacefeedfacefeedfacefeedfacefeedface PS_TGT_ID=tgt-9 \
+  run_inline_case bothmismatch ifx-bothmismatch
+assert_rc "$RC" 0 "A11 两者都不一致：评审仍成功"
+assert_contains "$OUT" "不等于本地 merge-base" "A11 两者都不一致：from 侧探针警告仍在日志里（不被 fail-closed 吞掉）"
+assert_contains "$OUT" "不在本地克隆里" "A11 两者都不一致：to 侧警告也在"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "A11 两者都不一致：仍然 0 次创建行内评论"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "评审期间源分支有新推送（Codeup 侧最新合并源版本是 deadbeefdead" "A11 两者都不一致：汇总写 fail-closed 的成因"
+assert_not_contains "$comment" "行号可能有偏移" "A11 两者都不一致：汇总不提行号偏移（一条行内评论都没发）"
+assert_contains "$comment" "## 问题清单" "A11 两者都不一致：回落成完整清单"
+
+# ---- A11（17-fix）：版本列表没给出最新合并源版本的提交号 → 同样 fail-closed ----
+# `codeup_select_patchset_pair` 把缺失/非字符串的 commitId 映射成空串（tests/test-codeup-api.sh 钉住），
+# 票 17 原实现在这里 fail-open：拿不到提交号照样发，等于放弃了「行内评论绑定它所评审的提交」这条证明（I5）。
+# 协调者复审改判：绑不上就不发，notice 单列这个成因（读者要能区分「对不上」与「没给」）。
+PS_SRC=OMIT PS_SRC_ID=src-9 run_inline_case nocommitid ifx-nocommitid
+assert_rc "$RC" 0 "A11 缺 commitId：评审仍成功（退出码 0）"
+assert_contains "$OUT" "最新合并源版本（src-9）没有可用的提交号" "A11 缺 commitId：日志在「没有可用的提交号」那一行点名是哪个版本缺"
+assert_contains "$OUT" "fail-closed" "A11 缺 commitId：日志点明是 fail-closed"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "A11 缺 commitId：0 次创建行内评论（绑不上就不发）"
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "A11 缺 commitId：只有预采样那一次（不重查——没有提交号不是滞后）"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "A11 缺 commitId：POST …/comments 只有汇总评论那一次，没有草稿"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "A11 缺 commitId：不调提交接口"
+assert_eq "$(req_count "$OUT" DELETE)" "0" "A11 缺 commitId：没有任何删除请求"
+assert_eq "$(printf '%s\n' "$OUT" | grep -cF 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}')" "0" "A11 缺 commitId：连现有行内评论都不查"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "行内评论未发出：Codeup 版本列表未给出该版本（src-9）的提交号，无法确认行内评论会绑到本次评审的提交上，下面是完整问题清单。" \
+  "A11 缺 commitId：notice 单列这个成因并带上版本号"
+assert_not_contains "$comment" "与 Codeup 侧最新合并源版本" "A11 缺 commitId：不谎称「对不上」（没给号 ≠ 号不同）"
+assert_contains "$comment" "## 问题清单" "A11 缺 commitId：回落成完整清单"
+assert_contains "$comment" "硬编码疑似应用密钥" "A11 缺 commitId：问题明细仍在汇总里（I10）"
+assert_not_contains "$comment" "已标注在" "A11 缺 commitId：不谎报行内计数"
+
+# ---- A11（17-fix2 B③）：提交号规范化——12 位缩写与大写都算「就是本次评审的提交」，照发 ----
+# 证据分级（票 17-fix3 ⑧）：**真实 API 只观察到 40 位全 sha**（acceptance 留档），没有观察到 Codeup 返回缩写。
+# 规范化是对**未观察到的形态**保守——万一哪天返回缩写或大写，字面相等会把它误判成「不一致」，
+# 而 fail-closed 之后每轮都发不出行内评论。下面两条用例是 fixture/unit 级的形状覆盖，不是真实 API 的证据。
+PS_SRC=HEAD12 run_inline_case shortsha ifx-shortsha
+assert_rc "$RC" 0 "缩写 sha：评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "缩写 sha：规范化后等于 HEAD，行内照发 3 条"
+assert_not_contains "$OUT" "fail-closed" "缩写 sha：不该 fail-closed"
+assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出" "缩写 sha：汇总里没有 fail-closed 的 notice"
+PS_SRC=HEADUP run_inline_case uppersha ifx-uppersha
+assert_rc "$RC" 0 "大写 sha：评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "大写 sha：大小写不影响规范化，行内照发 3 条"
+assert_not_contains "$OUT" "fail-closed" "大写 sha：不该 fail-closed"
+
+# ---- A11（17-fix2 B③）：提交号只有空白 → 走「没给出提交号」那条分支，不渲染空括号 ----
+PS_SRC="RAW:   " PS_SRC_ID=src-9 run_inline_case blanksha ifx-blanksha
+assert_rc "$RC" 0 "空白 commitId：评审成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "空白 commitId：0 次创建行内评论"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "未给出该版本（src-9）的提交号" "空白 commitId：按「没给出提交号」处置"
+assert_not_contains "$comment" "（）" "空白 commitId：评论里不出现空括号"
+# 更贴的一条：de03e59 会把空白串塞进「…最新合并源版本（<空白>）…」，括号里只有空格
+assert_not_contains "$comment" "最新合并源版本（ " "空白 commitId：括号里不是一串空格（不走「不一致」那条分支）"
+assert_not_contains "$comment" "有新推送" "空白 commitId：不谎称新推送"
+
+# ---- A11（17-fix2 B③）：最新合并源版本是 HEAD 的祖先 ⇒ 版本列表滞后 → 有界重查后 fail-closed ----
+# 与新推送相反：这一种**不会自愈**（没有下一次推送来触发新评审），处置是「重跑流水线」。
+# 重查用同一个 GET，所以请求数 = 1 + 3；CODEUP_RETRY_BACKOFF=0 让三次退避不真的睡。
+PS_SRC=PARENT PS_SRC_ID=src-9 run_inline_case lagging ifx-lagging CODEUP_RETRY_BACKOFF=0
+assert_rc "$RC" 0 "版本列表滞后：评审成功"
+assert_contains "$OUT" "是当前 HEAD" "版本列表滞后：日志点明那个版本是 HEAD 的祖先"
+# 数字来自脚本里的 INLINE_LAG_MAX / INLINE_LAG_BUDGET（票 17-fix3 ⑯：测试也不硬写，只钉住「写明了上限」）
+assert_contains "$OUT" "按退避重查（至多 3 次，总等待不超过 45 秒" "版本列表滞后：日志写明重查上限与总等待预算"
+# 重查已经挪到预采样里（票 17-fix3 ⑥）：预采样 1 次 + 三次重查 = 4 次，发布前不再查
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "4" "版本列表滞后：预采样 1 次 + 三次重查 = 4 次 GET"
+assert_contains "$OUT" "重查第 3/3 次" "版本列表滞后：三次都跑到了"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "版本列表滞后：重查仍滞后 → 0 次创建行内评论"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "Codeup 版本列表尚未包含本次提交" "版本列表滞后：notice 点名成因"
+assert_contains "$comment" "重跑流水线即可" "版本列表滞后：给出正确的处置（不是「等下一轮」）"
+assert_not_contains "$comment" "有新推送" "版本列表滞后：不谎称新推送（那条建议是等下一轮，等不到）"
+assert_contains "$comment" "## 问题清单" "版本列表滞后：回落成完整清单"
+
+# ---- A11（17-fix2 B③）：滞后但重查命中 → 用新版本正常发 ----
+# 第二次 GET 起 fixture 换成「to = 真实 HEAD、版本号更大」的列表：模拟 Codeup 在几秒内把版本建出来了。
+# 第 1 次 GET 用 `.1.json`（滞后：to 是 HEAD^），之后每一次都落到无序号的那份（已包含本次提交）：
+# 预采样重查命中之后，发布前还会再采样一次，那一次也必须拿到新版本（票 17-fix3 ⑥）。
+mk_lag_then_ok() {
+  local head base
+  head=$(git rev-parse HEAD); base=$(git merge-base origin/master HEAD)
+  jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFX_DIR/list-patchsets.1.json"
+  jq -n --arg sha "$head" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-10", versionNo:10, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFX_DIR/list-patchsets.json"
+}
+# CASE_EXTRA_TWEAK 在 mk_patchsets 之后执行，所以上面写的两份 fixture 会覆盖它生成的那份
+CASE_EXTRA_TWEAK=mk_lag_then_ok run_inline_case lagrecovered ifx-lagrecovered CODEUP_RETRY_BACKOFF=0
+assert_rc "$RC" 0 "滞后后命中：评审成功"
+assert_contains "$OUT" "重查命中" "滞后后命中：日志写明命中"
+# 预采样 1 次（滞后）+ 第一次重查命中 = 2 次，随后发布前再采样一次 = 3 次
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "3" "滞后后命中：预采样 + 一次重查命中 + 发布前采样 = 3 次 GET"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "滞后后命中：行内照发 3 条"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.to_patchset_biz_id' | sort -u | paste -sd, -)" "src-10" \
+  "滞后后命中：patchset_biz_id 换成重查拿到的新版本"
+assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出" "滞后后命中：汇总里没有 fail-closed 的 notice"
+
+# ---- A11（17-fix3 ①）：提交号不是 sha 形状 → 按「没有可用的提交号」处置，**绝不**当成已证明的版本 ----
+# `git rev-parse --verify "<x>^{commit}"` 接受任意 revision 表达式：不锚形状的话 `HEAD` / `@` / 一个 refname
+# 都会解析成克隆里的分支顶端、恰好等于 HEAD，于是「版本已证明」这条结论建立在一个从未核对内容的取值上
+# （fail-open）。锚了形状之后它落到 noid：一条行内评论都不发。
+for shape in HEAD @ master refs/heads/master; do
+  PS_SRC="RAW:$shape" PS_SRC_ID=src-9 run_inline_case "shape-$(printf '%s' "$shape" | tr -c 'A-Za-z0-9' '-')" ifx-shape
+  assert_rc "$RC" 0 "形状锚定（${shape}）：评审仍成功"
+  assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "形状锚定（${shape}）：0 次创建行内评论（不把 refname 当成已证明的版本）"
+  assert_contains "$OUT" "不是 sha 形状" "形状锚定（${shape}）：日志点明形状不对"
+  comment=$(posted_comment "$OUT")
+  assert_contains "$comment" "未给出该版本（src-9）的提交号" "形状锚定（${shape}）：按「没有提交号」处置"
+  assert_not_contains "$comment" "有新推送" "形状锚定（${shape}）：不谎称新推送（那条建议是等下一轮，永远等不到）"
+done
+# 正控：40 位全 sha 与 12 位缩写仍然照发（上面 shortsha/uppersha 已钉）；7 位以下不认
+PS_SRC=HEAD6 PS_SRC_ID=src-9 run_inline_case shape6 ifx-shape6
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "形状锚定：6 位十六进制短于 git 短 sha 下限，不认"
+
+# ---- A11（17-fix3 ⑩）：浅克隆里解析不出的提交 → 不能断言「新推送」----
+# 这一条走**函数级**而不是端到端：把 fixture 仓库削成浅克隆会同时打断脚本自己的 diff 基准
+# （`merge-base origin/<目标分支>`），那时评审在第 4 步就失败了，测不到版本核对。
+# 所以直接抽出两个纯函数，在一个专门造的浅克隆里跑。
+sh_dir="$tmp/shallow-src"; sh_clone="$tmp/shallow-clone"
+git init -q "$sh_dir"
+( cd "$sh_dir" && git config user.email t@t && git config user.name t \
+  && echo one > f && git add f && git commit -qm one \
+  && echo two >> f && git commit -qam two \
+  && echo three >> f && git commit -qam three )
+old_sha=$( cd "$sh_dir" && git rev-parse 'HEAD~2' )
+# 从**非裸**仓库浅克隆（depth=1）：`HEAD~2` 于是落在 graft 边界之下、在克隆里解析不出
+git clone -q --depth=1 "file://$sh_dir" "$sh_clone"
+# 抽出待测函数（整脚本 source 会执行主流程），并给它一个空的 log 与一个必然失败的 fetch
+sed -n '/^inline_resolve_commit() {/,/^}/p;/^inline_classify_to() {/,/^}/p' "$ROOT/scripts/kiro-review.sh" > "$tmp/cls.sh"
+sh_status=$( cd "$sh_clone" \
+  && git remote set-url origin "file://$tmp/no-such-remote.git" \
+  && log() { :; } \
+  && source "$tmp/cls.sh" \
+  && inline_classify_to "$old_sha" "$(git rev-parse HEAD)" \
+  && printf '%s' "$INLINE_TO_STATUS" )
+assert_eq "$(cd "$sh_clone" && git rev-parse --is-shallow-repository)" "true" "浅克隆前置：克隆确实是浅的"
+assert_eq "$sh_status" "unknown_shallow" \
+  "17-fix3 ⑩：浅克隆里解析不出、加深又失败 → 判定 unknown_shallow（不是 pushed_dark「新推送、会自愈」）"
+# 正控：同一个提交在**非浅**克隆里解析得出 → 它是 HEAD 的祖先，判定滞后而不是新推送
+git clone -q "file://$sh_dir" "$tmp/deep-clone"
+deep_status=$( cd "$tmp/deep-clone" && log() { :; } && source "$tmp/cls.sh" \
+  && inline_classify_to "$old_sha" "$(git rev-parse HEAD)" && printf '%s' "$INLINE_TO_STATUS" )
+assert_eq "$deep_status" "lag" "17-fix3 ⑩ 正控：非浅克隆里同一个提交解析得出、是 HEAD 的祖先 → lag"
+
+# ---- A11（17-fix3 ③）：最新合并源版本是 HEAD 的**后代** ⇒ 评审期间有新推送（对象已在克隆里）----
+# 浅克隆下这个提交拉不到（判定 pushed_dark），fetch 过之后它在本地（判定 pushed_known）——同一个事件，
+# 处置与文案必须一致，不能一个说新推送、另一个说 force-push。
+PS_SRC=CHILD PS_SRC_ID=src-9 run_inline_case descendant ifx-descendant
+assert_rc "$RC" 0 "后代版本：评审仍成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "后代版本：0 次创建行内评论"
+assert_contains "$OUT" "是当前 HEAD" "后代版本：日志点明拓扑关系"
+assert_contains "$OUT" "的后代（对象已在克隆里）" "后代版本：日志说明对象在本地"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "评审期间源分支有新推送" "后代版本：与 pushed_dark 同一套文案（同因同断）"
+assert_contains "$comment" "新推送触发的评审会补上行内评论" "后代版本：给出会自愈的处置"
+assert_not_contains "$comment" "不在同一条历史上" "后代版本：不谎称 force-push"
+assert_not_contains "$comment" "重跑流水线即可" "后代版本：不给滞后那条处置"
+
+# ---- A11（17-fix3 ④）：分叉历史（force-push / rebase 改写）→ fail-closed 且文案单列 ----
+# fixture 用 `git commit --amend` 之后的**旧** sha：对象还在克隆里（reflog 可达），但与新 HEAD 分属两条历史。
+PS_SRC=ORPHAN PS_SRC_ID=src-9 run_inline_case diverged ifx-diverged
+assert_rc "$RC" 0 "分叉历史：评审仍成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "分叉历史：0 次创建行内评论"
+assert_contains "$OUT" "分属两条历史" "分叉历史：日志点明成因"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "不在同一条历史上（源分支被改写或强推）" "分叉历史：notice 单列这个成因"
+assert_not_contains "$comment" "尚未包含本次提交" "分叉历史：不谎称滞后"
+assert_contains "$comment" "## 问题清单" "分叉历史：回落成完整清单"
+
+# ---- A11（17-fix3 ②）：滞后重查期间成因变了 → 按**最终**成因给文案，不再一律说「滞后，重跑流水线」----
+# 第 1 次 GET 滞后 → 触发重查；之后每次都返回一个不在克隆里的提交（评审期间来了新推送）。
+mk_lag_then_push() {
+  local base
+  base=$(git merge-base origin/master HEAD)
+  jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFX_DIR/list-patchsets.1.json"
+  jq -n --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-11", versionNo:11, relatedMergeItemType:"MERGE_SOURCE", commitId:"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}
+  ]' > "$IFX_DIR/list-patchsets.json"
+}
+CASE_EXTRA_TWEAK=mk_lag_then_push run_inline_case lagthenpush ifx-lagthenpush CODEUP_RETRY_BACKOFF=0
+assert_rc "$RC" 0 "重查期间来了新推送：评审仍成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "重查期间来了新推送：0 次创建行内评论"
+assert_contains "$OUT" "判定：pushed_dark" "重查期间来了新推送：日志记下每次重查的判定"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "评审期间源分支有新推送" "重查期间来了新推送：按最终成因给文案"
+assert_not_contains "$comment" "尚未包含本次提交" "重查期间来了新推送：不再一律说滞后"
+assert_not_contains "$comment" "重跑流水线即可" "重查期间来了新推送：不给「重跑」这条只会复现的建议"
+
+# ---- A11（17-fix3 ⑮）：滞后重查期间接口一直失败 → 用「查询版本列表失败」那条 notice，不谎称滞后 ----
+# 按调用序号注入（DRY_RUN_FAIL_ROUTES 的 `@N+`）：第 1 次（预采样）成功、第 2 次（发布前采样）拿到旧版本
+# 触发重查、第 3 次起全部 403。这正是第 ② 条最坏的实例：403 被说成「滞后，重跑流水线即可」。
+mk_lag_then_403() {
+  jq -n --arg sha "$(git rev-parse HEAD)" --arg base "$(git merge-base origin/master HEAD)" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-2", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFX_DIR/list-patchsets.1.json"
+}
+PS_SRC=PARENT PS_SRC_ID=src-9 CASE_EXTRA_TWEAK=mk_lag_then_403 \
+  run_inline_case lagthen403 ifx-lagthen403 CODEUP_RETRY_BACKOFF=0 DRY_RUN_FAIL_ROUTES="list-patchsets:403@3+"
+assert_rc "$RC" 0 "重查一直 403：评审仍成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "重查一直 403：0 次创建行内评论"
+assert_contains "$OUT" "两次采样：checkout 时判定=ok" "重查一直 403：两次采样比对写进日志"
+assert_contains "$OUT" "重查 MR 版本列表失败（HTTP 403）" "重查一直 403：每次失败都留痕"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "查询 MR 版本列表失败（HTTP 403）" "重查一直 403：按最终成因（接口失败）给 notice"
+assert_not_contains "$comment" "尚未包含本次提交" "重查一直 403：不谎称滞后"
+assert_not_contains "$comment" "重跑流水线即可" "重查一直 403：不给「重跑」这条只会复现的建议"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '行内评论未发出')" "1" "重查一直 403：汇总里只有一句成因（票 17-fix3 ⑬）"
+
+# ---- A11（17-fix3 ②）：滞后重查期间接口失败 / 选不出版本对 → 各自既有的 notice ----
+mk_lag_then_500() {
+  local base
+  base=$(git merge-base origin/master HEAD)
+  jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFX_DIR/list-patchsets.1.json"
+  jq -n '[]' > "$IFX_DIR/list-patchsets.json"   # 之后每次都返回空数组 → 选不出版本对
+}
+CASE_EXTRA_TWEAK=mk_lag_then_500 run_inline_case lagthennopair ifx-lagthennopair CODEUP_RETRY_BACKOFF=0
+assert_rc "$RC" 0 "重查后选不出版本对：评审仍成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "重查后选不出版本对：0 次创建行内评论"
+assert_contains "$OUT" "重查后仍选不出版本对" "重查后选不出版本对：日志留痕"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "选不出「最新合并目标版本 + 最新合并源版本」这一对" "重查后选不出版本对：用这条既有 notice"
+assert_not_contains "$comment" "重跑流水线即可" "重查后选不出版本对：不谎称滞后"
+
+# ---- A11（17-fix2 B③）：最新合并目标版本没有提交号 → 只打警告（P1-14 探针失效），照发 ----
+PS_TGT=OMIT run_inline_case fromnoid ifx-fromnoid
+assert_rc "$RC" 0 "from 缺 commitId：评审成功"
+assert_contains "$OUT" "P1-14 的探针" "from 缺 commitId：日志写明探针本次失效"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "from 缺 commitId：不影响发布，行内照发 3 条"
+assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出" "from 缺 commitId：不 fail-closed"
+assert_not_contains "$(posted_comment "$OUT")" "行号可能有偏移" "from 缺 commitId：没有提交号就不谈偏移（无从比较）"
+# ---- A11（17-fix3 ⑤）：最新合并目标版本的提交号只有空白 → 与 to 侧同样先去空白，不渲染空括号 ----
+PS_TGT="RAW:   " PS_TGT_ID=tgt-9 run_inline_case fromblank ifx-fromblank
+assert_rc "$RC" 0 "from 空白 commitId：评审成功"
+assert_contains "$OUT" "P1-14 的探针" "from 空白 commitId：按「没有提交号」处置（探针失效）"
+assert_not_contains "$OUT" "不等于本地 merge-base" "from 空白 commitId：不落到「基准不一致」那条分支"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "from 空白 commitId：不影响发布，行内照发 3 条"
+comment=$(posted_comment "$OUT")
+assert_not_contains "$comment" "行号可能有偏移" "from 空白 commitId：汇总里不谈偏移（无从比较）"
+assert_not_contains "$comment" "合并目标版本 ）" "from 空白 commitId：评论里不出现空括号"
 
 # ---- 查现有行内评论失败 → 跳过去重但照常发布，并留痕 ----
 run_inline_case nodedup ifx-nodedup DRY_RUN_FAIL_ROUTES="list-comments-inline:500" CODEUP_RETRY_BACKOFF=0
@@ -1029,7 +1292,9 @@ run_inline_case inlinedegrade ifx-inlinedegrade MOCK_KIRO_NO_MARKER=1
 assert_rc "$RC" 0 "降级 + 行内开启：退出码 0"
 assert_contains "$OUT" "结构化解析失败" "降级 + 行内开启：仍是降级评论"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "降级 + 行内开启：不发行内评论（没有可信的结构化问题）"
-assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "0" "降级 + 行内开启：连版本列表都不用查"
+# 预采样在 Kiro 之前，所以降级路径也会有那一次（它的作用正是「不用等模型跑完才知道版本对能不能用」）；
+# 发布路径本身不会再查——降级不进行内发布。
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "降级 + 行内开启：只有 Kiro 之前那次预采样"
 
 # ---- 无问题：不发行内评论，汇总仍完整 ----
 printf '{"contract":"codeup-reviewer/1","summary":"没有发现问题。","verdict":"MERGE","verdict_reason":"改动很小。","findings":[]}\n' > "$tmp/empty-contract.json"
@@ -1039,7 +1304,7 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "无问题 + 行内�
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "无问题 + 行内开启：不调提交接口"
 # 没有可发的行内评论时连版本列表与现有评论列表都不该查：白跑两个接口，还可能在一条
 # 「未发现明显问题」的汇总上挂一句「下面是完整问题清单」
-assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "0" "无问题 + 行内开启：不查版本列表"
+assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "1" "无问题 + 行内开启：只有 Kiro 之前那次预采样（发布路径提前返回，不再查）"
 assert_eq "$(printf '%s\n' "$OUT" | grep -cF 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}')" "0" "无问题 + 行内开启：不查现有行内评论"
 assert_contains "$OUT" "本次没有可发的行内评论" "无问题 + 行内开启：日志说明为什么跳过"
 comment=$(posted_comment "$OUT")
@@ -1057,8 +1322,7 @@ jq -n --arg fp "$fp_dup" --arg bot "$BOT" '[
    filePath:"src/app.py", line_number:2, author:{username:$bot},
    content:("### P0 · 硬编码疑似应用密钥\n<!-- kiro-inline:" + $fp + " -->\n")}
 ]' > "$IFX_DIR/list-comments-inline.json"
-CASE_TWEAK=mk_inline_fixture run_case outdated DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case outdated ifx-outdated
 assert_rc "$RC" 0 "out_dated：评审成功"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "out_dated：那条旧评论不算已发出，三条全部重发"
 assert_contains "$(inline_bodies "$OUT" | jq -r '.content')" "硬编码疑似应用密钥" "out_dated：被取代的那条按当前版本重发"
@@ -1102,8 +1366,7 @@ jq -n --arg fp "$fp_dup" --arg bot "$BOT" '[
    filePath:"src/other.py", line_number:9, author:{username:$bot},
    content:"### P2 · 与本次无关的残留草稿\n<!-- kiro-inline:9999999999999999999999999999999999999999 -->\n"}
 ]' > "$IFX_DIR/list-comments-inline.json"
-CASE_TWEAK=mk_inline_fixture run_case orphan DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case orphan ifx-orphan
 assert_rc "$RC" 0 "R5 残留草稿：评审成功"
 assert_eq "$(req_count "$OUT" DELETE 'comments/orphan-1$')" "1" "R5 残留草稿：指纹对得上的那条先被删掉"
 assert_eq "$(req_count "$OUT" DELETE 'comments/orphan-other$')" "0" "R5 残留草稿：与本次无关的草稿不动（同一 MR 上可能有另一次运行在进行中）"
@@ -1124,8 +1387,7 @@ jq -n --arg bot "$BOT" '[
    filePath:"src/app.py", line_number:2, author:{username:$bot},
    content:"### P0 · 正常转公开的那条\n<!-- kiro-inline:2222222222222222222222222222222222222222 -->\n"}
 ]' > "$IFX_DIR/list-comments-inline.2.json"
-CASE_TWEAK=mk_inline_fixture run_case stilldraft DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case stilldraft ifx-stilldraft
 assert_rc "$RC" 0 "R6 回读：评审成功"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "1" "R6 回读：提交本身成功（2xx）"
 assert_eq "$(printf '%s\n' "$OUT" | grep -cF 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}')" "2" "R6 回读：提交后又查了一次行内评论列表"
@@ -1146,25 +1408,17 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 0 条已标注在「文件改动」对应行" "R6b 回读失败：不谎报已标注条数"
 assert_contains "$comment" "**行内发布失败（3）**" "R6b 回读失败：三条都在折叠区完整列出（宁可重复，绝不藏问题）"
 
-# ---- R8：Codeup 侧的比较基准与本地 merge-base 不一致 → 警告 + 汇总里说明 ----
-IFX_DIR="$tmp/ifx-basemismatch"; mkdir -p "$IFX_DIR"
-mk_basemismatch() {
-  local head
-  mkdir -p "$IFX_DIR"
-  head=$(git rev-parse HEAD)
-  # MERGE_TARGET 的 commitId 是目标分支顶端（不是 merge-base）——目标分支在 MR 分出后前进过
-  jq -n --arg sha "$head" '[
-    {patchSetBizId:"tgt-9", versionNo:9, relatedMergeItemType:"MERGE_TARGET", commitId:"feedfacefeedfacefeedfacefeedfacefeedface"},
-    {patchSetBizId:"src-2", versionNo:2, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
-  ]' > "$IFX_DIR/list-patchsets.json"
-  jq -n '{comment_biz_id:"draft-1"}' > "$IFX_DIR/create-comment-inline.json"
-}
-CASE_TWEAK=mk_basemismatch run_case basemismatch DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+# ---- R8：Codeup 侧的比较基准与本地 merge-base 不一致 → 警告 + 汇总里说明，**照发**（票 17 裁决：from≠BASE 不 fail-closed）----
+# 与 A11 相反：line_number 是新文件侧行号（P1-02 实测），比较基准不同不改变行号；P1-14 又证明 MERGE_TARGET
+# 冻结在建 MR 时的 merge-base。所以这条只是留痕，不拒发。
+# MERGE_TARGET 的 commitId 是目标分支顶端（不是 merge-base）——目标分支在 MR 分出后前进过
+PS_TGT=RAW:feedfacefeedfacefeedfacefeedfacefeedface PS_TGT_ID=tgt-9 run_inline_case basemismatch ifx-basemismatch
 assert_rc "$RC" 0 "R8 基准不一致：评审仍成功"
 assert_contains "$OUT" "不等于本地 merge-base" "R8 基准不一致：日志告警"
-assert_contains "$OUT" "P1-14" "R8 基准不一致：日志指向待探测项"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "R8 基准不一致：仍以 API 给的版本发出（不猜语义）"
+assert_contains "$OUT" "P1-14" "R8 基准不一致：日志引用 P1-14 的结论（不 fail-closed 的依据）"
+assert_not_contains "$OUT" "待探测" "R8 基准不一致：P1-14 已探完，日志不再写成待探测项"
+assert_not_contains "$OUT" "fail-closed" "R8 基准不一致：这条分支不 fail-closed"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "R8 基准不一致：仍以 API 给的版本发出（新文件侧行号不受基准影响）"
 assert_eq "$(inline_bodies "$OUT" | jq -r '.from_patchset_biz_id' | sort -u | paste -sd, -)" "tgt-9" "R8 基准不一致：from 仍用 API 的版本"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "行内评论的行号可能有偏移" "R8 基准不一致：汇总评论里说明不确定性（I10）"
@@ -1173,8 +1427,7 @@ assert_contains "$comment" "其中 3 条已标注在「文件改动」对应行"
 # ---- 行内评论不影响汇总评论的原地更新（票 03 的不变量在开关打开后仍成立）----
 IFX_DIR="$tmp/ifx-update"; mkdir -p "$IFX_DIR"
 cp "$CFX/prior-run1/list-comments.json" "$IFX_DIR/list-comments.json"
-CASE_TWEAK=mk_inline_fixture run_case inlineupdate DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
-  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+run_inline_case inlineupdate ifx-update
 assert_rc "$RC" 0 "行内 + 原地更新：退出码 0"
 assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" "行内 + 原地更新：汇总仍原地更新同一条"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "3" "行内 + 原地更新：POST …/comments 只有三条行内评论，没有新建第二条汇总"
@@ -1268,8 +1521,7 @@ assert_not_contains "$comment" "重跑流水线可重新评审" "REVIEW_RERUN_HI
 
 # ============================================================================
 # 票 16 / A10：脚本侧掩码覆盖全部 sink（spec I3 修订）
-# ============================================================================
-# mock 评审员输出**合法契约**、summary / verdict_reason / title / body / fix 里各放一个合成 token
+# =====================================================================# mock 评审员输出**合法契约**、summary / verdict_reason / title / body / fix 里各放一个合成 token
 # （helpers.sh with_secrets：ghp_ 形态、AKIA 形态、base64 补位形态）。此前正常路径只做结构清洗、不掩码，
 # 三个值原样进汇总评论（CodeX P0-2）。断言对象是三处 sink：DRY_RUN 记录的汇总正文、每条行内正文、以及
 # 2> 捕获的流水线日志（OUT 同时含三者，所以对 OUT 整体断一次「原文不在」等于三处都断了；再对各处单独断
@@ -1468,5 +1720,29 @@ assert_not_contains "$OUT" "报告超长已截断" "第 38 条：没有触发 re
 run_case fixedtext-badawk PATH="$tmp/badawk:$PATH" INLINE_COMMENT=yes
 assert_nonzero "$RC" "第 7 条：INLINE_COMMENT=yes → 非零退出"
 assert_contains "$OUT" "错误：INLINE_COMMENT=yes 不是 0 或 1。行内评论开关只接受这两个取值" "第 7 条：含 INLINE_COMMENT 这种 ≥ 12 位标识符的固定文案在掩码不可用时仍原样进日志"
+# 票 17 B：契约外的 verdict → 结论行固定文案，原值只进流水线日志
+# ============================================================================
+printf '{"contract":"codeup-reviewer/1","summary":"s","verdict":"<h1>可合并</h1>","verdict_reason":"r","findings":[]}\n' > "$tmp/offcontract-verdict.json"
+run_case offverdict MOCK_KIRO_CONTRACT="$tmp/offcontract-verdict.json"
+assert_rc "$RC" 0 "票 17 B：契约外 verdict 不让评审失败（退出码 0）"
+assert_contains "$OUT" "警告：评审员结论不在契约内（已按未给出结论处理）：&lt;h1>可合并&lt;/h1>" "票 17 B：日志带清洗后的原值（只在日志里）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "## 结论：评审员未给出契约内的结论" "票 17 B：结论行是脚本的固定文案"
+assert_not_contains "$comment" "h1" "票 17 B：载荷（连转义形态）不出现在评论任何位置"
+assert_not_contains "$comment" "可合并" "票 17 B：载荷里的文字不出现在评论任何位置"
+assert_not_contains "$comment" "非契约取值" "票 17 B：不再是「X（非契约取值）」"
+
+# ============================================================================
+# 票 17 C：同一轮完全重复的问题 → 合并、日志警告、行内只发一条
+# ============================================================================
+run_inline_case inlinedup ifx-inlinedup MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/inline-dup.json"
+assert_rc "$RC" 0 "票 17 C：退出码 0"
+assert_contains "$OUT" "警告：1 条完全重复的问题已合并" "票 17 C：日志说明合并了几条"
+assert_contains "$OUT" "评审报告：P0 1 · P1 0 · P2 0" "票 17 C：日志里的级别计数按合并后算"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "1" "票 17 C：两条逐字段相同的问题只发一条行内评论（CodeX 复现时 inline_count=2）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "其中 1 条已标注在「文件改动」对应行" "票 17 C：统计行按合并后计数"
+assert_contains "$comment" "P0 1 · P1 0 · P2 0" "票 17 C：级别计数按合并后算"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.content' | grep -c '直接写入源码')" "1" "票 17 C：发出的是首条（保留首条的正文）"
 
 report

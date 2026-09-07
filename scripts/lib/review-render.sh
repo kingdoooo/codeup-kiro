@@ -369,8 +369,13 @@ REVIEW_CAP_BODY=32768
 REVIEW_CAP_FIX=16384
 REVIEW_CAP_ID=256        # id / category / verdict 三个单行槽位：按码点预切、不计入 truncated_fields（id / category 不渲染，verdict 是枚举——枚举校验归票 17）
 
-# --- 契约归一化（stdin = 契约 JSON → stdout = 归一化 JSON；只做结构 / 类型 / trim / 归一化 / 预切，**不**清洗、不掩码、不截断）---
+# --- 契约归一化（stdin = 契约 JSON → stdout = 归一化 JSON；只做结构 / 类型 / trim / 归一化 / 预切 / 同轮去重 / 结论枚举，**不**清洗、不掩码、不截断）---
 # 对外入口与最终形态见下面的 review_validate；这里只描述归一化本身。
+# verdict（票 17 B）：归一（去空白、大写）后只允许 MERGE / MERGE_AFTER_FIX / DO_NOT_MERGE；契约外一律置空串，渲染器对空串有
+#   固定文案，绝不把原值带进评论（结论行是读者第一眼看的位置，不是模型的自由文本槽位）。原值折成一行、截 80 字放进 verdict_raw——
+#   **只给流水线日志用**，且必须经 _untrusted_for_log 打出（它不进 dump-k、不进渲染）。缺 verdict 时两者都为空。
+# duplicate_findings（票 17 C，判定键见下面 dupkey 处）：同一轮里**全部有意义字段**逐字段相同的问题只留首条（原顺序），
+#   被并掉的条数记在这里；dropped_findings 只算不合契约被丢弃的，overflow_findings 只算超 REVIEW_MAX_FINDINGS 的。
 # 丢弃规则（spec §4.1「字段校验失败的 finding 丢弃并计数」）：
 #   - 不是 JSON 对象
 #   - severity 规范化（去首尾空白 + 大写）后不是 P0/P1/P2
@@ -433,18 +438,38 @@ _review_normalize() {
         | (if $file == null then null else lineno(.line_start) end) as $ls
         | (if $ls == null then null
            else (lineno(.line_end)) as $le | (if $le == null or $le < $ls then $ls else $le end) end) as $le
+        # 同轮去重的判定键（票 17 C，17-fix2 A① 定案；与票 16 的「归一化 → 掩码 → 清洗 → 上限」四段管线对齐）：**全部有意义字段**，
+        # 只有逐字段相同（模型把同一条原样重发）才合并——差一个字就是两条不同的意见，宁可重复，绝不吞掉第二条的正文与 fix（I10）。
+        # 路径与行号取**归一化前**的原值：输出字段把不可定位的问题全塌成 null，按它们比较会把不同文件、同文件不同行的问题并掉。
+        # title/body/fix 取归一化后、**清洗前**的值（清洗在 finalize 才做）：清洗是确定性的，清洗前逐字节相同必然渲染相同；
+        # 「只差首尾空白」的两条靠 tr 归一（17-fix3 ⑨）。清洗后才会相同的形态（例如只差一个未闭合围栏）不合并——按 I10 宁可重复。
+        | (if (.body | type) == "string" then tr(dectl(.body)) else "" end) as $bodykey
+        | (if (.fix | type) == "string" then tr(dectl(.fix)) else "" end) as $fixkey
         | { id: (oneline(.id | pre(.; $cap_id))), severity: $sev, category: (oneline(.category | pre(.; $cap_id))), title: $title,
             file: $file, line_start: $ls, line_end: $le, delocated: $delocated,
+            dupkey: ([tr(.file), lineno(.line_start), lineno(.line_end), $sev, $title, $bodykey, $fixkey] | tojson),
             body: (if (.body | type) == "string" then dectl(.body | pre(.; 2 * $cap_body)) else "" end),
             fix: (if (.fix | type) == "string" then dectl(.fix | pre(.; 2 * $cap_fix)) else "" end) }
       ] as $kept
+    # 只留首条（票 17 C；CodeX 复审 P1-3 末段）。相邻两行上的两条不同问题归区间去重管（Q8，已裁决维持）。
+    # 用 reduce + 已见集合而不是 unique_by：后者按键重排，会打乱「按原始次序编号」的稳定性。
+    | ($kept | reduce .[] as $f ({seen: {}, out: []};
+          $f.dupkey as $k
+          | if .seen[$k] then . else .seen[$k] = true | .out += [$f] end)).out as $uniq
+    # 结论只认三个契约取值（票 17 B）：契约外置空，渲染器对空串有固定文案；原值只进 verdict_raw 供日志用。
+    # 单行枚举槽位同样预切 256 码点（16-fix4 第 12a 条补：200 KB 的 verdict 曾原样进 ## 结论）。
+    | (if ($root.verdict | type) == "string" then (tr(dectl($root.verdict) | pre(.; $cap_id)) | gsub("[[:space:]]+"; " ")) else "" end) as $vraw
+    | ($vraw | ascii_upcase) as $vnorm
+    | ($vnorm == "MERGE" or $vnorm == "MERGE_AFTER_FIX" or $vnorm == "DO_NOT_MERGE") as $vok
     | { summary: (tr($root.summary | pre(.; 2 * $cap_summary))),
-        verdict: (tr($root.verdict | pre(.; $cap_id)) | ascii_upcase | gsub("[[:space:]]+"; " ")),   # 单行枚举槽位也切 256 码点（第 12a 条补：200 KB 的 verdict 曾原样进 ## 结论）
+        verdict: (if $vok then $vnorm else "" end),
+        verdict_raw: (if $vok or $vraw == "" then "" else ($vraw | .[0:80]) end),
         verdict_reason: (tr($root.verdict_reason | pre(.; 2 * $cap_summary))),
-        findings: ($kept | map(del(.delocated))),
+        findings: ($uniq | map(del(.delocated, .dupkey))),
         dropped_findings: (([$total, $maxf] | min) - ($kept | length)),
         overflow_findings: (if $total > $maxf then $total - $maxf else 0 end),
-        delocated_findings: ([$kept[] | select(.delocated)] | length) }'
+        duplicate_findings: (($kept | length) - ($uniq | length)),
+        delocated_findings: ([$uniq[] | select(.delocated)] | length) }'
 }
 # --- 就地 jq 改写（16-fix4 第 3 条；review_finalize_json 与 review_redact_json 共用）---
 # 输出先写到目标同目录的临时文件（跨文件系统的 mv 不是原子的，中途失败会留下半截 JSON），jq 失败或输出为空 → 删临时文件、
@@ -510,14 +535,14 @@ review_finalize_json() {
           | {f: (.title = ($T.v | gsub("\n"; " ")) | .body = $B.v | .fix = $F.v | .id |= _sanitize_inline | .category |= _sanitize_inline),
              t: ($T.t + $B.t + $F.t)})) as $fs
     | .findings = ($fs | map(.f))
-    | .summary = $S.v | .verdict_reason = $R.v | .verdict |= _sanitize_inline
+    | .summary = $S.v | .verdict_reason = $R.v | .verdict |= _sanitize_inline | .verdict_raw |= _sanitize_inline
     | .truncated_fields = ($S.t + $R.t + ($fs | map(.t) | add // 0))
     | .finalized = true'
 }
 # --- 契约校验（对外入口）：归一化 → 字段级掩码 → 清洗 + 上限（stdin → stdout）---
 # 顺序不能倒（16-fix3 第 15 条，P1）：先清洗再掩码时，围栏内的 `# Kiro 代码评审` / `---` 合法地不被转义，随后 PEM 整块删除把围栏
 # 开启行一起删掉，渲染出的汇总里出现真 H1 / H2 与吞掉页脚的未闭合围栏，R1「结构只能来自脚本」被打穿。
-# 规范化后的形态：{summary, verdict, verdict_reason, findings:[…], dropped_findings:N, overflow_findings:N, delocated_findings:N, truncated_fields:N, finalized:true}
+# 规范化后的形态：{summary, verdict, verdict_raw, verdict_reason, findings:[…], dropped_findings:N, overflow_findings:N, duplicate_findings:N, delocated_findings:N, truncated_fields:N, finalized:true}
 #   finalized 是阶段盖章（第 40 条）：review_redact_json / review_finalize_json 见到它拒绝再跑；渲染器与规划器只收盖过章的输入。不进指纹。
 #   summary / verdict_reason / title / body / fix 已掩码并过 _sanitize_md（见 R1 说明），title 里的 `*` 已转义；
 #   title / verdict / id / category 是单行；每个文本字段 ≤ REVIEW_CAP_*（字节），超出的已截断并计入 truncated_fields。
@@ -1225,14 +1250,15 @@ review_select_prior_comment() {
 }
 
 # --- 内部：总体结论的中文化（CONTEXT.md 的「总体结论」词汇）---
+# 结论行只能出现三个契约取值的中文映射或脚本的固定文案（票 17 B）。review_validate 已把契约外取值置空
+# 并把原值留在 verdict_raw（只进日志），所以 `*)` 正常不会走到；留着是防御：升级前的隐藏历史里可能存着
+# 原样带出过的旧值（当时的 `*)` 是「X（非契约取值）」，让模型或注入把任意文本送到读者第一眼看的位置）。
 _review_verdict_cn() {
   case "$1" in
     MERGE) echo "可合并" ;;
     MERGE_AFTER_FIX) echo "建议修改后合并" ;;
     DO_NOT_MERGE) echo "不建议合并" ;;
-    "") echo "评审员未给出结论" ;;
-    # 契约外的值原样带出：宁可评论上难看，也不能把评审员的结论静默改写成别的意思
-    *) echo "$1（非契约取值）" ;;
+    *) echo "评审员未给出契约内的结论" ;;
   esac
 }
 
@@ -1490,8 +1516,9 @@ _REVIEW_JQ_FIRSTSENT='
 # _review_render_fold_section <计划文件> <标题模板> <桶名> <是否未定位桶 0|1> [是否完整渲染 0|1]
 # 标题模板里的 `{levels}` 会替换成该桶里实际出现的级别列表（`P0/P1`）。替换刻意放在
 # 「桶为空就直接返回」之后：空桶时那个标题根本不会渲染，先算它等于白跑一个 jq。
-# 完整渲染（full=1）只给「行内发布失败」用：那些问题一条行内评论都没发出去，说明与修复建议
-# 在 MR 上再没有别的地方能看到（I10 失败可见），只给标题 + 首句等于把 P0 的内容丢了。
+# 完整渲染（full=1）给「行内发布失败」与「未定位问题」两个桶用：这两类问题一条行内评论都没发出去，
+# 说明与修复建议在 MR 上再没有别的地方能看到（I10 失败可见），只给标题 + 首句等于把 P0 的内容丢了。
+# 档位桶（profile）与超限桶（overflow）仍只给首句：它们是「本轮有意不发行内」的问题，读者要的是一眼扫过去。
 _review_render_fold_section() {
   local plan="$1" title="$2" bucket="$3" unloc="${4:-0}" full="${5:-0}" n
   n=$(jq -r --arg b "$bucket" '(.folded[$b] // []) | length' "$plan")
@@ -1534,7 +1561,10 @@ _review_render_folded() {
   printf '<details><summary>折叠区：未展开的问题（%s）</summary>\n' "$n"
   _review_render_fold_section "$plan" '{levels} 建议'          profile   0
   _review_render_fold_section "$plan" '超出行内上限的 {levels}' overflow  0
-  _review_render_fold_section "$plan" '未定位问题'              unlocated 1
+  # 未定位问题也完整渲染（票 17-fix3 ⑦）：这些问题没有可绑定的行，INLINE_COMMENT=1 的评论里除了折叠区
+  # 再没有第二个落脚点（「问题清单」那一节在 inline 形态下根本不渲染）。只给标题 + 首句等于把说明后半段
+  # 与修复建议丢掉，而同一轮里说明不同的两条未定位问题（A① 的键改动特意保住了它们）在页面上会看起来一样。
+  _review_render_fold_section "$plan" '未定位问题'              unlocated 1 1
   # 发布失败的那些问题完整渲染：一条行内评论都没发出去，说明与修复建议在 MR 上没有第二个落点
   _review_render_fold_section "$plan" '行内发布失败'            failed    0 1
   echo "</details>"
@@ -1562,7 +1592,7 @@ review_render_summary() {
   fi
 
   # --json 必须是 review_validate 的输出。不校验的话：空文件/非 JSON 会让每个 jq -r 都吐空串，
-  # 渲染出一条「结论：评审员未给出结论 / P0 · P1 · P2 全空 / 问题清单里什么也没有」的空壳评论并返回 0；
+  # 渲染出一条「结论：评审员未给出契约内的结论 / P0 · P1 · P2 全空 / 问题清单里什么也没有」的空壳评论并返回 0；
   # 缺 dropped_findings 时 `[[ "$dropped" -gt 0 ]]` 还会在 set -u 下直接崩（null: unbound variable）。
   jq -e '(type == "object")
          and ((.dropped_findings | type) == "number")
@@ -1581,9 +1611,17 @@ review_render_summary() {
       || { echo "review_render_summary: --inline-comment 1 需要 review_plan_inline 的输出（缺 inline/folded/inline_count/folded_count 字段）：${_RR_JSON}" >&2; return 2; }
   fi
 
-  local summary verdict verdict_cn verdict_reason dropped delocated n0 n1 n2 total stat hist
+  local summary verdict verdict_cn verdict_note verdict_reason dropped delocated n0 n1 n2 total stat hist
   summary=$(jq -r '.summary // ""' "$_RR_JSON")
   verdict=$(jq -r '.verdict // ""' "$_RR_JSON")
+  # 渲染器边界上再挡一次（票 17 B，纵深防御）：`review_validate` 已把契约外取值置空，但本函数是
+  # 公开入口，`verdict` 是唯一不过 `_sanitize_md` 的字段（三个枚举本来就是清洗的不动点），而它会
+  # 原样写进隐藏的历次记录（那份 JSON 下一轮还会被读回来）。没走过校验的调用方一旦直接调本函数，
+  # 任意文本就落进标记里；结论行本身有 `_review_verdict_cn` 的固定文案兜底，标记没有兜底。
+  case "$verdict" in
+    MERGE | MERGE_AFTER_FIX | DO_NOT_MERGE | "") ;;
+    *) echo "review_render_summary: 结论不在契约内（${#verdict} 字），按未给出结论渲染" >&2; verdict="" ;;
+  esac
   verdict_reason=$(jq -r '.verdict_reason // ""' "$_RR_JSON")
   dropped=$(jq -r '.dropped_findings' "$_RR_JSON")
   delocated=$(jq -r '.delocated_findings' "$_RR_JSON")
@@ -1592,6 +1630,18 @@ review_render_summary() {
   n0=$(jq -r '[.findings[] | select(.severity == "P0")] | length' "$_RR_JSON")
   n1=$(jq -r '[.findings[] | select(.severity == "P1")] | length' "$_RR_JSON")
   n2=$(jq -r '[.findings[] | select(.severity == "P2")] | length' "$_RR_JSON")
+  # 契约要求「有 P0 时不要给 MERGE」。模型违约时改写为「不建议合并」并**明说**原因（票 17 B）：结论行是读者
+  # 第一眼看的位置，没有合并卡点时它就是唯一的合并建议，「可合并」旁边挂一句矛盾提示拦不住只看标题的人。
+  # 改写在算历次记录之前：历次表记的必须是读者看到的那个结论。MERGE_AFTER_FIX / DO_NOT_MERGE 与 P0 相容，不动。
+  verdict_note=""
+  if [[ "$verdict" == "MERGE" && "$n0" -gt 0 ]]; then
+    verdict_note="评审员给出「可合并」，但报告了 ${n0} 条 P0；P0 必须修复，已按不建议合并处理。"
+    verdict="DO_NOT_MERGE"
+    # 改写也要进流水线日志：`kiro-review.sh` 那行「评审报告：… 结论 X」取自 validated.json，
+    # 打出来的是改写**前**的 MERGE，与评论、与隐藏历史都不一致。日志由这里出（而不是让调用方
+    # 把同一个条件再写一遍）：判定只有一份，两边不会漂。stdout 是评论正文，所以走 stderr。
+    echo "警告：评审员给出 MERGE 但报告了 ${n0} 条 P0（违反输出契约），汇总已按 DO_NOT_MERGE 渲染并在结论行下说明" >&2
+  fi
   verdict_cn=$(_review_verdict_cn "$verdict")
 
   # 历次记录：把本次这一行追加到 --history 给的旧记录上。由渲染器统一追加（而不是让调用方传全量），
@@ -1609,19 +1659,12 @@ review_render_summary() {
   echo ""
   echo "## 结论：${verdict_cn}"
   echo ""
-  if [[ -n "$verdict_reason" ]]; then printf '%s\n' "$verdict_reason"; else echo "（评审员未给出结论理由）"; fi
-  # 契约要求「有 P0 时不要给 MERGE」。模型违约时不改写它的结论（那是评审员的判断），
-  # 但必须把矛盾摆在结论旁边——否则只看标题的人会合并一份自己都说有 P0 的代码。
-  if [[ "$verdict" == "MERGE" && "$n0" -gt 0 ]]; then
+  # 改写原因紧接结论行（不静默）：脚本自己拼的固定文案，不含任何模型取值，不需要清洗
+  if [[ -n "$verdict_note" ]]; then
+    echo "> ⚠️ ${verdict_note}"
     echo ""
-    # 指向的必须是本次真的会渲染出来的地方：INLINE_COMMENT=1 时早返回、根本没有「问题清单」这一节，
-    # 明细都在行内评论与折叠区里，指过去会让读者去找一个不存在的章节。
-    if [[ "$_RR_INLINE" == "1" ]]; then
-      echo "> ⚠️ 评审员给出「可合并」，但同时报了 ${n0} 条 P0（必须修复）。两者矛盾，请以「文件改动」上的行内评论与下方折叠区为准。"
-    else
-      echo "> ⚠️ 评审员给出「可合并」，但同时报了 ${n0} 条 P0（必须修复）。两者矛盾，请以下方 P0 清单为准。"
-    fi
   fi
+  if [[ -n "$verdict_reason" ]]; then printf '%s\n' "$verdict_reason"; else echo "（评审员未给出结论理由）"; fi
   echo ""
   echo "## 问题统计"
   echo ""

@@ -77,7 +77,10 @@ _codeup_request_retry() {
 # DRY_RUN 下默认一律返回 `[]`（票 01/02 的测试依赖这个），但「先查旧评论再决定更新还是新建」
 # 这类逻辑必须能在 DRY_RUN 下喂进不同的列表响应，否则只能在真实 Codeup 上验证。
 # 机制：DRY_RUN_FIXTURE_DIR/<route>.json 存在就用它当响应体；不存在仍是 `[]`（向后兼容）。
-# 另有 DRY_RUN_FAIL_ROUTES="<route>:<code>,…" 注入 HTTP 状态码，用来测重试与失败退回。
+# 另有 DRY_RUN_FAIL_ROUTES="<route>:<code>[@N|@N+],…" 注入 HTTP 状态码，用来测重试与失败退回。
+# `@N` = 只在该 route 的第 N 次调用上失败；`@N+` = 从第 N 次起都失败；不带 `@` = 每次都失败。
+# 按调用序号注入是「同一 route 前几次成功、后几次失败」这类场景的唯一办法（票 17-fix3 ⑮：
+# 版本对预采样成功、随后的重查全部 403，那条分支原先无法在 DRY_RUN 下构造）。
 #
 # 行内评论的列表与创建跟汇总评论**走同一组路径**，只有 body 里的 comment_type 不同，所以
 # 这两条 route 还要看 body。汇总评论的正文里出现同样字样不会误判：正文是 JSON 字符串，
@@ -129,16 +132,30 @@ _codeup_dry_seq_reset() {
 _codeup_request() {
   local method="$1" path="$2" body="${3:-}"
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    local route pair fixture seq
+    local route pair fixture seq spec code when calls
     route=$(_codeup_route_name "$method" "$path" "$body")
     echo "DRY_RUN ${method} ${CODEUP_API_BASE}${path}" >&2
     [[ -n "$body" ]] && echo "DRY_RUN body: ${body}" >&2
     CODEUP_HTTP_CODE=200
-    # 失败注入放在序号递增之前：重试不该消耗 fixture 序号
+    # 调用计数（含失败注入的那些）：`@N` 语法要按「第几次调用」判定，而下面的 fixture 序号刻意不算失败，
+    # 两个计数各管一件事，不能混用。
+    _codeup_dry_calls="${_codeup_dry_calls:-}"
+    calls=$(printf '%s' "$_codeup_dry_calls" | tr ' ' '\n' | grep -c "^${route}$" || true)
+    calls=$((calls + 1))
+    _codeup_dry_calls="${_codeup_dry_calls}${_codeup_dry_calls:+ }${route}"
+    # 失败注入放在 fixture 序号递增之前：重试不该消耗 fixture 序号
     for pair in $(printf '%s' "${DRY_RUN_FAIL_ROUTES:-}" | tr ',' ' '); do
       [[ "${pair%%:*}" == "$route" ]] || continue
-      CODEUP_HTTP_CODE="${pair##*:}"
-      echo "DRY_RUN 注入失败：route=${route} HTTP ${CODEUP_HTTP_CODE}" >&2
+      spec="${pair#*:}"          # <code>[@N|@N+]
+      code="${spec%%@*}"; when="${spec#*@}"
+      if [[ "$when" != "$spec" ]]; then
+        case "$when" in
+          *+) [[ "$calls" -ge "${when%+}" ]] || continue ;;
+          *)  [[ "$calls" == "$when" ]] || continue ;;
+        esac
+      fi
+      CODEUP_HTTP_CODE="$code"
+      echo "DRY_RUN 注入失败：route=${route} 第 ${calls} 次 HTTP ${CODEUP_HTTP_CODE}" >&2
       echo '{}'
       return 0
     done

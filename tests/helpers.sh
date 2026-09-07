@@ -183,3 +183,59 @@ make_bad_awk() {
   } > "$dir/awk"
   chmod +x "$dir/awk"
 }
+# --- 版本列表 fixture 的唯一实现（票 17-fix3 ⑫）---
+# 端到端与变异两个套件原先各有一份，取值语义还不一样（变异那份把 OMIT/NONE 当字面 commitId 写进去，
+# 于是变异「看似被杀」）。这里只留一份，未知模式**硬错误**而不是静默直通。
+# 用法：由各套件的 tweak 钩子在 $CASE/work 里调用；读下面这些全局量：
+#   PS_SRC  最新 MERGE_SOURCE 的 commitId：HEAD / HEAD12 / HEAD6 / HEADUP / PARENT / CHILD / ORPHAN /
+#           OMIT（不带该字段）/ RAW:<原样值>
+#   PS_TGT  最新 MERGE_TARGET 的 commitId：BASE / OMIT / NONE（整条不写）/ RAW:<原样值>
+#   PS_SRC_ID / PS_TGT_ID  两个版本的 patchSetBizId
+#   PS_FIXTURE_DIR         写到哪个目录
+mk_patchsets_fixture() {
+  local head base src tgt n
+  : "${PS_FIXTURE_DIR:?mk_patchsets_fixture: 需要 PS_FIXTURE_DIR}"
+  mkdir -p "$PS_FIXTURE_DIR"
+  head=$(git rev-parse HEAD)
+  base=$(git merge-base origin/master HEAD)
+  case "${PS_SRC:-HEAD}" in
+    HEAD)   src="$head" ;;
+    HEAD12) src="${head:0:12}" ;;
+    HEAD6)  src="${head:0:6}" ;;                    # 短于 git 短 sha 下限（7 位）
+    HEADUP) src=$(printf '%s' "$head" | tr 'a-f' 'A-F') ;;
+    PARENT) src=$(git rev-parse 'HEAD^') ;;
+    # 后代：在 HEAD 之上再造一个提交，再把工作树退回 HEAD（对象仍在克隆里，模拟「新推送已被 fetch 到」）
+    CHILD)  echo "child of head" >> src/app.py; git commit -qam "child commit"
+            src=$(git rev-parse HEAD); git reset -q --hard 'HEAD^' ;;
+    # 分叉：`git commit --amend` 之后旧提交仍可达（reflog），与新 HEAD 分属两条历史
+    ORPHAN) src=$(git rev-parse HEAD); git commit -q --amend -m "amended (history rewritten)" ;;
+    OMIT)   src="" ;;
+    RAW:*)  src="${PS_SRC#RAW:}" ;;
+    *) echo "FAIL: mk_patchsets_fixture: 未知的 PS_SRC=[${PS_SRC}]（要写字面值请用 RAW: 前缀）" >&2; exit 1 ;;
+  esac
+  case "${PS_TGT:-BASE}" in
+    BASE)  tgt="$base" ;;
+    OMIT)  tgt="" ;;
+    NONE)  tgt="" ;;
+    RAW:*) tgt="${PS_TGT#RAW:}" ;;
+    *) echo "FAIL: mk_patchsets_fixture: 未知的 PS_TGT=[${PS_TGT}]（要写字面值请用 RAW: 前缀）" >&2; exit 1 ;;
+  esac
+  # src-1（versionNo 1）是诱饵：选版本对必须按 versionNo 取最大，不能取第一条或最后一条
+  jq -n --arg src "$src" --arg tgt "$tgt" --arg srcmode "${PS_SRC:-HEAD}" --arg tgtmode "${PS_TGT:-BASE}" \
+        --arg srcid "${PS_SRC_ID:-src-2}" --arg tgtid "${PS_TGT_ID:-tgt-1}" '[
+    (if $tgtmode == "NONE" then empty
+     else ({patchSetBizId:$tgtid, versionNo:1, relatedMergeItemType:"MERGE_TARGET"}
+           + (if $tgtmode == "OMIT" then {} else {commitId:$tgt} end)) end),
+    {patchSetBizId:"src-1", versionNo:1, relatedMergeItemType:"MERGE_SOURCE", commitId:"0000111122223333"},
+    ({patchSetBizId:$srcid, versionNo:9, relatedMergeItemType:"MERGE_SOURCE"}
+     + (if $srcmode == "OMIT" then {} else {commitId:$src} end))
+  ]' > "$PS_FIXTURE_DIR/list-patchsets.json"
+  for n in 1 2 3 4 5 6; do
+    [[ -e "$PS_FIXTURE_DIR/create-comment-inline.${n}.json" ]] \
+      || jq -n --arg id "draft-${n}" '{comment_biz_id:$id, comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true}' \
+           > "$PS_FIXTURE_DIR/create-comment-inline.${n}.json"
+  done
+}
+# 复位成默认值（每个用例之后调用；赋值前缀是否残留取决于 bash 版本）
+reset_ps_vars() { PS_SRC="HEAD"; PS_TGT="BASE"; PS_SRC_ID="src-2"; PS_TGT_ID="tgt-1"; }
+reset_ps_vars
