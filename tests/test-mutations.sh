@@ -1001,4 +1001,10 @@ pkg=$(make_mutant m-y-fpath-dectl-first 's|^    def fpath(v): (if (v \| type) ==
 assert_eq "$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; jq -n --arg f "$(printf 'src/\001app.py')" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P2",title:"t",body:"b",file:$f,line_start:1}]}' | review_validate | jq -c '[.findings[0].file, .delocated_findings]' ) )" '["src/app.py",0]' "M-y：控制字符被洗掉后路径「合法」、不计数——单测第 27 条断言会失败"
 assert_eq "$( ( set +e; source "$ROOT/scripts/lib/review-render.sh"; jq -n --arg f "$(printf 'src/\001app.py')" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P2",title:"t",body:"b",file:$f,line_start:1}]}' | review_validate | jq -c '[.findings[0].file, .delocated_findings]' ) )" '[null,1]' "M-y 对照：未变异实现置空并计数"
 
+# --- M-z：第 37 条——finalize 的 body 上限写死成字面量 32768 → 覆盖 REVIEW_CAP_BODY 不再生效（单测「覆盖后截到 ≤ 100」会失败）---
+pkg=$(make_mutant m-z-cap-literal 's|          \| cap(.body; \$cap_body) as \$B$|          \| cap(.body; 32768) as $B  # 变异 M-z：上限写死|' scripts/lib/review-render.sh)
+body5k=$(python3 -c 'print("b"*5000, end="")')
+assert_eq "$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; REVIEW_CAP_BODY=100; jq -n --arg b "$body5k" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:$b,fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -r '[(.findings[0].body | utf8bytelength <= 100), .truncated_fields] | @csv' ) )" "false,0" "M-z：覆盖 REVIEW_CAP_BODY=100 后 body 仍不截——单测第 37 条断言会失败"
+assert_eq "$( ( set +e; source "$ROOT/scripts/lib/review-render.sh"; REVIEW_CAP_BODY=100; jq -n --arg b "$body5k" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:$b,fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -r '[(.findings[0].body | utf8bytelength <= 100), .truncated_fields] | @csv' ) )" "true,1" "M-z 对照：未变异实现按覆盖后的上限截"
+
 report

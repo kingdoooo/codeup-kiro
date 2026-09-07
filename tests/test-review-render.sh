@@ -2440,7 +2440,12 @@ assert_eq "$(jq -r '.findings[0].title | utf8bytelength <= 2048' "$tmp/cap2.json
 assert_eq "$(jq -r '.findings[0].fix | utf8bytelength <= 16384' "$tmp/cap2.json")" "true" "第 7 条：fix 同理"
 assert_eq "$(jq -r '.truncated_fields, .dropped_findings' "$tmp/cap2.json" | tr '\n' ' ')" "3 1 " "第 6 条：被丢弃的问题（severity P9）不计入 truncated_fields，只数保留问题的三个字段"
 assert_eq "$(jq -r '.findings[0].body | .[-5:]' "$tmp/cap2.json")" "（已截断）" "第 7 条：截断标注仍在"
-assert_eq "$([[ -n "$REVIEW_CAP_BODY" && "$REVIEW_CAP_BODY" == 32768 ]] && echo one)" "one" "第 6 条：上限常量只在 REVIEW_CAP_* 一处"
+# 第 6 条 / 16-fix4 第 37 条：上限常量只在 REVIEW_CAP_* 一处——覆盖式证明（改常量后 review_validate 的截断跟着变；读常量再比自己的字面量是同义反复）
+body5k=$(python3 -c 'print("b"*5000, end="")')
+assert_eq "$( ( REVIEW_CAP_BODY=100; jq -n --arg b "$body5k" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:$b,fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -r '[(.findings[0].body | utf8bytelength <= 100), .truncated_fields] | @csv' ) )" "true,1" \
+  "第 37 条：REVIEW_CAP_BODY=100 覆盖后 5000 字节 body 截到 ≤ 100 且计 1（常量确实经 --argjson 生效；写死 32768 的变异会让它失败）"
+assert_eq "$(jq -n --arg b "$body5k" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:$b,fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -r '[(.findings[0].body | utf8bytelength), .truncated_fields] | @csv')" "5000,0" \
+  "第 37 条对照：默认上限下 5000 字节 body 原样"
 # 16-fix4 第 12b / 19 条：最终结果是「清洗过的文本 + 截断标记 ≤ 上限」（不再是 ≤ 上限 + 15），最后一步一定是清洗
 assert_eq "$(jq -r '[.summary, .findings[0].title, .findings[0].body, .findings[0].fix] | map(utf8bytelength) | [.[0] == 1, (.[1] | . <= 2048 and . > 2000), (.[2] | . <= 32768 and . > 32700), (.[3] | . <= 16384 and . > 16300)] | all' "$tmp/cap2.json")" "true" \
   "第 12b 条：三个超限字段清洗后连截断标记一起 ≤ 上限、且贴着上限（不是砍到 1/4 的兜底路径；summary 未超限原样）"
