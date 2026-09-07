@@ -770,7 +770,7 @@ assert_eq "$(mut_meta_row "$pkg" 'a|b|c' | tr -cd '|' | wc -c | tr -d ' ')" "5" 
 # ============ 票 17 的守卫 ============
 # --- M52（票 17 A / M-a）：to≠HEAD 从 fail-closed 改回「warn 然后继续」→ 旧 HEAD 的行号被绑到最新版本 ---
 # fixture：to 是评审期间新推上去的另一个提交（不在克隆里），from 仍是 merge-base（只让 to 异常）。
-# 三种成因与各自的处置见 docs/adr/0005-inline-comments-bind-to-reviewed-commit.md。
+# 各种成因与各自的处置见 docs/adr/0005-inline-comments-bind-to-reviewed-commit.md。
 IFXMIS="$tmp/ifx-headmismatch"
 mkdir -p "$IFXMIS"
 cp "$IFX"/create-comment-inline.*.json "$IFXMIS/"
