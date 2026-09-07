@@ -173,7 +173,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 ## 7. 自建构建机（网络受限/生产推荐）
 1. ECS/物理机按 Flow 文档接入为自有构建集群。
 2. 预装：git、curl、jq（≥1.6）、coreutils（`timeout`、`sha1sum`）、kiro-cli 固定版本
-   （建议 2.21.0，`kiro-cli --version` 验证；固定版本可规避 curl|bash 供应链漂移）。
+   （建议 2.21.1——探测 P1-15 与真实验收都在这个版本上做，`KIRO_TESTED_VERSIONS` 亦为它；`kiro-cli --version` 验证；固定版本可规避 curl|bash 供应链漂移）。
 3. 代理：流水线变量配置 HTTP_PROXY / HTTPS_PROXY / NO_PROXY
    （NO_PROXY 含 openapi-rdc.aliyuncs.com 与内网地址）。
 4. 流水线任务指定运行在该构建集群。
@@ -493,7 +493,7 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 | `CI_COMMIT_REF_NAME` | 由 Flow 注入 | 未注入时取 `git rev-parse --abbrev-ref HEAD` | 多代码源下须显式 `export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"`（带下标的内置变量，见第 5.1 节与 flow-pipeline.yaml） | 不带下标的取值在多代码源下不可预期（可能是集成包的分支） | Flow |
 | `REVIEW_REPO_DIR` | `$PWD` | 把当前目录当业务库 | 多代码源下必须显式指向业务库 checkout 目录 | 不得与集成包目录互相包含（隔离步骤会删文件，脚本直接拒绝运行） | Flow |
 | `KIRO_INSTALL_URL` | 官方安装脚本 | 云托管构建机上按需 `curl \| bash` 安装 | 指向内部镜像源 | 自建构建机预装固定版本时不会触发安装 | Flow |
-| `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行机可能需要 `LD_LIBRARY_PATH`、`JAVA_HOME` 这类；例：`LD_LIBRARY_PATH,JAVA_HOME` | 任一名字不合法（写成 `NAME=value`、带连字符/空格、或直接贴了个令牌）时**拒绝运行**并回写「评审未完成」；**凭证形状的名字也拒绝**：`YUNXIAO_*`、`CODEUP_*`、`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/`AWS_DEFAULT_REGION` 是配置不是凭证，显式放行）、含 `TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`、以 `_KEY`/`_PAT` 结尾或含 `_PAT_`、`DCKR_PAT_*`，以及 `ghp_`/`gho_`/`github_pat_`/`AKIA`/`ASIA` 开头的名字一律不放行。这份黑名单是**防运维手滑**，不是安全边界（受信 agent 没有 shell/env 工具，变量到不了模型手里）。失败评论按**条目序号 + 掩码 + 命中规则**列出（「第 2 项 `AWS****`（命中 `AWS_*`）」；掩码 = 首段 + `****`，形如 `svc_SECRET_9f3a…` 的名字本身就是密钥，不能原样进 MR）；**流水线日志**里给完整名字 + 规则（贴了令牌形态的条目除外，日志也只留掩码）。写成 `NAME=value` 的语法错误条目打完整标识符 + `****`（手误不是秘密，只隐藏 `=` 后面的取值）。点名的变量未设置时跳过 | Flow |
+| `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行机可能需要 `LD_LIBRARY_PATH`、`JAVA_HOME` 这类；例：`LD_LIBRARY_PATH,JAVA_HOME` | 任一名字不合法（写成 `NAME=value`、带连字符/空格、或直接贴了个令牌）时**拒绝运行**并回写「评审未完成」；**凭证形状的名字也拒绝**：`YUNXIAO_*`、`CODEUP_*`、`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/`AWS_DEFAULT_REGION` 是配置不是凭证，显式放行）、含 `TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`、以 `_KEY`/`_PAT` 结尾或含 `_PAT_`、`DCKR_PAT_*`，以及 `ghp_`/`gho_`/`github_pat_`/`AKIA`/`ASIA` 开头的名字一律不放行。这份拒绝清单是**防运维手滑**，不是安全边界（受信 agent 没有 shell/env 工具，变量到不了模型手里）。失败评论按**条目序号 + 掩码 + 命中规则**列出（「第 2 项 `AWS****`（命中 `AWS_*`）」；掩码 = 首段 + `****`，形如 `svc_SECRET_9f3a…` 的名字本身就是密钥，不能原样进 MR）；**流水线日志**里给完整名字 + 规则（贴了令牌形态的条目除外，日志也只留掩码）。写成 `NAME=value` 的语法错误条目打完整标识符 + `****`（手误不是秘密，只隐藏 `=` 后面的取值）。点名的变量未设置时跳过 | Flow |
 
 ### 11.2.1 测试/高级变量（生产流水线不要设）
 这些变量脚本确实会读，但它们是给本仓库的测试与排障用的。**生产流水线里一个都不要配**——

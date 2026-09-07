@@ -46,12 +46,18 @@ _kiro_agent_physical_dir() {
 # deny 谓词、工具三元组与 deny 报错文案**各只有一份**（15-fix4 #5）：安装器的 _kiro_agent_deny_missing 与 kiro_agent_selfcheck 都把
 # 这段 jq 前导拼进自己的程序。两份谓词只改一处的两种后果都是静默的——安装器放行而自检拒绝（每次评审都失败），或反过来（自检形同虚设）。
 KIRO_AGENT_TOOLS_JQ='("read","grep","glob")'
-_KIRO_DENY_OK_JQ='def deny_ok($t): (.toolsSettings[$t].deniedPaths | type == "array" and length > 0 and index("**/.git/**") != null);'
+# 必需的仓库相对拒绝形状（合并后复审第 5 条）：这份清单是 deny 门的定义，不再只查字面 **/.git/**——探测 P1-15 证明每一条都是保护
+# checkout 所必需的（.aws/.ssh/id_rsa 等）；少任何一条拒装 / 自检拒绝。与 kiro/agent-codeup-reviewer.json 里的相对条目同源，
+# tests/test-agent-config.sh 断言两者一致。
+KIRO_AGENT_REQUIRED_DENY_JQ='["**/.git","**/.git/**","**/.git/config","**/.netrc","**/.aws/**","**/.ssh/**","**/id_rsa*","**/id_ed25519*"]'
+_KIRO_DENY_OK_JQ='def deny_ok($t): (.toolsSettings[$t].deniedPaths as $d | ($d | type == "array") and ($d | length > 0) and (('"$KIRO_AGENT_REQUIRED_DENY_JQ"' - $d) == []));'
 # 按 allow 根注入的绝对拒绝形状（15-fix4 #1 补）：deny_abs($root) = 数组里每条以 **/ 开头的形状前面接上 <根>/；
 # deny_abs_missing($t; $ws; $ch) = 安装后该工具的 deniedPaths 里缺的注入条目（空数组 = 齐全）。安装器与自检共用这一份定义。
-_KIRO_DENY_ABS_JQ='def deny_abs($root): [ .[] | select(type == "string" and startswith("**/")) | $root + "/" + . ];
+# 绝对副本覆盖**每一条非绝对路径**的形状（合并后复审第 5 条）：不只 **/ 开头——`.env`、`secrets/**`、`*/.git/**` 在空 cwd 下同样只覆盖 cwd。
+# 以 / 开头的绝对路径与 ~/ 开头的家目录形状不需要副本（kiro-cli 自己展开）。
+_KIRO_DENY_ABS_JQ='def deny_abs($root): [ .[] | select(type == "string" and (startswith("/") or startswith("~/") | not)) | $root + "/" + . ];
   def deny_abs_missing($t; $ws; $ch): (.toolsSettings[$t].deniedPaths // []) as $d | [ ($d | deny_abs($ws)), ($d | deny_abs($ch)) | .[] | . as $e | select(($d | index($e)) == null) ];'
-KIRO_AGENT_DENY_MSG='deniedPaths 缺失、为空或不含 **/.git/**'
+KIRO_AGENT_DENY_MSG='deniedPaths 缺失、为空或不含全部必需的拒绝形状（**/.git/**、**/.aws/**、**/.ssh/**、**/id_rsa* 等，见 KIRO_AGENT_REQUIRED_DENY_JQ）'
 # 三个工具的 deniedPaths 是否都合格（存在、非空、含 **/.git/**）——一次 jq 查完三处（15-fix3 #13）。
 # $1=定义文件；stdout 打出第一个不合格的工具名（都合格则为空）；文件为空 / 不是恰好一个 JSON 对象 / 不是合法 JSON 时返回非零。
 # fail-closed（15-fix4 #13）：单次 jq 对空 / 纯空白输入**不输出且退出 0**，"" 会被调用方当成「三处都合格」；两个对象拼在一个文件里
@@ -231,7 +237,7 @@ kiro_cli_version() {
 #   ② 凭证形状的名字 → 拒绝（15-fix2 #13 / 15-fix3 #6 / 15-fix4 #4）：规则表 KIRO_ENV_CRED_RULES（YUNXIAO_*、CODEUP_*、AWS_*、*TOKEN*、
 #      *SECRET*、*PASSWORD*、*CREDENTIAL*、*_KEY、*_PAT、*_PAT_*、DCKR_PAT_*，以及令牌前缀 GHP_*、GHO_*、GITHUB_PAT_*、AKIA*、ASIA*；大小写不敏感），
 #      显式放行 KIRO_ENV_CRED_ALLOW（AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION：它们是配置不是凭证；AWS_* 其余仍拒）。
-#      这份黑名单是**防运维手滑**、不是安全边界：受信 agent 没有 shell / env 工具，变量到不了模型手里；逃生口存在的意义就是客户不改代码
+#      这份拒绝清单是**防运维手滑**、不是安全边界：受信 agent 没有 shell / env 工具，变量到不了模型手里；逃生口存在的意义就是客户不改代码
 #      也能放行自家构建变量。`XOX*` 已删（死代码：真实 Slack 令牌带连字符，先被 ① 拒）。
 #   诊断（15-fix4 #4 ③ / A8）：MR 失败评论（KIRO_ENV_ALLOW_ERROR）按**条目序号 + 掩码名 + 命中规则**列出（「第 2 项 AWS****（命中 AWS_*）」），
 #   同一首段的几个名字才分得开；**流水线日志**（stderr）对命中名字类规则的条目打完整名字 + 规则（名字是运维自己写的配置，不是模型文本），

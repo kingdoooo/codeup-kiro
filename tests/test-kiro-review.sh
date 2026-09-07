@@ -1757,11 +1757,13 @@ assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "stderr 先
 run_case verwarn2 MOCK_KIRO_VERSION_WARN=1 MOCK_KIRO_VERSION_STDERR=1
 assert_contains "$OUT" "kiro-cli 版本 2.21.1：在 P1-15 探测过的版本名单内" "升级提示与版本都在 stderr：按程序名锚定仍取到 2.21.1"
 # --version 跑不起来（退出码 127）：走失败评论（固定文案），不再是软 notice 后在 chat 上烧掉整个 KIRO_TIMEOUT
-run_case verfail MOCK_KIRO_VERSION_RC=127
+run_case verfail MOCK_KIRO_VERSION_RC=127 MOCK_KIRO_VERSION_ERRTOKEN="$SEC_GHP"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "kiro-cli --version 退出 127：评审失败"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "评审未完成" "kiro-cli --version 退出 127：失败评论"
 assert_contains "$comment" "kiro-cli --version 失败" "kiro-cli --version 退出 127：失败评论固定文案点名 --version"
+assert_not_contains "$OUT" "$SEC_GHP" "合并后复审⑦：--version 的 stderr 尾巴是不受信取值，走 die_review 第二参数过掩码——流水线日志不含原文（130f977 原样进日志：正控）"
+assert_contains "$OUT" "$SEC_GHP_MASKED" "合并后复审⑦：日志里是掩码形态"
 assert_contains "$comment" "127" "kiro-cli --version 退出 127：失败评论带退出码"
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "kiro-cli --version 退出 127：Kiro chat 未被启动（不烧额度）"
 assert_eq "$(call_count "$MD/calls" settings)" "0" "kiro-cli --version 退出 127：settings 也未调用（在能力检查处就停）"
@@ -1848,16 +1850,18 @@ EQ="$tmp/eqtree"; mkdir -p "$EQ"
   printf 'x' > AGENTS.md; printf 'x' > a/agents.md; mkdir a/b/AGENTS.md      # 大小写不敏感；同名目录不算
   echo '{}' > .kiro/settings/cli.json; ln -s ../evil d/.kiro                # .kiro 目录 + .kiro 符号链接
   ln -s /etc/hosts filelink; ln -s /etc dirlink; ln -s nowhere dangling; ln -s /etc/hosts a/b/deeplink
+  ln -s /etc/hosts "$(printf 'tabtail\t')"                                    # 名字以制表符结尾的链接：IFS 切分会剥掉尾巴（合并后复审②）
   printf 'x' > lsp.json; printf 'x' > a/lsp.json                            # 只有根 lsp.json 算
   printf 'x' > .kiro/settings/inner-agents.md )                               # .kiro 内部：随 .kiro 整体删，不单列
 expected=$(cd "$EQ" && injection_surface_scan | sort)
-assert_eq "$(printf '%s\n' "$expected" | grep -c .)" "10" "谓词等价前置：枚举版在合成树上列出 10 条（2 AGENTS.md + 2 .kiro + 5 符号链接 + 根 lsp.json）"
+assert_eq "$(printf '%s\n' "$expected" | grep -c .)" "11" "谓词等价前置：枚举版在合成树上列出 11 条（2 AGENTS.md + 2 .kiro + 6 符号链接 + 根 lsp.json）"
 pre_scan=$(cd "$EQ" && review_isolation_scan | od -An -c | tr -d ' \n')   # 删除前发射器的原始 NUL 流
 counts=$(cd "$EQ" && review_isolate_workspace "$tmp/eq-removed.zlist")
 actual=$(tr '\0' '\n' < "$tmp/eq-removed.zlist" | cut -f2- | sort)
 assert_eq "$actual" "$expected" "谓词等价：生产隔离函数删除的集合 == 测试谓词枚举的集合"
 assert_eq "$(od -An -c "$tmp/eq-removed.zlist" | tr -d ' \n')" "$pre_scan" "谓词等价：删除清单逐字节等于删除前发射器的 NUL 流（先写清单再删）"
-assert_eq "$(tr '\0' '\n' < "$tmp/eq-removed.zlist" | cut -f1 | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')" "agents=2 kiro=2 links=5 lsp=1 " "谓词等价：清单里的 class 列与四个计数一致"
+assert_eq "$(tr '\0' '\n' < "$tmp/eq-removed.zlist" | cut -f1 | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')" "agents=2 kiro=2 links=6 lsp=1 " "谓词等价：清单里的 class 列与四个计数一致"
+assert_eq "$([[ -L "$EQ/$(printf 'tabtail\t')" ]] && echo survived || echo gone)" "gone" "合并后复审②：名字以制表符结尾的符号链接真的被删了（130f977：计数了、清单里有、链接却幸存——正控）"
 assert_eq "$counts" "2 2 5 1" "谓词等价：计数 = 2 个 AGENTS.md（根 + a/agents.md）、2 个 .kiro（目录 + 链接）、5 个符号链接（filelink dirlink dangling a/b/deeplink c/.git）、1 个根 lsp.json"
 assert_eq "$(cd "$EQ" && injection_surface_scan | wc -l | tr -d ' ')" "0" "谓词等价：隔离后枚举版扫描为空"
 assert_eq "$([[ -L "$EQ/.git/rootgitlink" && -f "$EQ/.git/AGENTS.md" ]] && echo kept || echo gone)" "kept" "谓词等价：根 .git 内部不动"

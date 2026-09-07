@@ -808,7 +808,10 @@ if codeup_list_global_comments "$LOCAL_ID" > "$WORK/comments.json"; then
        else
          jq -r '.content // ""' "$WORK/prior.json" > "$WORK/prior.md"
          PRIOR_HISTORY_FILE="$WORK/prior-history.json"
-         review_parse_history "$WORK/prior.md" > "$PRIOR_HISTORY_FILE"
+         # 历史标记的内容来自上一条评论，任何有 MR 写权限的人都能手改；重发前先过一遍掩码，让标记行成为文档级掩码的不动点——
+         # 否则一个 secret=… 形状的值会让每一轮的守卫都 rc 3、评审永远失败（合并后复审第 4 条）。保行模式、单行 JSON 不变形。
+         review_parse_history "$WORK/prior.md" | review_redact_secrets --keep-lines > "$PRIOR_HISTORY_FILE" \
+           || die_review "历史标记掩码失败（掩码程序不可用）"
          REVIEW_RUN=$((prior_run + 1))
          log "找到本评审员的旧汇总评论 ${PRIOR_COMMENT_ID}（上次为第 ${prior_run} 次评审，读回历次记录 $(jq -r 'length' "$PRIOR_HISTORY_FILE") 行），本次原地更新为第 ${REVIEW_RUN} 次"
        fi ;;
@@ -844,7 +847,7 @@ for _v in KIRO_TIMEOUT DIFF_SIZE_LIMIT; do
 done
 unset _v
 # KIRO_ENV_PASSTHROUGH 只收变量名：非法名字（写成 NAME=value、带空格/连字符）与凭证形状的名字（规则表 KIRO_ENV_CRED_RULES，
-# AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 显式放行）一律拒绝运行——静默忽略会让运维以为透传生效了。这份黑名单是防运维手滑、
+# AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 显式放行）一律拒绝运行——静默忽略会让运维以为透传生效了。这份拒绝清单是防运维手滑、
 # 不是安全边界（受信 agent 没有 shell / env 工具）。原因文案只有一处（kiro_env_allowlist 的 KIRO_ENV_ALLOW_ERROR：MR 评论按条目序号 +
 # 掩码 + 命中规则；完整名字只在流水线日志；取值从不出现）。
 env_allowlist_or_die() { kiro_env_allowlist || die_review "KIRO_ENV_PASSTHROUGH 不合法：${KIRO_ENV_ALLOW_ERROR}。请修正该流水线变量"; }
@@ -913,7 +916,7 @@ grep -q -- '--output-format' <<<"$KIRO_CHAT_HELP" \
 # 取法在 kiro_cli_version（scripts/lib/kiro-agent.sh，探测脚本共用，15-fix4 #7）：stdout / stderr 分开捕获、按程序名锚定——stderr 上先到的
 # 升级提示「A new version (2.30.0) …」不能被当成已装版本；版本打到 stderr 的 CLI 仍取得到（15-fix3 #8）。--version 退出码非零 → 失败评论：
 # 连 --version 都跑不起来的 CLI，不该再在 chat 上烧掉整个 KIRO_TIMEOUT。
-kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" || die_review "${KIRO_CLI_VERSION_ERROR}。kiro-cli 无法运行，拒绝评审；请检查构建机上的 kiro-cli 安装"
+kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" || die_review "kiro-cli 无法运行，拒绝评审；请检查构建机上的 kiro-cli 安装" "$KIRO_CLI_VERSION_ERROR"   # stderr 尾巴是不受信取值：走第二参数过掩码（合并后复审第 13 条）
 if [[ -z "$KIRO_CLI_VERSION" || " $KIRO_TESTED_VERSIONS " != *" $KIRO_CLI_VERSION "* ]]; then
   REVIEW_NOTICE="注意：本次 kiro-cli 版本 ${KIRO_CLI_VERSION:-未知} 未经 P1-15 探测（已探测：${KIRO_TESTED_VERSIONS}），读取边界依赖未验证的路径解析行为（符号链接 / ../ 是否先解析再比对 allowedPaths）；请按 scripts/probe/README.md「升级 kiro-cli 之后」跑一次探测。"
   log "警告：${REVIEW_NOTICE}"

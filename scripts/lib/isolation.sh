@@ -46,7 +46,11 @@ review_isolate_workspace() {
   # ① 扫描（不删）——发射器的 stdout 直接落到清单文件；find 失败即返回非零，清单可能不完整、此时一个文件都不删
   review_isolation_scan > "$out" || return 1
   # ② 逐条删除、按 class 计数。任一条删不掉返回非零：清单里已经写了它，调用方按失败处理（不启动 Kiro）
-  while IFS=$'\t' read -r -d '' cls path; do
+  # 整条记录读入再按**第一个**制表符切分：`IFS=$'\t' read cls path` 会把 path 末尾的制表符当分隔符剥掉，名字以 \t 结尾的
+  # 符号链接就被计数、进清单、却 rm 了一个不存在的路径（合并后复审第 2 条）。class 本身没有制表符，所以首个制表符就是边界。
+  local rec
+  while IFS= read -r -d '' rec; do
+    cls=${rec%%$'\t'*}; path=${rec#*$'\t'}
     case "$cls" in
       agents) rm -f "$path" || return 1; n_agents=$((n_agents + 1)) ;;
       kiro)   rm -rf "$path" || return 1; n_kiro=$((n_kiro + 1)) ;;

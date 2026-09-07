@@ -237,7 +237,7 @@ assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "read.allowedPaths" "selfcheck：�
 # 15-fix4 #5：deny 谓词、工具三元组、deny 报错文案在库里各只有一份（安装器的 _kiro_agent_deny_missing 与自检都拼同一段 jq）——
 # 只改一处的两种后果都是静默的：安装器放行自检拒绝（每次评审都失败），或安装器拒绝自检放行（自检形同虚设）
 lib_code() { grep -v '^[[:space:]]*#' "$ROOT/scripts/lib/kiro-agent.sh"; }   # 只看代码行，注释里的说明不算
-assert_eq "$(lib_code | grep -c 'index("\*\*/.git/\*\*")')" "1" "库里 deny 谓词（index **/.git/**）只出现一次"
+assert_eq "$(lib_code | grep -c "KIRO_AGENT_REQUIRED_DENY_JQ\"' - \$d) == \[\]")" "1" "库里 deny 谓词（必需形状清单 - deniedPaths == []）只出现一次"
 assert_eq "$(lib_code | grep -c '"read","grep","glob"')" "1" "库里工具三元组字面量只出现一次"
 assert_eq "$(lib_code | grep -c 'deniedPaths 缺失、为空或不含')" "1" "库里 deny 报错文案只出现一次"
 
@@ -602,5 +602,21 @@ if command -v kiro-cli >/dev/null 2>&1 && kiro-cli agent validate --help >/dev/n
 else
   echo "INFO: 本机无 kiro-cli，跳过 agent validate 断言" >&2
 fi
+
+
+# ---- 合并后复审⑤：deny 门要求全部必需形状；每条非绝对路径的形状都有两组绝对副本 ----
+jq --arg p "$ABS_PROMPT" '.prompt = $p | .toolsSettings.read.deniedPaths -= ["**/.ssh/**"]' "$A" > "$tmp/no-sshdeny.json"
+rc=0; err=$(kiro_install_agent "$tmp/no-sshdeny.json" "$tmp/agents-nosshdeny" --workspace "$WS" --chunks "$CH" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "复审⑤：read.deniedPaths 缺 **/.ssh/**：拒绝安装（130f977 只查 **/.git/**、装成功：正控）"
+assert_contains "$err" "read.deniedPaths" "复审⑤：报错点名 read.deniedPaths"
+jq --arg p "$ABS_PROMPT" '.prompt = $p | .toolsSettings.read.deniedPaths += [".env", "secrets/**", "*/.git/**"]' "$A" > "$tmp/rel-deny.json"
+dest_rel=$(kiro_install_agent "$tmp/rel-deny.json" "$tmp/agents-rel" --workspace "$WS" --chunks "$CH")
+assert_eq "$(jq -r --arg ws "$WS_P" --arg ch "$CH_P" '.toolsSettings.read.deniedPaths | [index($ws + "/.env"), index($ch + "/.env"), index($ws + "/secrets/**"), index($ch + "/*/.git/**")] | map(. != null) | all' "$dest_rel")" "true" \
+  "复审⑤：非 **/ 开头的相对形状同样得到两组绝对副本（130f977 零副本：正控）"
+assert_eq "$(jq -r --arg ws "$WS_P" '[.toolsSettings.read.deniedPaths[] | select(startswith($ws + "/"))] | length' "$dest_rel")" "11" "复审⑤：workspace 根下的副本恰好 = 相对形状数（8 条必需 + 3 条新增），绝对路径与 ~/ 不生成副本"
+rc=0; kiro_agent_selfcheck "$dest_rel" "$WS_P" "$CH_P" || rc=$?
+assert_eq "$rc" "0" "复审⑤：带额外相对形状的定义自检通过（副本齐全）"
+assert_eq "$(jq -c --argjson req "$KIRO_AGENT_REQUIRED_DENY_JQ" '(.toolsSettings.read.deniedPaths | map(select(startswith("**/")))) as $d | (($req - $d) == []) and (($d - $req) == [])' "$A")" "true" \
+  "复审⑤：KIRO_AGENT_REQUIRED_DENY_JQ 与 kiro/agent 定义里的 **/ 形状逐条一致（同源）"
 
 report

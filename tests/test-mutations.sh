@@ -1521,4 +1521,28 @@ assert_contains "$comment" "重跑流水线即可" "M62：给出「重跑」这�
 assert_contains "$comment" "选不出「最新合并目标版本 + 最新合并源版本」这一对" \
   "M62：正确的那句也还在——两句互相矛盾的成因同时进了汇总"
 
+
+# ============ 合并后深度复审（phase1 130f977）阻断项的变异守卫 ============
+# --- M-r1：上限切片退回「模型顺序先切」→ 200 条 P2 后的 3 条 P0 消失 ---
+pkg=$(make_mutant m-r1-slice-order 's/       then (\[$valid\[\] | select(.severity == "P0")\] + \[$valid\[\] | select(.severity == "P1")\] + \[$valid\[\] | select(.severity == "P2")\])\[:$maxf\]/       then $valid[:$maxf]/' scripts/lib/review-render.sh)
+p0n=$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:([range(200) | {severity:"P2",title:("t"+tostring),body:"b",fix:"",file:"src/app.py",line_start:1}] + [range(3) | {severity:"P0",title:("p"+tostring),body:"b",fix:"",file:"src/app.py",line_start:1}])}' | review_validate | jq '[.findings[]|select(.severity=="P0")]|length' ) )
+assert_eq "$p0n" "0" "M-r1：按模型顺序先切 → P0 全丢——单测「3 条 P0 全留」断言会失败"
+# --- M-r3：保行块 128 行上界后直接退回普通行 → 第 129 行起正文裸露 ---
+pkg=$(make_mutant m-r3-cap-plain 's/if (++kb_lines > 128 \&\& !((length($0) < 24 \&\& pem_body($0, 0, 0)) || pem_body($0, 24, 1) || pem_is_hdr($0))) { inpem = 0 }/if (++kb_lines > 128) { inpem = 0 }/' scripts/lib/review-render.sh)
+raw=$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; { printf '%s\n' "$PEM_B"; for i in $(seq 1 140); do printf 'MIIEvQ29ADANBgkq\n'; done; printf '%s\n' "$PEM_E"; } | review_redact_secrets --keep-lines | grep -c 'MIIEvQ29ADANBgkq' ) )
+assert_eq "$raw" "12" "M-r3：上界后 12 行正文裸露——单测「140 行全部屏蔽」断言会失败"
+# --- M-r5：绝对副本退回只覆盖 **/ 开头 → .env 没有副本 ---
+pkg=$(make_mutant m-r5-abs-only-globstar 's/select(type == "string" and (startswith("\/") or startswith("~\/") | not))/select(type == "string" and startswith("**\/"))/' scripts/lib/kiro-agent.sh)
+n_env=$( ( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; mkdir -p "$tmp/mr5-ws" "$tmp/mr5-ch"; jq --arg p "file://$ROOT/prompts/review-agent-prompt.md" '.prompt = $p | .toolsSettings.read.deniedPaths += [".env"]' "$ROOT/kiro/agent-codeup-reviewer.json" > "$tmp/mr5.json"; d=$(kiro_install_agent "$tmp/mr5.json" "$tmp/mr5-agents" --workspace "$tmp/mr5-ws" --chunks "$tmp/mr5-ch"); jq '[.toolsSettings.read.deniedPaths[] | select(endswith("/.env"))] | length' "$d" ) )
+assert_eq "$n_env" "0" "M-r5：只给 **/ 形状生成副本 → .env 零副本——单测「相对形状都有两组绝对副本」断言会失败"
+# --- M-r7：--version 的 stderr 尾巴退回 die_review 第一参数 → 令牌原样进日志 ---
+pkg=$(make_mutant m-r7-version-arg1 's/die_review "kiro-cli 无法运行，拒绝评审；请检查构建机上的 kiro-cli 安装" "$KIRO_CLI_VERSION_ERROR"/die_review "${KIRO_CLI_VERSION_ERROR}。kiro-cli 无法运行，拒绝评审"/')
+run_case m-r7 "$pkg" MOCK_KIRO_VERSION_RC=127 MOCK_KIRO_VERSION_ERRTOKEN="$SEC_GHP"
+assert_contains "$OUT" "$SEC_GHP" "M-r7：令牌原样进流水线日志——端到端「日志不含原文」断言会失败"
+# --- M-r2：隔离清单改回 IFS 切分 → 名字以制表符结尾的链接幸存 ---
+pkg=$(make_mutant m-r2-tab-split 's/while IFS= read -r -d .. rec; do/while IFS=$(printf "\\t") read -r -d "" rec; do/' scripts/lib/isolation.sh)   # IFS=制表符 时 read 会剥掉记录尾巴的制表符
+T2="$tmp/mr2tree"; mkdir -p "$T2"; ( cd "$T2" && git init -q . && ln -s /etc/hosts "$(printf 'tabtail\t')" )
+( set +e; source "$pkg/scripts/lib/isolation.sh"; cd "$T2" && review_isolate_workspace "$tmp/mr2-removed.zlist" >/dev/null 2>&1 )
+assert_eq "$([[ -L "$T2/$(printf 'tabtail\t')" ]] && echo survived || echo gone)" "survived" "M-r2：IFS 切分剥掉尾巴制表符 → 链接幸存——端到端「制表符尾链接被删」断言会失败"
+
 report

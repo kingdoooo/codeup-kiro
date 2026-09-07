@@ -77,7 +77,7 @@ if [[ "${1:-}" == "--version" ]]; then
   echo "version" >> "$M/calls"
   printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-version"   # 第四处 kiro-cli 调用的环境（15-fix4 #18）
   # MOCK_KIRO_VERSION_RC=<n>：--version 跑不起来（例如 127）——脚本必须按退出码走失败评论，而不是软 notice 后在 chat 上烧掉整个 KIRO_TIMEOUT（15-fix4 #7）
-  if [[ "${MOCK_KIRO_VERSION_RC:-0}" != "0" ]]; then echo "mock: kiro-cli --version 模拟失败" >&2; exit "${MOCK_KIRO_VERSION_RC}"; fi
+  if [[ "${MOCK_KIRO_VERSION_RC:-0}" != "0" ]]; then echo "mock: kiro-cli --version 模拟失败${MOCK_KIRO_VERSION_ERRTOKEN:+（auth failed for token ${MOCK_KIRO_VERSION_ERRTOKEN}）}" >&2; exit "${MOCK_KIRO_VERSION_RC}"; fi   # ERRTOKEN：stderr 里带一个令牌形状（合并后复审⑦）
   # MOCK_KIRO_VERSION_WARN=1：stderr 上**先**打一条升级提示（带更高的版本号，不带「kiro-cli <版本>」形态），再在 stdout 打已装版本——
   # `2>&1 | head -1` 会取到可用版本 2.30.0 而不是已装版本（15-fix4 #7）
   if [[ "${MOCK_KIRO_VERSION_WARN:-0}" == "1" ]]; then echo "warn: A new version (2.30.0) of kiro-cli is available (installed ${MOCK_KIRO_VERSION-2.21.1}). Run kiro-cli update." >&2; fi

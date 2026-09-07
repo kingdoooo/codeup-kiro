@@ -410,6 +410,7 @@ _review_normalize() {
     # 那会连多行字符串里每一行的缩进都裁掉。
     # dectl 来自 _REVIEW_JQ_SANITIZE（控制字符集只此一份，第 2 条）
     def pre(v; n): if (v | type) == "string" then v[0:n] else v end;   # 预切（第 12a 条，按码点）
+    def trimraw(v): if (v | type) == "string" then (v | gsub("\\A[[:space:]]+"; "") | gsub("[[:space:]]+\\z"; "")) else "" end;   # 只 trim、不剥控制字符：去重键里的 file 要与 fpath 的判定看同一份字节（合并后复审第 12 条）
     def tr(v): if (v | type) == "string"
                then (dectl(v) | gsub("\\A[[:space:]]+"; "") | gsub("[[:space:]]+\\z"; ""))
                else "" end;
@@ -426,7 +427,10 @@ _review_normalize() {
                     else $t end;
     . as $root
     | ((.findings // []) | length) as $total
-    | [ (.findings // [])[:$maxf][]
+    # 先校验、后切上限（合并后复审第 1 条）：以前按模型输出顺序 [:$maxf] 先切——200 条 P2 后面的 3 条 P0 整条消失、MERGE+P0 改写
+    # 看不见；200 条不合契约的条目也会吃掉整个预算。现在全部条目先校验归一化，超过上限时按级别稳定排序（P0 → P1 → P2，
+    # 同级保持原序）再切，溢出的永远是最低级别；不超上限时保持原序。
+    | [ (.findings // [])[]
         | select(type == "object")
         | (tr(.severity) | ascii_upcase) as $sev
         | oneline(.title | pre(.; 2 * $cap_title)) as $title
@@ -447,10 +451,13 @@ _review_normalize() {
         | (if (.fix | type) == "string" then tr(dectl(.fix)) else "" end) as $fixkey
         | { id: (oneline(.id | pre(.; $cap_id))), severity: $sev, category: (oneline(.category | pre(.; $cap_id))), title: $title,
             file: $file, line_start: $ls, line_end: $le, delocated: $delocated,
-            dupkey: ([tr(.file), lineno(.line_start), lineno(.line_end), $sev, $title, $bodykey, $fixkey] | tojson),
+            dupkey: ([trimraw(.file), lineno(.line_start), lineno(.line_end), $sev, $title, $bodykey, $fixkey] | tojson),
             body: (if (.body | type) == "string" then dectl(.body | pre(.; 2 * $cap_body)) else "" end),
             fix: (if (.fix | type) == "string" then dectl(.fix | pre(.; 2 * $cap_fix)) else "" end) }
-      ] as $kept
+      ] as $valid
+    | (if ($valid | length) > $maxf
+       then ([$valid[] | select(.severity == "P0")] + [$valid[] | select(.severity == "P1")] + [$valid[] | select(.severity == "P2")])[:$maxf]
+       else $valid end) as $kept
     # 只留首条（票 17 C；CodeX 复审 P1-3 末段）。相邻两行上的两条不同问题归区间去重管（Q8，已裁决维持）。
     # 用 reduce + 已见集合而不是 unique_by：后者按键重排，会打乱「按原始次序编号」的稳定性。
     | ($kept | reduce .[] as $f ({seen: {}, out: []};
@@ -466,8 +473,8 @@ _review_normalize() {
         verdict_raw: (if $vok or $vraw == "" then "" else ($vraw | .[0:80]) end),
         verdict_reason: (tr($root.verdict_reason | pre(.; 2 * $cap_summary))),
         findings: ($uniq | map(del(.delocated, .dupkey))),
-        dropped_findings: (([$total, $maxf] | min) - ($kept | length)),
-        overflow_findings: (if $total > $maxf then $total - $maxf else 0 end),
+        dropped_findings: ($total - ($valid | length)),
+        overflow_findings: (($valid | length) - ($kept | length)),
         duplicate_findings: (($kept | length) - ($uniq | length)),
         delocated_findings: ([$uniq[] | select(.delocated)] | length) }'
 }
@@ -1146,7 +1153,8 @@ review_parse_history() {
   #      本函数会返回空串而不是 []，把「拿不到历史」升级成整条评论渲染失败。
   out=$(printf '%s' "$json" | jq -c -s '
           if length == 1 and (.[0] | type == "array")
-          then [.[0][] | select(type == "object" and (.run | type) == "number")]
+          then [.[0][] | select(type == "object" and (.run | type) == "number")
+                | .verdict |= (if . == "MERGE" or . == "MERGE_AFTER_FIX" or . == "DO_NOT_MERGE" then . else "" end)]   # 历史里的结论只认契约枚举（票 17 B；合并后复审第 4 条）
           else [] end' 2>/dev/null) || out=""
   if [[ -z "$out" ]]; then
     echo "review_parse_history: 历史标记内不是恰好一个 JSON 数组，忽略历史" >&2
@@ -2034,7 +2042,7 @@ review_redact_secrets() {
     # 分支顺序、短路与结果都不变（`> * - -----BEGIN…` 等形态 golden 逐字节相同）。
     function pem_strip_deco(s) {
       sub(/^[[:space:]]+/, "", s)
-      while (sub(/^[>*+`][[:space:]]*/, "", s) || sub(/^-[[:space:]]+/, "", s) || sub(/^[0-9]+\.[[:space:]]+/, "", s) || sub(/^------/, "-----", s)) ;
+      while (sub(/^[>*+`][[:space:]]*/, "", s) || sub(/^-[[:space:]]+/, "", s) || sub(/^[0-9]+\.[[:space:]]+/, "", s) || sub(/^------+/, "-----", s)) ;   # 6 个以上的 - 一步收成 5 个：逐个剥会让长破折号串二次方（合并后复审第 10 条）
       sub(/[[:space:]`*]+$/, "", s)
       return s
     }
@@ -2208,7 +2216,11 @@ review_redact_secrets() {
     inpem && keeplines {
       # 第 15 条 ①：保行模式的块状态有上界——连续 128 行没有 END 就退出（RSA-8192 的 PEM 约 100 行，含 RFC 1421 头也不到 128），
       # 否则围栏里引用的一条裸 BEGIN 会让后文所有标识符行 / 代码行都按块内处理；已替换的行不回退、不加提示（保行不能加行）
-      if (++kb_lines > 128) { inpem = 0 }
+      # 合并后复审第 3 条：到上界后不能直接退回普通行——16 字符折行的 4096 位密钥超过 128 行，第 129 行起会裸露；
+      # 上界之后只要这一行仍像正文（非严格判定）就继续按块内处理，第一行不像正文时才退出。
+      # 上界之后：短行（< 24，16 字符折行的密钥）按非严格判定继续；长行按严格判定（类别切换率）——标识符行（第 15 条 ① 的
+      # disableInheriting…129）不算正文而退出，真实 64 字符正文行（切换率 ≥ 0.6）继续屏蔽。PKCS#8 首行那类低熵短行不会误退出。
+      if (++kb_lines > 128 && !((length($0) < 24 && pem_body($0, 0, 0)) || pem_body($0, 24, 1) || pem_is_hdr($0))) { inpem = 0 }
     }
     inpem && keeplines {
       if (pem_marker($0, PEM_BEGIN_RE)) { print; next }                 # 块内又一条起始行：只是标记

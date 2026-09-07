@@ -2617,9 +2617,9 @@ assert_eq "$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE",
 assert_eq "$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[range(250) | {severity:"P2",title:("t" + tostring),body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -c '[(.findings|length), .dropped_findings, .overflow_findings]')" "[200,0,50]" "第 28 条：250 条合法问题 → kept 200 / dropped 0 / overflow 50（cf29da0 记成 dropped 50：正控）"
 jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:([range(205) | {severity:"P2",title:("t" + tostring),body:"b",fix:"",file:"src/app.py",line_start:1}] + [{severity:"P9",title:"x",body:"y"}])}' \
   | review_validate > "$tmp/overflow.json"
-assert_eq "$(jq -c '[(.findings|length), .dropped_findings, .overflow_findings]' "$tmp/overflow.json")" "[200,0,6]" "第 28 条：上限之外的不合契约条目算 overflow（没进校验）"
-assert_contains "$(review_render_summary --json "$tmp/overflow.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n)" "（另有 6 条超出展示上限）" "第 28 条：汇总统计行单独一段说明超出展示上限"
-assert_not_contains "$(review_render_summary --json "$tmp/overflow.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n)" "不合契约已丢弃" "第 28 条：超上限不再冒充「不合契约」"
+assert_eq "$(jq -c '[(.findings|length), .dropped_findings, .overflow_findings]' "$tmp/overflow.json")" "[200,1,5]" "第 28 条 + 合并后复审①：先校验后切上限——不合契约的条目计入 dropped、不再占预算（130f977：[200,0,6]）"
+assert_contains "$(review_render_summary --json "$tmp/overflow.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n)" "（另有 5 条超出展示上限）" "第 28 条 + 合并后复审①：汇总统计行单独一段说明超出展示上限（先校验：不合契约那条计入 dropped，溢出 5）"
+assert_contains "$(review_render_summary --json "$tmp/overflow.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n)" "（另有 1 条不合契约已丢弃）" "第 28 条 + 合并后复审①：真正不合契约的那条按 dropped 报（超上限的 5 条另行说明，不冒充不合契约）"
 # 第 27 条：file 里的控制字符——先在只 trim 的值上查禁用字符，再剔控制字符；命中 → null + delocated 计数
 assert_eq "$(jq -n --arg f "$(printf 'src/\001app.py')" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P2",title:"t",body:"b",file:$f,line_start:1}]}' | review_validate | jq -c '[.findings[0].file, .delocated_findings]')" "[null,1]" \
   "第 27 条：src/<U+0001>app.py 按不可定位处理并计数（cf29da0 先剔控制字符 → 合法路径、不计数：正控）"
@@ -2899,4 +2899,40 @@ if [[ "$GOLDEN_DIRTY" == "1" ]]; then
   echo "GOLDEN_UPDATE=1：golden 文件已重写，本次运行不构成通过。请人工读 git diff 确认渲染正确，再不带该变量重跑。" >&2
   exit 1
 fi
+
+# ============================================================================
+# 合并后深度复审（2026-09-07，phase1 = 130f977）阻断项的守卫
+# ============================================================================
+# 复审①：上限前先校验、超上限时按级别优先切——200 条 P2 后面的 3 条 P0 不能消失、MERGE+P0 改写要看得见
+v=$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:([range(200) | {severity:"P2",title:("t"+tostring),body:"b",fix:"",file:"src/app.py",line_start:1}] + [range(3) | {severity:"P0",title:("硬编码凭证"+tostring),body:"b",fix:"",file:"src/app.py",line_start:1}])}' | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -c '[(.findings|length), ([.findings[]|select(.severity=="P0")]|length), .findings[0].severity, .overflow_findings, .dropped_findings]')" '[200,3,"P0",3,0]' \
+  "复审①：超上限时按级别切，3 条 P0 全留、溢出的是 P2（130f977：P0 全丢，正控）"
+printf '%s' "$v" > "$tmp/p0-overflow.json"
+review_render_summary --json "$tmp/p0-overflow.json" --sha 90fcb05 --src f --dst main --ts t --diff-note n > "$tmp/p0-overflow.md"
+assert_contains "$(cat "$tmp/p0-overflow.md")" "硬编码凭证0" "复审①：P0 出现在汇总里"
+assert_not_contains "$(cat "$tmp/p0-overflow.md")" "## 结论：可合并" "复审①：MERGE + P0 的改写看得见 P0（结论不再是可合并）"
+assert_eq "$(review_validate < fixtures/contract/inline.json | jq -c '[.findings[].severity]')" '["P0","P1","P2","P1","P0","P2","P0","P1"]' "复审①：不超上限时保持模型原序（不重排）"
+# 复审③：保行模式的 128 行上界之后，仍像正文的行继续屏蔽（16 字符折行的 4096 位密钥超过 128 行）
+long_pem=$(printf '%s\n' "$PEM_B"; for i in $(seq 1 140); do printf 'MIIEvQ29ADANBgkq\n'; done; printf '%s' "$PEM_E")
+out=$(printf '%s\n' "$long_pem" | review_redact_secrets --keep-lines)
+assert_eq "$(printf '%s\n' "$out" | grep -c 'MIIEvQ29ADANBgkq')" "0" "复审③：140 行 16 字符折行的正文全部屏蔽——第 129 行起不再裸露（130f977：12 行裸露，正控）"
+assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "$(printf '%s\n' "$long_pem" | wc -l | tr -d ' ')" "复审③：仍保行"
+deco=$(printf '%s\n' "$PEM_B"; for i in $(seq 1 130); do printf 'MIIEvQ29ADANBgkq\n'; done; printf 'plain prose line here\nsrc/main/java/com/example/UserService')
+out2=$(printf '%s\n' "$deco" | review_redact_secrets --keep-lines)
+assert_contains "$out2" "src/main/java/com/example/UserService" "复审③：上界之后第一行不像正文即退出块，后文原样（装饰性 BEGIN 仍不会吞掉后文）"
+# 复审④：历史标记读回的 verdict 只认契约枚举；历史 JSON 行过保行掩码后仍是合法 JSON、密钥形状被掩（重发的标记行是掩码的不动点）
+printf '# t\n<!-- kiro-review:90fcb05 run:2 -->\n<!-- kiro-history:[{"run":1,"sha":"90fcb05","verdict":"secret=ABCDEFGHIJKL1234","status":"","p0":0,"p1":0,"p2":0}] -->\n' > "$tmp/poison.md"
+assert_eq "$(review_parse_history "$tmp/poison.md" | jq -r '.[0].verdict')" "" "复审④：历史里契约外的 verdict 置空（130f977 原样保留：正控）"
+h2=$(printf '{"run":1,"sha":"90fcb05","verdict":"","status":"secret=ABCDEFGHIJKL1234","p0":0}\n' | review_redact_secrets --keep-lines)
+assert_eq "$(printf '%s' "$h2" | jq -c '[.run, (.status | test("ABCDEFGHIJKL1234")), (.status | test("\\\\*\\\\*\\\\*\\\\*"))]')" "[1,false,true]" "复审④：历史 JSON 行过保行掩码仍是合法 JSON、密钥形状被掩"
+# 复审⑥：长破折号串一步收敛——不再二次方
+start=$SECONDS; out=$(printf '%s\n' "$(python3 -c 'print("-"*65536)')" | review_redact_secrets --keep-lines); dur=$((SECONDS - start))
+assert_eq "$([[ $dur -le 5 ]] && echo fast || echo "slow:${dur}s")" "fast" "复审⑥：65536 个 - 的一行 5 s 内处理完（130f977 约 48 s：正控）"
+assert_eq "$(printf '%s' "$out" | wc -c | tr -d ' ')" "65536" "复审⑥：普通破折号行原样"
+# 复审⑧：去重键里的 file 不剥控制字符——src/<0x01>app.py 与 src/app.py 是两条，谁先出现都不并
+ctl=$(printf 'src/\001app.py')
+v=$(jq -n --arg f "$ctl" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:"b",fix:"",file:$f,line_start:7},{severity:"P0",title:"t",body:"b",fix:"",file:"src/app.py",line_start:7}]}' | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -c '[(.findings|length), .duplicate_findings, .delocated_findings, .findings[1].file]')" '[2,0,1,"src/app.py"]' \
+  "复审⑧：控制字符变体先出现也不会并掉可定位的那条（130f977：并成一条且无定位，正控）"
+
 report
