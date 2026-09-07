@@ -1369,7 +1369,7 @@ assert_contains "$OUT" "评审报告：P0 2" "对照：两条都留下了（路�
 assert_not_contains "$OUT" "完全重复的问题已合并" "对照：不同文件不算重复"
 assert_contains "$OUT" "2 条问题的 file 含" "对照：两条都按未定位处理（归一化后 file 为 null）"
 pkg=$(make_mutant m56-dupkey-normalized \
-  's#dupkey: (\[tr(.file), lineno(.line_start), lineno(.line_end),#dupkey: ([$file, $ls, $le,#' \
+  's#dupkey: (\[trimraw(.file), lineno(.line_start), lineno(.line_end),#dupkey: ([$file, $ls, $le,#' \
   scripts/lib/review-render.sh)
 run_case m56 "$pkg" MOCK_KIRO_CONTRACT="$DELOCC"
 assert_rc "$RC" 0 "M56：变异体仍能跑完"
