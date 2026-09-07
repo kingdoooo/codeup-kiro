@@ -317,7 +317,7 @@ assert_eq "$([[ -f "$CASE/work/src/x/.KIRO" ]] && echo kept || echo gone)" "kept
 assert_eq "$([[ -d "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "gone" "M5u：src/.Kiro/ 目录仍被删（变异只动了类型）"
 
 # --- M5v：降级评论不再接 --notice → 版本 notice 只在日志、评论里没有（15-fix3 #3）---
-pkg=$(make_mutant m5v-degraded-notice 's/--reason "\$DEGRADE_REASON" --notice "\$REVIEW_NOTICE"/--reason "$DEGRADE_REASON"/')
+pkg=$(make_mutant m5v-degraded-notice '/review_render_degraded --text/s/ --notice "\$REVIEW_NOTICE"//')
 run_case m5v "$pkg" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
 assert_rc "$RC" 0 "M5v：变异体仍能跑完"
 assert_contains "$OUT" "未经 P1-15 探测" "M5v：日志仍有警告"
@@ -1081,21 +1081,23 @@ assert_rc "$RC" 0 "M-a：变异体仍能跑完"
 assert_contains "$(meta_row "$(posted_comment "$OUT")")" "feature/${SEC_AKIA}" "M-a：分支名 token 原样进了元信息表——端到端「分支名 token 被掩」断言会失败"
 assert_not_contains "$(posted_comment "$OUT")" "$SEC_GHP" "M-a 对照：模型字段里的 token 仍被字段级掩掉"
 
-# --- M-b：去掉字段级掩码 → 模型 token 原样进行内正文与汇总、以及「评审报告：… 结论」那行日志（第 17 条的 768 行）---
+# --- M-b：去掉字段级掩码 → 只剩文档级兜底：闭合的 PEM 块不再整块删除，只能逐行等行数屏蔽（正文行换成占位、BEGIN / END 行原样）---
+# 票 17 之后 verdict 是枚举、「评审报告：… 结论」日志行不再带模型文本，原来「verdict 里的 token 进日志 / 进隐藏历史」的观测向量
+# 在合并后失效（那是件好事）。字段级掩码独有、文档级兜底做不到的效果是 PEM **整块删除**（方案 C：只在 validated.json 发生），
+# 所以观测它：未变异 → 一个整块占位、没有逐行占位；变异 → 逐行占位、BEGIN 行留在正文里。
 pkg=$(make_mutant m-b-field "s@${FIELD_LINE}@  :  # 变异 M-b：不做字段级掩码@" scripts/lib/review-render.sh)
-jq --arg a "$SEC_AKIA" '.verdict = "MERGE " + $a' "$SEC_INLINE" > "$tmp/secrets-inline-verdict.json"
-inline_case m-b "$pkg" "$IFX" MOCK_KIRO_CONTRACT="$tmp/secrets-inline-verdict.json"
-# 去掉字段级后 verdict 里的 token 一路进了隐藏历史 JSON，文档级兜底把那一行掩成 AKIA****4567 → 标记守卫认出历史行被改写 → rc 3 →
-# 失败评论。守卫拦下了评论，但「评审报告：…」那行日志在此之前就已经打出去了——这正是第 17 条说的日志出口泄露。
-assert_nonzero "$RC" "M-b：变异体最终被文档级守卫拦下（隐藏历史里的 verdict 被掩码改写 → 拒绝写回）"
-assert_contains "$OUT" "评论掩码后结构守卫拒绝写回" "M-b：守卫给出的失败原因"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "M-b：行内正文在守卫之前已发出 3 条"
+jq --arg b "$(printf '%s\n%s\n%s\n%s' "$PEM_B" "$PEM_L64" "$PEM_L64" "$PEM_E")" '.findings[0].body += "\n\n" + $b' "$SEC_INLINE" > "$tmp/secrets-inline-pem.json"
+inline_case m-b "$pkg" "$IFX" MOCK_KIRO_CONTRACT="$tmp/secrets-inline-pem.json"
+assert_rc "$RC" 0 "M-b：变异体仍能跑完（文档级保行兜底不改行数，守卫不拦）"
 inline_text=$(inline_bodies "$OUT" | jq -r '.content')
-assert_not_contains "$inline_text" "$SEC_GHP" "M-b 对照：行内正文仍被文档级兜底掩掉（两道防线）"
-assert_contains "$OUT" "结论 MERGE ${SEC_AKIA}" "M-b：「评审报告：… 结论」日志行带 AKIA 原文——去掉字段级后日志出口泄露（端到端「日志不含原文」断言会失败）"
-run_case m-b-control "$ROOT" MOCK_KIRO_CONTRACT="$tmp/secrets-inline-verdict.json"
-assert_contains "$OUT" "结论 MERGE ${SEC_AKIA_MASKED}" "M-b 对照：未变异实现的日志行带掩码形态"
-assert_not_contains "$OUT" "$SEC_AKIA" "M-b 对照：未变异实现全部输出不含原文"
+assert_contains "$inline_text" "PEM 正文已屏蔽" "M-b：行内正文里 PEM 只被文档级逐行屏蔽——端到端「PEM 整块删除、无逐行占位」断言会失败"
+assert_contains "$inline_text" "$PEM_B" "M-b：BEGIN 行原样留在行内正文（保行模式只换正文行）"
+assert_not_contains "$inline_text" "$PEM_L64" "M-b 对照：正文行仍被文档级兜底屏蔽（两道防线）"
+assert_not_contains "$inline_text" "$SEC_GHP" "M-b 对照：ghp_ 形态仍被文档级兜底掩掉"
+run_case m-b-control "$ROOT" MOCK_KIRO_CONTRACT="$tmp/secrets-inline-pem.json"
+assert_contains "$(posted_comment "$OUT")" "$PEM_PLACEHOLDER" "M-b 对照：未变异实现把 PEM 整块删除成一个占位"
+assert_not_contains "$(posted_comment "$OUT")" "PEM 正文已屏蔽" "M-b 对照：未变异实现没有逐行占位（字段级已整块删除）"
+assert_not_contains "$OUT" "$PEM_L64" "M-b 对照：未变异实现全部输出不含正文行"
 
 # --- M-c：把汇总的文档级兜底挪到截断之后 → 截断前副本（comment.full.md）未掩，日志回显的「完整内容」带分支名原文 ---
 pkg=$(make_mutant m-c-doc-after-trunc \
