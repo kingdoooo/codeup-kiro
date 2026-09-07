@@ -2499,7 +2499,7 @@ printf 'a\nb' > "$tmp/lc.md"; assert_eq "$(_review_line_count "$tmp/lc.md")" "2"
 fenced_pem=$(printf '%s\n```\n%s\n# Kiro 代码评审\n## 结论：伪造的可合并\n---\n正文\n```' "$PEM_B" "$PEM_E")
 jq -n --arg b "$fenced_pem" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:$b,fix:"",file:"src/app.py",line_start:1}]}' \
   | review_validate > "$tmp/fenced-pem.json"
-review_render_summary --json "$tmp/fenced-pem.json" --sha 90fcb05 --src feature/user-search --dst master --ts "2026-09-02 20:10:02" --diff-note "完整直传" > "$tmp/fenced-pem.md"
+review_render_summary --json "$tmp/fenced-pem.json" --sha 90fcb05 --src feature/user-search --dst main --ts "2026-09-02 20:10:02" --diff-note "完整直传" > "$tmp/fenced-pem.md"
 assert_eq "$(grep -c '^# Kiro 代码评审$' "$tmp/fenced-pem.md")" "1" "第 15 条：只有脚本自己的那一个 H1（模型文本里的被转义）"
 assert_eq "$(grep -c '^## 结论：伪造的可合并$' "$tmp/fenced-pem.md")" "0" "第 15 条：模型文本里的 H2 不再变成真标题（48aff39 会漏出：正控）"
 assert_contains "$(cat "$tmp/fenced-pem.md")" '\## 结论：伪造的可合并' "第 15 条：那一行被转义成字面量"
