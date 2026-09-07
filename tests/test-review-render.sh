@@ -2148,6 +2148,21 @@ assert_contains "$(printf '%s' "$v" | jq -r '[.findings[].fix] | join("|")')" "�
 v=$(jq -c '.findings[1].body = .findings[0].body | .findings[1].fix = .findings[0].fix' fixtures/contract/repo-level-dup.json | review_validate)
 assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "1,1" \
   "17-fix2：仓库级问题正文与修复建议都逐字相同（模型原样重发）→ 仍按重复合并"
+# 票 17-fix3 ⑨：**只差首尾空白**的两条也要合并——渲染出来逐字节相同，不合并就是两条一样的条目。
+# 这条断言在 17-fix2 被改成了「把 body 直接赋成一样」（永远不会失败），等于把 de03e59 的回退放走了。
+v=$(jq -c '.findings[1].body = ("  " + .findings[0].body + "  ") | .findings[1].fix = ("\n" + .findings[0].fix + " ")' \
+      fixtures/contract/repo-level-dup.json | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "1,1" \
+  "17-fix3 ⑨：仓库级问题只差 body/fix 的首尾空白 → 仍按重复合并（判定键先 tr 再清洗）"
+assert_eq "$(printf '%s' "$v" | jq -r '.findings[0].body')" "$(jq -r '.findings[0].body' fixtures/contract/repo-level-dup.json)" \
+  "17-fix3 ⑨：输出的 body 仍是不去首尾空白的清洗结果（只改判定，不改渲染）"
+# 可定位问题同理（判定键对两类问题是同一份）
+v=$(jq -c '.findings[0].file = "src/app.py" | .findings[0].line_start = 30 | .findings[0].line_end = 30
+           | .findings[1].file = "src/app.py" | .findings[1].line_start = 30 | .findings[1].line_end = 30
+           | .findings[1].body = (.findings[0].body + "   ") | .findings[1].fix = .findings[0].fix' \
+      fixtures/contract/repo-level-dup.json | review_validate)
+assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings] | join(",")')" "1,1" \
+  "17-fix3 ⑨：可定位问题只差 body 尾部空白 → 仍按重复合并"
 # 路径不合规被按未定位处理的也走同一条规则（$file 为 null）
 v=$(jq -c '.findings[0].file = "a|b" | .findings[1].file = "a|b"' fixtures/contract/repo-level-dup.json | review_validate)
 assert_eq "$(printf '%s' "$v" | jq -r '[(.findings | length), .duplicate_findings, .delocated_findings] | join(",")')" "2,0,2" \

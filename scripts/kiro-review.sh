@@ -43,8 +43,11 @@ MAX_INLINE_COMMENTS="${MAX_INLINE_COMMENTS:-10}"
 # 行内评论实际是否生效：版本对取不到时降为 0，并把原因写进汇总评论（INLINE_NOTICE）。
 INLINE_ACTIVE=0
 INLINE_NOTICE=""
-# 版本列表滞后时重查几次（票 17-fix2 B③、17-fix3 ⑥：预采样与发布前采样共用同一个上限）
+# 版本列表滞后时的重查上限（票 17-fix2 B③、17-fix3 ⑥⑪：预采样与发布前采样共用同一组上限）。
+# 两个上限一起生效：次数上限挡住「退避为 0 时空转」，总等待预算挡住「退避累加把流水线挂住」。
+# 这两个常量是文案与文档里那些数字的唯一来源——setup-guide/ADR 不再硬写次数（票 17-fix3 ⑯）。
 INLINE_LAG_MAX=3
+INLINE_LAG_BUDGET=45
 # from 侧探针的结果（1 = Codeup 的比较基准与本地 merge-base 不一致）。默认 0：`set -u` 下没跑过探针
 # 就读它会直接崩掉整次评审。
 INLINE_FROM_OFFSET=0
@@ -160,10 +163,12 @@ die_review() {
 # （票 17-fix3；此前锚 notice 文案，文案挪进 inline_bail_to 之后就失配了）。改名字要同步 test-mutations.sh。
 # fail-closed / 发不出去的统一出口（票 17-fix2 C⑤）：原因既要进汇总评论（阿里云侧看不到流水线日志，I10），
 # 又要进日志。六个出口原先各抄一份「拼 notice + log + return 1」，改一处文案就得同步六处。
-# 调用方写成 `inline_bail "<notice>" "<log>"; return 1`：rc 由调用方给，读起来就是「说明原因，然后退出」。
+# 本函数自身 return 1（票 17-fix3 ⑬）：调用点写 `inline_bail "<notice>" "<log>" || return 1`。
+# 之前 rc 由调用点自己拼，漏一处就变成「notice 写了、却继续往下发」，而 e2e 只看最终结果、照样绿。
 inline_bail() {
   INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }$1"
   log "$2"
+  return 1   # 票 17-fix3 ⑬：rc 由本函数给，调用点写 `… || return 1`——漏掉 rc 时不会「说明了原因却继续往下发」
 }
 
 # 把 Codeup 给的提交号规范化成本地克隆里的全 sha（票 17-fix2 B③）：接受缩写与大写。
@@ -188,7 +193,8 @@ inline_resolve_commit() {
 #   INLINE_TO_STATUS = 状态词；INLINE_TO_NORM = 规范化后的全 sha（ok/lag/pushed_known/diverged 时非空）。
 #   noid          空 / 全空白 / 不是 sha 形状 —— 没有可核对的提交号
 #   pushed_known  是 HEAD 的**后代**（对象已在克隆里，多半是 fetch 时被一起带下来的）⇒ 评审期间有新推送
-#   pushed_dark   解析不出（对象不在克隆里）⇒ 同样是评审期间有新推送，只是本地看不到那个提交
+#   pushed_dark   解析不出、且克隆不是浅的（或加深之后仍解析不出）⇒ 同样是评审期间有新推送
+#   unknown_shallow 浅克隆且加深失败 ⇒ 无从判定（既可能是新推送，也可能是 graft 边界之下的旧提交）
 #   lag           是 HEAD 的**祖先** ⇒ Codeup 版本列表尚未包含本次提交
 #   diverged      两向都不是祖先 ⇒ 历史分叉（force-push / rebase 改写）
 # 「后代」这一支不能落到 diverged（票 17-fix3 ③）：同一个「评审期间新推送」事件，浅克隆下对象不在本地、
@@ -199,10 +205,27 @@ inline_classify_to() {
   [[ -n "$raw" ]] || { INLINE_TO_STATUS=noid; return 0; }
   if ! INLINE_TO_NORM=$(inline_resolve_commit "$raw"); then
     INLINE_TO_NORM=""
-    # 形状就不对（refname/HEAD/@/带非法字符）时同样按「没有可核对的提交号」处理：把它说成新推送会给出
+    # 形状就不对（refname/HEAD/@/带非法字符）时按「没有可核对的提交号」处理：把它说成新推送会给出
     # 「等下一轮」这条永远等不到的建议。
-    if [[ "$raw" =~ ^[0-9a-fA-F]{7,40}$ ]]; then INLINE_TO_STATUS=pushed_dark; else INLINE_TO_STATUS=noid; fi
-    return 0
+    if [[ ! "$raw" =~ ^[0-9a-fA-F]{7,40}$ ]]; then INLINE_TO_STATUS=noid; return 0; fi
+    # 形状对但解析不出：**浅克隆上这不足以断言「新推送」**（票 17-fix3 ⑩）——graft 边界之下的旧提交
+    # 一样解析不出，而那种情形永远不会自愈（没有新推送去触发下一轮）。所以先加深再判。
+    if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
+      log "注意：提交 ${raw:0:12} 在本地解析不出，而这是一个浅克隆——先加深再判定（否则 graft 边界之下的旧提交会被误报成「新推送」）"
+      git fetch --unshallow --quiet 2>/dev/null || git fetch --deepen 100 --quiet 2>/dev/null || true
+      if INLINE_TO_NORM=$(inline_resolve_commit "$raw"); then
+        log "加深后解析成功：${INLINE_TO_NORM:0:12}"
+      else
+        INLINE_TO_NORM=""
+        if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
+          # 仍是浅克隆（加深失败：网络受限 / 服务端不允许）⇒ 无从判定，不能给任何一种自愈承诺
+          INLINE_TO_STATUS=unknown_shallow; return 0
+        fi
+        INLINE_TO_STATUS=pushed_dark; return 0
+      fi
+    else
+      INLINE_TO_STATUS=pushed_dark; return 0
+    fi
   fi
   if [[ "$INLINE_TO_NORM" == "$head" ]]; then INLINE_TO_STATUS=ok; return 0; fi
   if git merge-base --is-ancestor "$INLINE_TO_NORM" "$head" 2>/dev/null; then INLINE_TO_STATUS=lag; return 0; fi
@@ -227,6 +250,9 @@ inline_bail_to() { # <状态> <to_ps> <to_commit 原值> <head 全 sha>
     lag)
       inline_bail "行内评论未发出：Codeup 版本列表尚未包含本次提交（${head:0:12}，版本列表滞后），下面是完整问题清单；重跑流水线即可。" \
         "警告：Codeup 版本列表仍未包含本次提交（${head:0:12}），最新合并源版本是它的祖先（${INLINE_TO_NORM:0:12}）——本次不发任何行内评论（fail-closed，ADR-0005）：绑到旧版本上会挂错位置；重跑流水线即可" ;;
+    unknown_shallow)
+      inline_bail "行内评论未发出：无法确认 Codeup 侧最新合并源版本（${raw:0:12}）与本次评审的提交（${head:0:12}）的关系——构建机上是浅克隆且加深失败，下面是完整问题清单；放开克隆深度后重跑流水线即可。" \
+        "警告：最新合并源版本的提交（${raw:0:12}）在浅克隆里解析不出、加深也失败——无从判定成因（可能是新推送，也可能是 graft 边界之下的旧提交），本次不发任何行内评论（fail-closed，ADR-0005）" ;;
     diverged)
       inline_bail "行内评论未发出：Codeup 侧最新合并源版本（${INLINE_TO_NORM:0:12}）与本次评审的提交（${head:0:12}）不在同一条历史上（源分支被改写或强推），下面是完整问题清单；新推送触发的评审会补上行内评论。" \
         "警告：最新合并源版本的提交（${INLINE_TO_NORM:0:12}）与当前 HEAD（${head:0:12}）分属两条历史（force-push？）——本次不发任何行内评论（fail-closed，ADR-0005）" ;;
@@ -253,11 +279,24 @@ inline_sample_pair() { # <head 全 sha>
 
 # 滞后重查：按既有退避（CODEUP_RETRY_BACKOFF）重取版本对至多 <max> 次。
 # 收尾状态写进 INLINE_END_STATE（四分类之一，或 http / nopair）——调用方按它选 notice（票 17-fix3 ②）。
-inline_requery_lag() { # <head 全 sha> <次数>
-  local head="$1" max="$2" attempt rc
+inline_requery_lag() { # <head 全 sha> <次数上限>
+  local head="$1" max="$2" attempt rc waited=0 nap
   INLINE_END_STATE="$INLINE_TO_STATUS"
-  for attempt in $(seq 1 "$max"); do
-    _codeup_retry_sleep "$attempt"
+  # 不用 `seq`（票 17-fix3 ⑭）：那是个未在预检里声明的外部依赖，缺失时 `$(seq …)` 展开为空、
+  # 循环一次都不跑，日志却还说「重查至多 N 次」。
+  for ((attempt = 1; attempt <= max; attempt++)); do
+    # **先查再睡**（票 17-fix3 ⑪）：原先每轮开头先睡，第一次重查白等一个退避，而 codeup_list_patchsets
+    # 内部本来就带 3 次重试各自的退避——最坏耗时因此接近 75 秒而不是 ADR 写的 30 秒。
+    # 退避只发生在两次尝试之间，且总等待受 INLINE_LAG_BUDGET 约束（超预算就不再等、直接收尾）。
+    if [[ "$attempt" -gt 1 ]]; then
+      nap=$(( (attempt - 1) * $(_codeup_retry_backoff) ))
+      if [[ $((waited + nap)) -gt "$INLINE_LAG_BUDGET" ]]; then
+        log "重查：再等 ${nap} 秒会超过总预算 ${INLINE_LAG_BUDGET} 秒（已等 ${waited} 秒），停止重查"
+        break
+      fi
+      [[ "$nap" -gt 0 ]] && sleep "$nap"
+      waited=$((waited + nap))
+    fi
     rc=0; inline_sample_pair "$head" || rc=$?
     if [[ "$rc" == "1" ]]; then
       INLINE_END_STATE=http
@@ -336,7 +375,7 @@ inline_presample() {
   # 不再采样，那时探针就永远进不了日志——而「P1-14 的结论失效了」比「推送太频繁」要紧得多。
   [[ "$rc" == "0" ]] && inline_check_from "$SAMPLE_FROM_PS" "$SAMPLE_FROM_COMMIT" "预采样："
   if [[ "$INLINE_PRE_STATUS" == "lag" ]]; then
-    log "注意：预采样判定版本列表滞后——最新合并源版本的提交（${INLINE_TO_NORM:0:12}）是当前 HEAD（${head_full:0:12}）的祖先；现在就按退避重查至多 ${INLINE_LAG_MAX} 次（此时重查成本是几秒，评审跑完再重查要等一轮模型）"
+    log "注意：预采样判定版本列表滞后——最新合并源版本的提交（${INLINE_TO_NORM:0:12}）是当前 HEAD（${head_full:0:12}）的祖先；现在就按退避重查（至多 ${INLINE_LAG_MAX} 次，总等待不超过 ${INLINE_LAG_BUDGET} 秒；此时重查成本是几秒，评审跑完再重查要等一轮模型）"
     inline_requery_lag "$head_full" "$INLINE_LAG_MAX"
     INLINE_PRE_STATUS="$INLINE_END_STATE"
     INLINE_PRE_TO_PS="$SAMPLE_TO_PS"; INLINE_PRE_TO_COMMIT="$SAMPLE_TO_COMMIT"
@@ -362,7 +401,7 @@ publish_inline_comments() {
   # 「未发现明显问题」的汇总上挂一句「下面是完整问题清单」。
   if ! review_plan_inline --json "$validated" --changed-lines "$WORK/changed-lines.json" \
          --profile "$INLINE_PROFILE" --max "$MAX_INLINE_COMMENTS" > "$WORK/plan.json"; then
-    inline_bail "行内评论未发出：生成行内发布计划失败，下面是完整问题清单。" "警告：生成行内发布计划失败"; return 1
+    inline_bail "行内评论未发出：生成行内发布计划失败，下面是完整问题清单。" "警告：生成行内发布计划失败" || return 1  # fail-closed:plan
   fi
   # 档位/上限被回落时的说明要上到汇总评论：流水线日志阿里云侧看不到（I10）
   config_notice=$(jq -r '.config_notice // ""' "$WORK/plan.json")
@@ -380,15 +419,15 @@ publish_inline_comments() {
   if [[ "$INLINE_PRE_DECIDED" == "1" ]]; then
     log "行内评论：沿用预采样的判定（${INLINE_PRE_STATUS}），不再重查版本列表"
     case "$INLINE_PRE_STATUS" in
-      http|nopair) inline_bail_pair "$INLINE_PRE_STATUS" ;;
-      *) inline_bail_to "$INLINE_PRE_STATUS" "$INLINE_PRE_TO_PS" "$INLINE_PRE_TO_COMMIT" "$head_full" ;;
+      http|nopair) inline_bail_pair "$INLINE_PRE_STATUS" || return 1 ;;   # fail-closed:pre
+      *) inline_bail_to "$INLINE_PRE_STATUS" "$INLINE_PRE_TO_PS" "$INLINE_PRE_TO_COMMIT" "$head_full" || return 1 ;;  # fail-closed:pre
     esac
-    return 1  # fail-closed:pre
+    return 1  # fail-closed:pre-guard（上面两支都会 return，这行只是兜底）
   fi
   local rc=0
   inline_sample_pair "$head_full" || rc=$?
-  if [[ "$rc" == "1" ]]; then inline_bail_pair http; return 1; fi   # fail-closed:pair-http
-  if [[ "$rc" == "2" ]]; then inline_bail_pair nopair; return 1; fi  # fail-closed:pair-nopair
+  if [[ "$rc" == "1" ]]; then inline_bail_pair http || return 1; fi   # fail-closed:pair-http
+  if [[ "$rc" == "2" ]]; then inline_bail_pair nopair || return 1; fi  # fail-closed:pair-nopair
   from_ps="$SAMPLE_FROM_PS"; to_ps="$SAMPLE_TO_PS"
   to_commit="$SAMPLE_TO_COMMIT"; from_commit="$SAMPLE_FROM_COMMIT"
   log "行内评论版本对：from=${from_ps}（最新合并目标版本）→ to=${to_ps}（最新合并源版本，patchset_biz_id 用它）"
@@ -409,7 +448,7 @@ publish_inline_comments() {
     log "两次采样：checkout 时判定=${INLINE_PRE_STATUS}（to=${INLINE_PRE_TO_PS:-?}）、发布前判定=${to_status}（to=${to_ps}）$([[ "$INLINE_PRE_STATUS" == "ok" ]] && printf '%s' " ⇒ 评审期间源分支确实有新推送（两次采样即证据）" || printf '%s' " ⇒ 与评审期间的推送无关")"
   fi
   if [[ "$to_status" == "lag" ]]; then
-    log "注意：最新合并源版本的提交（${INLINE_TO_NORM:0:12}）是当前 HEAD（${head_full:0:12}）的祖先——Codeup 版本列表可能尚未包含本次提交，按退避重查至多 ${INLINE_LAG_MAX} 次"
+    log "注意：最新合并源版本的提交（${INLINE_TO_NORM:0:12}）是当前 HEAD（${head_full:0:12}）的祖先——Codeup 版本列表可能尚未包含本次提交，按退避重查（至多 ${INLINE_LAG_MAX} 次，总等待不超过 ${INLINE_LAG_BUDGET} 秒）"
     inline_requery_lag "$head_full" "$INLINE_LAG_MAX"
     to_status="$INLINE_TO_STATUS"
     from_ps="$SAMPLE_FROM_PS"; to_ps="$SAMPLE_TO_PS"
@@ -418,15 +457,15 @@ publish_inline_comments() {
     # 选不出版本对。全部说成「滞后，重跑流水线即可」是错的——重跑在同一份陈旧 checkout 上只会复现。
     if [[ "$INLINE_END_STATE" != "ok" ]]; then
       case "$INLINE_END_STATE" in
-        http|nopair) inline_bail_pair "$INLINE_END_STATE" ;;
-        *) inline_bail_to "$INLINE_END_STATE" "$to_ps" "$to_commit" "$head_full" ;;
+        http|nopair) inline_bail_pair "$INLINE_END_STATE" || return 1 ;;   # fail-closed:lag-end
+        *) inline_bail_to "$INLINE_END_STATE" "$to_ps" "$to_commit" "$head_full" || return 1 ;;  # fail-closed:lag-end
       esac
-      return 1  # fail-closed:lag-end
+      return 1  # fail-closed:lag-end-guard（上面两支都会 return，这行只是兜底）
     fi
     inline_check_from "$from_ps" "$from_commit"   # 重查换了版本对，探针按新值重走一遍
   fi
   if [[ "$to_status" != "ok" ]]; then
-    inline_bail_to "$to_status" "$to_ps" "$to_commit" "$head_full"; return 1  # fail-closed:to
+    inline_bail_to "$to_status" "$to_ps" "$to_commit" "$head_full" || return 1  # fail-closed:to
   fi
   # from 侧的 notice 留到这里（警告已在上面打过）：它说的是「**发出去的**行内评论的行号可能有偏移」，
   # 而 fail-closed 那条路径一条都没发，那时写进汇总只会让读者去找不存在的行内评论。

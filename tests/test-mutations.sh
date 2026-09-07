@@ -376,34 +376,18 @@ jq -n --arg bot "$BOT" \
 # 而那不是本组要证明的东西。HEAD 只有在 fixture 仓库建好（用例自己的 MUT_TWEAK 可能再提交）之后才知道，
 # 所以内层 tweak 先跑、版本列表后写。取值语义与 test-kiro-review.sh 的 mk_patchsets 一致。
 _INLINE_FX=""; _INLINE_INNER_TWEAK=""
-PS_SRC="HEAD"; PS_TGT="BASE"; PS_SRC_ID="src-2"; PS_TGT_ID="tgt-1"
+# 实现在 tests/helpers.sh 的 mk_patchsets_fixture（票 17-fix3 ⑫：与 test-kiro-review.sh 共用同一份，
+# 取值语义因此不会再走形）。用例自己的 tweak 先跑（它可能再提交、改变 HEAD），版本列表后写。
 mk_patchsets() {
-  local src tgt head base
   [[ -z "$_INLINE_INNER_TWEAK" ]] || "$_INLINE_INNER_TWEAK"
-  head=$(git rev-parse HEAD); base=$(git merge-base origin/master HEAD)
-  case "$PS_SRC" in
-    HEAD) src="$head" ;;
-    PARENT) src=$(git rev-parse 'HEAD^') ;;
-    *) src="$PS_SRC" ;;
-  esac
-  case "$PS_TGT" in BASE) tgt="$base" ;; *) tgt="$PS_TGT" ;; esac
-  # 取值语义与 test-kiro-review.sh 的同名函数保持一致：OMIT = 不带 commitId，NONE = 整条 MERGE_TARGET 都不写
-  # （于是选不出版本对）。两份不一致的话，同一个场景在两个套件里表现不同，很难查。
-  jq -n --arg src "$src" --arg tgt "$tgt" --arg srcmode "$PS_SRC" --arg tgtmode "$PS_TGT" \
-        --arg srcid "$PS_SRC_ID" --arg tgtid "$PS_TGT_ID" '[
-    (if $tgtmode == "NONE" then empty
-     else ({patchSetBizId:$tgtid, versionNo:1, relatedMergeItemType:"MERGE_TARGET"}
-           + (if $tgtmode == "OMIT" then {} else {commitId:$tgt} end)) end),
-    ({patchSetBizId:$srcid, versionNo:9, relatedMergeItemType:"MERGE_SOURCE"}
-     + (if $srcmode == "OMIT" then {} else {commitId:$src} end))
-  ]' > "$_INLINE_FX/list-patchsets.json"
+  PS_FIXTURE_DIR="$_INLINE_FX" mk_patchsets_fixture
 }
 inline_case() { # <用例名> <集成包根> <fixture 目录> [VAR=值 …]；版本列表形态走 PS_* 全局量
   local name="$1" pkg="$2" fx="$3"; shift 3
   _INLINE_FX="$fx"; _INLINE_INNER_TWEAK="${MUT_TWEAK:-}"; MUT_TWEAK=""   # 与 run_case 同理：赋值前缀是否残留取决于 bash 版本
   MUT_TWEAK=mk_patchsets run_case "$name" "$pkg" DRY_RUN_FIXTURE_DIR="$fx" CODEUP_BOT_USERNAME="$BOT" \
     INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2EC" "$@"
-  PS_SRC="HEAD"; PS_TGT="BASE"; PS_SRC_ID="src-2"; PS_TGT_ID="tgt-1"
+  reset_ps_vars
 }
 
 # --- 对照：未变异实现上行内评论管线的四项可观测结果都成立 ---
@@ -791,7 +775,7 @@ IFXMIS="$tmp/ifx-headmismatch"
 mkdir -p "$IFXMIS"
 cp "$IFX"/create-comment-inline.*.json "$IFXMIS/"
 head_mismatch_case() { # <用例名> <集成包根>
-  PS_SRC=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 inline_case "$1" "$2" "$IFXMIS"
+  PS_SRC=RAW:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 inline_case "$1" "$2" "$IFXMIS"
 }
 head_mismatch_case baseline-headmismatch "$ROOT"
 assert_rc "$RC" 0 "对照：to 解析不出时评审成功"
@@ -886,8 +870,8 @@ IFXBOTH="$tmp/ifx-bothmismatch"
 mkdir -p "$IFXBOTH"
 cp "$IFX"/create-comment-inline.*.json "$IFXBOTH/"
 both_mismatch_case() { # <用例名> <集成包根>
-  PS_SRC=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 \
-    PS_TGT=feedfacefeedfacefeedfacefeedfacefeedface PS_TGT_ID=tgt-9 inline_case "$1" "$2" "$IFXBOTH"
+  PS_SRC=RAW:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 \
+    PS_TGT=RAW:feedfacefeedfacefeedfacefeedfacefeedface PS_TGT_ID=tgt-9 inline_case "$1" "$2" "$IFXBOTH"
 }
 both_mismatch_case baseline-bothmismatch "$ROOT"
 assert_rc "$RC" 0 "对照：两个核对都不成立时评审仍成功"

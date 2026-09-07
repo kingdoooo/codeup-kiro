@@ -397,8 +397,13 @@ review_validate() {
         | (if $file == null then null else lineno(.line_start) end) as $ls
         | (if $ls == null then null
            else (lineno(.line_end)) as $le | (if $le == null or $le < $ls then $ls else $le end) end) as $le
-        | (if (.body | type) == "string" then (.body | _sanitize_md) else "" end) as $bodykey
-        | (if (.fix | type) == "string" then (.fix | _sanitize_md) else "" end) as $fixkey
+        # 判定键用的 body/fix 先 tr 去首尾空白再清洗（票 17-fix3 ⑨）：不去空白的话「只差首尾空白」的两条
+        # 渲染出来逐字节相同却不合并（de03e59 的回退，17-fix2 又把钉它的断言改成了永远不会失败的形态）。
+        | (tr(.body) | _sanitize_md) as $bodykey
+        | (tr(.fix) | _sanitize_md) as $fixkey
+        # 输出仍是**不去首尾空白**的清洗结果：渲染形态在这一票里不动，只改判定。
+        | (if (.body | type) == "string" then (.body | _sanitize_md) else "" end) as $bodyout
+        | (if (.fix | type) == "string" then (.fix | _sanitize_md) else "" end) as $fixout
         | { id: (oneline(.id)), severity: $sev, category: (oneline(.category)), title: $title,
             file: $file, line_start: $ls, line_end: $le, delocated: $delocated,
             # 同轮去重的判定键（票 17 C，17-fix2 A① 定案）：**全部有意义字段**，只有逐字段相同（模型把同一条
@@ -407,8 +412,8 @@ review_validate() {
             # 同文件不同行的问题并掉（fixture/unit 实测：三条同标题问题只剩一条）。title/body/fix 取**归一化后**
             # 的值：「重复」的定义是「渲染出来一模一样」——按清洗后比，才不会因为清洗前差一个未闭合围栏就漏判。
             dupkey: ([tr(.file), lineno(.line_start), lineno(.line_end), $sev, $title, $bodykey, $fixkey] | tojson),
-            body: $bodykey,
-            fix: $fixkey }
+            body: $bodyout,
+            fix: $fixout }
       ] as $kept
     # 只留首条（票 17 C；CodeX 复审 P1-3 末段）。相邻两行上的两条不同问题归区间去重管（Q8，已裁决维持）。
     # 用 reduce + 已见集合而不是 unique_by：后者按键重排，会打乱「按原始次序编号」的稳定性。

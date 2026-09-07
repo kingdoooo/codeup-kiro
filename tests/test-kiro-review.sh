@@ -672,45 +672,11 @@ IFX_DIR=""
 #   CASE_EXTRA_TWEAK       再跑一个函数（改业务库、写别的 fixture），在写完版本列表之后执行
 # 默认值让每个用例都拿到「to = 真实 HEAD、from = 真实 merge-base」——否则每个用例都会打
 # 「与 HEAD 不一致」或「不等于 merge-base」的警告，那两条警告本身就再也测不出来了。
-PS_SRC="HEAD"; PS_TGT="BASE"; PS_SRC_ID="src-2"; PS_TGT_ID="tgt-1"; CASE_EXTRA_TWEAK=""
+CASE_EXTRA_TWEAK=""
+# 版本列表 fixture 的实现在 tests/helpers.sh 的 mk_patchsets_fixture（票 17-fix3 ⑫：只留一份，
+# 两个套件共用；未知模式硬错误）。这里只做「设好目录 → 调它 → 再跑用例自己的 tweak」。
 mk_patchsets() {
-  local head base src tgt n
-  mkdir -p "$IFX_DIR"
-  head=$(git rev-parse HEAD)
-  base=$(git merge-base origin/master HEAD)
-  case "$PS_SRC" in
-    HEAD) src="$head" ;;
-    HEAD12) src="${head:0:12}" ;;
-    HEAD6) src="${head:0:6}" ;;                     # 短于 git 短 sha 下限（7 位）
-    HEADUP) src=$(printf '%s' "$head" | tr 'a-f' 'A-F') ;;
-    PARENT) src=$(git rev-parse 'HEAD^') ;;
-    # 后代：在 HEAD 之上再造一个提交，然后把工作树退回 HEAD（对象仍在克隆里，模拟「新推送已被 fetch 到」）
-    CHILD) echo "child of head" >> src/app.py; git commit -qam "child commit"
-           src=$(git rev-parse HEAD); git reset -q --hard 'HEAD^'; head=$(git rev-parse HEAD) ;;
-    # 分叉：`git commit --amend` 之后旧提交仍可达（reflog），它与新 HEAD 分属两条历史
-    ORPHAN) src=$(git rev-parse HEAD); git commit -q --amend -m "amended (history rewritten)"
-            head=$(git rev-parse HEAD) ;;
-    # 原样写入（`RAW:` 前缀）：要注入 `HEAD` / `@` / 一个 refname 这类**字面量**时必须走这里，
-    # 否则 `PS_SRC=HEAD` 会命中上面第一条分支、被换成真实 sha，形状锚定就测不到了。
-    RAW:*) src="${PS_SRC#RAW:}" ;;
-    *) src="$PS_SRC" ;;
-  esac
-  case "$PS_TGT" in BASE) tgt="$base" ;; *) tgt="$PS_TGT" ;; esac
-  # src-1（versionNo 1）是诱饵：选版本对必须按 versionNo 取最大，不能取第一条或最后一条
-  jq -n --arg src "$src" --arg tgt "$tgt" --arg srcmode "$PS_SRC" --arg tgtmode "$PS_TGT" \
-        --arg srcid "$PS_SRC_ID" --arg tgtid "$PS_TGT_ID" '[
-    (if $tgtmode == "NONE" then empty
-     else ({patchSetBizId:$tgtid, versionNo:1, relatedMergeItemType:"MERGE_TARGET"}
-           + (if $tgtmode == "OMIT" then {} else {commitId:$tgt} end)) end),
-    {patchSetBizId:"src-1", versionNo:1, relatedMergeItemType:"MERGE_SOURCE", commitId:"0000111122223333"},
-    ({patchSetBizId:$srcid, versionNo:9, relatedMergeItemType:"MERGE_SOURCE"}
-     + (if $srcmode == "OMIT" then {} else {commitId:$src} end))
-  ]' > "$IFX_DIR/list-patchsets.json"
-  for n in 1 2 3 4 5 6; do
-    [[ -e "$IFX_DIR/create-comment-inline.${n}.json" ]] \
-      || jq -n --arg id "draft-${n}" '{comment_biz_id:$id, comment_type:"INLINE_COMMENT", state:"DRAFT", draft:true}' \
-           > "$IFX_DIR/create-comment-inline.${n}.json"
-  done
+  PS_FIXTURE_DIR="$IFX_DIR" mk_patchsets_fixture
   [[ -z "$CASE_EXTRA_TWEAK" ]] || "$CASE_EXTRA_TWEAK"
 }
 # 用法：run_inline_case <用例名> <fixture 目录名> [VAR=值 …]；版本列表形态与额外改造走上面那几个全局量
@@ -721,7 +687,7 @@ run_inline_case() {
     DRY_RUN_FIXTURE_DIR="$IFX_DIR" CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 \
     MOCK_KIRO_CONTRACT="$E2E_CONTRACT" "$@"
   # 复位：`PS_SRC=… run_inline_case …` 这种赋值前缀是否在函数返回后仍生效，POSIX 未定义
-  PS_SRC="HEAD"; PS_TGT="BASE"; PS_SRC_ID="src-2"; PS_TGT_ID="tgt-1"; CASE_EXTRA_TWEAK=""
+  reset_ps_vars; CASE_EXTRA_TWEAK=""
 }
 # inline_bodies（本次创建了哪些行内评论）在 helpers.sh 里，与变异测试共用同一份实现。
 # 提交草稿那一次请求的 body
@@ -1023,7 +989,7 @@ assert_contains "$(posted_comment "$OUT")" "## 问题清单" "选不出版本对
 # 这个 commitId 在克隆里找不到 ⇒ 它是本次 checkout 之后推上去的 ⇒ 成因是新推送，**会自愈**（那次推送
 # 自己会触发新一轮评审），所以文案就直说新推送。滞后与历史改写各有自己的用例，见下。
 # from 用默认的真实 merge-base：只让 to 异常，隔离成因（from≠BASE 是另一条分支，见下面 R8）
-PS_SRC=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 run_inline_case shamismatch ifx-shamismatch
+PS_SRC=RAW:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 run_inline_case shamismatch ifx-shamismatch
 assert_rc "$RC" 0 "A11 新推送：评审仍成功（退出码 0）"
 assert_contains "$OUT" "不在本地克隆里" "A11 新推送：日志点明成因是提交不在克隆里"
 assert_contains "$OUT" "fail-closed" "A11 新推送：日志点明是 fail-closed，不是发了再提醒"
@@ -1041,6 +1007,7 @@ assert_contains "$comment" "行内评论未发出：评审期间源分支有新�
 assert_not_contains "$comment" "重跑流水线即可" "A11 新推送：不给「重跑流水线」这条相反的建议（那是滞后的处置）"
 assert_not_contains "$comment" "滞后" "A11 新推送：不把成因说成版本列表滞后"
 assert_contains "$comment" "## 问题清单" "A11 新推送：回落成完整展开的问题清单（INLINE_COMMENT=0 形态）"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '行内评论未发出')" "1" "A11 新推送：汇总里只有一句成因（票 17-fix3 ⑬：漏一处 return 就会变成两句）"
 assert_contains "$comment" "硬编码疑似应用密钥" "A11 新推送：问题明细仍在汇总里（信息不丢，I10）"
 assert_contains "$comment" "仓库级问题：没有统一的密钥管理" "A11 新推送：未定位问题也在完整清单里"
 assert_not_contains "$comment" "已标注在" "A11 新推送：不谎报行内计数（INLINE_ACTIVE 仍为 0）"
@@ -1057,8 +1024,8 @@ assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出" "A11 正�
 # from 侧那条警告是「P1-14 的结论失效了」的探针，必须先于 fail-closed 落进日志：否则最需要它的那种运行
 # （目标语义变了、同一个 MR 又在评审期间被推送）反而没有它，运维只会看到「推送太频繁」。
 # 汇总里仍然只写 fail-closed 的成因：一条行内评论都没发，「行内评论的行号可能有偏移」会让读者去找不存在的东西。
-PS_SRC=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 \
-  PS_TGT=feedfacefeedfacefeedfacefeedfacefeedface PS_TGT_ID=tgt-9 \
+PS_SRC=RAW:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef PS_SRC_ID=src-9 \
+  PS_TGT=RAW:feedfacefeedfacefeedfacefeedfacefeedface PS_TGT_ID=tgt-9 \
   run_inline_case bothmismatch ifx-bothmismatch
 assert_rc "$RC" 0 "A11 两者都不一致：评审仍成功"
 assert_contains "$OUT" "不等于本地 merge-base" "A11 两者都不一致：from 侧探针警告仍在日志里（不被 fail-closed 吞掉）"
@@ -1106,7 +1073,7 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "大写 sha：大小
 assert_not_contains "$OUT" "fail-closed" "大写 sha：不该 fail-closed"
 
 # ---- A11（17-fix2 B③）：提交号只有空白 → 走「没给出提交号」那条分支，不渲染空括号 ----
-PS_SRC="   " PS_SRC_ID=src-9 run_inline_case blanksha ifx-blanksha
+PS_SRC="RAW:   " PS_SRC_ID=src-9 run_inline_case blanksha ifx-blanksha
 assert_rc "$RC" 0 "空白 commitId：评审成功"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "空白 commitId：0 次创建行内评论"
 comment=$(posted_comment "$OUT")
@@ -1122,7 +1089,8 @@ assert_not_contains "$comment" "有新推送" "空白 commitId：不谎称新推
 PS_SRC=PARENT PS_SRC_ID=src-9 run_inline_case lagging ifx-lagging CODEUP_RETRY_BACKOFF=0
 assert_rc "$RC" 0 "版本列表滞后：评审成功"
 assert_contains "$OUT" "是当前 HEAD" "版本列表滞后：日志点明那个版本是 HEAD 的祖先"
-assert_contains "$OUT" "按退避重查至多 3 次" "版本列表滞后：日志写明要重查几次"
+# 数字来自脚本里的 INLINE_LAG_MAX / INLINE_LAG_BUDGET（票 17-fix3 ⑯：测试也不硬写，只钉住「写明了上限」）
+assert_contains "$OUT" "按退避重查（至多 3 次，总等待不超过 45 秒" "版本列表滞后：日志写明重查上限与总等待预算"
 # 重查已经挪到预采样里（票 17-fix3 ⑥）：预采样 1 次 + 三次重查 = 4 次，发布前不再查
 assert_eq "$(req_count "$OUT" GET 'diffs/patches$')" "4" "版本列表滞后：预采样 1 次 + 三次重查 = 4 次 GET"
 assert_contains "$OUT" "重查第 3/3 次" "版本列表滞后：三次都跑到了"
@@ -1177,6 +1145,36 @@ done
 PS_SRC=HEAD6 PS_SRC_ID=src-9 run_inline_case shape6 ifx-shape6
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "形状锚定：6 位十六进制短于 git 短 sha 下限，不认"
 
+# ---- A11（17-fix3 ⑩）：浅克隆里解析不出的提交 → 不能断言「新推送」----
+# 这一条走**函数级**而不是端到端：把 fixture 仓库削成浅克隆会同时打断脚本自己的 diff 基准
+# （`merge-base origin/<目标分支>`），那时评审在第 4 步就失败了，测不到版本核对。
+# 所以直接抽出两个纯函数，在一个专门造的浅克隆里跑。
+sh_dir="$tmp/shallow-src"; sh_clone="$tmp/shallow-clone"
+git init -q "$sh_dir"
+( cd "$sh_dir" && git config user.email t@t && git config user.name t \
+  && echo one > f && git add f && git commit -qm one \
+  && echo two >> f && git commit -qam two \
+  && echo three >> f && git commit -qam three )
+old_sha=$( cd "$sh_dir" && git rev-parse 'HEAD~2' )
+# 从**非裸**仓库浅克隆（depth=1）：`HEAD~2` 于是落在 graft 边界之下、在克隆里解析不出
+git clone -q --depth=1 "file://$sh_dir" "$sh_clone"
+# 抽出待测函数（整脚本 source 会执行主流程），并给它一个空的 log 与一个必然失败的 fetch
+sed -n '/^inline_resolve_commit() {/,/^}/p;/^inline_classify_to() {/,/^}/p' "$ROOT/scripts/kiro-review.sh" > "$tmp/cls.sh"
+sh_status=$( cd "$sh_clone" \
+  && git remote set-url origin "file://$tmp/no-such-remote.git" \
+  && log() { :; } \
+  && source "$tmp/cls.sh" \
+  && inline_classify_to "$old_sha" "$(git rev-parse HEAD)" \
+  && printf '%s' "$INLINE_TO_STATUS" )
+assert_eq "$(cd "$sh_clone" && git rev-parse --is-shallow-repository)" "true" "浅克隆前置：克隆确实是浅的"
+assert_eq "$sh_status" "unknown_shallow" \
+  "17-fix3 ⑩：浅克隆里解析不出、加深又失败 → 判定 unknown_shallow（不是 pushed_dark「新推送、会自愈」）"
+# 正控：同一个提交在**非浅**克隆里解析得出 → 它是 HEAD 的祖先，判定滞后而不是新推送
+git clone -q "file://$sh_dir" "$tmp/deep-clone"
+deep_status=$( cd "$tmp/deep-clone" && log() { :; } && source "$tmp/cls.sh" \
+  && inline_classify_to "$old_sha" "$(git rev-parse HEAD)" && printf '%s' "$INLINE_TO_STATUS" )
+assert_eq "$deep_status" "lag" "17-fix3 ⑩ 正控：非浅克隆里同一个提交解析得出、是 HEAD 的祖先 → lag"
+
 # ---- A11（17-fix3 ③）：最新合并源版本是 HEAD 的**后代** ⇒ 评审期间有新推送（对象已在克隆里）----
 # 浅克隆下这个提交拉不到（判定 pushed_dark），fetch 过之后它在本地（判定 pushed_known）——同一个事件，
 # 处置与文案必须一致，不能一个说新推送、另一个说 force-push。
@@ -1225,6 +1223,27 @@ assert_contains "$comment" "评审期间源分支有新推送" "重查期间来�
 assert_not_contains "$comment" "尚未包含本次提交" "重查期间来了新推送：不再一律说滞后"
 assert_not_contains "$comment" "重跑流水线即可" "重查期间来了新推送：不给「重跑」这条只会复现的建议"
 
+# ---- A11（17-fix3 ⑮）：滞后重查期间接口一直失败 → 用「查询版本列表失败」那条 notice，不谎称滞后 ----
+# 按调用序号注入（DRY_RUN_FAIL_ROUTES 的 `@N+`）：第 1 次（预采样）成功、第 2 次（发布前采样）拿到旧版本
+# 触发重查、第 3 次起全部 403。这正是第 ② 条最坏的实例：403 被说成「滞后，重跑流水线即可」。
+mk_lag_then_403() {
+  jq -n --arg sha "$(git rev-parse HEAD)" --arg base "$(git merge-base origin/master HEAD)" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-2", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFX_DIR/list-patchsets.1.json"
+}
+PS_SRC=PARENT PS_SRC_ID=src-9 CASE_EXTRA_TWEAK=mk_lag_then_403 \
+  run_inline_case lagthen403 ifx-lagthen403 CODEUP_RETRY_BACKOFF=0 DRY_RUN_FAIL_ROUTES="list-patchsets:403@3+"
+assert_rc "$RC" 0 "重查一直 403：评审仍成功"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "重查一直 403：0 次创建行内评论"
+assert_contains "$OUT" "两次采样：checkout 时判定=ok" "重查一直 403：两次采样比对写进日志"
+assert_contains "$OUT" "重查 MR 版本列表失败（HTTP 403）" "重查一直 403：每次失败都留痕"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "查询 MR 版本列表失败（HTTP 403）" "重查一直 403：按最终成因（接口失败）给 notice"
+assert_not_contains "$comment" "尚未包含本次提交" "重查一直 403：不谎称滞后"
+assert_not_contains "$comment" "重跑流水线即可" "重查一直 403：不给「重跑」这条只会复现的建议"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '行内评论未发出')" "1" "重查一直 403：汇总里只有一句成因（票 17-fix3 ⑬）"
+
 # ---- A11（17-fix3 ②）：滞后重查期间接口失败 / 选不出版本对 → 各自既有的 notice ----
 mk_lag_then_500() {
   local base
@@ -1251,7 +1270,7 @@ assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "from 缺 commitId�
 assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出" "from 缺 commitId：不 fail-closed"
 assert_not_contains "$(posted_comment "$OUT")" "行号可能有偏移" "from 缺 commitId：没有提交号就不谈偏移（无从比较）"
 # ---- A11（17-fix3 ⑤）：最新合并目标版本的提交号只有空白 → 与 to 侧同样先去空白，不渲染空括号 ----
-PS_TGT="   " PS_TGT_ID=tgt-9 run_inline_case fromblank ifx-fromblank
+PS_TGT="RAW:   " PS_TGT_ID=tgt-9 run_inline_case fromblank ifx-fromblank
 assert_rc "$RC" 0 "from 空白 commitId：评审成功"
 assert_contains "$OUT" "P1-14 的探针" "from 空白 commitId：按「没有提交号」处置（探针失效）"
 assert_not_contains "$OUT" "不等于本地 merge-base" "from 空白 commitId：不落到「基准不一致」那条分支"
@@ -1391,7 +1410,7 @@ assert_contains "$comment" "**行内发布失败（3）**" "R6b 回读失败：�
 # 与 A11 相反：line_number 是新文件侧行号（P1-02 实测），比较基准不同不改变行号；P1-14 又证明 MERGE_TARGET
 # 冻结在建 MR 时的 merge-base。所以这条只是留痕，不拒发。
 # MERGE_TARGET 的 commitId 是目标分支顶端（不是 merge-base）——目标分支在 MR 分出后前进过
-PS_TGT=feedfacefeedfacefeedfacefeedfacefeedface PS_TGT_ID=tgt-9 run_inline_case basemismatch ifx-basemismatch
+PS_TGT=RAW:feedfacefeedfacefeedfacefeedfacefeedface PS_TGT_ID=tgt-9 run_inline_case basemismatch ifx-basemismatch
 assert_rc "$RC" 0 "R8 基准不一致：评审仍成功"
 assert_contains "$OUT" "不等于本地 merge-base" "R8 基准不一致：日志告警"
 assert_contains "$OUT" "P1-14" "R8 基准不一致：日志引用 P1-14 的结论（不 fail-closed 的依据）"
