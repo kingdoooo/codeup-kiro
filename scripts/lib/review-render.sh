@@ -114,10 +114,14 @@ _REVIEW_JQ_SANITIZE="def dectl(v): (v | gsub(\"${REVIEW_CTRL_JQ_RE}\"; \"\"));"'
   # 渲染器把它当段落，其后的 `<div>` 照样渲染）；闭合围栏必须与开启同一字符、长度不短于开启、后面只能
   # 有空白（所以 ``` 里的 `~~~` 是内容，`~~~` 里的 ``` 也是）。开启行本身也过标签转义：info string 里
   # 的 `<` 没有任何合法用途。围栏内只认定不渲染 HTML，其余一律按普通行处理。
+  # 围栏长度上限 8（16-fix4 第 19 条补 ①）：真实代码围栏是 3–4 个、偶见 5；行首 ≥ 9 个反引号 / ~ 的串不开围栏（下面按普通文本把首字符
+  # 转义），于是补的闭合围栏最长 8 字节。否则 40 000 个反引号的字段：开 40 000 + 补 40 000，截到上限再洗又补上限，字段翻倍、上限循环不收敛。
   def _fence_open: [capture("^[[:space:]]{0,3}(?<f>`{3,}|~{3,})(?<info>.*)$")][0]
                    | if . == null then null
+                     elif (.f | length) > 8 then null
                      elif (.f | startswith("~")) or (.info | test("`") | not) then {ch: .f[0:1], len: (.f | length)}
                      else null end;
+  def _re_longfence: "^[[:space:]]{0,3}(`{9,}|~{9,})";
   def _fence_close($ch; $len): [capture("^[[:space:]]{0,3}(?<f>`{3,}|~{3,})[[:space:]]*$")][0]
                    | . != null and (.f[0:1] == $ch) and ((.f | length) >= $len);
   # 分隔线与 setext 下划线（PROGRESS：原先只认连续 3+ 个 `-*_=`，`- - -`/`* * *`/单个 `=`/`-` 漏网）：
@@ -145,7 +149,9 @@ _REVIEW_JQ_SANITIZE="def dectl(v): (v | gsub(\"${REVIEW_CTRL_JQ_RE}\"; \"\"));"'
             else
               ($l | _escape_tags) as $t
               | {fch: null, flen: 0, out: (.out + [
-                  if ($t | test("^[[:space:]]{0,3}#{1,6}([[:space:]]|$)")) then
+                  if ($t | test(_re_longfence)) then
+                    ($t | sub("^(?<sp>[[:space:]]{0,3})"; .sp + "\\"))
+                  elif ($t | test("^[[:space:]]{0,3}#{1,6}([[:space:]]|$)")) then
                     ($t | sub("^(?<sp>[[:space:]]{0,3})(?<h>#{1,6})"; .sp + "\\" + .h))
                   elif ($t | _is_break_line) then
                     ($t | sub("^(?<sp>[[:space:]]{0,3})"; .sp + "\\"))
@@ -472,11 +478,13 @@ review_finalize_json() {
           | if ($c | utf8bytelength) > $m then .b = ([0, (((($b * $m) / ($c | utf8bytelength)) | floor) - 1)] | max) else . end)
       | if .c != null and (.c | utf8bytelength) <= $m then .c else (_bytecut($raw; (($m / 4) | floor)) | _sanitize_md) end;   # 6 轮仍超（清洗膨胀 > 2.5 倍的病态输入）：预算砍到 1/4 再洗一次
     def _mark: "（已截断）";
+    # 切点可能落在 boldsafe 产出的 `\*` 转义对中间，留下一个孤立反斜杠（第 19 条补 ②）：末尾奇数长度的反斜杠串去掉最后一个
+    def _trim_dangling_bs: if ((capture("(?<bs>\\\\*)$").bs | length) % 2) == 1 then .[:-1] else . end;
     # 输入一定是字符串（归一化后每个文本字段都是字符串——这条不变量可以依赖，不再留「非字符串」分支，第 12b 条补）
     def cap(v; n): v as $v | n as $n
       | ($v | _sanitize_md) as $s
       | if ($s | utf8bytelength) <= $n then {v: $s, t: 0}
-        else {v: (_fit($v; $n - (_mark | utf8bytelength)) + _mark), t: 1} end;
+        else {v: ((_fit($v; $n - (_mark | utf8bytelength)) | _trim_dangling_bs) + _mark), t: 1} end;
     # 加粗槽位：title 会被脚本包进 `**…**`（问题标题行、折叠区条目、行内评论首行）。先把 `*` 转义成 `\*`，
     # 否则标题里的 `**kwargs` 会提前闭合脚本的加粗、把级别前缀变回普通文字。先转义再清洗：转义后的
     # 字符串以反斜杠开头，不会再被 _sanitize_md 的整行加粗规则二次转义。

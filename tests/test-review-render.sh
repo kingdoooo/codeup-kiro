@@ -2456,6 +2456,20 @@ assert_eq "$(jq -n --arg c "$big" '{contract:"codeup-reviewer/1", summary:$c, ve
   "第 12a 条：预切不影响最终字节上限（summary 8192 内）；id 只预切、不计入 truncated_fields"
 assert_eq "$(jq -n --arg v "$(python3 -c 'print("MERGE"*1000)')" '{contract:"codeup-reviewer/1", summary:"s", verdict:$v, verdict_reason:"r", findings:[]}' | review_validate | jq -r '.verdict | length')" "256" "第 12a 条补：verdict 也切 256 码点（cf29da0 5000 位原样进 ## 结论：正控）"
 assert_eq "$(jq -r '[.findings[] | has("_tc")] | any' "$tmp/cap2.json")" "false" "第 12b 条补：truncated_fields 的统计不再往 finding 上挂中间字段"
+# 第 19 条补 ①：围栏长度上限 8——40 000 个反引号的字段不再「开 40 000 + 补 40 000」（cf29da0：title 4112 / body 65552 / fix 32784：正控）
+bt=$(python3 -c 'print("`"*40000, end="")')
+jq -n --arg c "$bt" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1}]}' \
+  | review_validate > "$tmp/bt.json"
+assert_eq "$(jq -r '[(.findings[0].title|utf8bytelength <= 2048), (.findings[0].body|utf8bytelength <= 32768), (.findings[0].fix|utf8bytelength <= 16384), .truncated_fields] | @csv' "$tmp/bt.json")" "true,true,true,3" \
+  "第 19 条补 ①：40 000 反引号的三个字段都落在上限内"
+assert_eq "$(printf '%s\n' '````````' '<b>x</b>' '````````' | review_sanitize_md | sed -n 2p)" "<b>x</b>" "第 19 条补 ①：8 个反引号仍是围栏（围栏内不转义）"
+assert_eq "$(printf '%s\n' '`````````' '<b>x</b>' | review_sanitize_md | tr '\n' '|')" '\`````````|&lt;b>x&lt;/b>|' "第 19 条补 ①：9 个反引号不开围栏，首字符转义、其后照常转义（cf29da0 当围栏放行 <b>：正控）"
+# 第 19 条补 ②：切点落在 boldsafe 的 \* 转义对中间时，标记前不能剩一个孤立反斜杠（4e542ca 上 pad 1023 复现 `…\*\（已截断）`）
+for pad in 1021 1022 1023 1024 1025; do
+  t=$(python3 -c "import sys; print('a'*int(sys.argv[1]) + '*'*3000, end='')" "$pad")
+  assert_eq "$(jq -n --arg t "$t" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$t,body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -r '.findings[0].title | (capture("(?<bs>\\\\*)（已截断）$").bs | length) % 2')" "0" \
+    "第 19 条补 ②：pad ${pad} 的 title 截断标记前反斜杠成对（无孤立反斜杠）"
+done
 # 第 12d 条：计时守卫（目标 < 5 s，守 4 倍）——10000 个 <!-- 的膨胀向量与 100 KB 单行 body 都要在秒级；不要靠缩小向量让它变快
 python3 -c 'import json,random,string; random.seed(7); s="".join(random.choice(string.ascii_letters+string.digits+"+/ .") for _ in range(100000)); print(json.dumps({"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"r","findings":[{"severity":"P0","title":"t","body":s,"fix":"","file":"src/app.py","line_start":1}]}))' > "$tmp/big-line.json"
 t0=$SECONDS; review_validate < "$tmp/big-line.json" > "$tmp/big-line.out"; jq -n --arg c "$filler" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1}]}' | review_validate > /dev/null; el=$((SECONDS - t0))
