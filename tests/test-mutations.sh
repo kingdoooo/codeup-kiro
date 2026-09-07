@@ -222,7 +222,8 @@ assert_eq "$(grep -c -x -- 'KIRO_FOO' "$MD/env")" "1" "M5k：KIRO_FOO 被透传�
 
 # --- M5l：安装函数漏写 grep 那一处 allowedPaths → grep 没有边界（15-fix #3 / 15-fix2 #16：单变异可杀）---
 # 单测层：三处不再相等；端到端层：执行器第 3 步的 kiro_agent_selfcheck **按值**比对三处 allowedPaths，拦下来并回写失败评论
-pkg=$(make_mutant m5l-grep-allow '/\.toolsSettings\.grep\.allowedPaths = \[\$ws, \$ch\]/d' scripts/lib/kiro-agent.sh)
+# 15-fix4 裁决 A 后三处 allowedPaths 由 reduce 循环统一写入，不再有 grep 专属的一行；变异改为「循环里对 grep 跳过覆盖」（保留源定义里的旧值）。
+pkg=$(make_mutant m5l-grep-allow 's/\.toolsSettings\[\$t\]\.allowedPaths = \[\$ws, \$ch\]/.toolsSettings[$t].allowedPaths = (if $t == "grep" then .toolsSettings[$t].allowedPaths else [$ws, $ch] end)/' scripts/lib/kiro-agent.sh)
 mkdir -p "$tmp/m5l-ws" "$tmp/m5l-ch"
 dest5l=$( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_install_agent "$pkg/kiro/agent-codeup-reviewer.json" "$tmp/m5l-agents" --workspace "$tmp/m5l-ws" --chunks "$tmp/m5l-ch" 2>/dev/null )
 assert_eq "$([[ "$(jq -c .toolsSettings.grep.allowedPaths "$dest5l")" == "$(jq -c .toolsSettings.read.allowedPaths "$dest5l")" ]] && echo same || echo differs)" "differs" \
