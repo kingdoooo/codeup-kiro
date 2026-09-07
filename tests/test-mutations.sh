@@ -732,7 +732,7 @@ b64_pad="dGhpcyBpcyBh""IHNlY3JldA=="
 assert_contains "$(mut_rd_multi "$pkg" "api_key = \"${b64_pad}\"\n")" "$b64_pad" "M41：补位 == 结尾的取值原样放出——单测「掩码①」断言会失败"
 assert_eq "$(mut_rd_multi "$ROOT" "api_key = \"${b64_pad}\"\n")" 'api_key = "dGhp****dA=="' "M41 对照：未变异实现从键之后向前找分隔符、取值被掩"
 # M42：放出时不再掩夹在句子里的 base64 连片（redact_b64 的掩码换成原样）
-pkg=$(make_mutant m42-b64-runs 's|out = out substr(s, 1, RSTART - 1) (b64_material(m, minlen) ? (full ? "\*\*\*\*" : mask(m)) : m)|out = out substr(s, 1, RSTART - 1) m|' scripts/lib/review-render.sh)
+pkg=$(make_mutant m42-b64-runs 's|out = out substr(s, 1, RSTART - 1) (b64_material(m, minlen, 1) ? (full ? "\*\*\*\*" : mask(m)) : m)|out = out substr(s, 1, RSTART - 1) m|' scripts/lib/review-render.sh)
 assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "$PEM_L64" "M42：句子里的私钥正文片段完整放出——单测「片段不进评论」断言会失败"
 assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "MIIEowIBAAKCAQEAfakekey0123456" "M42 对照：整行正文仍被掩（另一条规则）"
 # M43：放出时不再掩整行 base64
