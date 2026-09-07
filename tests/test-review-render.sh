@@ -2470,6 +2470,17 @@ for pad in 1021 1022 1023 1024 1025; do
   assert_eq "$(jq -n --arg t "$t" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$t,body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -r '.findings[0].title | (capture("(?<bs>\\\\*)（已截断）$").bs | length) % 2')" "0" \
     "第 19 条补 ②：pad ${pad} 的 title 截断标记前反斜杠成对（无孤立反斜杠）"
 done
+# 第 41 条：单行槽位里的 ``` 不能把汇总打进代码块——verdict / title 各放一个未闭合围栏串
+jq --arg v '``` MERGE' --arg t '```oops' '.verdict = $v | .findings[0].title = $t' fixtures/contract/full.json | review_validate > "$tmp/fence-inline.json"
+assert_eq "$(jq -r '.verdict' "$tmp/fence-inline.json")" '\``` MERGE' "第 41 条：verdict 里的围栏串首字符转义、仍是单行"
+assert_eq "$(jq -r '.findings[0].title' "$tmp/fence-inline.json")" '\```oops' "第 41 条：title 里的围栏串首字符转义、仍是单行"
+review_render_summary --json "$tmp/fence-inline.json" --sha 90fcb05 --src f --dst main --ts t --diff-note n > "$tmp/fence-inline.md"
+review_validate < fixtures/contract/full.json > "$tmp/fence-plain.json"
+review_render_summary --json "$tmp/fence-plain.json" --sha 90fcb05 --src f --dst main --ts t --diff-note n > "$tmp/fence-plain.md"
+assert_eq "$(( $(grep -c '^```' "$tmp/fence-inline.md" || true) % 2 ))" "0" "第 41 条：汇总全文列 0 的围栏成对"
+assert_eq "$(wc -l < "$tmp/fence-inline.md" | tr -d ' ')" "$(wc -l < "$tmp/fence-plain.md" | tr -d ' ')" "第 41 条：行数与正常渲染一致（c01b226 多出两行闭合围栏：正控）"
+assert_eq "$(jq --arg v '~~~ MERGE' '.verdict = $v' fixtures/contract/full.json | review_validate | jq -r '.verdict')" '\~~~ MERGE' "第 41 条：~~~ 围栏串同样转义"
+assert_eq "$(jq --arg i 'F```1' --arg c 'sec```' '.findings[0].id = $i | .findings[0].category = $c' fixtures/contract/full.json | review_validate | jq -r '.findings[0].id + " " + .findings[0].category')" 'F\```1 sec\```' "第 41 条：id / category 走同一份单行清洗"
 # 第 12d 条：计时守卫（目标 < 5 s，守 4 倍）——10000 个 <!-- 的膨胀向量与 100 KB 单行 body 都要在秒级；不要靠缩小向量让它变快
 python3 -c 'import json,random,string; random.seed(7); s="".join(random.choice(string.ascii_letters+string.digits+"+/ .") for _ in range(100000)); print(json.dumps({"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"r","findings":[{"severity":"P0","title":"t","body":s,"fix":"","file":"src/app.py","line_start":1}]}))' > "$tmp/big-line.json"
 t0=$SECONDS; review_validate < "$tmp/big-line.json" > "$tmp/big-line.out"; jq -n --arg c "$filler" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1}]}' | review_validate > /dev/null; el=$((SECONDS - t0))

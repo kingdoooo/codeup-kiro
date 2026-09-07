@@ -163,6 +163,11 @@ _REVIEW_JQ_SANITIZE="def dectl(v): (v | gsub(\"${REVIEW_CTRL_JQ_RE}\"; \"\"));"'
     | (if .fch != null then (.out + [(.fch * .flen)]) else .out end)
     | join("\n")
     end;
+  # 单行槽位（verdict / title / id / category）的清洗（16-fix4 第 41 条）：_sanitize_md 用「另起一行补闭合围栏」修未闭合围栏，单行槽位因此
+  # 变成两行，把列 0 的 ``` 注进汇总结构（`verdict = "``` MERGE"` 让其后 30 行全进代码块）。先把 ≥ 3 个反引号 / ~ 的串首字符转义
+  # （不可能再成围栏），再 _sanitize_md，最后把换行折成空格兜底保证单行。
+  def _escape_fence_runs: gsub("(?<r>`{3,}|~{3,})"; "\\" + .r);
+  def _sanitize_inline: _escape_fence_runs | _sanitize_md | gsub("\n"; " ");
 '
 
 # --- 不受信取值进表格单元格 / code span 时要剔掉的字符集（票 13：三处只此一份；仓库里习惯把这条规则叫「字符许可清单」，
@@ -491,7 +496,7 @@ review_finalize_json() {
     # 标题里**所有** `*` 一律转义（16-fix4 第 22 条）：掩码结果 `AKIA****4567` 的四颗星也转义成 `\*\*\*\*`（渲染出来仍是 ****）——
     # 一处掩码靠 CommonMark「三的倍数」规则碰巧不闭合外层 `**`，两处（`硬编码 AKIA… 与 ghp_… 两处密钥`）就互相配对、把 `P0 ·`
     # 级别前缀打回普通文字。全部转义在两种解读下都安全。
-    def boldsafe_esc: if type == "string" then gsub("\\*"; "\\*") else . end;   # 清洗由 cap 做（最后一步一定是清洗）
+    def boldsafe_esc: _escape_fence_runs | gsub("\\*"; "\\*");   # 围栏串与 * 先转义（第 41 / 22 条），清洗由 cap 做（最后一步一定是清洗）
     # 一遍遍历、无中间字段（第 12b 条补）：原先往 finding 上挂 ._tc 再 del，._tc 是 validated.json 的可见字段，漏掉那句 del 就流进 plan.json
     . as $r
     | cap($r.summary; $cap_summary) as $S
@@ -500,10 +505,10 @@ review_finalize_json() {
           cap((.title | boldsafe_esc); $cap_title) as $T
           | cap(.body; $cap_body) as $B
           | cap(.fix; $cap_fix) as $F
-          | {f: (.title = $T.v | .body = $B.v | .fix = $F.v | .id |= _sanitize_md | .category |= _sanitize_md),
+          | {f: (.title = ($T.v | gsub("\n"; " ")) | .body = $B.v | .fix = $F.v | .id |= _sanitize_inline | .category |= _sanitize_inline),
              t: ($T.t + $B.t + $F.t)})) as $fs
     | .findings = ($fs | map(.f))
-    | .summary = $S.v | .verdict_reason = $R.v | .verdict |= _sanitize_md
+    | .summary = $S.v | .verdict_reason = $R.v | .verdict |= _sanitize_inline
     | .truncated_fields = ($S.t + $R.t + ($fs | map(.t) | add // 0))'
 }
 # --- 契约校验（对外入口）：归一化 → 字段级掩码 → 清洗 + 上限（stdin → stdout）---
