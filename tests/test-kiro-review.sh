@@ -1862,7 +1862,7 @@ assert_eq "$actual" "$expected" "谓词等价：生产隔离函数删除的集�
 assert_eq "$(od -An -c "$tmp/eq-removed.zlist" | tr -d ' \n')" "$pre_scan" "谓词等价：删除清单逐字节等于删除前发射器的 NUL 流（先写清单再删）"
 assert_eq "$(tr '\0' '\n' < "$tmp/eq-removed.zlist" | cut -f1 | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}')" "agents=2 kiro=2 links=6 lsp=1 " "谓词等价：清单里的 class 列与四个计数一致"
 assert_eq "$([[ -L "$EQ/$(printf 'tabtail\t')" ]] && echo survived || echo gone)" "gone" "合并后复审②：名字以制表符结尾的符号链接真的被删了（130f977：计数了、清单里有、链接却幸存——正控）"
-assert_eq "$counts" "2 2 5 1" "谓词等价：计数 = 2 个 AGENTS.md（根 + a/agents.md）、2 个 .kiro（目录 + 链接）、5 个符号链接（filelink dirlink dangling a/b/deeplink c/.git）、1 个根 lsp.json"
+assert_eq "$counts" "2 2 6 1" "谓词等价：计数 = 2 个 AGENTS.md（根 + a/agents.md）、2 个 .kiro（目录 + 链接）、6 个符号链接（filelink dirlink dangling a/b/deeplink c/.git tabtail\t）、1 个根 lsp.json"
 assert_eq "$(cd "$EQ" && injection_surface_scan | wc -l | tr -d ' ')" "0" "谓词等价：隔离后枚举版扫描为空"
 assert_eq "$([[ -L "$EQ/.git/rootgitlink" && -f "$EQ/.git/AGENTS.md" ]] && echo kept || echo gone)" "kept" "谓词等价：根 .git 内部不动"
 assert_eq "$([[ -L "$EQ/nested/repo/.git/innerlink" && -f "$EQ/nested/repo/.git/AGENTS.md" && -d "$EQ/nested/repo/.git/.kiro" ]] && echo kept || echo gone)" "kept" "谓词等价：嵌套 .git 内部不动"
