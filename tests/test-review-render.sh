@@ -2486,6 +2486,22 @@ assert_eq "$(( $(grep -c '^```' "$tmp/fence-inline.md" || true) % 2 ))" "0" "第
 assert_eq "$(wc -l < "$tmp/fence-inline.md" | tr -d ' ')" "$(wc -l < "$tmp/fence-plain.md" | tr -d ' ')" "第 41 条：行数与正常渲染一致（c01b226 多出两行闭合围栏：正控）"
 assert_eq "$(jq --arg v '~~~ MERGE' '.verdict = $v' fixtures/contract/full.json | review_validate | jq -r '.verdict')" '\~~~ MERGE' "第 41 条：~~~ 围栏串同样转义"
 assert_eq "$(jq --arg i 'F```1' --arg c 'sec```' '.findings[0].id = $i | .findings[0].category = $c' fixtures/contract/full.json | review_validate | jq -r '.findings[0].id + " " + .findings[0].category')" 'F\```1 sec\```' "第 41 条：id / category 走同一份单行清洗"
+# 第 38 条：因正文超过评论上限而没发出的行内条目，折叠区只渲染标题 + 一句说明（不搬 40 KB 正文进汇总）
+python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["findings"][0]["body"]="B"*40000; c["findings"][0]["fix"]="F"*40000; json.dump(c,open(sys.argv[2],"w"),ensure_ascii=False)' fixtures/contract/inline.json "$tmp/over38.json"
+review_validate < "$tmp/over38.json" > "$tmp/over38.v.json"
+review_plan_inline --json "$tmp/over38.v.json" --changed-lines "$CL" > "$tmp/over38.plan.json"
+jq -c '[.inline[] | {idx, outcome: "created"}] | .[0] += {outcome: "failed", reason: "oversize", bytes: 32900, limit: 20000}' "$tmp/over38.plan.json" > "$tmp/over38.oc.json"
+review_plan_apply_outcomes "$tmp/over38.plan.json" "$tmp/over38.oc.json" > "$tmp/over38.final.json"
+assert_eq "$(jq -c '[.folded.failed | length, .folded.failed[0].fail_reason, .folded.failed[0].fail_bytes, .folded.failed[0].fail_limit]' "$tmp/over38.final.json")" '[1,"oversize",32900,20000]' "第 38 条：apply_outcomes 把 reason / bytes / limit 挂到 failed 条目上"
+assert_eq "$(jq -c '[.inline[] | has("fail_reason")] | any' "$tmp/over38.final.json")" "false" "第 38 条：发出去的条目不带失败字段"
+review_render_summary --json "$tmp/over38.final.json" --inline-comment 1 --sha 90fcb05 --src f --dst main --ts t --diff-note n > "$tmp/over38.md"
+assert_contains "$(cat "$tmp/over38.md")" "正文 32900 字节超过评论上限 MAX_COMMENT_BYTES=20000，未在评论中展示。" "第 38 条：折叠区那一条只有标题 + 说明句"
+assert_not_contains "$(cat "$tmp/over38.md")" "$(python3 -c 'print("B"*200, end="")')" "第 38 条：40 KB 正文没有进汇总（4e542ca 全文搬进折叠区：正控）"
+assert_eq "$([[ $(wc -c < "$tmp/over38.md") -lt 20000 ]] && echo ok)" "ok" "第 38 条：汇总总字节 < 20000（不会再触发截断）"
+jq -c '[.inline[] | {idx, outcome: "created"}] | .[0] += {outcome: "failed"}' "$tmp/over38.plan.json" > "$tmp/over38.oc2.json"
+review_plan_apply_outcomes "$tmp/over38.plan.json" "$tmp/over38.oc2.json" > "$tmp/over38b.final.json"
+review_render_summary --json "$tmp/over38b.final.json" --inline-comment 1 --sha 90fcb05 --src f --dst main --ts t --diff-note n > "$tmp/over38b.md"
+assert_contains "$(cat "$tmp/over38b.md")" "$(python3 -c 'print("B"*200, end="")')" "第 38 条对照：普通 failed（发布失败、无 reason）仍完整渲染 body（一条行内评论都没发出去，说明与修复建议只有这一个落点）"
 # 第 12d 条：计时守卫（目标 < 5 s，守 4 倍）——10000 个 <!-- 的膨胀向量与 100 KB 单行 body 都要在秒级；不要靠缩小向量让它变快
 python3 -c 'import json,random,string; random.seed(7); s="".join(random.choice(string.ascii_letters+string.digits+"+/ .") for _ in range(100000)); print(json.dumps({"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"r","findings":[{"severity":"P0","title":"t","body":s,"fix":"","file":"src/app.py","line_start":1}]}))' > "$tmp/big-line.json"
 t0=$SECONDS; review_validate < "$tmp/big-line.json" > "$tmp/big-line.out"; jq -n --arg c "$filler" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1}]}' | review_validate > /dev/null; el=$((SECONDS - t0))

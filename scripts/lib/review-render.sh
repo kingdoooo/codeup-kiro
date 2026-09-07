@@ -792,13 +792,17 @@ review_plan_apply_outcomes() {
   local plan="$1" outcomes="$2"
   [[ -r "$plan" ]] || { echo "review_plan_apply_outcomes: 计划文件不可读：${plan}" >&2; return 2; }
   [[ -r "$outcomes" ]] || { echo "review_plan_apply_outcomes: 结果文件不可读：${outcomes}" >&2; return 2; }
+  # 结果记录整条保留（第 38 条）：failed 条目带上 reason / bytes / limit（超大正文守卫写的），折叠渲染器据此只渲染标题
   jq -c --slurpfile oc "$outcomes" '
     (($oc[0] // []) | map(select(type == "object" and (.idx | type) == "number"))
-                    | map({key: (.idx | tostring), value: (.outcome // "failed")}) | from_entries) as $o
-    | def status(f): ($o[(f.idx | tostring)] // "failed");
+                    | map({key: (.idx | tostring), value: .}) | from_entries) as $o
+    | def rec(f): ($o[(f.idx | tostring)] // {});
+      def status(f): (rec(f).outcome // "failed");
       (.inline // []) as $in
     | [ $in[] | select(status(.) != "failed") ] as $kept
-    | [ $in[] | select(status(.) == "failed") ] as $failed
+    | [ $in[] | select(status(.) == "failed")
+        | . as $f | rec($f) as $r
+        | if ($r.reason | type) == "string" then . + {fail_reason: $r.reason, fail_bytes: ($r.bytes // null), fail_limit: ($r.limit // null)} else . end ] as $failed
     | .inline = $kept
     | .folded.failed = $failed
     | .inline_count = ($kept | length)
@@ -1490,12 +1494,15 @@ _review_render_fold_section() {
   echo ""
   printf '**%s（%s）**\n' "$title" "$n"
   if [[ "$full" == "1" ]]; then
-    # 与「问题清单」同款：编号 + 定位串 + 标题 + 说明 + 修复建议
+    # 与「问题清单」同款：编号 + 定位串 + 标题 + 说明 + 修复建议。因正文超过评论上限而没发出的条目（fail_reason=oversize，第 38 条）
+    # 只渲染标题 + 一句说明——把 40 KB 正文搬进汇总只会让汇总也超限、把其它问题的文本一起截掉
     jq -r --arg b "$bucket" --arg unloc "$unloc" "${_REVIEW_JQ_LOC}"'
       (.folded[$b] // []) | to_entries[]
       | .value as $f
-      | "\n**\(.key + 1). \($f | _loc($unloc)) — \($f.title)**\n\n\($f.body)"
-        + (if ($f.fix | length) > 0 then "\n\n**修复建议**\n\n\($f.fix)" else "" end)' "$plan"
+      | "\n**\(.key + 1). \($f | _loc($unloc)) — \($f.title)**\n\n"
+        + (if $f.fail_reason == "oversize"
+           then "正文 \($f.fail_bytes // "?") 字节超过评论上限 MAX_COMMENT_BYTES=\($f.fail_limit // "?")，未在评论中展示。"
+           else "\($f.body)" + (if ($f.fix | length) > 0 then "\n\n**修复建议**\n\n\($f.fix)" else "" end) end)' "$plan"
     return 0
   fi
   echo ""

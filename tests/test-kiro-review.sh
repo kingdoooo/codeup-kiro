@@ -1458,6 +1458,11 @@ assert_rc "$RC" 0 "第 7 条守卫：评审成功"
 assert_contains "$OUT" "字节超过 MAX_COMMENT_BYTES=20000，转入折叠区" "第 7 条守卫：日志点明超限正文进折叠区"
 assert_eq "$(inline_bodies "$OUT" | grep -c . || true)" "2" "第 7 条守卫：超限的那一条没发出（其余两条照发）"
 assert_contains "$(posted_comment "$OUT")" "**行内发布失败（1）**" "第 7 条守卫：超限的那一条进了折叠区"
+# 16-fix4 第 38 条：超大正文不再搬进汇总——折叠区只渲染标题 + 说明句，汇总不超限、不触发截断
+assert_contains "$(posted_comment "$OUT")" "字节超过评论上限 MAX_COMMENT_BYTES=20000，未在评论中展示。" "第 38 条：折叠区那一条只有标题 + 说明句"
+assert_not_contains "$(posted_comment "$OUT")" "$(python3 -c 'print("B"*200, end="")')" "第 38 条：40 KB 正文的前 200 字节不在汇总里（4e542ca 全文搬进折叠区、汇总随之超限被截：正控）"
+assert_eq "$([[ $(posted_comment "$OUT" | wc -c) -lt 20000 ]] && echo ok)" "ok" "第 38 条：汇总总字节 < MAX_COMMENT_BYTES=20000"
+assert_not_contains "$OUT" "报告超长已截断" "第 38 条：没有触发 review_truncate_comment（其它问题的文本不再被一起截掉）"
 # ---- 16-fix4 第 7 条：掩码程序不可用时，含 ≥ 12 位 ASCII 标识符的固定文案必须原样出现在日志里（cf29da0 的「连片分类器」会整段省略：正控）----
 run_case fixedtext-badawk PATH="$tmp/badawk:$PATH" INLINE_COMMENT=yes
 assert_nonzero "$RC" "第 7 条：INLINE_COMMENT=yes → 非零退出"

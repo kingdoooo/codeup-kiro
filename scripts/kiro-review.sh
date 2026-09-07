@@ -348,8 +348,11 @@ publish_inline_comments() {
     local body_bytes
     body_bytes=$(wc -c < "$WORK/body-${idx}.md" | tr -d ' ') || body_bytes=""
     if ! [[ "$body_bytes" =~ ^[0-9]+$ ]] || [[ "$body_bytes" -gt "$MAX_COMMENT_BYTES" ]]; then   # 量不出字节数按超限处理（第 30 条）
-      log "警告：问题 #${idx} 的行内评论正文 ${body_bytes} 字节超过 MAX_COMMENT_BYTES=${MAX_COMMENT_BYTES}，转入折叠区"
-      printf '{"idx":%s,"outcome":"failed"}\n' "$idx" >> "$WORK/outcomes.jsonl"; n_failed=$((n_failed + 1)); continue
+      log "警告：问题 #${idx} 的行内评论正文 ${body_bytes} 字节超过 MAX_COMMENT_BYTES=${MAX_COMMENT_BYTES}，转入折叠区（只展示标题）"
+      # 记下原因与字节数（第 38 条）：折叠区的「行内发布失败」桶默认渲染 body + fix 全文，超大正文照搬进汇总只会让汇总也超限、
+      # 把其它问题的文本一起截掉；带 reason=oversize 的条目只渲染标题 + 一句说明
+      printf '{"idx":%s,"outcome":"failed","reason":"oversize","bytes":%s,"limit":%s}\n' "$idx" "$([[ "$body_bytes" =~ ^[0-9]+$ ]] && printf '%s' "$body_bytes" || printf 0)" "$MAX_COMMENT_BYTES" >> "$WORK/outcomes.jsonl"
+      n_failed=$((n_failed + 1)); continue
     fi
     # 必须用文件式接口而不是 `cid=$(codeup_create_inline_comment …)`：命令替换在子 shell 里跑，
     # CODEUP_HTTP_CODE 与 DRY_RUN 的 fixture 序号都传不回来（codeup-api.sh 里写明了这条约定）
