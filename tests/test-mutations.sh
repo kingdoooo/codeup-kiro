@@ -1402,7 +1402,7 @@ assert_contains "$OUT" "不在本地克隆里" "M57：to 侧警告不受影响�
 # 隐藏历史里的结论下一轮会被读回来渲染；结论行本身有固定文案兜底，标记没有。所以这一层单独也要有变异守卫。
 # 用 jq 造输入：printf 里的 \n 会变成真的换行，那是非法 JSON，渲染器的输入校验会先把它挡掉。
 jq -n '{summary:"s", verdict:"MERGE\n## 伪造标题", verdict_reason:"r", findings:[],
-        dropped_findings:0, delocated_findings:0}' > "$tmp/m58-input.json"
+        dropped_findings:0, delocated_findings:0, finalized:true}' > "$tmp/m58-input.json"   # 带票 16 的阶段盖章：只塌渲染器边界这一层，不是塌盖章检查
 mut_bypass_marker() { ( set +e; source "$1/scripts/lib/review-render.sh"
   review_render_summary --json "$tmp/m58-input.json" --sha 90fcb05 --src f --dst m --ts t --diff-note n 2>/dev/null \
     | grep -F '<!-- kiro-history:' ); }
