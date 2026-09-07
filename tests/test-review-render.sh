@@ -2454,6 +2454,8 @@ assert_eq "$(jq -r '[.summary, .findings[0].body, .findings[0].id, .findings[0].
   "第 12a 条：summary 切 2×8192 码点、body 切 2×32768 码点、id / category 切 256 码点"
 assert_eq "$(jq -n --arg c "$big" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:"b",fix:"f",id:$c,file:"src/app.py",line_start:1}]}' | review_validate | jq -r '[(.summary|utf8bytelength <= 8192), (.findings[0].id|length), .truncated_fields] | @csv')" "true,256,1" \
   "第 12a 条：预切不影响最终字节上限（summary 8192 内）；id 只预切、不计入 truncated_fields"
+assert_eq "$(jq -n --arg v "$(python3 -c 'print("MERGE"*1000)')" '{contract:"codeup-reviewer/1", summary:"s", verdict:$v, verdict_reason:"r", findings:[]}' | review_validate | jq -r '.verdict | length')" "256" "第 12a 条补：verdict 也切 256 码点（cf29da0 5000 位原样进 ## 结论：正控）"
+assert_eq "$(jq -r '[.findings[] | has("_tc")] | any' "$tmp/cap2.json")" "false" "第 12b 条补：truncated_fields 的统计不再往 finding 上挂中间字段"
 # 第 12d 条：计时守卫（目标 < 5 s，守 4 倍）——10000 个 <!-- 的膨胀向量与 100 KB 单行 body 都要在秒级；不要靠缩小向量让它变快
 python3 -c 'import json,random,string; random.seed(7); s="".join(random.choice(string.ascii_letters+string.digits+"+/ .") for _ in range(100000)); print(json.dumps({"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"r","findings":[{"severity":"P0","title":"t","body":s,"fix":"","file":"src/app.py","line_start":1}]}))' > "$tmp/big-line.json"
 t0=$SECONDS; review_validate < "$tmp/big-line.json" > "$tmp/big-line.out"; jq -n --arg c "$filler" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1}]}' | review_validate > /dev/null; el=$((SECONDS - t0))

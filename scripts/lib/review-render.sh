@@ -356,7 +356,7 @@ REVIEW_CAP_SUMMARY=8192
 REVIEW_CAP_TITLE=2048
 REVIEW_CAP_BODY=32768
 REVIEW_CAP_FIX=16384
-REVIEW_CAP_ID=256        # id / category：不渲染，只为约束掩码成本（按码点预切，不计入 truncated_fields）
+REVIEW_CAP_ID=256        # id / category / verdict 三个单行槽位：按码点预切、不计入 truncated_fields（id / category 不渲染，verdict 是枚举——枚举校验归票 17）
 
 # --- 契约归一化（stdin = 契约 JSON → stdout = 归一化 JSON；只做结构 / 类型 / trim / 归一化 / 预切，**不**清洗、不掩码、不截断）---
 # 对外入口与最终形态见下面的 review_validate；这里只描述归一化本身。
@@ -428,7 +428,7 @@ _review_normalize() {
             fix: (if (.fix | type) == "string" then dectl(.fix | pre(.; 2 * $cap_fix)) else "" end) }
       ] as $kept
     | { summary: (tr($root.summary | pre(.; 2 * $cap_summary))),
-        verdict: (tr($root.verdict) | ascii_upcase | gsub("[[:space:]]+"; " ")),
+        verdict: (tr($root.verdict | pre(.; $cap_id)) | ascii_upcase | gsub("[[:space:]]+"; " ")),   # 单行枚举槽位也切 256 码点（第 12a 条补：200 KB 的 verdict 曾原样进 ## 结论）
         verdict_reason: (tr($root.verdict_reason | pre(.; 2 * $cap_summary))),
         findings: ($kept | map(del(.delocated))),
         dropped_findings: (([$total, $maxf] | min) - ($kept | length)),
@@ -472,11 +472,11 @@ review_finalize_json() {
           | if ($c | utf8bytelength) > $m then .b = ([0, (((($b * $m) / ($c | utf8bytelength)) | floor) - 1)] | max) else . end)
       | if .c != null and (.c | utf8bytelength) <= $m then .c else (_bytecut($raw; (($m / 4) | floor)) | _sanitize_md) end;   # 6 轮仍超（清洗膨胀 > 2.5 倍的病态输入）：预算砍到 1/4 再洗一次
     def _mark: "（已截断）";
+    # 输入一定是字符串（归一化后每个文本字段都是字符串——这条不变量可以依赖，不再留「非字符串」分支，第 12b 条补）
     def cap(v; n): v as $v | n as $n
-      | if ($v | type) != "string" then {v: "", t: 0}
-        else ($v | _sanitize_md) as $s
-          | if ($s | utf8bytelength) <= $n then {v: $s, t: 0}
-            else {v: (_fit($v; $n - (_mark | utf8bytelength)) + _mark), t: 1} end end;
+      | ($v | _sanitize_md) as $s
+      | if ($s | utf8bytelength) <= $n then {v: $s, t: 0}
+        else {v: (_fit($v; $n - (_mark | utf8bytelength)) + _mark), t: 1} end;
     # 加粗槽位：title 会被脚本包进 `**…**`（问题标题行、折叠区条目、行内评论首行）。先把 `*` 转义成 `\*`，
     # 否则标题里的 `**kwargs` 会提前闭合脚本的加粗、把级别前缀变回普通文字。先转义再清洗：转义后的
     # 字符串以反斜杠开头，不会再被 _sanitize_md 的整行加粗规则二次转义。
@@ -484,18 +484,19 @@ review_finalize_json() {
     # 一处掩码靠 CommonMark「三的倍数」规则碰巧不闭合外层 `**`，两处（`硬编码 AKIA… 与 ghp_… 两处密钥`）就互相配对、把 `P0 ·`
     # 级别前缀打回普通文字。全部转义在两种解读下都安全。
     def boldsafe_esc: if type == "string" then gsub("\\*"; "\\*") else . end;   # 清洗由 cap 做（最后一步一定是清洗）
+    # 一遍遍历、无中间字段（第 12b 条补）：原先往 finding 上挂 ._tc 再 del，._tc 是 validated.json 的可见字段，漏掉那句 del 就流进 plan.json
     . as $r
     | cap($r.summary; $cap_summary) as $S
     | cap($r.verdict_reason; $cap_summary) as $R
-    | .findings |= [ .[]
-        | cap((.title | boldsafe_esc); $cap_title) as $T
-        | cap(.body; $cap_body) as $B
-        | cap(.fix; $cap_fix) as $F
-        | .title = $T.v | .body = $B.v | .fix = $F.v | .id |= _sanitize_md | .category |= _sanitize_md
-        | ._tc = ($T.t + $B.t + $F.t) ]
+    | (.findings | map(
+          cap((.title | boldsafe_esc); $cap_title) as $T
+          | cap(.body; $cap_body) as $B
+          | cap(.fix; $cap_fix) as $F
+          | {f: (.title = $T.v | .body = $B.v | .fix = $F.v | .id |= _sanitize_md | .category |= _sanitize_md),
+             t: ($T.t + $B.t + $F.t)})) as $fs
+    | .findings = ($fs | map(.f))
     | .summary = $S.v | .verdict_reason = $R.v | .verdict |= _sanitize_md
-    | .truncated_fields = ($S.t + $R.t + ([.findings[]._tc] | add // 0))
-    | .findings |= map(del(._tc))'
+    | .truncated_fields = ($S.t + $R.t + ($fs | map(.t) | add // 0))'
 }
 # --- 契约校验（对外入口）：归一化 → 字段级掩码 → 清洗 + 上限（stdin → stdout）---
 # 顺序不能倒（16-fix3 第 15 条，P1）：先清洗再掩码时，围栏内的 `# Kiro 代码评审` / `---` 合法地不被转义，随后 PEM 整块删除把围栏
