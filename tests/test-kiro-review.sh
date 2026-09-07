@@ -407,12 +407,12 @@ assert_contains "$OUT" 'dGhp****dA==' "原文含未掩码凭证：补位形态�
 assert_contains "$OUT" 'api_key = ' "原文含未掩码凭证：键名保留"
 # 票 10 ②：只引用了 PEM 起始行时，其后的结论不能被吞掉，且要给出未闭合提示
 pem_body="MIIEowIBAAKCAQEA""fakekey0123456"
-pem_body2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02"
+pem_body2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4"   # 与 mockbin/kiro-cli 的 PEM_BODY2 一致（第 26 条改定义后尾巴要像随机 base64）
 assert_not_contains "$OUT" "$pem_body" "原文含未掩码凭证：说明行之后的整行私钥正文不进评论"
 # 16-fix3 第 14 条：降级原文走保行模式——正文行就地换成占位、起始行保留为标记、不插提示行、不删任何行
 assert_contains "$OUT" "****（PEM 正文已屏蔽）" "原文含未掩码凭证：整行正文换成等行数的屏蔽占位（保行模式）"
 assert_not_contains "$OUT" "$pem_body2" "原文含未掩码凭证：夹在句子里的正文片段不进评论"
-assert_contains "$OUT" "正文片段 MIIE****ke02 出现在 app/key.pem" "原文含未掩码凭证：片段掩码后句子其余部分完整"
+assert_contains "$OUT" "正文片段 MIIE****2Lm4 出现在 app/key.pem" "原文含未掩码凭证：片段掩码后句子其余部分完整"
 assert_contains "$OUT" "（下面是私钥内容，节选）" "原文含未掩码凭证：起始行后的说明行放出来（不被吞）"
 assert_not_contains "$OUT" "没有配对的 END 行" "原文含未掩码凭证（第 14 条）：保行模式不再插「未闭合」提示行"
 assert_contains "$OUT" "BEGIN RSA PRIVATE KEY" "原文含未掩码凭证（第 14 条）：起始行作为标记原位保留"
