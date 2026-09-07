@@ -2542,6 +2542,8 @@ assert_eq "$REVIEW_CTRL_TR_SET" '\000-\010\013-\014\016-\037' "第 2 条：tr �
 assert_eq "$REVIEW_CTRL_JQ_RE" '[\u0000-\u0008\u000b-\u000c\u000e-\u001f]' "第 2 条：jq 正则由同一份区间渲染"
 assert_eq "$(printf 'a\001b\013c\td\n' | review_clean_text | od -An -c | tr -s ' ' | sed 's/ *$//')" " a b c \t d \n" "第 2 条：review_clean_text 剔 \001 / \013、留制表"
 assert_eq "$(printf '{"contract":"codeup-reviewer/1","summary":"a\\u0001b\\u000bc\\td","verdict":"MERGE","verdict_reason":"r","findings":[]}' | review_validate | jq -r '.summary | @json')" '"abc\td"' "第 2 条：归一化的 dectl 与清洗用同一份 jq def"
+# 第 8 条补：库里任何 awk -v name="…" 的取值都不得来自环境变量（对所有名字一次性成立，而不是只防 REVIEW_REDACT_SENTINEL_RE 一个）
+assert_eq "$(grep -cE -- '-v [a-z_]+="\$\{?[A-Z_]' "$ROOT/scripts/lib/review-render.sh" || true)" "0" "第 8 条补（静态）：review-render.sh 里没有从大写环境变量取值的 awk -v"
 # 第 3 / 4 条：两个共用小函数的失败语义——jq 失败 / 掩码程序失败时目标文件一个字节不动、临时文件不残留
 printf '{"a":1}\n' > "$tmp/jqi.json"; cp "$tmp/jqi.json" "$tmp/jqi.orig"
 rc=0; _review_jq_inplace "$tmp/jqi.json" who 步骤 -c '.a |= error("boom")' 2> "$tmp/jqi.err" || rc=$?
