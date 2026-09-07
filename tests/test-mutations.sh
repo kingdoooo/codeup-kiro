@@ -707,10 +707,20 @@ PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4ijkl"   #
 PEM_PLACEHOLDER="**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
 mut_rd_multi() { ( set +e; source "$1/scripts/lib/review-render.sh"; printf '%b' "$2" | review_redact_secrets ); }   # <包根> <多行文本（printf %b）>
 unclosed_in="$PEM_B\n（下面是私钥内容，节选）\nMIIEowIBAAKCAQEAfakekey0123456\n正文片段 $PEM_L64 出现在 app/key.pem\n\n总体结论：不建议合并。\n"
-# M39：让字段末 / EOF 时的放出失效 → 未配对 BEGIN 之后暂存的全部正文一起消失（等价于票 10 之前的「块内一律丢弃」）
+# M39：让 EOF 时的放出失效 → 未配对 BEGIN 之后暂存的全部正文一起消失（等价于票 10 之前的「块内一律丢弃」）。
+#      注意它覆盖的是**无哨兵形态**（库被直接调用 / 测试直接调）：生产唯一的字段模式调用方 review_redact_json 总带 --sentinel，
+#      倒出文件总以哨兵行结尾，END 块在生产里永不触发——生产里放出未闭合块的是哨兵规则里的 pem_flush()，由下面的 M39b 覆盖（第 39 条）
 pkg=$(make_mutant m39-pem-unclosed 's|    END { emit_pending(); if (inpem \&\& !keeplines) pem_flush() }|    END { emit_pending() }|' scripts/lib/review-render.sh)
 assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "总体结论：不建议合并。" "M39：未配对 BEGIN 之后的结论被整段吞掉——单测「结论仍在」断言会失败"
 assert_contains "$(mut_rd_multi "$ROOT" "$unclosed_in")" "总体结论：不建议合并。" "M39 对照：未变异实现放出结论"
+# M39b：哨兵规则里去掉 pem_flush() → 字段末未闭合的 PEM 块（BEGIN + 正文 + 结论）在哨兵行之前静默消失（review_redact_json 的生产路径）
+pkg=$(make_mutant m39b-sentinel-flush 's|    sentre != "" \&\& \$0 ~ sentre { emit_pending(); if (inpem) { if (keeplines) inpem = 0; else pem_flush() } print; next }|    sentre != "" \&\& $0 ~ sentre { emit_pending(); if (inpem) { if (keeplines) inpem = 0; else pem_drop() } print; next }  # 变异 M39b|' scripts/lib/review-render.sh)
+mut_rd_sent() { ( set +e; source "$1/scripts/lib/review-render.sh"; printf '%b' "$2" | review_redact_secrets --sentinel '^<<S>>$' ); }   # <包根> <多行文本>
+sent_in="$PEM_B\n$PEM_L64\n总体结论：不建议合并。\n<<S>>\n"
+assert_not_contains "$(mut_rd_sent "$pkg" "$sent_in")" "总体结论：不建议合并。" "M39b：字段末未闭合 PEM 之后的结论在哨兵前被静默吞掉——单测「字段末未闭合 PEM 放出 + 提示」断言会失败"
+assert_not_contains "$(mut_rd_sent "$pkg" "$sent_in")" "没有配对的 END 行" "M39b：连未闭合提示也没有（无声）"
+assert_contains "$(mut_rd_sent "$ROOT" "$sent_in")" "总体结论：不建议合并。" "M39b 对照：未变异实现在哨兵前放出结论"
+assert_contains "$(mut_rd_sent "$ROOT" "$sent_in")" "没有配对的 END 行" "M39b 对照：未变异实现给未闭合提示"
 # M40：只掐掉未闭合提示（正文照样放出）
 pkg=$(make_mutant m40-pem-note 's|      print pem_note(held_n - first + 1)|      held_n = held_n  # 变异：不打未闭合提示|' scripts/lib/review-render.sh)
 assert_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "总体结论：不建议合并。" "M40：正文仍在（变异只影响提示）"
