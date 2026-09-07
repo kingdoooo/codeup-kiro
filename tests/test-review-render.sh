@@ -527,7 +527,7 @@ review_validate < "$tmp/startitle.json" > "$tmp/startitle-validated.json"
 assert_eq "$(jq -r '.findings[0].title' "$tmp/startitle-validated.json")" '函数用 \*\*kwargs 透传参数' "validate：title 里的 * 转义成 \*"
 render "$tmp/startitle.json" "$tmp/startitle.md"
 assert_contains "$(cat "$tmp/startitle.md")" '**1. `a.py:3-7` — 函数用 \*\*kwargs 透传参数**' "渲染：问题标题行的加粗仍然闭合在行尾"
-jq -c '.findings[0]' "$tmp/startitle-validated.json" > "$tmp/item-startitle.json"
+jq -c '.findings[0] + {finalized: true}' "$tmp/startitle-validated.json" > "$tmp/item-startitle.json"   # 直接从 findings 切条目要自己盖章（生产由 review_plan_inline 盖，第 40 条）
 review_render_inline_body "$tmp/item-startitle.json" 90fcb05 "$(review_fingerprint a.py 3 x)" > "$tmp/inline-startitle.md"
 assert_eq "$(head -1 "$tmp/inline-startitle.md")" '**P1 · 函数用 \*\*kwargs 透传参数（L3–L7）**' "行内正文：首行加粗闭合在行尾，级别前缀不会变回普通文字"
 
@@ -1659,7 +1659,7 @@ assert_not_contains "$(cat "$tmp/inline-single.md")" "（L27" "行内正文：�
 assert_contains "$(cat "$tmp/inline-single.md")" "<!-- kiro-inline:${fpS} L27-27 sev=P1 -->" "行内正文：单行问题的标记区间为 L27-27"
 
 # fix 为空 → 省略修复建议小节
-jq -n '{id:"X",severity:"P2",title:"缺少模块级说明",file:"a.py",line_start:1,line_end:1,body:"说明。",fix:""}' > "$tmp/item-nofix.json"
+jq -n '{id:"X",severity:"P2",title:"缺少模块级说明",file:"a.py",line_start:1,line_end:1,body:"说明。",fix:"",finalized:true}' > "$tmp/item-nofix.json"
 review_render_inline_body "$tmp/item-nofix.json" abc1234 "$(review_fingerprint a.py 1 缺少模块级说明)" > "$tmp/inline-nofix.md"
 assert_not_contains "$(cat "$tmp/inline-nofix.md")" "**修复建议**" "行内正文：fix 为空时省略修复建议小节"
 assert_contains "$(cat "$tmp/inline-nofix.md")" "**P2 · 缺少模块级说明**" "行内正文：fix 为空时其余照常"
@@ -1678,7 +1678,7 @@ assert_rc "$rc" 2 "行内正文：缺 line_start → rc 2（标记里写不出�
 # 模型文本里的注入在 review_validate 阶段就被转义，行内正文里同样不成立
 jq -c '.findings[0]' "$tmp/inline-validated.json" >/dev/null   # 形态自检
 review_validate < "$tmp/inject.json" > "$tmp/inject-validated.json"
-jq -c '.findings[0]' "$tmp/inject-validated.json" > "$tmp/item-inject.json"
+jq -c '.findings[0] + {finalized: true}' "$tmp/inject-validated.json" > "$tmp/item-inject.json"
 review_render_inline_body "$tmp/item-inject.json" 90fcb05 "$(review_fingerprint src/app.py 1 提示词注入企图)" > "$tmp/inline-inject.md"
 assert_eq "$(grep -c '^<!-- kiro-inline:' "$tmp/inline-inject.md")" "1" "行内正文：指纹标记恰好一个（模型文本里的注释已被转义）"
 assert_eq "$(grep -c '<!-- kiro-review:' "$tmp/inline-inject.md")" "0" "行内正文：模型文本里的评审标记不成立"
@@ -2089,7 +2089,7 @@ assert_contains "$(cat "$tmp/secrets-inline-body.md")" "**P0 · 用户输入直�
 jq --arg t "硬编码 ${SEC_AKIA} 与 ${SEC_GHP} 两处密钥" '.title = $t' "$tmp/secrets-item.json" > "$tmp/two-mask-item.json"
 jq -n --slurpfile it "$tmp/two-mask-item.json" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[$it[0] + {severity:"P0", file:"src/app.py"}]}' \
   | review_validate > "$tmp/two-mask-validated.json"
-jq -c '.findings[0]' "$tmp/two-mask-validated.json" > "$tmp/two-mask-item.validated.json"
+jq -c '.findings[0] + {finalized: true}' "$tmp/two-mask-validated.json" > "$tmp/two-mask-item.validated.json"
 assert_eq "$(review_render_inline_body "$tmp/two-mask-item.validated.json" 90fcb05 "$fpR" | head -1)" "**P0 · 硬编码 ${SEC_AKIA_MASKED_TITLE} 与 ${SEC_GHP_MASKED_TITLE} 两处密钥（L30–L31）**" \
   "第 22 条：标题里两处掩码的八颗星全部转义，级别前缀的加粗不被拆开（cf29da0 只转义掩码之外的 *：正控）"
 strip_secrets < "$tmp/secrets-inline-body.md" > "$tmp/secrets-inline-body.stripped.md"
@@ -2486,6 +2486,28 @@ assert_eq "$(( $(grep -c '^```' "$tmp/fence-inline.md" || true) % 2 ))" "0" "第
 assert_eq "$(wc -l < "$tmp/fence-inline.md" | tr -d ' ')" "$(wc -l < "$tmp/fence-plain.md" | tr -d ' ')" "第 41 条：行数与正常渲染一致（c01b226 多出两行闭合围栏：正控）"
 assert_eq "$(jq --arg v '~~~ MERGE' '.verdict = $v' fixtures/contract/full.json | review_validate | jq -r '.verdict')" '\~~~ MERGE' "第 41 条：~~~ 围栏串同样转义"
 assert_eq "$(jq --arg i 'F```1' --arg c 'sec```' '.findings[0].id = $i | .findings[0].category = $c' fixtures/contract/full.json | review_validate | jq -r '.findings[0].id + " " + .findings[0].category')" 'F\```1 sec\```' "第 41 条：id / category 走同一份单行清洗"
+# 第 40 条：阶段盖章——「归一化 → 掩码 → 清洗 → 上限」不能只靠 review_validate 里的调用顺序成立
+review_validate < fixtures/contract/full.json > "$tmp/stamp.json"
+assert_eq "$(jq -r '.finalized' "$tmp/stamp.json")" "true" "第 40 条：review_validate 的输出盖 finalized: true"
+cp "$tmp/stamp.json" "$tmp/stamp2.json"; rc=0; review_redact_json "$tmp/stamp2.json" 2> "$tmp/stamp.err" || rc=$?
+assert_rc "$rc" 2 "第 40 条：对 validated.json 再跑 review_redact_json → rc 2（4e542ca 会照掩、清洗后再掩的 P1 原地复发：正控）"
+assert_contains "$(cat "$tmp/stamp.err")" "已清洗定稿的契约不能再掩码" "第 40 条：固定文案"
+assert_same_file "$tmp/stamp2.json" "$tmp/stamp.json" "第 40 条：拒绝时文件不动"
+rc=0; review_finalize_json "$tmp/stamp2.json" 2> "$tmp/stamp.err" || rc=$?
+assert_rc "$rc" 2 "第 40 条：再定稿 → rc 2（不幂等：再跑会再截一次、再加一个「（已截断）」）"
+assert_contains "$(cat "$tmp/stamp.err")" "已清洗定稿的契约不能再定稿" "第 40 条：固定文案"
+_review_normalize < fixtures/contract/full.json > "$tmp/stamp.norm.json"
+rc=0; review_render_summary --json "$tmp/stamp.norm.json" --sha 90fcb05 --src f --dst main --ts t --diff-note n > /dev/null 2> "$tmp/stamp.err" || rc=$?
+assert_rc "$rc" 2 "第 40 条：渲染器拒绝归一化的中间产物（没盖章）"
+assert_contains "$(cat "$tmp/stamp.err")" "finalized 盖章" "第 40 条：渲染器点明缺盖章"
+rc=0; review_plan_inline --json "$tmp/stamp.norm.json" --changed-lines "$CL" > /dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "第 40 条：规划器拒绝没盖章的输入"
+review_plan_inline --json "$tmp/stamp.json" --changed-lines "$CL" > "$tmp/stamp.plan.json"
+assert_eq "$(jq -c '[.finalized, ([.inline[].finalized] | all)]' "$tmp/stamp.plan.json")" "[true,true]" "第 40 条：计划顶层与每条行内条目都带盖章"
+jq -c '.inline[0] | del(.finalized)' "$tmp/stamp.plan.json" > "$tmp/stamp.item.json"
+rc=0; review_render_inline_body "$tmp/stamp.item.json" 90fcb05 "$fpR" > /dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "第 40 条：行内正文渲染器拒绝没盖章的条目"
+assert_eq "$(review_fingerprint src/app.py 30 t)" "$(review_fingerprint src/app.py 30 t)" "第 40 条：指纹只取 file + line + title，盖章字段不参与"
 # 第 38 条：因正文超过评论上限而没发出的行内条目，折叠区只渲染标题 + 一句说明（不搬 40 KB 正文进汇总）
 python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); c["findings"][0]["body"]="B"*40000; c["findings"][0]["fix"]="F"*40000; json.dump(c,open(sys.argv[2],"w"),ensure_ascii=False)' fixtures/contract/inline.json "$tmp/over38.json"
 review_validate < "$tmp/over38.json" > "$tmp/over38.v.json"
@@ -2504,8 +2526,11 @@ review_render_summary --json "$tmp/over38b.final.json" --inline-comment 1 --sha 
 assert_contains "$(cat "$tmp/over38b.md")" "$(python3 -c 'print("B"*200, end="")')" "第 38 条对照：普通 failed（发布失败、无 reason）仍完整渲染 body（一条行内评论都没发出去，说明与修复建议只有这一个落点）"
 # 第 12d 条：计时守卫（目标 < 5 s，守 4 倍）——10000 个 <!-- 的膨胀向量与 100 KB 单行 body 都要在秒级；不要靠缩小向量让它变快
 python3 -c 'import json,random,string; random.seed(7); s="".join(random.choice(string.ascii_letters+string.digits+"+/ .") for _ in range(100000)); print(json.dumps({"contract":"codeup-reviewer/1","summary":"s","verdict":"MERGE","verdict_reason":"r","findings":[{"severity":"P0","title":"t","body":s,"fix":"","file":"src/app.py","line_start":1}]}))' > "$tmp/big-line.json"
-t0=$SECONDS; review_validate < "$tmp/big-line.json" > "$tmp/big-line.out"; jq -n --arg c "$filler" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1}]}' | review_validate > /dev/null; el=$((SECONDS - t0))
-assert_eq "$([[ $el -le 20 ]] && echo ok)" "ok" "第 12d 条：100 KB 单行 body + 膨胀向量两次 review_validate 共 ${el}s（≤ 20 s；cf29da0 的 redact_url 无界回扫要十几秒）"
+# 量 CPU 时间（user + sys，含子进程）而不是墙钟：共机跑多套测试时墙钟能翻 5–8 倍，CPU 时间不受负载影响（自审 finding）
+TIMEFORMAT='%U %S'
+{ time { review_validate < "$tmp/big-line.json" > "$tmp/big-line.out"; jq -n --arg c "$filler" '{contract:"codeup-reviewer/1", summary:$c, verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$c,body:$c,fix:$c,file:"src/app.py",line_start:1}]}' | review_validate > /dev/null; }; } 2> "$tmp/perf.time"
+el=$(awk 'END { printf "%d", $1 + $2 }' "$tmp/perf.time")
+assert_eq "$([[ $el -le 20 ]] && echo ok)" "ok" "第 12d 条：100 KB 单行 body + 膨胀向量两次 review_validate 共 CPU ${el}s（≤ 20 s；cf29da0 的膨胀向量单次要 2 分钟）"
 assert_eq "$(jq -r '.findings[0].body | utf8bytelength <= 32768' "$tmp/big-line.out")" "true" "第 12d 条：100 KB 单行 body 截到上限之内"
 # 第 8 条：行数按记录数（末行无换行也算）
 printf 'a\nb' > "$tmp/lc.md"; assert_eq "$(_review_line_count "$tmp/lc.md")" "2" "第 8 条：_review_line_count 一个 fork，末行无换行也算一行"
@@ -2537,7 +2562,7 @@ assert_eq "$(rd "$PEM_L64")" "MIIE****ijkl" "第 17 条仍掩：≥ 40 位、含
 jq -n --arg b "$PEM_B" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:$b,body:"b",fix:"",file:"src/app.py",line_start:1}]}' \
   | review_validate > "$tmp/title-pem.json"
 assert_eq "$(jq -r '.findings[0].title | test("\n")' "$tmp/title-pem.json")" "false" "第 19 条：title 为 BEGIN 标记时仍是单行（不变成占位 + 提示两行；48aff39 两行：正控）"
-render_inline_body_title=$(jq -c '.findings[0] + {file:"src/app.py", line_start:30, line_end:31}' "$tmp/title-pem.json" > "$tmp/title-pem-item.json"; review_render_inline_body "$tmp/title-pem-item.json" 90fcb05 "$fpR" | head -2)
+render_inline_body_title=$(jq -c '.findings[0] + {file:"src/app.py", line_start:30, line_end:31, finalized:true}' "$tmp/title-pem.json" > "$tmp/title-pem-item.json"; review_render_inline_body "$tmp/title-pem-item.json" 90fcb05 "$fpR" | head -2)
 assert_eq "$(printf '%s\n' "$render_inline_body_title" | sed -n 2p)" "<!-- kiro-inline:${fpR} L30-31 sev=P0 -->" "第 19 条：行内首行之后紧跟标记行（首行没有断成两行）"
 # 第 20 条：降级原文 / stderr 进 awk 前剔 NUL
 assert_eq "$(python3 -c "import sys; sys.stdout.buffer.write(b'line one \x00 ${SEC_AKIA} tail\n')" | review_clean_text | review_redact_secrets --keep-lines)" "line one  ${SEC_AKIA_MASKED} tail" "第 20 条：NUL 先剔除，其后的密钥不再被 awk 截断吞掉（48aff39：24 字节静默消失）"
@@ -2577,6 +2602,8 @@ _review_redact_to "$tmp/rt.in" "$tmp/rt.out" who "" --keep-lines; assert_eq "$(c
 # 第 16 / 17 条：标记正则是加载期常量；两份文件的行数一次 awk 算完
 assert_eq "$REVIEW_MARKER_LINE_RE_ALL" "$(_review_marker_line_re)" "第 16 条：_review_marker_line_re 只是常量的取值口"
 printf 'a\nb\nc' > "$tmp/lc3.md"; assert_eq "$(_review_line_counts "$tmp/lc.md" "$tmp/lc3.md")" "2 3" "第 17 条：_review_line_counts 一次给出两份文件的记录数（末行无换行也算）"
+: > "$tmp/lc0.md"; assert_eq "$(_review_line_counts "$tmp/lc0.md" "$tmp/lc3.md")" "0 3" "第 17 条：第一份为空时不会把第二份的记录算给它（自审 finding）"
+assert_eq "$(_review_line_counts "$tmp/lc3.md" "$tmp/lc0.md")" "3 0" "第 17 条：第二份为空"
 # 第 29 条：截断的替换文件建在目标同目录、不残留
 cp "$GOLDEN/summary-full.md" "$tmp/tr29.md"; rc=0; review_truncate_comment "$tmp/tr29.md" 1200 || rc=$?
 assert_rc "$rc" 0 "第 29 条：1980 字节的 golden 截到 1200 成功（标记仍在）"

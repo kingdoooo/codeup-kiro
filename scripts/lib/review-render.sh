@@ -460,6 +460,8 @@ _review_jq_inplace() {
 review_finalize_json() {
   local file="${1-}"
   [[ -n "$file" && -r "$file" ]] || { echo "review_finalize_json: 文件不可读：${file}" >&2; return 2; }
+  # 阶段盖章（16-fix4 第 40 条）：定稿过的契约不能再定稿——再跑一次会再截一次、再加一个「（已截断）」
+  if jq -e '.finalized == true' "$file" >/dev/null 2>&1; then echo "review_finalize_json: 已清洗定稿的契约不能再定稿：${file}" >&2; return 2; fi
   _review_jq_inplace "$file" review_finalize_json "清洗 / 上限" -c --argjson cap_summary "$REVIEW_CAP_SUMMARY" --argjson cap_title "$REVIEW_CAP_TITLE" \
            --argjson cap_body "$REVIEW_CAP_BODY" --argjson cap_fix "$REVIEW_CAP_FIX" "${_REVIEW_JQ_SANITIZE}"'
     # 字段上限（第 21 条，按 UTF-8 **字节**）：最终结果是「清洗过的文本 ≤ 上限」——清洗会膨胀（全是 `<!--` 的字段 4 → 7 字节；`<a` → `&lt;a`
@@ -509,12 +511,14 @@ review_finalize_json() {
              t: ($T.t + $B.t + $F.t)})) as $fs
     | .findings = ($fs | map(.f))
     | .summary = $S.v | .verdict_reason = $R.v | .verdict |= _sanitize_inline
-    | .truncated_fields = ($S.t + $R.t + ($fs | map(.t) | add // 0))'
+    | .truncated_fields = ($S.t + $R.t + ($fs | map(.t) | add // 0))
+    | .finalized = true'
 }
 # --- 契约校验（对外入口）：归一化 → 字段级掩码 → 清洗 + 上限（stdin → stdout）---
 # 顺序不能倒（16-fix3 第 15 条，P1）：先清洗再掩码时，围栏内的 `# Kiro 代码评审` / `---` 合法地不被转义，随后 PEM 整块删除把围栏
 # 开启行一起删掉，渲染出的汇总里出现真 H1 / H2 与吞掉页脚的未闭合围栏，R1「结构只能来自脚本」被打穿。
-# 规范化后的形态：{summary, verdict, verdict_reason, findings:[…], dropped_findings:N, overflow_findings:N, delocated_findings:N, truncated_fields:N}
+# 规范化后的形态：{summary, verdict, verdict_reason, findings:[…], dropped_findings:N, overflow_findings:N, delocated_findings:N, truncated_fields:N, finalized:true}
+#   finalized 是阶段盖章（第 40 条）：review_redact_json / review_finalize_json 见到它拒绝再跑；渲染器与规划器只收盖过章的输入。不进指纹。
 #   summary / verdict_reason / title / body / fix 已掩码并过 _sanitize_md（见 R1 说明），title 里的 `*` 已转义；
 #   title / verdict / id / category 是单行；每个文本字段 ≤ REVIEW_CAP_*（字节），超出的已截断并计入 truncated_fields。
 # rc 1 = 顶层不是对象 / findings 不是数组 / 不是合法 JSON（调用方走降级）
@@ -729,6 +733,8 @@ review_plan_inline() {
   done
   [[ -n "$json" && -r "$json" ]] || { echo "review_plan_inline: --json 不可读：${json:-<未提供>}" >&2; return 2; }
   [[ -n "$changed" && -r "$changed" ]] || { echo "review_plan_inline: --changed-lines 不可读：${changed:-<未提供>}" >&2; return 2; }
+  jq -e '.finalized == true' "$json" >/dev/null 2>&1 \
+    || { echo "review_plan_inline: --json 不是 review_validate 的定稿输出（缺 finalized 盖章，第 40 条）：${json}" >&2; return 2; }
   # 档位与上限来自流水线变量，配错不该让评审失败，但必须回落到默认值并留痕。
   # 留痕不能只在 stderr：阿里云侧开发者看不到流水线日志（I10），所以同时写进 config_notice，
   # 由调用方接到汇总评论的 --notice 上——否则「档位配错了」这件事在 MR 上完全看不出来，
@@ -770,7 +776,7 @@ review_plan_inline() {
         inline_profile: $profile,
         max_inline: $max,
         config_notice: $notice,
-        inline: $inline,
+        inline: ($inline | map(. + {finalized: true})),   # 每条行内条目也盖章：review_render_inline_body 只收定稿过的输入（第 40 条）
         folded: { profile: ($prof | ordered), overflow: $overflow,
                   unlocated: ($unloc | ordered), failed: [] },
         inline_count: ($inline | length),
@@ -1035,6 +1041,8 @@ review_render_inline_body() {
   [[ "$fp" =~ ^[0-9a-f]{40}$ ]] || { echo "review_render_inline_body: 指纹不是 40 位十六进制：${fp}" >&2; return 2; }
   jq -e 'type == "object" and (.severity | type) == "string" and (.title | type) == "string"' "$item" >/dev/null 2>&1 \
     || { echo "review_render_inline_body: 问题 JSON 缺 severity/title：${item}" >&2; return 2; }
+  jq -e '.finalized == true' "$item" >/dev/null 2>&1 \
+    || { echo "review_render_inline_body: 问题 JSON 没有 finalized 盖章（只收 review_plan_inline 从定稿契约切出的条目，第 40 条）：${item}" >&2; return 2; }
   # 行内评论必然有锚点行：没有 line_start 的问题是未定位问题，根本不该走到这里；
   # 而标记里写不出区间，下一次评审就只能退回 line_number 去猜。
   jq -e '(.line_start | type) == "number"' "$item" >/dev/null 2>&1 \
@@ -1559,8 +1567,9 @@ review_render_summary() {
   jq -e '(type == "object")
          and ((.dropped_findings | type) == "number")
          and ((.delocated_findings | type) == "number")
-         and ((.findings | type) == "array")' "$_RR_JSON" >/dev/null 2>&1 \
-    || { echo "review_render_summary: --json 不是 review_validate 的输出（需要对象 + 数值 dropped_findings/delocated_findings + 数组 findings）：${_RR_JSON}" >&2; return 2; }
+         and ((.findings | type) == "array")
+         and (.finalized == true)' "$_RR_JSON" >/dev/null 2>&1 \
+    || { echo "review_render_summary: --json 不是 review_validate 的输出（需要对象 + 数值 dropped_findings/delocated_findings + 数组 findings + finalized 盖章；归一化的中间产物没盖章、不能渲染）：${_RR_JSON}" >&2; return 2; }
   # INLINE_COMMENT=1 还需要发布计划的字段：缺了就说明调用方没走 review_plan_inline，
   # 硬渲染只会得到一条没有折叠区、行内计数恒为 0 的评论——那比报错更难发现。
   if [[ "$_RR_INLINE" == "1" ]]; then
@@ -2140,7 +2149,7 @@ review_redact_secrets() {
     }
     pem_marker($0, PEM_BEGIN_RE) { begin_block($0, 1); next }
     # 兜底是主规则（第 10 条再补）：一行**含**起始标记（前面有任何文字：`**F1** 硬编码私钥：-----BEGIN…-----`）且下一行就是密钥正文
-    # （pem_body_key：≥ 20 位 base64、含数字与大小写——长路径 src/main/java/…/UserService 无数字不中）→ 块起始；
+    # （pem_body(l, 20, 1)：≥ 20 位 base64、含数字、含 +/= 或类别切换率 ≥ 0.35——长路径 / 长类名不中）→ 块起始；
     # 下一行不是正文的是句中引用，按普通行放出。同一行已带 END 标记的（一行 .env 形态、「从 BEGIN 到 END」的散文）交给 pem_inline。
     $0 ~ PEM_BEGIN_RE && $0 !~ PEM_END_RE { pend = $0; next }
     { print redact_line($0) }
@@ -2175,6 +2184,9 @@ review_redact_json() {
   [[ -n "$file" && -r "$file" ]] || { echo "review_redact_json: 文件不可读：${file}" >&2; return 2; }
   jq -e 'type == "object" and (.findings | type) == "array"' "$file" >/dev/null 2>&1 \
     || { echo "review_redact_json: 不是归一化契约（顶层不是对象 / findings 不是数组）：${file}" >&2; return 2; }
+  # 阶段盖章（16-fix4 第 40 条）：「归一化 → 掩码 → 清洗 → 上限」的顺序不能只靠 review_validate 里的调用顺序成立——validated.json 也满足
+  # 上面的形状检查，若有人把 review_redact_json "$WORK/validated.json" 加回去，清洗后再掩码（16-fix3 第 15 条的 P1）会原地复发
+  if jq -e '.finalized == true' "$file" >/dev/null 2>&1; then echo "review_redact_json: 已清洗定稿的契约不能再掩码：${file}" >&2; return 2; fi
   dir=$(mktemp -d) || { echo "review_redact_json: 建不出临时目录：${file}" >&2; return 1; }
   nonce=$(review_new_nonce)
   pre=$(_review_field_sentinel "$nonce" $'\001'); suf=${pre#*$'\001'}; pre=${pre%%$'\001'*}
@@ -2234,8 +2246,11 @@ _review_marker_line_re() { printf '%s' "$REVIEW_MARKER_LINE_RE_ALL"; }
 # 文件的**记录数**（最后一行没有换行也算一行）：不受 NUL 字节影响。一个 fork（第 8 条）。
 _review_line_count() { LC_ALL=C awk 'END { print NR }' "$1"; }
 # 两份文件的记录数一次算完（16-fix4 第 17 条：review_redact_file 的保行守卫原先起两个 awk，这里合成一个）：输出「前者 后者」。
-# 第一份文件必须非空（调用方已保证），否则文件切换点判不出来。
-_review_line_counts() { LC_ALL=C awk 'FNR == 1 { fi++ } fi == 1 { a++ } END { print a + 0, NR - a }' "$1" "$2"; }
+# 第一份文件为空时 awk 判不出文件切换点（会把第二份的记录全算给第一份），所以先在 bash 里兜住——空文件是 0 行。
+_review_line_counts() {
+  if [[ ! -s "$1" ]]; then printf '0 %s\n' "$(_review_line_count "$2")"; return; fi
+  LC_ALL=C awk 'FNR == 1 { fi++ } fi == 1 { a++ } END { print a + 0, NR - a }' "$1" "$2"
+}
 # --- 守卫 + 原子替换（review_redact_file 与 review_truncate_comment 共用；第 12 条）---
 # 用法：_review_replace_guarded <原文件> <新文件> <调用方名>
 #   原文件里的每一行脚本标记（评审标记 / 行内标记 / 隐藏历史）必须在新文件里逐字节仍在，否则拒绝写回。

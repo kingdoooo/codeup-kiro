@@ -72,7 +72,8 @@ _validate_err_lib_lines() {
   local f="${1-}" lib="" n_other=0 line
   [[ -r "$f" ]] || { printf '%s' "（校验日志不可读）"; return 0; }
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^(review_validate|_review_normalize|review_redact_json|review_finalize_json|_review_jq_inplace|_review_redact_to|review_redact_secrets):\  ]]; then
+    # 前缀清单就是库里 echo "<name>: …" 实际用到的四个名字（_review_normalize 以 review_validate 报错，_review_jq_inplace / _review_redact_to 用调用方的名字）
+    if [[ "$line" =~ ^(review_validate|review_redact_json|review_finalize_json|review_redact_secrets):\  ]]; then
       lib="${lib:+${lib}；}${line}"
     elif [[ -n "$line" ]]; then n_other=$((n_other + 1)); fi
   done < "$f"
@@ -603,7 +604,7 @@ fi
 
 # --- 4. 生成 diff（merge-base 三点比较；浅克隆自动加深）---
 git fetch -q origin "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}" \
-  || die_review "无法 fetch 目标分支 ${TARGET_BRANCH}"
+  || die_review "无法 fetch 目标分支" "$TARGET_BRANCH"   # 分支名是 MR 作者可控的不受信取值，走 die_review 的第二个参数（日志里掩码）
 if ! BASE=$(git merge-base "origin/${TARGET_BRANCH}" HEAD 2>/dev/null); then
   log "浅克隆缺少历史，尝试 --unshallow……"
   git fetch -q --unshallow origin 2>/dev/null || true
@@ -766,7 +767,7 @@ if [[ -z "$DEGRADE_REASON" ]]; then
       [[ "$truncated_fields" =~ ^[0-9]+$ ]] || die_review "validated.json 的 truncated_fields 不是数字" "$truncated_fields"   # 第 20 条
       [[ "$truncated_fields" == "0" ]] \
         || log "警告：${truncated_fields} 个模型字段超出上限已截断（summary/verdict_reason ${REVIEW_CAP_SUMMARY}、title ${REVIEW_CAP_TITLE}、body ${REVIEW_CAP_BODY}、fix ${REVIEW_CAP_FIX} 字节）"
-      overflow=$(jq -r '.overflow_findings // 0' "$WORK/validated.json")
+      overflow=$(jq -r '.overflow_findings // 0' "$WORK/validated.json") || die_review "读取 validated.json 失败（jq rc=$?）"
       [[ "$overflow" =~ ^[0-9]+$ && "$overflow" -gt 0 ]] \
         && log "警告：问题数 $((overflow + REVIEW_MAX_FINDINGS)) 超过上限 ${REVIEW_MAX_FINDINGS}，仅展示前 ${REVIEW_MAX_FINDINGS} 条"   # 第 28 条
       ;;

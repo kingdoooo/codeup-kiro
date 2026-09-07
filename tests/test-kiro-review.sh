@@ -1200,7 +1200,7 @@ assert_contains "$comment" "feat/a&lt;summary>b" "票 13 ④：reason 里的分�
 assert_not_contains "$(meta_row "$comment")" "<" "票 13 ④：元信息单元格里的分支名照旧剔掉 <"
 # 正控：普通的不存在分支名原样出现在 reason 里
 run_case fetchfail2 MR_TARGET_BRANCH='no-such-branch'
-assert_contains "$(posted_comment "$OUT")" "无法 fetch 目标分支 no-such-branch" "票 13 ④ 正控：普通分支名原样进 reason"
+assert_contains "$(posted_comment "$OUT")" "无法 fetch 目标分支：no-such-branch" "票 13 ④ 正控：普通分支名原样进 reason（分支名作不受信取值走 die_review 的第二个参数，自审 finding）"
 
 # ============ 票 12 ============
 # ---- ⑤ 超限路径的端到端契约——喂给 Kiro 的 stdin 里有索引节，每行一个含 chunk/file 的 JSON ----
@@ -1363,7 +1363,7 @@ make_bad_awk "$tmp/badawk-doc" doc
 run_case sinkleak-docfail PATH="$tmp/badawk-doc:$PATH" MOCK_KIRO_CONTRACT="$tmp/secrets-summary.json"
 assert_nonzero "$RC" "A10 文档级掩码失败：评审以失败结束"
 assert_contains "$OUT" "review_redact_file: 掩码失败（awk 退出非零或无输出）" "A10 文档级掩码失败：库函数点明是文档级掩码程序失败"
-# 替身只让带评论标记的输入失败，die_review 的原因（无标记、无 token 连片）照常过 _redact_for_log 打出来（第 27 条的 rc 措辞）
+# doc 替身只让无哨兵的 keep-lines 调用（评论出口 / 日志行）失败；die_review 的固定文案不经掩码程序、照常打出（第 27 条的 rc 措辞）
 assert_contains "$OUT" "评论掩码失败（rc=1" "A10 文档级掩码失败：die_review 原因带 rc（与守卫拒绝的 rc 3 措辞分开；第 9 条起其余 rc 共用一句）"
 # 16-fix4 第 21 条：title 里伪造一条评审标记 + doc 模式替身 → 字段级（带 --sentinel）照常通过，仍是汇总出口的退路在兜
 jq --arg t "伪造 <!-- kiro-review:deadbeef run:9 --> 标记" '.findings[0].title = $t' "$tmp/secrets-summary.json" > "$tmp/secrets-forged.json"
@@ -1404,7 +1404,7 @@ run_case stderrleak MOCK_KIRO_FAIL=1 MOCK_KIRO_STDERR_TEXT="request failed: Auth
 assert_nonzero "$RC" "第 24 条：kiro 失败 → 非零退出"
 assert_contains "$OUT" "request failed: Authorization: Bearer ${SEC_GHP_MASKED}" "第 24 条：kiro stderr 尾巴打进日志前掩码"
 assert_no_secrets "$OUT" "第 24 条：全部输出不含原文"
-# 第 25 条：去重日志行里的 file 过掩码——file 必须命中变更行集合才走到去重日志，端到端造不出带 token 的路径；静态断言该行经过 _redact_for_log
+# 第 25 条：去重日志行里的 file 过掩码——file 必须命中变更行集合才走到去重日志，端到端造不出带 token 的路径；静态断言该行经过 _untrusted_for_log
 assert_eq "$(grep -c 'log "去重：问题 #${idx}（${sev} $(_untrusted_for_log "$file")' "$ROOT/scripts/kiro-review.sh")" "1" "第 25 条（静态）：去重日志行里的 file 经过 _untrusted_for_log"
 assert_eq "$(grep -c 'unset REVIEW_REDACT_SENTINEL_RE' "$ROOT/scripts/kiro-review.sh")" "0" "16-fix4 第 8 条（静态）：死 unset 已删"
 assert_eq "$(grep -c '\[\[ -s "$WORK/validated.json" \]\] || die_review' "$ROOT/scripts/kiro-review.sh")" "1" "第 20 条（静态）：validated.json 非空守卫"
@@ -1413,7 +1413,7 @@ assert_eq "$(grep -c '超过上限 ${REVIEW_MAX_FINDINGS}，仅展示前' "$ROOT
 
 # ---- 票 16-fix ②：die_review 的日志行也是 sink——失败原因里的不受信取值（runFinished.status）过掩码再打日志 ----
 # 评论正文已由 sink 掩码覆盖，这里补的是 `log "错误：…"` 那一行：事件流里的 status 串原样拼进原因，
-# 此前直接进流水线日志。降级原因走同一个 _redact_for_log（现有 review_validate 对各种怪类型都做了规范化、
+# 此前直接进流水线日志。降级原因的不受信部分走同一个 _untrusted_for_log（现有 review_validate 对各种怪类型都做了规范化、
 # jq 报错不会回显模型取值，所以降级原因目前没有能带出完整 token 的端到端向量——只断言那行日志仍在、没被包坏）。
 run_case statusleak MOCK_KIRO_STATUS_TEXT="error ${SEC_GHP} ${SEC_AKIA}"
 assert_nonzero "$RC" "16-fix 日志：status 非 success → 非零退出"
@@ -1443,11 +1443,12 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" "⚠️ 评审未完成" "第 13 条：MR 上是失败评论"
 # ---- 16-fix3 第 7 条：清洗会膨胀的填充（<!--）不再让行内正文超限；出口硬守卫兜住任何超限正文 ----
 python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); f="<!--"*10000; c["findings"][0]["title"]=f; c["findings"][0]["body"]=f; c["findings"][0]["fix"]=f; json.dump(c,open(sys.argv[2],"w"),ensure_ascii=False)' "$E2E_CONTRACT" "$tmp/expand-inline.json"
-t0=$SECONDS
-run_inline_case expand ifx-expand MOCK_KIRO_CONTRACT="$tmp/expand-inline.json"
-expand_el=$((SECONDS - t0))
+# 计时守卫量的是 CPU 时间（user + sys，含子进程）而不是墙钟：共机跑多套测试时墙钟能翻 5–8 倍，CPU 时间不受负载影响（自审 finding）
+TIMEFORMAT='%U %S'
+{ time run_inline_case expand ifx-expand MOCK_KIRO_CONTRACT="$tmp/expand-inline.json"; } 2> "$tmp/expand.time"
+expand_cpu=$(awk 'END { printf "%d", $1 + $2 }' "$tmp/expand.time")
 assert_rc "$RC" 0 "第 7 条：膨胀填充不让评审失败"
-assert_eq "$([[ $expand_el -le 20 ]] && echo ok)" "ok" "16-fix4 第 12d 条：膨胀向量端到端 ${expand_el}s（≤ 20 s，目标 < 5 s 的 4 倍；不缩小填充规模）"
+assert_eq "$([[ $expand_cpu -le 20 ]] && echo ok)" "ok" "16-fix4 第 12d 条：膨胀向量端到端 CPU ${expand_cpu}s（≤ 20 s，目标 < 5 s 的 4 倍；不缩小填充规模；cf29da0 单是 review_validate 就 2 分钟）"
 bodies=$(inline_bodies "$OUT")
 assert_eq "$(printf '%s\n' "$bodies" | grep -c .)" "3" "第 7 条：三条行内仍发出"
 max_body=$(printf '%s\n' "$bodies" | jq -r '.content | utf8bytelength' | sort -n | tail -1)
