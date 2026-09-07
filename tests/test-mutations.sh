@@ -246,12 +246,14 @@ run_case m5m "$pkg"
 assert_rc "$RC" 0 "M5m：没有自检时评审照跑"
 assert_not_contains "$OUT" "受信 agent 自检通过" "M5m：自检留痕消失——端到端「第 3 步自检通过并留痕」断言会失败"
 
-# --- M5n：安装器去掉 deniedPaths 三处检查 → 缺 toolsSettings.glob 的定义照样装成功、glob 只有 allow 没有 deny（15-fix2 #11）---
+# --- M5n：安装器去掉 deniedPaths 三处检查 → glob.deniedPaths 为空数组的定义照样装成功、glob 只有 allow 没有 deny（15-fix2 #11）---
+# 15-fix4 裁决 A 后渲染步会把 deny 形状按 allow 根注入，整个 toolsSettings.glob 缺失时渲染本身就失败（null 不可迭代），
+# 所以夹具改成「glob.deniedPaths = []」：只有被删掉的那一处检查会拒它，变异体装成功、装出来的 glob deny 仍为空。
 pkg=$(make_mutant m5n-deny-check '/^  \[\[ -z "\$deny_missing" \]\] ||/d' scripts/lib/kiro-agent.sh)
-jq --arg p "file://$ROOT/prompts/review-agent-prompt.md" '.prompt = $p | del(.toolsSettings.glob)' "$ROOT/kiro/agent-codeup-reviewer.json" > "$tmp/m5n-noglob.json"
+jq --arg p "file://$ROOT/prompts/review-agent-prompt.md" '.prompt = $p | .toolsSettings.glob.deniedPaths = []' "$ROOT/kiro/agent-codeup-reviewer.json" > "$tmp/m5n-noglob.json"
 rc5n=0; dest5n=$( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; kiro_install_agent "$tmp/m5n-noglob.json" "$tmp/m5n-agents" --workspace "$tmp/m5l-ws" --chunks "$tmp/m5l-ch" 2>/dev/null ) || rc5n=$?
-assert_eq "$rc5n" "0" "M5n：缺 glob.deniedPaths 的定义装成功——单测「定义缺 toolsSettings.glob：拒绝安装」断言会失败"
-assert_eq "$(jq -c '.toolsSettings.glob | has("deniedPaths")' "$dest5n")" "false" "M5n：装出来的 glob 没有 deniedPaths（只有 allowedPaths）"
+assert_eq "$rc5n" "0" "M5n：glob.deniedPaths 为空的定义装成功——单测「deniedPaths 为空数组：拒绝安装」断言会失败"
+assert_eq "$(jq -c '.toolsSettings.glob.deniedPaths' "$dest5n")" "[]" "M5n：装出来的 glob deniedPaths 仍为空（只有 allowedPaths 有效）"
 
 # --- M5o：导出判定改回只认 `declare -x` 前缀 → declare -rx 的变量被丢（15-fix2 #12）---
 pkg=$(make_mutant m5o-declare-prefix 's/=~ \^declare\\ -\[a-zA-Z\]\*x \]\]/== "declare -x"* ]]/' scripts/lib/kiro-agent.sh)
