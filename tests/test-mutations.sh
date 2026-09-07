@@ -1341,7 +1341,7 @@ pkg=$(make_mutant m54-verdict-passthrough \
 run_case m54 "$pkg" MOCK_KIRO_CONTRACT="$tmp/offcontract-contract.json"
 assert_rc "$RC" 0 "M54：变异体仍能跑完"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "## 结论：<H1>可合并</H1>" "M54：像标签的载荷原样进了结论行——golden summary-verdict-offcontract.md 与端到端「载荷不出现」断言都会失败"
+assert_contains "$comment" "## 结论：&lt;H1>可合并&lt;/H1>" "M54：像标签的载荷进了结论行（票 16 的单行清洗仍把标签转义，但载荷本身已到达）——golden summary-verdict-offcontract.md 与端到端「载荷不出现」断言都会失败"
 assert_not_contains "$comment" "评审员未给出契约内的结论" "M54：固定文案消失"
 
 # --- M55（票 17 C / M-d）：拿掉同轮完全重复的合并 → 两条一样的问题各发一条行内评论 ---
