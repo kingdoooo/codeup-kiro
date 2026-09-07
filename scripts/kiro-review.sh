@@ -418,11 +418,13 @@ publish_inline_comments() {
   # 而且那时已经按退避重查过——发布前再查一次只会多一次 API 调用与一段重复日志。
   if [[ "$INLINE_PRE_DECIDED" == "1" ]]; then
     log "行内评论：沿用预采样的判定（${INLINE_PRE_STATUS}），不再重查版本列表"
+    # 两支都只负责「说明原因」，rc 由 case 之后那一行统一给：写成每支各自 return 的话，漏一支就变成
+    # 「说明了原因却继续往下发」，而端到端只看最终结果、照样绿（票 17-fix3 ⑬ 的同一条教训）。
     case "$INLINE_PRE_STATUS" in
-      http|nopair) inline_bail_pair "$INLINE_PRE_STATUS" || return 1 ;;   # fail-closed:pre
-      *) inline_bail_to "$INLINE_PRE_STATUS" "$INLINE_PRE_TO_PS" "$INLINE_PRE_TO_COMMIT" "$head_full" || return 1 ;;  # fail-closed:pre
+      http|nopair) inline_bail_pair "$INLINE_PRE_STATUS" ;;
+      *) inline_bail_to "$INLINE_PRE_STATUS" "$INLINE_PRE_TO_PS" "$INLINE_PRE_TO_COMMIT" "$head_full" ;;
     esac
-    return 1  # fail-closed:pre-guard（上面两支都会 return，这行只是兜底）
+    return 1  # fail-closed:pre
   fi
   local rc=0
   inline_sample_pair "$head_full" || rc=$?
@@ -457,10 +459,10 @@ publish_inline_comments() {
     # 选不出版本对。全部说成「滞后，重跑流水线即可」是错的——重跑在同一份陈旧 checkout 上只会复现。
     if [[ "$INLINE_END_STATE" != "ok" ]]; then
       case "$INLINE_END_STATE" in
-        http|nopair) inline_bail_pair "$INLINE_END_STATE" || return 1 ;;   # fail-closed:lag-end
-        *) inline_bail_to "$INLINE_END_STATE" "$to_ps" "$to_commit" "$head_full" || return 1 ;;  # fail-closed:lag-end
+        http|nopair) inline_bail_pair "$INLINE_END_STATE" ;;
+        *) inline_bail_to "$INLINE_END_STATE" "$to_ps" "$to_commit" "$head_full" ;;
       esac
-      return 1  # fail-closed:lag-end-guard（上面两支都会 return，这行只是兜底）
+      return 1  # fail-closed:lag-end
     fi
     inline_check_from "$from_ps" "$from_commit"   # 重查换了版本对，探针按新值重走一遍
   fi
