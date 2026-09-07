@@ -469,29 +469,53 @@ assert_contains "$err_var" "非法变量名" "KIRO_ENV_ALLOW_ERROR 带失败原�
 # 15-fix2 #17 / 15-fix3 #6：非法 token **无条件掩码**——只留首段（第一个 _ 之前；没有 _ 就前 4 个字符）+ ****。
 # 原来只在含 = 时掩码，`ghp-liveSecret123` 会原样进日志；原来保留整个标识符前缀，`svc_deploy_9f3ab21c=…` 的标识符部分本身就像密钥
 for pair in 'KIRO_FOO=s3cr3t|KIRO****|s3cr3t' 'ghp-liveSecret123|ghp****|liveSecret' '1ABC|****|1ABC' 'A B|A****|A B' 'svc_deploy_9f3ab21c=zz|svc****|9f3ab21c'; do
-  tok="${pair%%|*}"; rest="${pair#*|}"; want="${rest%%|*}"; leak="${rest#*|}"
+  IFS='|' read -r tok want leak <<<"$pair"   # G8：一次拆三列
   rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH="$tok" bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
   assert_contains "$err" "$want" "非法 token [${tok}]：掩码为 ${want}"
   assert_not_contains "${err#*非法变量名：}" "$leak" "非法 token [${tok}]：原文 ${leak} 不进报错"
 done
-# 令牌形态的假字面量由片段拼出来：仓库是公开的，密钥扫描器会把 ghp_<36 位> 这类完整形态当真令牌（与替身里 PEM 片段同一理由）
-FAKE_TOK_BODY="ABCDEFGHIJKLMNOPQRSTUVWXYZ""abcdefghij"
-FAKE_AKIA_BODY="IOSFODNN7""EXAMPLE"
-# 15-fix2 #13 / 15-fix3 #6：凭证形状的名字（语法合法）也拒绝——YUNXIAO_* / CODEUP_* / AWS_* / *TOKEN* / *SECRET* / *PASSWORD* /
-# *CREDENTIAL* / *_KEY，加令牌前缀 GHP_* / GHO_* / GITHUB_PAT_* / AKIA* / XOX*，大小写不敏感；被拒名字**掩码**（首段 + ****）——
-# `svc_SECRET_9f3ab21c7de4` 这种合法标识符形态的密钥会进 MR 失败评论
-for pair in 'YUNXIAO_TOKEN|YUNXIAO****' 'yunxiao_org_id|yunxiao****' 'CODEUP_REPO_ID|CODEUP****' 'AWS_PROFILE|AWS****' 'AWS_SECRET_ACCESS_KEY|AWS****' \
-            'GITHUB_TOKEN|GITHUB****' 'MY_SECRET|MY****' 'DB_PASSWORD|DB****' 'GCP_CREDENTIALS|GCP****' 'SIGNING_KEY|SIGNING****' 'KIRO_API_KEY|KIRO****' \
-            'svc_SECRET_9f3ab21c7de4|svc****' "ghp_${FAKE_TOK_BODY}|ghp****" "gho_${FAKE_TOK_BODY}|gho****" \
-            'github_pat_11ABCDEFG_abcdef|github****' "AKIA${FAKE_AKIA_BODY}|AKIA****" 'xoxb_123456_abcdef|xoxb****'; do
-  cn="${pair%%|*}"; want_mask="${pair#*|}"
+# 令牌形态的假字面量由 helpers.sh 的 fake_token 片段拼出（15-fix4 #9）：仓库是公开的，密钥扫描器会把 ghp_<36 位> 这类完整形态当真令牌
+# 15-fix2 #13 / 15-fix3 #6 / 15-fix4 #4：凭证形状的名字（语法合法）也拒绝——规则表 KIRO_ENV_CRED_RULES：YUNXIAO_* / CODEUP_* / AWS_* /
+# *TOKEN* / *SECRET* / *PASSWORD* / *CREDENTIAL* / *_KEY / *_PAT / *_PAT_* / DCKR_PAT_*，加令牌前缀 GHP_* / GHO_* / GITHUB_PAT_* / AKIA* / ASIA*，
+# 大小写不敏感；被拒名字**掩码**（首段 + ****）——`svc_SECRET_9f3ab21c7de4` 这种合法标识符形态的密钥会进 MR 失败评论。
+# 第三列 = 期望命中的规则名（评论里「第 N 项 掩码（命中 规则）」）。XOX* 已删（真实 Slack 令牌带连字符，先被语法规则拒）。
+for pair in 'YUNXIAO_TOKEN|YUNXIAO****|YUNXIAO_*' 'yunxiao_org_id|yunxiao****|YUNXIAO_*' 'CODEUP_REPO_ID|CODEUP****|CODEUP_*' 'AWS_SECRET_ACCESS_KEY|AWS****|AWS_*' \
+            'AWS_ACCESS_KEY_ID|AWS****|AWS_*' 'AWS_SESSION_TOKEN|AWS****|AWS_*' 'aws_foo|aws****|AWS_*' \
+            'GITHUB_TOKEN|GITHUB****|*TOKEN*' 'MY_SECRET|MY****|*SECRET*' 'DB_PASSWORD|DB****|*PASSWORD*' 'GCP_CREDENTIALS|GCP****|*CREDENTIAL*' 'SIGNING_KEY|SIGNING****|*_KEY' 'KIRO_API_KEY|KIRO****|*_KEY' \
+            'svc_SECRET_9f3ab21c7de4|svc****|*SECRET*' '_FOO_SECRET|_FOO****|*SECRET*' \
+            'MY_PAT|MY****|*_PAT' 'MY_PAT_2|MY****|*_PAT_*' 'DCKR_PAT_abc|DCKR****|DCKR_PAT_*' 'dckr_pat_xyz|dckr****|DCKR_PAT_*' \
+            "$(fake_token ghp)|ghp****|GHP_*" "$(fake_token gho)|gho****|GHO_*" "$(fake_token ghpat)|github****|GITHUB_PAT_*" \
+            "$(fake_token akia)|AKIA****|AKIA*" "$(fake_token asia)|ASIA****|ASIA*"; do
+  IFS='|' read -r cn want_mask want_rule <<<"$pair"   # G8：一次拆三列
   rc=0; err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH="KIRO_FOO,${cn}" \
     bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist' _ "$LIB" 2>&1 >/dev/null) || rc=$?
   assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：返回非零"
   assert_contains "$err" "凭证形状" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：报错说明"
-  assert_contains "$err" "$want_mask" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：报错里是掩码 ${want_mask}"
-  assert_not_contains "${err#*拒绝透传：}" "$cn" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：原名不进报错"
+  err_var=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH="KIRO_FOO,${cn}" bash -c 'source "$1"; kiro_env_allowlist 2>/dev/null; printf "%s" "$KIRO_ENV_ALLOW_ERROR"' _ "$LIB")
+  assert_contains "$err_var" "第 2 项 ${want_mask}（命中 ${want_rule}）" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：MR 文案按「第 N 项 掩码（命中 规则）」列出"
+  assert_not_contains "${err_var#*拒绝透传：}" "$cn" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：原名不进 MR 文案"
+  # 流水线日志（stderr）：名字类规则给完整名字 + 规则；令牌前缀类规则（GHP_*/GHO_*/GITHUB_PAT_*/AKIA*/ASIA*）像贴了真令牌，日志也只留掩码
+  case "$want_rule" in
+    GHP_\*|GHO_\*|GITHUB_PAT_\*|AKIA\*|ASIA\*)
+      assert_not_contains "${err#*拒绝透传：}" "$cn" "KIRO_ENV_PASSTHROUGH 含令牌前缀名字 [${cn}]：日志里也只留掩码（像贴了真令牌）"
+      assert_contains "$err" "第 2 项 ${want_mask}（命中 ${want_rule}" "KIRO_ENV_PASSTHROUGH 含令牌前缀名字 [${cn}]：日志按序号 + 掩码 + 规则" ;;
+    *)
+      assert_contains "$err" "第 2 项 ${cn}（命中 ${want_rule}）" "KIRO_ENV_PASSTHROUGH 含凭证形状名字 [${cn}]：流水线日志给完整名字 + 命中规则（运维自己写的配置，不是模型文本）" ;;
+  esac
 done
+# 15-fix4 #4：显式放行的 AWS 配置名（不是凭证）照常透传；AWS_* 其余仍拒（上面已覆盖）
+aws_ok=$(names_under HOME="$tmp/h" AWS_PROFILE=p AWS_REGION=r AWS_DEFAULT_REGION=d KIRO_ENV_PASSTHROUGH='AWS_PROFILE,AWS_REGION,AWS_DEFAULT_REGION')
+for v in AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION; do
+  assert_eq "$(printf '%s\n' "$aws_ok" | grep -c -x -- "$v")" "1" "KIRO_ENV_PASSTHROUGH 显式放行 ${v}（配置不是凭证）"
+done
+# 多个被拒条目：序号按运维写的顺序（放行的条目也占序号），同首段的两个 AWS_* 靠序号与规则分得开（A8）
+multi_err=$(env -i PATH="$PATH" HOME="$tmp/h" KIRO_ENV_PASSTHROUGH='AWS_PROFILE,AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY ,JAVA_HOME,_FOO_SECRET' bash -c 'source "$1"; kiro_env_allowlist 2>/dev/null; printf "%s" "$KIRO_ENV_ALLOW_ERROR"' _ "$LIB")
+assert_contains "$multi_err" "第 2 项 AWS****（命中 AWS_*）、第 3 项 AWS****（命中 AWS_*）、第 5 项 _FOO****（命中 *SECRET*）" "多个被拒条目：按序号列出、以 _ 开头的名字掩码保留前 4 个字符"
+assert_not_contains "$multi_err" "第 1 项" "多个被拒条目：放行的 AWS_PROFILE 不在列表里（但占序号）"
+assert_not_contains "$multi_err" "第 4 项" "多个被拒条目：合法的 JAVA_HOME 不在列表里"
+# XOX* 规则已删：xoxb_ 形态的合法标识符现在照常透传（真实 Slack 令牌 xoxb-… 带连字符，被语法规则拒，见上面非法名字用例）
+xox_ok=$(names_under HOME="$tmp/h" xoxb_123456_abcdef=1 KIRO_ENV_PASSTHROUGH='xoxb_123456_abcdef')
+assert_eq "$(printf '%s\n' "$xox_ok" | grep -c -x -- "xoxb_123456_abcdef")" "1" "XOX* 规则已删：xoxb_ 形态的合法标识符照常透传"
 # 正控：形状相近但不命中的名字照常透传（KEYBOARD 不是 *_KEY；TOKENIZER 命中 *TOKEN*——它就该被拒）
 ok_names=$(names_under HOME="$tmp/h" KEYBOARD=1 MONKEY_PATCH=1 KIRO_ENV_PASSTHROUGH='KEYBOARD,MONKEY_PATCH')
 assert_eq "$(printf '%s\n' "$ok_names" | grep -c -x KEYBOARD)" "1" "KEYBOARD 不命中 *_KEY：正常透传"

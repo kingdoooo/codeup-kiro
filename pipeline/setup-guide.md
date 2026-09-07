@@ -477,7 +477,7 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 | `CI_COMMIT_REF_NAME` | 由 Flow 注入 | 未注入时取 `git rev-parse --abbrev-ref HEAD` | 多代码源下须显式 `export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"`（带下标的内置变量，见第 5.1 节与 flow-pipeline.yaml） | 不带下标的取值在多代码源下不可预期（可能是集成包的分支） | Flow |
 | `REVIEW_REPO_DIR` | `$PWD` | 把当前目录当业务库 | 多代码源下必须显式指向业务库 checkout 目录 | 不得与集成包目录互相包含（隔离步骤会删文件，脚本直接拒绝运行） | Flow |
 | `KIRO_INSTALL_URL` | 官方安装脚本 | 云托管构建机上按需 `curl \| bash` 安装 | 指向内部镜像源 | 自建构建机预装固定版本时不会触发安装 | Flow |
-| `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行机可能需要 `LD_LIBRARY_PATH`、`JAVA_HOME` 这类；例：`LD_LIBRARY_PATH,JAVA_HOME` | 任一名字不合法（写成 `NAME=value`、带连字符/空格、或直接贴了个令牌）时**拒绝运行**并回写「评审未完成」；**凭证形状的名字也拒绝**：`YUNXIAO_*`、`CODEUP_*`、`AWS_*`、含 `TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`、以 `_KEY` 结尾，以及 `ghp_`/`gho_`/`github_pat_`/`AKIA`/`xox` 开头的名字一律不放行——固定名单刚把令牌关在门外，不能被一个变量名重新打开。两种情况评论与日志里都只出现**掩码**（首段 + `****`，如 `YUNXIAO****`、`ghp****`）：形如 `svc_SECRET_9f3a…` 的名字本身就是密钥，不能原样进 MR；点名的变量未设置时跳过 | Flow |
+| `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行机可能需要 `LD_LIBRARY_PATH`、`JAVA_HOME` 这类；例：`LD_LIBRARY_PATH,JAVA_HOME` | 任一名字不合法（写成 `NAME=value`、带连字符/空格、或直接贴了个令牌）时**拒绝运行**并回写「评审未完成」；**凭证形状的名字也拒绝**：`YUNXIAO_*`、`CODEUP_*`、`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/`AWS_DEFAULT_REGION` 是配置不是凭证，显式放行）、含 `TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`、以 `_KEY`/`_PAT` 结尾或含 `_PAT_`、`DCKR_PAT_*`，以及 `ghp_`/`gho_`/`github_pat_`/`AKIA`/`ASIA` 开头的名字一律不放行。这份黑名单是**防运维手滑**，不是安全边界（受信 agent 没有 shell/env 工具，变量到不了模型手里）。失败评论按**条目序号 + 掩码 + 命中规则**列出（「第 2 项 `AWS****`（命中 `AWS_*`）」；掩码 = 首段 + `****`，形如 `svc_SECRET_9f3a…` 的名字本身就是密钥，不能原样进 MR）；**流水线日志**里给完整名字 + 规则（贴了令牌形态的条目除外，日志也只留掩码）。点名的变量未设置时跳过 | Flow |
 
 ### 11.2.1 测试/高级变量（生产流水线不要设）
 这些变量脚本确实会读，但它们是给本仓库的测试与排障用的。**生产流水线里一个都不要配**——
@@ -601,9 +601,10 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
   都以 `env -i` 启动，只透传**固定名单**（下一行与代码 `KIRO_ENV_FIXED_NAMES` 逐名比对，由 `tests/test-agent-config.sh` 守卫；HOME 承载登录态与 agent 目录）：
   固定名单（KIRO_ENV_FIXED_NAMES）：PATH、HOME、USER、TERM、TMPDIR、LANG、LANGUAGE、LC_ALL、LC_CTYPE、LC_MESSAGES、KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY、HTTPS_PROXY、FTP_PROXY、ALL_PROXY、NO_PROXY、http_proxy、https_proxy、ftp_proxy、all_proxy、no_proxy、SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、XDG_CONFIG_HOME、XDG_DATA_HOME、XDG_CACHE_HOME、XDG_STATE_HOME、XDG_RUNTIME_DIR
   **不做形状匹配**（`KIRO_*`、`*_PROXY` 这类模式会放行 `CORP_SECRET_PROXY`、客户自定义的 `KIRO_…`）。自建执行机需要别的变量时
-  用 `KIRO_ENV_PASSTHROUGH` 点名（第 11 节；只放名字，非法名字拒绝运行；`YUNXIAO_*`/`CODEUP_*`/`AWS_*`/含 TOKEN、SECRET、
-  PASSWORD、CREDENTIAL、以 `_KEY` 结尾、`ghp_`/`gho_`/`github_pat_`/`AKIA`/`xox` 开头的凭证形状名字也拒绝——固定名单刚关掉的洞
-  不能被一个变量名重新打开；两种拒绝在评论与日志里都只留掩码）。云效令牌、`CODEUP_*` 与 Flow 注入的其它变量都不进 Kiro 进程
+  用 `KIRO_ENV_PASSTHROUGH` 点名（第 11 节；只放名字，非法名字拒绝运行；`YUNXIAO_*`/`CODEUP_*`/`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/
+  `AWS_DEFAULT_REGION` 除外）/含 TOKEN、SECRET、PASSWORD、CREDENTIAL、以 `_KEY`/`_PAT` 结尾、含 `_PAT_`、`ghp_`/`gho_`/`github_pat_`/
+  `AKIA`/`ASIA` 开头的凭证形状名字也拒绝——这是防运维手滑，不是安全边界：受信 agent 没有 shell/env 工具，变量到不了模型手里；
+  评论里只留掩码 + 命中规则，流水线日志给全名）。云效令牌、`CODEUP_*` 与 Flow 注入的其它变量都不进 Kiro 进程
   （`/proc` 已在拒绝清单里，这是零成本的第二道）。清单是一份库函数（`kiro_env_allowlist`），探测脚本复用同一份；
   日志只打透传的变量名（按变量取名字，取值里的换行不会把半个取值带进日志）。清单让 kiro-cli 起不来时评审按
   「kiro-cli 退出码 N」失败并回写评论，不会退回继承完整环境。

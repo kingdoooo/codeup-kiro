@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # 极简断言库。失败即打印并退出非零。
+# 规则（15-fix4 #8）：**辅助函数不得把捕获的大字符串管进可能提前停读的程序**（grep -q、head、sed …q 之类）——下游一停读，上游 printf 就收
+# SIGPIPE/EPIPE，测试文件都开了 pipefail，整个文件以 141 静默退出、连 FAIL 行都没有（assert_contains 与 meta_row 都踩过）。
+# 需要「第一条」就让 awk 读完再挑（见 meta_row）；子串判断用 bash 的 [[ == *x* ]]。test-kiro-review.sh 里有一条静态断言守着本文件。
 TESTS_PASSED=0
 
 assert_eq() {  # 实际值 期望值 说明
@@ -24,6 +27,12 @@ assert_contains() {  # 内容 子串 说明
 }
 
 assert_not_contains() {  # 内容 子串 说明
+  # 多行 needle 对否定断言是**放宽**（15-fix4 #8 / B8）：以前按行 OR 匹配、任一行出现即命中，改成连续子串后一条多行密钥泄漏断言会因折行变化而假通过。
+  # 直接拒绝，fail loudly：请逐行断言。
+  if [[ "$2" == *$'\n'* ]]; then
+    echo "FAIL: $3 — 否定断言不接受多行 needle，请逐行断言" >&2
+    exit 1
+  fi
   if [[ "$1" == *"$2"* ]]; then
     echo "FAIL: $3 — 不应出现子串 [$2]" >&2
     exit 1
@@ -61,7 +70,24 @@ inline_bodies() {
 # 所以实现只能有一份——提取管道一变，两处拷贝里没改的那一处会静静地返回空串，
 # 然后以「过滤失效」的名义失败，把维护者引向错误的方向（与 req_count/inline_bodies 同一理由）。
 # 没匹配到时返回空串而不是让调用方在 pipefail 下直接中止（调用方要能打出自己的诊断）。
-meta_row() { printf '%s\n' "$1" | { grep -F '| `' || true; } | { grep -F ' → ' || true; } | head -1; }
+# 用 awk 读完全部输入再只打第一条：`… | head -1` 会在第一行后关管道，上游 printf 收 SIGPIPE → pipefail 下 141 静默退出（15-fix4 #8 / E6）
+meta_row() { printf '%s\n' "$1" | awk 'index($0, "| `") && index($0, " → ") && !done { print; done = 1 }'; }
+
+# 假令牌由片段拼出（15-fix4 #9）：仓库是公开的，密钥扫描器会把 ghp_<36 位> 这类完整形态当真令牌——单测、端到端与替身都从这里取，片段只写一处。
+# 用法：fake_token ghp|gho|ghpat|akia|asia|pem1|pem2
+fake_token() {
+  local body="ABCDEFGHIJKLMNOPQRSTUVWXYZ""abcdefghij"
+  case "$1" in
+    ghp)   printf 'ghp_%s' "$body" ;;
+    gho)   printf 'gho_%s' "$body" ;;
+    ghpat) printf 'github_pat_%s' "11ABCDEFG_abcdef" ;;
+    akia)  printf 'AKIA%s%s' "IOSFODNN7" "EXAMPLE" ;;
+    asia)  printf 'ASIA%s%s' "IOSFODNN7" "EXAMPLE" ;;
+    pem1)  printf '%s%s' "MIIEowIBAAKCAQEA" "fakekey0123456" ;;
+    pem2)  printf '%s%s' "MIIEvQIBADANBgkqhkiG9w0BAQEF" "AASCBKcwggSjAgEAAoIBAQCfake02" ;;
+    *) echo "fake_token: 未知类型 [$1]" >&2; return 2 ;;
+  esac
+}
 
 # 端到端 fixture 里机器人账号的用户名（取自 spec §4.7.1 P1-00 实测值）
 TEST_BOT_USERNAME='aliyun:kingdooo_hvFXC'

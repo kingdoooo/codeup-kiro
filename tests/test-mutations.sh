@@ -252,7 +252,7 @@ assert_not_contains "$attr5o" "TMPDIR=" "M5o：declare -rx TMPDIR 被丢——�
 
 # --- M5p：凭证形状的名字不再单独归类（当成普通名字放进名单）→ KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN 照跑，令牌进了 Kiro 进程环境（15-fix2 #13）---
 # 只删「拒绝」那一行的变异会把凭证名字静默丢掉（进不了名单也不报错）——那是另一种坏；这里模拟的是「忘了区分」
-pkg=$(make_mutant m5p-cred-names 's/) cred+=("$(_kiro_env_mask_token "$tok")") ;;/) names+=("$tok") ;;/' scripts/lib/kiro-agent.sh)
+pkg=$(make_mutant m5p-cred-names 's/rule=$(_kiro_env_cred_rule "$up")/rule=""/' scripts/lib/kiro-agent.sh)
 run_case m5p "$pkg" KIRO_ENV_PASSTHROUGH="YUNXIAO_TOKEN"
 assert_rc "$RC" 0 "M5p：凭证形状的名字不再拒绝——端到端「KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：拒绝运行」断言会失败"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "1" "M5p：YUNXIAO_TOKEN 进了 Kiro 进程环境（固定名单关掉的洞被一个变量名重新打开）"
@@ -265,7 +265,7 @@ assert_rc "$RC" 0 "M5q：变异体仍能跑完"
 assert_eq "$([[ -L "$CASE/work/vendor/lib/.git/nestedlink" ]] && echo kept || echo gone)" "gone" "M5q：嵌套 .git 内部的符号链接被删——端到端「嵌套 .git：目录内部的符号链接不动」断言会失败"
 
 # --- M5r：非法 token 不再掩码 → 像令牌的 token 原文进日志与评论（15-fix2 #17）---
-pkg=$(make_mutant m5r-no-mask 's/bad+=("$(_kiro_env_mask_token "$tok")")/bad+=("$tok")/' scripts/lib/kiro-agent.sh)
+pkg=$(make_mutant m5r-no-mask 's/bad+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")")/bad+=("第 ${idx} 项 $tok")/' scripts/lib/kiro-agent.sh)
 run_case m5r "$pkg" KIRO_ENV_PASSTHROUGH="ghp-liveSecret123"
 assert_contains "$OUT" "liveSecret123" "M5r：像令牌的 token 原文进了输出——端到端「原文不进日志也不进评论」断言会失败"
 
@@ -276,17 +276,21 @@ assert_rc "$RC" 0 "M5s：变异体仍能跑完"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5s：汇总评论没有版本 notice——端到端「版本不在名单：汇总评论带 notice」断言会失败"
 
 # --- M5t：.kiro 匹配退回区分大小写 → .Kiro/ 幸存（15-fix3 #1）---
-mut_kiro_case() { mkdir -p src/.Kiro/settings && echo '{}' > src/.Kiro/settings/cli.json; rm -rf .kiro; printf 'plain' > .kiro; git add -A; git commit -qm case; }   # 大小写变体不同目录（APFS 大小写不敏感）
+# 夹具与端到端 kirocase 用例同一份（tests/fixture-repo.sh 的 make_kiro_case_variants，15-fix4 #10）：以前这里少了 src/x/.KIRO，变异跑在更小的树上
 pkg=$(make_mutant m5t-kiro-case 's/-o -iname .kiro -prune/-o -name .kiro -prune/' scripts/lib/isolation.sh)
-MUT_TWEAK=mut_kiro_case run_case m5t "$pkg"
+MUT_TWEAK=make_kiro_case_variants run_case m5t "$pkg"
 assert_rc "$RC" 0 "M5t：变异体仍能跑完"
 assert_eq "$([[ -d "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "kept" "M5t：src/.Kiro/ 幸存——端到端「src/.Kiro/ 目录被删」断言会失败"
+assert_eq "$([[ -f "$CASE/work/src/x/.KIRO" ]] && echo kept || echo gone)" "kept" "M5t：子目录大写文件 src/x/.KIRO 同样幸存——端到端「子目录 .KIRO 文件被删」断言会失败"
+assert_eq "$([[ -e "$CASE/work/.kiro" ]] && echo kept || echo gone)" "gone" "M5t：小写的根 .kiro 文件仍被删（变异只动了大小写）"
 
 # --- M5u：.kiro 匹配退回只认目录/符号链接 → 根 .kiro 普通文件幸存（15-fix3 #2）---
 pkg=$(make_mutant m5u-kiro-type 's/-o -iname .kiro -prune/-o -iname .kiro \\( -type d -o -type l \\) -prune/' scripts/lib/isolation.sh)
-MUT_TWEAK=mut_kiro_case run_case m5u "$pkg"
+MUT_TWEAK=make_kiro_case_variants run_case m5u "$pkg"
 assert_rc "$RC" 0 "M5u：变异体仍能跑完"
 assert_eq "$([[ -f "$CASE/work/.kiro" ]] && echo kept || echo gone)" "kept" "M5u：根 .kiro 普通文件幸存——端到端「根 .kiro 普通文件被删」断言会失败"
+assert_eq "$([[ -f "$CASE/work/src/x/.KIRO" ]] && echo kept || echo gone)" "kept" "M5u：子目录大写普通文件 src/x/.KIRO 同样幸存"
+assert_eq "$([[ -d "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "gone" "M5u：src/.Kiro/ 目录仍被删（变异只动了类型）"
 
 # --- M5v：降级评论不再接 --notice → 版本 notice 只在日志、评论里没有（15-fix3 #3）---
 pkg=$(make_mutant m5v-degraded-notice 's/--reason "\$DEGRADE_REASON" --notice "\$REVIEW_NOTICE"/--reason "$DEGRADE_REASON"/')
@@ -303,7 +307,7 @@ assert_contains "$OUT" "未经 P1-15 探测" "M5ad：日志仍有警告"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5ad：失败评论丢了版本告警——端到端「失败评论带版本告警引用块」断言会失败"
 
 # --- M5w：被拒的凭证形状名字不再掩码 → 完整名字进失败评论（15-fix3 #6）---
-pkg=$(make_mutant m5w-cred-mask 's/cred+=("$(_kiro_env_mask_token "$tok")")/cred+=("$tok")/' scripts/lib/kiro-agent.sh)
+pkg=$(make_mutant m5w-cred-mask 's/cred+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")（命中 ${rule}）")/cred+=("第 ${idx} 项 ${tok}（命中 ${rule}）")/' scripts/lib/kiro-agent.sh)
 run_case m5w "$pkg" KIRO_ENV_PASSTHROUGH="svc_SECRET_9f3ab21c7de4"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5w：仍拒绝运行"
 assert_contains "$(posted_comment "$OUT")" "svc_SECRET_9f3ab21c7de4" "M5w：完整名字进了评论——端到端「完整名字不进评论」断言会失败"

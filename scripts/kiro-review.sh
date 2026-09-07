@@ -54,7 +54,7 @@ PROMPT_FILE="${PROMPT_FILE:-${PKG_ROOT}/prompts/review-prompt.md}"
 AGENT_FILE="${PKG_ROOT}/kiro/agent-codeup-reviewer.json"
 REVIEW_REPO_DIR="${REVIEW_REPO_DIR:-$PWD}"
 # Kiro 进程环境许可清单之外要额外透传的变量**名**（逗号分隔，只放名字不放值；自建执行机可能需要 LD_LIBRARY_PATH /
-# JAVA_HOME 这类；AWS_* 与其它凭证形状的名字按规则硬拒绝）。固定名单与校验在 scripts/lib/kiro-agent.sh 的 kiro_env_allowlist；
+# JAVA_HOME / AWS_PROFILE 这类；凭证形状的名字按规则拒绝，AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 显式放行）。固定名单与校验在 scripts/lib/kiro-agent.sh 的 kiro_env_allowlist；
 # 非法名字在第 1.6 步拒绝运行。
 KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 # 探测 P1-15（T8：符号链接与 ../ 越界都是先解析再比对 allowedPaths）实测过的 kiro-cli 版本（空格分隔）。读取边界依赖 kiro-cli
@@ -525,9 +525,10 @@ for _v in KIRO_TIMEOUT DIFF_SIZE_LIMIT; do
     || die_review "${_v}=0 不合法（必须 ≥1；0 会让超时形同不限时、让 diff 阈值变成「全部省略」）。请修正该流水线变量"
 done
 unset _v
-# KIRO_ENV_PASSTHROUGH 只收变量名：非法名字（写成 NAME=value、带空格/连字符）与凭证形状的名字（YUNXIAO_*/CODEUP_*/AWS_*/
-# *TOKEN*/*SECRET*/*PASSWORD*/*CREDENTIAL*/*_KEY）一律拒绝运行——静默忽略会让运维以为透传生效了、或把固定名单刚关掉的洞
-# 重新打开。原因文案只有一处（kiro_env_allowlist 的 KIRO_ENV_ALLOW_ERROR；非法 token 已掩码，取值从不出现）。
+# KIRO_ENV_PASSTHROUGH 只收变量名：非法名字（写成 NAME=value、带空格/连字符）与凭证形状的名字（规则表 KIRO_ENV_CRED_RULES，
+# AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 显式放行）一律拒绝运行——静默忽略会让运维以为透传生效了。这份黑名单是防运维手滑、
+# 不是安全边界（受信 agent 没有 shell / env 工具）。原因文案只有一处（kiro_env_allowlist 的 KIRO_ENV_ALLOW_ERROR：MR 评论按条目序号 +
+# 掩码 + 命中规则；完整名字只在流水线日志；取值从不出现）。
 env_allowlist_or_die() { kiro_env_allowlist || die_review "KIRO_ENV_PASSTHROUGH 不合法：${KIRO_ENV_ALLOW_ERROR}。请修正该流水线变量"; }
 env_allowlist_or_die
 

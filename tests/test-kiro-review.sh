@@ -1410,7 +1410,7 @@ assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH �
 assert_not_contains "$OUT" "liveSecret" "像令牌的非法 token：原文不进日志也不进评论"
 assert_contains "$(posted_comment "$OUT")" "ghp****" "像令牌的非法 token：评论里只有掩码"
 # 15-fix3 #6：`ghp_<36 位>` 是**合法标识符**，不带 = 也不带连字符——原来不匹配任何凭证形状、被静默接受并透传；现在按 GHP_* 前缀拒绝并掩码
-FAKE_GHP="ghp_""ABCDEFGHIJKLMNOPQRSTUVWXYZ""abcdefghij"   # 片段拼接：公开仓库里不留完整的令牌形态字面量
+FAKE_GHP=$(fake_token ghp)   # 片段拼接只在 helpers.sh 的 fake_token 一处（15-fix4 #9）：公开仓库里不留完整的令牌形态字面量
 run_case badpass3b KIRO_ENV_PASSTHROUGH="$FAKE_GHP"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 贴了一个真形态 ghp_ 令牌：拒绝运行"
 comment=$(posted_comment "$OUT")
@@ -1425,8 +1425,21 @@ assert_contains "$comment" "凭证形状" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：
 assert_contains "$comment" "YUNXIAO****" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：失败评论列出被拒名字的掩码（15-fix3 #6）"
 assert_not_contains "$comment" "YUNXIAO_TOKEN" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：完整名字不进评论（svc_SECRET_… 这类名字本身就是密钥）"
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "KIRO_ENV_PASSTHROUGH=YUNXIAO_TOKEN：Kiro 未被启动"
-run_case badpass5 KIRO_ENV_PASSTHROUGH="AWS_PROFILE"
-assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH=AWS_PROFILE：AWS_* 一律拒绝"
+# 15-fix4 #4：AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 是配置不是凭证，显式放行；AWS_* 其余仍拒
+run_case awscfg KIRO_ENV_PASSTHROUGH="AWS_PROFILE,AWS_REGION,AWS_DEFAULT_REGION" AWS_PROFILE=p AWS_REGION=cn-north-1 AWS_DEFAULT_REGION=cn-north-1
+assert_rc "$RC" 0 "KIRO_ENV_PASSTHROUGH=AWS_PROFILE,AWS_REGION,AWS_DEFAULT_REGION：放行、评审正常完成"
+for v in AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION; do
+  assert_eq "$(grep -c -x -- "$v" "$MD/env")" "1" "KIRO_ENV_PASSTHROUGH：$v 透传到 Kiro 进程"
+done
+# 被拒条目按「第 N 项 掩码（命中 规则）」列出（A8：两个 AWS_* 名字掩码后都是 AWS****，靠序号与规则区分）；流水线日志给完整名字，评论不给
+run_case badpass5 KIRO_ENV_PASSTHROUGH="AWS_PROFILE,AWS_ACCESS_KEY_ID,MY_PAT" AWS_PROFILE=p
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "KIRO_ENV_PASSTHROUGH 含 AWS_ACCESS_KEY_ID：拒绝运行"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "第 2 项 AWS****（命中 AWS_*）" "凭证形状：评论按条目序号 + 掩码 + 命中规则列出（第 2 项）"
+assert_contains "$comment" "第 3 项 MY****（命中 *_PAT）" "凭证形状：*_PAT 规则命中、序号 3"
+assert_not_contains "$comment" "AWS_ACCESS_KEY_ID" "凭证形状：完整名字不进评论"
+assert_contains "$OUT" "第 2 项 AWS_ACCESS_KEY_ID（命中 AWS_*）" "凭证形状：流水线日志给完整名字 + 规则（名字是运维自己写的配置）"
+assert_not_contains "$comment" "第 1 项" "凭证形状：放行的 AWS_PROFILE 不在被拒条目里"
 
 # ---- 替身通道是 fail-closed（15-fix #14 / 15-fix2 #18 #19）：拿不到 $HOME/.kiro-mock 或加载不了 helpers.sh 的替身以 97 退出并报错 ----
 mkdir -p "$tmp/nohome"
@@ -1549,14 +1562,8 @@ assert_eq "$(cat "$MD/cwdscan")" "" "嵌套 .git：Kiro 启动时扫描不到残
 assert_contains "$OUT" "2 个符号链接" "嵌套 .git：只删了 sub/.git 与 link-outside-git 两个链接（计数 2）"
 
 # ---- .kiro 大小写不敏感 + 根 .kiro 普通文件（15-fix3 #1 #2）：macOS/Windows 执行器上 .Kiro/ 按 .kiro/ 读到；旧代码无条件 rm -rf ./.kiro 没搬进新库 ----
-# 大小写变体放在**不同目录**里：macOS APFS 默认大小写不敏感，同一目录下 .Kiro 与 .kiro 是同一个条目
-tweak_kiro_case() {
-  rm -rf .kiro && printf 'plain file named .kiro\n' > .kiro            # 根 .kiro 是普通文件
-  mkdir -p src/.Kiro/settings && echo '{"chat.disableInheritingDefaultResources": false}' > src/.Kiro/settings/cli.json
-  mkdir -p src/x && echo x > src/x/.KIRO                                 # 子目录里大写的普通文件
-  git add -A && git commit -qm "kiro case variants"
-}
-CASE_TWEAK=tweak_kiro_case run_case kirocase
+# 夹具在 tests/fixture-repo.sh 的 make_kiro_case_variants（与变异 M5t / M5u 同一份，15-fix4 #10）
+CASE_TWEAK=make_kiro_case_variants run_case kirocase
 assert_rc "$RC" 0 ".kiro 变体：评审正常完成"
 assert_eq "$([[ -e "$CASE/work/.kiro" ]] && echo kept || echo gone)" "gone" ".kiro 变体：根 .kiro 普通文件被删"
 assert_eq "$([[ -e "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "gone" ".kiro 变体：src/.Kiro/ 目录被删（不分大小写）"
@@ -1652,6 +1659,12 @@ paste_ctl=$(paste_delims "$tmp/paste-ctl.txt")
 assert_eq "$(printf '%s\n' "$paste_ctl" | wc -l | tr -d ' ')" "5" "静态正控：五种 paste 分隔符写法都被正则认出"
 assert_eq "$(printf '%s\n' "$paste_ctl" | non_ascii_count)" "4" "静态正控：四个多字节分隔符在本平台上都被非 ASCII 判定抓到（单字节那个不算）"
 assert_eq "$(grep -rn -- '--print-paths\|print_paths' "$ROOT/scripts" | wc -l | tr -d ' ')" "0" "静态：--print-paths 协议已从 scripts/ 删除"
+# 15-fix4 #8：tests/helpers.sh 的辅助函数不得把 printf 出来的大字符串管进可能提前停读的程序（grep -q / head）——下游一停读上游 printf 收
+# SIGPIPE，pipefail 下整个测试文件以 141 静默退出、连 FAIL 行都没有（assert_contains 与 meta_row 都踩过）。只看代码行，不看注释。
+early_exit_pipes() { grep -v '^[[:space:]]*#' "$1" | grep -cE 'printf .*\|.*(grep -q|head( |$))' || true; }
+assert_eq "$(early_exit_pipes "$ROOT/tests/helpers.sh")" "0" "静态：helpers.sh 里没有 printf … | grep -q / head 这类会提前停读的管道"
+printf '%s\n' 'meta_row() { printf "%s\n" "$1" | { grep -F x || true; } | head -1; }' 'x() { printf "%s" "$1" | grep -qF y; }' '# printf | head 注释不算' > "$tmp/helpers-old-shape.sh"
+assert_eq "$(early_exit_pipes "$tmp/helpers-old-shape.sh")" "2" "静态正控：旧 meta_row（… | head -1）与 printf | grep -q 两种形状都被认出、注释不算"
 
 run_case rerunhint REVIEW_RERUN_HINT='评论 `/kiro review` 可重新评审'
 assert_rc "$RC" 0 "REVIEW_RERUN_HINT：评审成功"

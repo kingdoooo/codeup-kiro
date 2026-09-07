@@ -200,13 +200,13 @@ elif [[ "${MOCK_KIRO_LEAK_SECRET:-0}" == "1" ]]; then
   # 不守契约（无标记）**并且**没按掩码规则脱敏：降级路径必须由脚本再掩一次。
   # 三种形态都放进来：裸值、base64 补位（值里含 `=`）、只引用起始行的 PEM 块。
   # 后两种在票 10 之前都会失效——补位形态整段裸奔，未配对的 BEGIN 会把它之后的结论全吞掉。
-  # PEM 与 base64 值都由片段拼出来，不在仓库里留下完整的凭证形态字面量（与单测同一理由）。
+  # PEM 与 base64 值都由片段拼出来，不在仓库里留下完整的凭证形态字面量（与单测同一理由；PEM 片段取自 helpers.sh 的 fake_token）。
   D5="-----"
   PADDED="dGhpcyBpcyBh""IHNlY3JldA=="
   # 整行正文刻意只有 30 字符：≥20 走「整行 base64」规则，但不到 40、不会被「连片 base64」规则顺手掩掉——
   # 否则 M43 变异（关掉整行规则）观察不到任何变化（2026-09-05 实测踩过）。
-  PEM_BODY="MIIEowIBAAKCAQEA""fakekey0123456"
-  PEM_BODY2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQCfake02"
+  PEM_BODY=$(fake_token pem1)      # 片段拼接只在 tests/helpers.sh 的 fake_token 一处（15-fix4 #9）
+  PEM_BODY2=$(fake_token pem2)
   # 起始行后先来一句说明，再是整行正文与夹在句子里的正文片段：三种形态都要在放出时被掩掉
   FINAL=$(printf '# 代码评审报告\n\nP0：src/app.py 里写死了凭证 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY，还有 AKIAIOSFODNN7EXAMPLE。\nP0：src/conf.py 里 api_key = "%s" 也是明文。\nP0：仓库里还提交了私钥：\n%sBEGIN RSA PRIVATE KEY%s\n（下面是私钥内容，节选）\n%s\n正文片段 %s 出现在 app/key.pem\n\n总体结论：不建议合并。\n' \
           "$PADDED" "$D5" "$D5" "$PEM_BODY" "$PEM_BODY2")

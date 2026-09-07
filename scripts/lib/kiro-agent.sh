@@ -214,14 +214,18 @@ kiro_cli_version() {
 #   PATH、HOME（登录态与 ~/.kiro/agents 都靠它）、USER、TERM、TMPDIR、LANG、LANGUAGE、LC_ALL、LC_CTYPE、LC_MESSAGES、
 #   KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY/HTTPS_PROXY/FTP_PROXY/ALL_PROXY/NO_PROXY 与小写五个、
 #   SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、XDG_CONFIG_HOME、XDG_DATA_HOME、XDG_CACHE_HOME、XDG_STATE_HOME、XDG_RUNTIME_DIR。
-# **逃生口** KIRO_ENV_PASSTHROUGH：逗号分隔的变量**名**（自建执行机可能需要 LD_LIBRARY_PATH / JAVA_HOME 这类；AWS_* 按凭证形状拒绝），
+# **逃生口** KIRO_ENV_PASSTHROUGH：逗号分隔的变量**名**（自建执行机可能需要 LD_LIBRARY_PATH / JAVA_HOME / AWS_PROFILE 这类），
 #   只放名字不放值。两道校验，任一不过 → 返回 1、原因放进 KIRO_ENV_ALLOW_ERROR，调用方必须拒绝运行而不是静默忽略：
 #   ① 语法：不是 [A-Za-z_][A-Za-z0-9_]*（例如写成 NAME=value）→ 拒绝。
-#   ② 凭证形状的名字 → 拒绝（15-fix2 #13 / 15-fix3 #6）：YUNXIAO_*、CODEUP_*、AWS_*、*TOKEN*、*SECRET*、*PASSWORD*、*CREDENTIAL*、
-#      *_KEY，以及常见令牌前缀 GHP_*、GHO_*、GITHUB_PAT_*、AKIA*、XOX*（大小写不敏感；`ghp_<36 位>` 是合法标识符，没有这几条会被静默接受）。
-#      固定名单刚把云效令牌关在门外，运维写一个 YUNXIAO_TOKEN 就又开了——只靠文档一句话拦不住。
-#   两条路径的报错都**无条件掩码**（15-fix2 #17 / 15-fix3 #6）：只留首段（第一个 _ 之前；没有 _ 就前 4 个字符）+ ****——
-#   `svc_SECRET_9f3ab21c7de4` 这种合法标识符形态的密钥会进 MR 失败评论，不能原样出现；取值从不出现在任何输出里。
+#   ② 凭证形状的名字 → 拒绝（15-fix2 #13 / 15-fix3 #6 / 15-fix4 #4）：规则表 KIRO_ENV_CRED_RULES（YUNXIAO_*、CODEUP_*、AWS_*、*TOKEN*、
+#      *SECRET*、*PASSWORD*、*CREDENTIAL*、*_KEY、*_PAT、*_PAT_*、DCKR_PAT_*，以及令牌前缀 GHP_*、GHO_*、GITHUB_PAT_*、AKIA*、ASIA*；大小写不敏感），
+#      显式放行 KIRO_ENV_CRED_ALLOW（AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION：它们是配置不是凭证；AWS_* 其余仍拒）。
+#      这份黑名单是**防运维手滑**、不是安全边界：受信 agent 没有 shell / env 工具，变量到不了模型手里；逃生口存在的意义就是客户不改代码
+#      也能放行自家构建变量。`XOX*` 已删（死代码：真实 Slack 令牌带连字符，先被 ① 拒）。
+#   诊断（15-fix4 #4 ③ / A8）：MR 失败评论（KIRO_ENV_ALLOW_ERROR）按**条目序号 + 掩码名 + 命中规则**列出（「第 2 项 AWS****（命中 AWS_*）」），
+#   同一首段的几个名字才分得开；**流水线日志**（stderr）对命中名字类规则的条目打完整名字 + 规则（名字是运维自己写的配置，不是模型文本），
+#   命中令牌前缀规则（GHP_* / GHO_* / GITHUB_PAT_* / AKIA* / ASIA*）的条目在日志里也只留掩码——那更像是贴了个真令牌。
+#   掩码 = 首段（第一个 _ 之前；首段为空——名字以 _ 开头——或没有 _ 时取前 4 个字符）+ ****；取值从不出现在任何输出里。
 #   名字对应的变量未设置 → 跳过。KIRO_ENV_PASSTHROUGH 自己不透传。
 # YUNXIAO_* / CODEUP_* 以及 Flow 注入的一切都不进 Kiro 进程（/proc 已在拒绝清单里，这是零成本的第二道）。
 # KIRO_LOG_NO_COLOR=1 固定追加（用户设成别的值也被覆盖）。只透传**已导出**的变量：未导出的本来也到不了子进程。
@@ -231,32 +235,57 @@ kiro_cli_version() {
 KIRO_ENV_FIXED_NAMES=(PATH HOME USER TERM TMPDIR LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES KIRO_API_KEY KIRO_LOG_NO_COLOR HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy ftp_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR)
 KIRO_ENV_ALLOW=()
 KIRO_ENV_ALLOW_ERROR=""
-# 被拒 token / 名字的掩码：先取开头的合法标识符字符段（没有就只有 ****），再只留它的首段——第一个 _ 之前，
-# 没有 _ 就前 4 个字符——加 ****。`KIRO_FOO=s3cr3t`→KIRO****，`ghp-liveSecret123`→ghp****，`svc_SECRET_9f3a`→svc****，`1ABC`→****
+# 被拒 token / 名字的掩码：先取开头的合法标识符字符段（没有就只有 ****），再只留它的首段——第一个 _ 之前；首段为空（以 _ 开头，A8）
+# 或没有 _ 时取前 4 个字符——加 ****。`KIRO_FOO=s3cr3t`→KIRO****，`ghp-liveSecret123`→ghp****，`svc_SECRET_9f3a`→svc****，`_FOO_SECRET`→_FOO****，`1ABC`→****
 _kiro_env_mask_token() {
-  local id
+  local id seg
   if [[ "$1" =~ ^([A-Za-z_][A-Za-z0-9_]*) ]]; then id="${BASH_REMATCH[1]}"; else printf '****'; return 0; fi
-  if [[ "$id" == *_* ]]; then printf '%s****' "${id%%_*}"; else printf '%s****' "${id:0:4}"; fi
+  seg="${id%%_*}"; [[ "$id" == *_* && -n "$seg" ]] || seg="${id:0:4}"
+  printf '%s****' "$seg"
+}
+# 凭证形状规则表与显式放行（15-fix4 #4）。_kiro_env_cred_rule <大写名字> → stdout 命中的规则（空 = 放行）；
+# 令牌前缀类规则（更像贴了真令牌）在流水线日志里也只留掩码，其余名字类规则日志给全名
+# 顺序即优先级：先具体（令牌前缀、DCKR_PAT_*）再泛（*_PAT_* 也匹配 GITHUB_PAT_…），命中的规则名要能说明「为什么」
+KIRO_ENV_CRED_RULES=('GHP_*' 'GHO_*' 'GITHUB_PAT_*' 'AKIA*' 'ASIA*' 'DCKR_PAT_*' 'YUNXIAO_*' 'CODEUP_*' 'AWS_*' '*TOKEN*' '*SECRET*' '*PASSWORD*' '*CREDENTIAL*' '*_KEY' '*_PAT' '*_PAT_*')
+KIRO_ENV_CRED_TOKEN_RULES=('GHP_*' 'GHO_*' 'GITHUB_PAT_*' 'AKIA*' 'ASIA*')
+KIRO_ENV_CRED_ALLOW=(AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION)
+# 用「、」拼接条目（IFS 只认单字节，不能塞多字节分隔符）
+_kiro_env_join() { local sep="$1" out="" x; shift; for x in "$@"; do out+="${out:+$sep}$x"; done; printf '%s' "$out"; }
+_kiro_env_cred_rule() {
+  local r
+  for r in "${KIRO_ENV_CRED_ALLOW[@]}"; do [[ "$1" == "$r" ]] && return 0; done
+  for r in "${KIRO_ENV_CRED_RULES[@]}"; do [[ "$1" == $r ]] && { printf '%s' "$r"; return 0; }; done
+  return 0
 }
 kiro_env_allowlist() {
   KIRO_ENV_ALLOW=(); KIRO_ENV_ALLOW_ERROR=""
-  local n tok rest up seen=" "
-  local -a names=("${KIRO_ENV_FIXED_NAMES[@]}") bad=() cred=()
+  local n tok rest up rule seen=" " idx=0 tr_ tok_rule
+  local -a names=("${KIRO_ENV_FIXED_NAMES[@]}") bad=() cred=() cred_log=()
   if [[ -n "${KIRO_ENV_PASSTHROUGH:-}" ]]; then
     rest="${KIRO_ENV_PASSTHROUGH},"
     while [[ -n "$rest" ]]; do
       tok="${rest%%,*}"; rest="${rest#*,}"
       tok="${tok#"${tok%%[![:space:]]*}"}"; tok="${tok%"${tok##*[![:space:]]}"}"   # 去首尾空白
       [[ -z "$tok" ]] && continue
-      if [[ ! "$tok" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then bad+=("$(_kiro_env_mask_token "$tok")"); continue; fi
+      idx=$((idx + 1))
+      if [[ ! "$tok" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then bad+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")"); continue; fi
       up=$(printf '%s' "$tok" | tr '[:lower:]' '[:upper:]')
-      case "$up" in
-        YUNXIAO_*|CODEUP_*|AWS_*|*TOKEN*|*SECRET*|*PASSWORD*|*CREDENTIAL*|*_KEY|GHP_*|GHO_*|GITHUB_PAT_*|AKIA*|XOX*) cred+=("$(_kiro_env_mask_token "$tok")") ;;
-        *) names+=("$tok") ;;
-      esac
+      rule=$(_kiro_env_cred_rule "$up")
+      if [[ -n "$rule" ]]; then
+        cred+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")（命中 ${rule}）")
+        tok_rule=0; for tr_ in "${KIRO_ENV_CRED_TOKEN_RULES[@]}"; do [[ "$rule" == "$tr_" ]] && tok_rule=1; done
+        if [[ "$tok_rule" == "1" ]]; then cred_log+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")（命中 ${rule}，像贴了令牌，日志也只留掩码）")
+        else cred_log+=("第 ${idx} 项 ${tok}（命中 ${rule}）"); fi
+      else
+        names+=("$tok")
+      fi
     done
-    if [[ ${#bad[@]} -gt 0 ]]; then KIRO_ENV_ALLOW_ERROR="KIRO_ENV_PASSTHROUGH 含非法变量名：${bad[*]}（只接受逗号分隔的变量名，例如 LD_LIBRARY_PATH,JAVA_HOME；不能带 = 或取值；非法部分已掩码）"; echo "kiro_env_allowlist: ${KIRO_ENV_ALLOW_ERROR}" >&2; return 1; fi
-    if [[ ${#cred[@]} -gt 0 ]]; then KIRO_ENV_ALLOW_ERROR="KIRO_ENV_PASSTHROUGH 含凭证形状的变量名，拒绝透传：${cred[*]}（已掩码；YUNXIAO_*、CODEUP_*、AWS_*、*TOKEN*、*SECRET*、*PASSWORD*、*CREDENTIAL*、*_KEY 与 GHP_*/GHO_*/GITHUB_PAT_*/AKIA*/XOX* 前缀一律不放行——这些正是固定名单要关在 Kiro 进程之外的东西）"; echo "kiro_env_allowlist: ${KIRO_ENV_ALLOW_ERROR}" >&2; return 1; fi
+    if [[ ${#bad[@]} -gt 0 ]]; then KIRO_ENV_ALLOW_ERROR="KIRO_ENV_PASSTHROUGH 含非法变量名：$(_kiro_env_join 、 "${bad[@]}")（只接受逗号分隔的变量名，例如 LD_LIBRARY_PATH,JAVA_HOME；不能带 = 或取值；非法部分已掩码）"; echo "kiro_env_allowlist: ${KIRO_ENV_ALLOW_ERROR}" >&2; return 1; fi
+    if [[ ${#cred[@]} -gt 0 ]]; then
+      KIRO_ENV_ALLOW_ERROR="KIRO_ENV_PASSTHROUGH 含凭证形状的变量名，拒绝透传：$(_kiro_env_join 、 "${cred[@]}")（已掩码；规则：YUNXIAO_*、CODEUP_*、AWS_*（AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 除外）、*TOKEN*、*SECRET*、*PASSWORD*、*CREDENTIAL*、*_KEY、*_PAT、*_PAT_*、DCKR_PAT_*，令牌前缀 GHP_*/GHO_*/GITHUB_PAT_*/AKIA*/ASIA*——固定名单刚把令牌关在门外，不能被一个变量名重新打开；完整名字见流水线日志）"
+      echo "kiro_env_allowlist: KIRO_ENV_PASSTHROUGH 含凭证形状的变量名，拒绝透传：$(_kiro_env_join 、 "${cred_log[@]}")" >&2
+      return 1
+    fi
   fi
   for n in "${names[@]}"; do
     [[ "$seen" == *" $n "* ]] && continue
