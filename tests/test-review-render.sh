@@ -2061,11 +2061,23 @@ render_redacted() {  # <契约> <输出 md> [额外参数…]：与 render 同�
   review_render_summary --json "$tmp/validated-redacted.json" --sha 90fcb05 --src feature/user-search --dst master \
     --ts "2026-09-02 20:10:02" --diff-note "完整直传" "$@" > "$out"
 }
-D5="-----"; PEM_B="${D5}BEGIN RSA PRIVATE KEY${D5}"; PEM_E="${D5}END RSA PRIVATE KEY${D5}"   # 拼接：完整 PEM 头字面量不进源码（Code Defender）
-PEM_PLACEHOLDER="**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
-PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4ijkl"   # 64 位折行的密钥正文形态；尾巴要像随机 base64（切换率 0.41）——第 26 条改定义后块外判定看类别切换率，原 fake02abcdefghijkl 尾巴只有 0.28
-PEM_L16="MIIEvQIBADANBgkq"                                                             # 16 位折行
-rd() { printf '%s\n' "$1" | review_redact_secrets; }               # 字段级（默认）
+# PEM 夹具常量（D5 / PEM_B / PEM_E / PEM_L64 / PEM_L16）在 tests/helpers.sh；两个占位符是库常量
+# REVIEW_PEM_PLACEHOLDER / REVIEW_PEM_BODY_PH（票 18 ⑪：以前这里与 test-mutations.sh 各写一份、测试里还手抄了四次）
+PEM_PLACEHOLDER="$REVIEW_PEM_PLACEHOLDER"; PEM_BODY_PH="$REVIEW_PEM_BODY_PH"   # 本文件里的短别名（下面几十处断言按这两个名字引用）
+# 票 18 ⑪ 的三条结构断言：常量与探针只有一份、倒出程序只有一份
+assert_eq "$(LC_ALL=C grep -c '^D5=\|^PEM_B=\|^PEM_E=\|^PEM_L64=\|^PEM_L16=' "$ROOT/tests/helpers.sh")" "5" "⑪：五个 PEM 夹具常量都在 helpers.sh"
+for f in test-review-render.sh test-mutations.sh; do
+  assert_eq "$(LC_ALL=C grep -c '^D5=\|^PEM_L64=\|^PEM_L16=' "$ROOT/tests/$f")" "0" "⑪：${f} 里不再各写一份 PEM 夹具常量"
+  assert_eq "$(LC_ALL=C grep -c 'redact_probe' "$ROOT/tests/$f" | LC_ALL=C awk '{print ($1 > 0 ? "yes" : "no")}')" "yes" "⑪：${f} 用统一探针 redact_probe"
+done
+assert_eq "$(LC_ALL=C grep -cF "$REVIEW_PEM_BODY_PH" "$ROOT/tests/test-mutations.sh" "$ROOT/tests/test-kiro-review.sh" | LC_ALL=C awk -F: '{s += $2} END {print s + 0}')" "0" \
+  "⑪：另两个测试文件里不再手抄 PEM 正文占位符的字面量（取库常量 REVIEW_PEM_BODY_PH；本文件的这条断言自己带着那个取值，所以只扫另两个）"
+assert_eq "$(LC_ALL=C grep -c '^redact_probe() {' "$ROOT/tests/helpers.sh")" "1" "⑪：统一掩码探针只有 helpers.sh 一份"
+assert_eq "$(LC_ALL=C grep -c 'to_entries\[\] | (if (.value | type) == "string"' "$ROOT/scripts/lib/review-render.sh")" "1" \
+  "⑪：字段倒出的「发射约定」只在 _review_dump_fields 一处（原先两份程序各一遍）"
+assert_eq "$(LC_ALL=C grep -c 'split(\$re; null) | map(rtrimstr("' "$ROOT/scripts/lib/review-render.sh")" "2" \
+  "⑪：切回仍是两行（单行槽位与多行槽位各一份 rawfile），但发射约定共用一处——错位会让 title 拿到 category 的内容而 rc 0"
+rd() { redact_probe "$1"; }        # 字段级（默认）——统一探针在 tests/helpers.sh
 
 # ---- review_redact_file：文档级兜底的失败语义（rc 0 改写 / 1 掩码程序失败 / 2 不可读为空 / 3 守卫拒绝；非零时原文件不动）----
 printf 'token: %s\n正文。\n' "$SEC_GHP" > "$tmp/rf.md"
@@ -2213,7 +2225,7 @@ review_render_degraded --text "$tmp/deg-secrets.raw.md" --sha 90fcb05 --src feat
 assert_masked "$(cat "$tmp/deg-secrets.md")" "票 16 降级"
 assert_not_contains "$(cat "$tmp/deg-secrets.md")" "MIIEowIBAAKCAQEAs3cR9tX" "票 16 降级：未闭合块后紧跟的密钥正文行被就地屏蔽（第 14 条：保行模式）"
 assert_eq "$(grep -c -F -- "$PEM_B" "$tmp/deg-secrets.md")" "2" "票 16 降级（第 14 / 28 条）：两条 BEGIN 行都作为标记原位保留（保行模式不删行、不换占位）"
-assert_eq "$(grep -c -F '****（PEM 正文已屏蔽）' "$tmp/deg-secrets.md")" "1" "票 16 降级（第 14 条）：正文行换成等行数的屏蔽占位"
+assert_eq "$(grep -c -F "$REVIEW_PEM_BODY_PH" "$tmp/deg-secrets.md")" "1" "票 16 降级（第 14 条）：正文行换成等行数的屏蔽占位"
 assert_not_contains "$(cat "$tmp/deg-secrets.md")" "没有配对的 END 行" "票 16 降级（第 14 条）：保行模式不插提示行"
 assert_contains "$(cat "$tmp/deg-secrets.md")" "又一处：" "票 16 降级：两条标记行之间的评审内容不再整段消失"
 assert_contains "$(cat "$tmp/deg-secrets.md")" "总体结论：不建议合并。" "票 16 降级：结论仍在"
@@ -2292,7 +2304,7 @@ assert_same_file "$tmp/pem-fields.md" "$tmp/pem-fields.doc.md" "方案 C：文�
 printf '| 文件 | P0 |\n|---|---|\n| %s | 1 |\n%s\n%s\n%s\n' "$PEM_B" "$PEM_B" "$PEM_L64" "$PEM_E" > "$tmp/doc-pem.md"; cp "$tmp/doc-pem.md" "$tmp/doc-pem.orig"
 rc=0; review_redact_file "$tmp/doc-pem.md" || rc=$?
 assert_rc "$rc" 0 "方案 C 文档级：含锚定 BEGIN/END 行的文件 rc 0"
-printf '| 文件 | P0 |\n|---|---|\n| %s | 1 |\n%s\n%s\n%s\n' "$PEM_B" "$PEM_B" '****（PEM 正文已屏蔽）' "$PEM_E" > "$tmp/doc-pem.expected"
+printf '| 文件 | P0 |\n|---|---|\n| %s | 1 |\n%s\n%s\n%s\n' "$PEM_B" "$PEM_B" "$REVIEW_PEM_BODY_PH" "$PEM_E" > "$tmp/doc-pem.expected"
 assert_same_file "$tmp/doc-pem.md" "$tmp/doc-pem.expected" "方案 C 文档级：不删行——表格行与标记行原位保留，只有正文行换成等行数的占位（变异「保行模式删行」→ 行数守卫 rc 3）"
 # 第 10 条：file 取值是 BEGIN 标记 → review_validate 按不可定位处理，进「未定位」而不是表格行
 jq --arg b "$PEM_B" '.findings[0].file = $b' fixtures/contract/full.json | review_validate > "$tmp/pem-file.json"
@@ -2413,9 +2425,8 @@ assert_eq "$(rd 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF
 # ============================================================================
 # 16-fix3：48aff39 闭合 diff 复审第 1–14 条（第 9 条不做）
 # ============================================================================
-rdk() { printf '%s\n' "$1" | review_redact_secrets --keep-lines; }
+rdk() { redact_probe --keep-lines "$1"; }   # 保行模式——统一探针在 tests/helpers.sh
 PEM_L64S="MIIEvQIBADANBgkq/hkiG9w0BAQEFAASC/""BKcwggSjAgEAAoIB/AQC7x9Kf2Lm4Qz8Rt"   # 每 16 位一个 / 的正文（第 1 条：48aff39 的 [A-Za-z0-9+]{20,} 一段都凑不满）；尾巴要像随机 base64——16-fix4 第 26 条起 ≥ 2 个 / 且类别切换率 < 0.35 视为路径，原先的 fake02abcdefgh 尾巴把切换率拉到 0.30
-PEM_BODY_PH='****（PEM 正文已屏蔽）'
 # ---- 第 10 条（P1 回退）：带 Markdown 装饰的 BEGIN / END 行仍开块（48aff39 三种形态全部原样输出正文：正控）----
 for deco in '`%s`' '* %s' '1. %s' '**%s**' '> * %s'; do
   # shellcheck disable=SC2059
@@ -2455,7 +2466,7 @@ out=$(printf '%s\n' "$enc" | review_redact_secrets --keep-lines)
 assert_not_contains "$out" "0123456789ABCDEF" "第 11 条：保行模式下 DEK-Info 头也屏蔽"
 
 # ---- 第 26 条：「像密钥正文」只有一份判定 b64_material（字符集 + ≥ minlen + 非十六进制 + 数字/大小写 + 路径排除）----
-rdk() { printf '%s\n' "$1" | review_redact_secrets --keep-lines; }
+rdk() { redact_probe --keep-lines "$1"; }   # 保行模式——统一探针在 tests/helpers.sh
 PATH_A="src/main/java/com/example/v2/service/impl/UserService"           # 54 位、含数字、2 个以上 /、切换率 0.14
 PATH_B="packages/Core/src/main/java/com/acme/utf8/CodecHelper"          # 53 位、切换率 0.16
 RAND2S="ab/cD3eF/gH4iJ5kL6mN7oP8qR9sT0uV1wX2yZ3aB4cD5eF6gH7iJ8kL9m"   # 随机 base64 含 2 个 /：切换率 0.9
@@ -2676,8 +2687,33 @@ assert_eq "$REVIEW_CTRL_TR_SET" '\000-\010\013-\014\016-\037' "第 2 条：tr �
 assert_eq "$REVIEW_CTRL_JQ_RE" '[\u0000-\u0008\u000b-\u000c\u000e-\u001f]' "第 2 条：jq 正则由同一份区间渲染"
 assert_eq "$(printf 'a\001b\013c\td\n' | review_clean_text | od -An -c | tr -s ' ' | sed 's/ *$//')" " a b c \t d \n" "第 2 条：review_clean_text 剔 \001 / \013、留制表"
 assert_eq "$(printf '{"contract":"codeup-reviewer/1","summary":"a\\u0001b\\u000bc\\td","verdict":"MERGE","verdict_reason":"r","findings":[]}' | review_validate | jq -r '.summary | @json')" '"abc\td"' "第 2 条：归一化的 dectl 与清洗用同一份 jq def"
-# 第 8 条补：库里任何 awk -v name="…" 的取值都不得来自环境变量（对所有名字一次性成立，而不是只防 REVIEW_REDACT_SENTINEL_RE 一个）
-assert_eq "$(grep -cE -- '-v [a-z_]+="\$\{?[A-Z_]' "$ROOT/scripts/lib/review-render.sh" || true)" "0" "第 8 条补（静态）：review-render.sh 里没有从大写环境变量取值的 awk -v"
+# 第 8 条补：库里任何 awk -v name="…" 的取值都不得来自环境变量（对所有名字一次性成立，而不是只防 REVIEW_REDACT_SENTINEL_RE 一个）。
+# 票 18 ⑪ 起有两个例外：两个 PEM 占位符经 -v 传进 awk（唯一取值在库里）。所以判定收紧为「**环境可覆盖**的名字才算违规」——
+# 名字在本库里被**无条件**赋值（`NAME="…"`，不是 `${NAME:-…}` / `${NAME-…}`）时环境改不了它；下面逐个名字核对，
+# 有一个是「未赋值」或「带 :- 默认值」形态就算违规（那种取值确实来自环境）。
+awkv_bad=""
+while IFS= read -r nm; do
+  [[ -n "$nm" ]] || continue
+  if LC_ALL=C grep -qE "^${nm}=\"" "$ROOT/scripts/lib/review-render.sh" \
+     && ! LC_ALL=C grep -qE "^${nm}=\"\\\$\{${nm}[:-]" "$ROOT/scripts/lib/review-render.sh"; then continue; fi
+  awkv_bad="${awkv_bad}${awkv_bad:+, }${nm}"
+done < <(LC_ALL=C grep -oE -- '-v [a-z_]+="\$\{?[A-Z_][A-Za-z0-9_]*' "$ROOT/scripts/lib/review-render.sh" \
+         | LC_ALL=C sed -E 's/.*="\$\{?//' | sort -u)
+assert_eq "$awkv_bad" "" "第 8 条补（静态）：review-render.sh 里 awk -v 的每个大写取值都是本库无条件赋值的常量（环境改不了），没有一个来自环境变量"
+# 正控：把其中一个常量改成「环境可覆盖」形态（${NAME:-默认}）→ 上面的判定必须报出它
+awkv_probe=$(mktemp)
+LC_ALL=C sed -E 's/^REVIEW_PEM_BODY_PH="\*\*\*\*/REVIEW_PEM_BODY_PH="${REVIEW_PEM_BODY_PH:-****/' "$ROOT/scripts/lib/review-render.sh" > "$awkv_probe"
+assert_eq "$(LC_ALL=C grep -c '^REVIEW_PEM_BODY_PH="\${REVIEW_PEM_BODY_PH:-' "$awkv_probe")" "1" "第 8 条补 正控：探针文件里那个常量确实被改成了环境可覆盖形态"
+awkv_bad2=""
+while IFS= read -r nm; do
+  [[ -n "$nm" ]] || continue
+  if LC_ALL=C grep -qE "^${nm}=\"" "$awkv_probe" \
+     && ! LC_ALL=C grep -qE "^${nm}=\"\\\$\{${nm}[:-]" "$awkv_probe"; then continue; fi
+  awkv_bad2="${awkv_bad2}${awkv_bad2:+, }${nm}"
+done < <(LC_ALL=C grep -oE -- '-v [a-z_]+="\$\{?[A-Z_][A-Za-z0-9_]*' "$awkv_probe" \
+         | LC_ALL=C sed -E 's/.*="\$\{?//' | sort -u)
+assert_eq "$awkv_bad2" "REVIEW_PEM_BODY_PH" "第 8 条补 正控：环境可覆盖的取值会被判定报出（这条判定不是空转）"
+rm -f "$awkv_probe"
 # 第 3 / 4 条：两个共用小函数的失败语义——jq 失败 / 掩码程序失败时目标文件一个字节不动、临时文件不残留
 printf '{"a":1}\n' > "$tmp/jqi.json"; cp "$tmp/jqi.json" "$tmp/jqi.orig"
 rc=0; _review_jq_inplace "$tmp/jqi.json" who 步骤 -c '.a |= error("boom")' 2> "$tmp/jqi.err" || rc=$?

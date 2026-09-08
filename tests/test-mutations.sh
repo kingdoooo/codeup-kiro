@@ -1043,10 +1043,9 @@ assert_eq "$(sha_row_pipes "$(mut_render "$ROOT" "$nl_branch")")" "5" \
 # --- M39–M43：库级探针（字段模式的 review_redact_secrets）。M39 / M40 / M42 / M43 是 PEM 未闭合块的放出 / 提示 / 掩码——16-fix3 第 14 条后
 #     降级路径走保行模式，字段级的 pem_flush 只在 review_redact_json 里跑，端到端向量换成保行模式的 M-r；M41 与 PEM 无关：
 #     redact_assign 的分隔符扫描方向（16-fix4 第 25 条补回）---
-D5="-----"; PEM_B="${D5}BEGIN RSA PRIVATE KEY${D5}"; PEM_E="${D5}END RSA PRIVATE KEY${D5}"   # 拆片段：完整 PEM 头字面量不进源码
-PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4ijkl"   # 尾巴像随机 base64（第 26 条改定义）
-PEM_PLACEHOLDER="**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
-mut_rd_multi() { ( set +e; source "$1/scripts/lib/review-render.sh"; printf '%b' "$2" | review_redact_secrets ); }   # <包根> <多行文本（printf %b）>
+# PEM 夹具常量在 tests/helpers.sh；占位符取库常量（票 18 ⑪）。本文件的探针只是统一探针的薄别名：<包根> 在前，与原来的调用形态一致
+PEM_PLACEHOLDER="$REVIEW_PEM_PLACEHOLDER"
+mut_rd_multi() { redact_probe --pkg "$1" --multi "$2"; }   # <包根> <多行文本（printf %b）>
 unclosed_in="$PEM_B\n（下面是私钥内容，节选）\nMIIEowIBAAKCAQEAfakekey0123456\n正文片段 $PEM_L64 出现在 app/key.pem\n\n总体结论：不建议合并。\n"
 # M39：让 EOF 时的放出失效 → 未配对 BEGIN 之后暂存的全部正文一起消失（等价于票 10 之前的「块内一律丢弃」）。
 #      注意它覆盖的是**无哨兵形态**（库被直接调用 / 测试直接调）：生产唯一的字段模式调用方 review_redact_json 总带 --sentinel，
@@ -1056,7 +1055,7 @@ assert_not_contains "$(mut_rd_multi "$pkg" "$unclosed_in")" "总体结论：不�
 assert_contains "$(mut_rd_multi "$ROOT" "$unclosed_in")" "总体结论：不建议合并。" "M39 对照：未变异实现放出结论"
 # M39b：哨兵规则里去掉 pem_flush() → 字段末未闭合的 PEM 块（BEGIN + 正文 + 结论）在哨兵行之前静默消失（review_redact_json 的生产路径）
 pkg=$(make_mutant m39b-sentinel-flush 's|    sentre != "" \&\& \$0 ~ sentre { emit_pending(); if (inpem) { if (keeplines) inpem = 0; else pem_flush() } print; next }|    sentre != "" \&\& $0 ~ sentre { emit_pending(); if (inpem) { if (keeplines) inpem = 0; else pem_drop() } print; next }  # 变异 M39b|' scripts/lib/review-render.sh)
-mut_rd_sent() { ( set +e; source "$1/scripts/lib/review-render.sh"; printf '%b' "$2" | review_redact_secrets --sentinel '^<<S>>$' ); }   # <包根> <多行文本>
+mut_rd_sent() { redact_probe --pkg "$1" --sentinel '^<<S>>$' --multi "$2"; }   # <包根> <多行文本>
 sent_in="$PEM_B\n$PEM_L64\n总体结论：不建议合并。\n<<S>>\n"
 assert_not_contains "$(mut_rd_sent "$pkg" "$sent_in")" "总体结论：不建议合并。" "M39b：字段末未闭合 PEM 之后的结论在哨兵前被静默吞掉——单测「字段末未闭合 PEM 放出 + 提示」断言会失败"
 assert_not_contains "$(mut_rd_sent "$pkg" "$sent_in")" "没有配对的 END 行" "M39b：连未闭合提示也没有（无声）"
@@ -1143,7 +1142,7 @@ assert_eq "$(mut_meta_row "$pkg" 'a|b|c' | tr -cd '|' | wc -c | tr -d ' ')" "5" 
 SEC_SUMMARY="$tmp/secrets-summary.json"; with_secrets "$ROOT/tests/fixtures/contract/mock-review.json" > "$SEC_SUMMARY"
 SEC_INLINE="$tmp/secrets-inline.json";   with_secrets "$E2EC" > "$SEC_INLINE"
 # FIELD_LINE / DOC_LINE 两条锚定义在文件开头（票 18 ⑨：静态自检要在那里展开表达式）
-mut_rd() { ( set +e; source "$1/scripts/lib/review-render.sh"; printf '%s\n' "$2" | review_redact_secrets ); }   # 库级探针：<包根> <一行>
+mut_rd() { redact_probe --pkg "$1" "$2"; }   # 库级探针：<包根> <一行>
 
 # --- 对照：未变异实现三处都不含原文；分支名 token 被文档级掩掉 ---
 run_case baseline-sink "$ROOT" MOCK_KIRO_CONTRACT="$SEC_SUMMARY" CI_COMMIT_REF_NAME="feature/${SEC_AKIA}"
@@ -1335,8 +1334,8 @@ assert_contains "$(mut_rd_multi "$ROOT" "x\n$PEM_B\n（内容已省略）\n$PEM_
 # ============ 16-fix4 的守卫 ============
 # --- M-w：第 11 条——begin_block 的悬挂行不再对标记前的散文过 redact_line → AKIA 原文跟着出去 ---
 pkg=$(make_mutant m-w-begin-pre 's|      if (keeplines) print redact_line(pre) mk redact_b64(redact_line(tail), 20, 1)|      if (keeplines) print pre mk redact_b64(redact_line(tail), 20, 1)  # 变异 M-w|' scripts/lib/review-render.sh)
-assert_contains "$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w：悬挂行 BEGIN 前的 AKIA 原样出去——单测「悬挂行掩码」断言会失败"
-assert_not_contains "$( ( set +e; source "$ROOT/scripts/lib/review-render.sh"; printf '%b' "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n" | review_redact_secrets --keep-lines ) )" "$SEC_AKIA" "M-w 对照：未变异实现掩"
+assert_contains "$(redact_probe --pkg "$pkg" --keep-lines --multi "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n")" "$SEC_AKIA" "M-w：悬挂行 BEGIN 前的 AKIA 原样出去——单测「悬挂行掩码」断言会失败"
+assert_not_contains "$(redact_probe --keep-lines --multi "硬编码凭证 $SEC_AKIA 与私钥 $PEM_B\n$PEM_L64\n$PEM_E\n")" "$SEC_AKIA" "M-w 对照：未变异实现掩"
 
 # --- M-x：第 26 条——b64_material 的路径排除 / 数字要求各去掉一条 → Java 路径被掩 / 无数字长标识符被掩（单测 golden 会失败）---
 pkg=$(make_mutant m-x1-no-switch-rate 's|^      return (pairs > 0 \&\& sw / pairs >= 0.35)$|      return 1  # 变异 M-x1：块外不再看类别切换率|' scripts/lib/review-render.sh)

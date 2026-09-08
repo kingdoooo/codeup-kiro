@@ -193,6 +193,40 @@ assert_no_secrets() {  # 内容 说明前缀：三种原文都不在（掩码形
   assert_not_contains "$1" "$SEC_AKIA" "$2：AKIA 形态原文不出现"
   assert_not_contains "$1" "$SEC_B64" "$2：base64 补位形态原文不出现"
 }
+# --- PEM 夹具常量与掩码探针（票 18 ⑪：test-review-render.sh 与 test-mutations.sh 原先各写一份同值同注释的定义）---
+# 完整 PEM 头字面量不进源码（Code Defender 会拦），所以由片段拼出。两个占位符不在这里另写一份：
+# 它们的唯一取值是库里的 REVIEW_PEM_PLACEHOLDER / REVIEW_PEM_BODY_PH（本文件顶部已 source scripts/lib/isolation.sh，
+# 掩码库由各测试文件自己 source——下面两个别名在库加载之后才有意义，所以用函数取值而不是赋值常量）。
+D5="-----"
+PEM_B="${D5}BEGIN RSA PRIVATE KEY${D5}"
+PEM_E="${D5}END RSA PRIVATE KEY${D5}"
+PEM_L64="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4ijkl"   # 64 位折行的密钥正文形态；尾巴要像随机 base64（切换率 0.41）——第 26 条改定义后块外判定看类别切换率，原 fake02abcdefghijkl 尾巴只有 0.28
+PEM_L16="MIIEvQIBADANBgkq"                                                     # 16 位折行
+# 掩码探针（票 18 ⑪：原先 rd / rdk / mut_rd / mut_rd_multi / mut_rd_sent 五份 source-in-subshell 各写一遍）。
+# 一份带开关的统一探针：在子 shell 里 source 指定包的掩码库再喂一行 / 多行文本，`set +e` 让被测函数的非零退出不打断调用方。
+# 用法：redact_probe [--pkg <包根，默认 $ROOT>] [--keep-lines] [--sentinel <ERE>] [--multi] <文本>
+#   --multi：文本按 printf %b 解释（`\n` 展开成换行，多行输入用它）；不带则按 printf '%s\n' 只发一行
+redact_probe() {
+  local pkg="${ROOT:-}" keep="" sent="" multi=0
+  while [[ $# -gt 1 ]]; do
+    case "$1" in
+      --pkg) pkg="$2"; shift 2 ;;
+      --keep-lines) keep="--keep-lines"; shift ;;
+      --sentinel) sent="$2"; shift 2 ;;
+      --multi) multi=1; shift ;;
+      *) break ;;
+    esac
+  done
+  [[ -n "$pkg" ]] || { echo "redact_probe: 需要 --pkg 或全局 ROOT" >&2; return 2; }
+  ( set +e
+    source "$pkg/scripts/lib/review-render.sh"
+    local -a args=()
+    [[ -n "$keep" ]] && args+=("$keep")
+    [[ -n "$sent" ]] && args+=(--sentinel "$sent")
+    if [[ "$multi" == "1" ]]; then printf '%b' "${1-}" | review_redact_secrets "${args[@]+"${args[@]}"}"
+    else printf '%s\n' "${1-}" | review_redact_secrets "${args[@]+"${args[@]}"}"; fi )
+}
+
 # 故障注入替身：让 review_redact_secrets 那段 awk 程序失败（按程序文本识别），其余 awk 调用透传给真 awk——
 # 否则 diff/变更行的 awk 也会挂，评审在到达出口之前就失败了，测不到「掩码失败」这一段。
 # 真 awk 的路径在这里就解析好并写死进替身，不在替身里靠剥 PATH 首项去找：kiro-review.sh 找不到 kiro-cli 时

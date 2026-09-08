@@ -4,6 +4,9 @@ cd "$(dirname "$0")"
 source helpers.sh
 source fixture-repo.sh
 source ../scripts/lib/isolation.sh   # 15-fix2 #23：等价性用例直接调生产的隔离函数
+# 掩码库在这里就 source（原先只在票 04 段之前 source 一次）：本文件用它的 review_fingerprint 与两个 PEM 占位符常量
+# （REVIEW_PEM_PLACEHOLDER / REVIEW_PEM_BODY_PH，票 18 ⑪ 起是唯一取值）。只加载函数与常量，不跑主流程。
+source ../scripts/lib/review-render.sh
 
 # kiro-review.sh 把 timeout/gtimeout 当强制依赖（无超时能力时拒绝运行），
 # 本机缺失时它在第一步就退出，本套件的每条断言都测不到真实行为。
@@ -563,7 +566,7 @@ pem_body="MIIEowIBAAKCAQEA""fakekey0123456"
 pem_body2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4"   # 与 mockbin/kiro-cli 的 PEM_BODY2 一致（第 26 条改定义后尾巴要像随机 base64）
 assert_not_contains "$OUT" "$pem_body" "原文含未掩码凭证：说明行之后的整行私钥正文不进评论"
 # 16-fix3 第 14 条：降级原文走保行模式——正文行就地换成占位、起始行保留为标记、不插提示行、不删任何行
-assert_contains "$OUT" "****（PEM 正文已屏蔽）" "原文含未掩码凭证：整行正文换成等行数的屏蔽占位（保行模式）"
+assert_contains "$OUT" "$REVIEW_PEM_BODY_PH" "原文含未掩码凭证：整行正文换成等行数的屏蔽占位（保行模式）"
 assert_not_contains "$OUT" "$pem_body2" "原文含未掩码凭证：夹在句子里的正文片段不进评论"
 assert_contains "$OUT" "正文片段 MIIE****2Lm4 出现在 app/key.pem" "原文含未掩码凭证：片段掩码后句子其余部分完整"
 assert_contains "$OUT" "（下面是私钥内容，节选）" "原文含未掩码凭证：起始行后的说明行放出来（不被吞）"
@@ -824,7 +827,7 @@ assert_not_contains "$comment" "$(printf '\357\277\275')" "R4：评论里没有 
 # ============================================================================
 # 全部在 DRY_RUN + fixture 下验证：绝不碰真实 Codeup。
 # 判定「到底发了什么请求」仍靠 stderr 上的 `DRY_RUN <方法> <URL>`（req_count）与 body 行。
-source "$ROOT/scripts/lib/review-render.sh"   # 只为 review_fingerprint：指纹必须与生产同一份实现
+# 掩码库已在文件开头 source（review_fingerprint 与 PEM 占位符常量都来自它，与生产同一份实现）
 
 E2E_CONTRACT="$ROOT/tests/fixtures/contract/inline-e2e.json"
 # fixture 仓库里 src/app.py 只有第 2 行是新增行（base: import os/def main/pass），

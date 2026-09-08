@@ -1954,6 +1954,10 @@ review_truncate_comment() {
 # URL 内嵌凭证两遍匹配（第 12 条）：先按 RFC 3986 严格类（userinfo 不含 `/`）；不中时用口令可含 `/` 的宽松类，但要求 user 段
 #   不含 `.`（含点的是主机名）且口令段不以 `[0-9]+/` 开头（那是端口 + 路径）——真实世界里未编码粘贴的
 #   `https://ci:wJalr…/K7MD…@git…` 与 `postgres://admin:Ab3/xY9+…==@db` 要掩，`registry.npmjs.org:443/@babel/core` 不能掩。
+# 两个 PEM 占位符（票 18 ⑪）：原先只存在于下面 awk 的 BEGIN 块里，测试与 golden 手抄了四份。现在导出成 shell 常量、用 -v 传进 awk，
+# 测试 source 本库后直接引用 REVIEW_PEM_PLACEHOLDER / REVIEW_PEM_BODY_PH。取值一个字节都没变（golden 逐字节不变）。
+REVIEW_PEM_PLACEHOLDER="**** （脚本已屏蔽一段 PRIVATE KEY 内容）"   # 字段级：整块（或悬挂标记之后）换成这一行
+REVIEW_PEM_BODY_PH="****（PEM 正文已屏蔽）"                          # 保行模式：块内每个正文行等行数换成这一行
 review_redact_secrets() {
   local keep=0 sentre=""
   while (( $# )); do
@@ -1965,7 +1969,8 @@ review_redact_secrets() {
       *) echo "review_redact_secrets: 未知参数 $1" >&2; return 2 ;;
     esac
   done
-  LC_ALL=C awk -v keeplines="$keep" -v sentre="$sentre" '
+  LC_ALL=C awk -v keeplines="$keep" -v sentre="$sentre" \
+      -v pem_ph="$REVIEW_PEM_PLACEHOLDER" -v pem_body_ph="$REVIEW_PEM_BODY_PH" '
     # 注意：本函数整体在 LC_ALL=C 下运行（按字节），所以**所有取值的字符类都必须是显式 ASCII 许可清单**，
     # 不能用 [^…] 这种否定类——中文标点等高位字节不属于 [[:space:]]/[[:punct:]]，取值会一路吞进中文正文，
     # 掩码还会从多字节字符中间切断（输出 U+FFFD）。
@@ -2256,8 +2261,10 @@ review_redact_secrets() {
       else           print redact_line(pre) PEM_PLACEHOLDER
     }
     BEGIN {
-      PEM_PLACEHOLDER = "**** （脚本已屏蔽一段 PRIVATE KEY 内容）"
-      PEM_BODY_PH = "****（PEM 正文已屏蔽）"
+      # 两个占位符由 -v 传入（票 18 ⑪：唯一取值在库的 shell 常量 REVIEW_PEM_PLACEHOLDER / REVIEW_PEM_BODY_PH）；
+      # -v 传空（有人直接调 awk 程序）时回落到同一份字面量，绝不让占位符变成空串（那会把密钥行删成空行）
+      PEM_PLACEHOLDER = (pem_ph != "" ? pem_ph : "**** （脚本已屏蔽一段 PRIVATE KEY 内容）")
+      PEM_BODY_PH = (pem_body_ph != "" ? pem_body_ph : "****（PEM 正文已屏蔽）")
       PEM_BEGIN_RE = "-----BEGIN [A-Z ]*PRIVATE KEY-----"
       PEM_END_RE = "-----END [A-Z ]*PRIVATE KEY-----"
       B64C = "A-Za-z0-9+/"
@@ -2326,6 +2333,15 @@ _review_redact_to() {
     rm -f "$out"; echo "$who: 掩码失败（awk 退出非零或无输出）${tail}" >&2; return 1
   fi
 }
+# --- 倒出一组字段（票 18 ⑪：两份倒出程序只差字段清单）---
+# 用法：_review_dump_fields <契约文件> <jq 字段数组表达式> <哨兵前缀> <哨兵后缀> → stdout
+# **发射约定**（与下面回注的「切回约定」成对）：第 k 个字段（从 0 起）原样输出，之后一行 `<pre>k<suf>`；非字符串字段输出空串。
+# 切回时按同一个序号取（`$k[1 + 3 * $i]` 那些下标）——两份程序各写一遍时，改了发射顺序而没同步下标不会有任何守卫报错。
+_review_dump_fields() {
+  local file="$1" fields="$2" pre="$3" suf="$4"
+  jq -r --arg pre "$pre" --arg suf "$suf" "${fields}"'
+    | to_entries[] | (if (.value | type) == "string" then .value else "" end) + "\n" + $pre + (.key | tostring) + $suf' "$file"
+}
 review_redact_json() {
   local file="${1-}" dir nonce sre pre suf
   [[ -n "$file" && -r "$file" ]] || { echo "review_redact_json: 文件不可读：${file}" >&2; return 2; }
@@ -2341,14 +2357,11 @@ review_redact_json() {
   # 两份倒出（第 19 条）：单行槽位（verdict、每条 title / id / category）走保行模式——起始标记当 title 时不能变成两行
   # （占位 + 提示），否则结论行 / 加粗 / 行内首行都断成两行、指纹只 hash 到第一行；多行槽位（summary / verdict_reason / body / fix）
   # 走可删行的字段级模式。category / id 也进清单（第 31 条：全部模型文本）。
-  if ! jq -r --arg pre "$pre" --arg suf "$suf" '
-        [.verdict, (.findings[] | .title, .id, .category)]
-        | to_entries[] | (if (.value | type) == "string" then .value else "" end) + "\n" + $pre + (.key | tostring) + $suf' \
-        "$file" > "$dir/dump-k" \
-     || ! jq -r --arg pre "$pre" --arg suf "$suf" '
-        [.summary, .verdict_reason, (.findings[] | .body, .fix)]
-        | to_entries[] | (if (.value | type) == "string" then .value else "" end) + "\n" + $pre + (.key | tostring) + $suf' \
-        "$file" > "$dir/dump-f"; then
+  # 两份倒出只差第一行的字段清单，所以走同一个 _review_dump_fields（票 18 ⑪）：**发射约定**（每个字段后跟一行
+  # `<pre><序号><suf>`）只在那里定义一次，切回时按同一个序号取——两份程序各写一遍的话，错位的后果是 title 拿到 category 的
+  # 内容而 rc 仍是 0（评论里的标题与分类静静地对调，没有任何守卫会响）。
+  if ! _review_dump_fields "$file" '[.verdict, (.findings[] | .title, .id, .category)]' "$pre" "$suf" > "$dir/dump-k" \
+     || ! _review_dump_fields "$file" '[.summary, .verdict_reason, (.findings[] | .body, .fix)]' "$pre" "$suf" > "$dir/dump-f"; then
     rm -rf "$dir"; echo "review_redact_json: 倒出字段失败：${file}" >&2; return 1
   fi
   if ! _review_redact_to "$dir/dump-k" "$dir/masked-k" review_redact_json "：${file}" --keep-lines --sentinel "^${sre}\$" \

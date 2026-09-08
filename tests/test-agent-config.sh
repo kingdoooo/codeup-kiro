@@ -93,9 +93,40 @@ for t in read grep glob; do
 done
 assert_eq "$(jq -c '.toolsSettings | [.read.allowedPaths, .grep.allowedPaths, .glob.allowedPaths] | unique | length' "$dest")" "1" "安装后三处 allowedPaths 相等"
 assert_eq "$(leftover_count "$dest")" "0" "安装后没有残留占位符"
-assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$dest")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$A")" \
-  "安装只改写 prompt、三处 allowedPaths 与三处 deniedPaths（追加注入条目），其余字段不变"
+assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths) | del(.permissions)' "$dest")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths) | del(.permissions)' "$A")" \
+  "安装只改写 prompt、三处 allowedPaths、三处 deniedPaths 与 V3 的 permissions.rules[fs_read].match（都只追加注入条目），其余字段不变"
 assert_eq "$(jq -c .allowedTools "$dest")" '[]' "安装后 allowedTools 仍为空"
+# 票 18 ⑫：V3 的 fs_read deny 与 toolsSettings.deniedPaths 同源——安装时按两条 allow 根各注入一份绝对副本，原相对条目保留
+v3_rel=$(jq -r '[.permissions.rules[] | select(.capability == "fs_read") | .match[] | select(startswith("/") or startswith("~/") | not)] | length' "$A")
+assert_eq "$(jq -r '[.permissions.rules[] | select(.capability == "fs_read") | .match] | .[0] | length' "$dest")" \
+  "$(( $(jq -r '[.permissions.rules[] | select(.capability == "fs_read") | .match] | .[0] | length' "$A") + 2 * v3_rel ))" \
+  "⑫：V3 fs_read.match 条数 = 原条数 + 2 × 相对形状数（每条按两条 allow 根各一份绝对副本）"
+for root in "$WS_P" "$CH_P"; do
+  assert_eq "$(jq -r --arg r "$root" '[.permissions.rules[] | select(.capability == "fs_read") | .match[] | select(startswith($r + "/"))] | length' "$dest")" "$v3_rel" \
+    "⑫：V3 fs_read.match 里按 ${root} 注入的绝对副本齐全（${v3_rel} 条）"
+done
+assert_eq "$(jq -r '[.permissions.rules[] | select(.capability == "fs_read") | .match[] | select(. == "**/.git/**")] | length' "$dest")" "1" \
+  "⑫：V3 的原相对条目保留（cwd 恰好等于某个 allow 根时它仍有效）"
+assert_eq "$(jq -c '[.permissions.rules[] | select(.capability != "fs_read")]' "$dest")" "$(jq -c '[.permissions.rules[] | select(.capability != "fs_read")]' "$A")" \
+  "⑫：fs_write / shell / web_* 的 deny 规则一个字节没动"
+# --allow-none（探测正控）不注入 V3 副本
+dest_none=$(kiro_install_agent "$A" "$tmp/agents-none" --allow-none)
+assert_eq "$(jq -c '.permissions' "$dest_none")" "$(jq -c '.permissions' "$A")" "⑫：--allow-none 不改 permissions（正控 agent 要旧形态）"
+# 自检：prompt 必须非空且是 file:// 绝对路径（相对形态在 agent 目录下指向不存在的文件 → kiro-cli 静默回退默认提示词）
+for bad in 'del(.prompt)' '.prompt = ""' '.prompt = "file://../prompts/review-agent-prompt.md"' '.prompt = "内联提示词文本"'; do
+  jq "$bad" "$dest" > "$tmp/badprompt.json"
+  rc=0; kiro_agent_selfcheck "$tmp/badprompt.json" "$WS_P" "$CH_P" || rc=$?
+  assert_rc "$rc" 1 "⑫ 自检：prompt 经 [${bad}] 篡改后拒绝（不让默认系统提示词跑评审）"
+  assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "prompt" "⑫ 自检：原因点名 prompt（[${bad}]）"
+done
+# 自检：V3 fs_read 的绝对副本被删掉 → 拒绝
+jq '(.permissions.rules[] | select(.capability == "fs_read") | .match) |= map(select(startswith("/") | not))' "$dest" > "$tmp/nov3abs.json"
+rc=0; kiro_agent_selfcheck "$tmp/nov3abs.json" "$WS_P" "$CH_P" || rc=$?
+assert_rc "$rc" 1 "⑫ 自检：V3 fs_read.match 缺绝对副本 → 拒绝"
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "permissions.rules 里 fs_read" "⑫ 自检：原因点名 V3 的那一处"
+# 正控：未篡改的安装结果仍通过（上面几条不是靠「任何输入都拒」蒙对的）
+rc=0; kiro_agent_selfcheck "$dest" "$WS_P" "$CH_P" || rc=$?
+assert_rc "$rc" 0 "⑫ 自检正控：未篡改的安装结果通过"
 # 15-fix4 #1 补（探测 kiro-probe-P1-15-t15fix4-4b30a00）：kiro-cli 2.21.1 把 **/ 开头的 deniedPaths 按 cwd 解析——kiro-cli 改在空目录下运行后，
 # 业务库里的 .git/logs/HEAD、.ssh/config 被读出（T3 / T9a–T9d FAIL）；加 <业务库>/**/.git/** 后恢复被拒。安装器对每条 **/ 形状按两条 allow 根各注入一份绝对副本。
 rel_deny=$(jq -c '[.toolsSettings.read.deniedPaths[] | select(startswith("**/"))]' "$A")

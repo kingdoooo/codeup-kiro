@@ -119,6 +119,9 @@ kiro_install_agent() {
     prompt_new="file://${abs}"
   fi
   # 一次 jq 渲染：改写 prompt（如需）+ 三处 allowedPaths 结构化覆盖 + 三处 deniedPaths 追加按 allow 根注入的绝对形状（--allow-none 则只删 allowedPaths）
+  # V3 的 fs_read deny 规则（permissions.rules）与 toolsSettings.*.deniedPaths **同源**（票 18 ⑫）：两处都有 `**/…` 形状，
+  # 而 kiro-cli 把它们按 cwd 解析（15-fix4 #1 补）。V3 不上生产（ADR-0004），但定义是 V2/V3 双兼容的，切引擎时不该只有一半形状
+  # 拿到绝对副本——那种「一半生效」的边界比明确不支持更危险。--allow-none 同样不注入（正控 agent 要旧形态）。
   rendered=$(jq --arg p "$prompt_new" --arg ws "$ws" --arg ch "$ch" --argjson none "$allow_none" "$_KIRO_DENY_ABS_JQ"'
       (if $p != "" then .prompt = $p else . end)
       | if $none == 1 then del(.toolsSettings[].allowedPaths)
@@ -126,6 +129,12 @@ kiro_install_agent() {
                .toolsSettings[$t].allowedPaths = [$ws, $ch]
                | .toolsSettings[$t].deniedPaths as $d
                | .toolsSettings[$t].deniedPaths = ($d + ($d | deny_abs($ws)) + ($d | deny_abs($ch))))
+          | (if ((.permissions // {}).rules | type) == "array"
+             then .permissions.rules |= map(
+                    if (.capability == "fs_read") and ((.match | type) == "array")
+                    then .match as $m | .match = ($m + ($m | deny_abs($ws)) + ($m | deny_abs($ch)))
+                    else . end)
+             else . end)
         end
     ' "$src") || { echo "kiro_install_agent: 渲染 agent 定义失败：${src}" >&2; return 1; }
   mkdir -p "$dest_dir" || return 1
@@ -184,7 +193,18 @@ kiro_agent_selfcheck() {
         ( select([((.permissions // {}).rules // [])[] | select(.effect != "deny")] != []) | "permissions.rules 含非 deny 规则（V3 只同步 deny）" ),
         ( select(((.permissions // {}) | keys) - ["rules"] != []) | "permissions 含 rules 之外的键（\((.permissions | keys) | tojson)）" ),
         ( select(.includeMcpJson != false) | "includeMcpJson 不是 false" ),
-        ( select(.includePowers != false) | "includePowers 不是 false" )
+        ( select(.includePowers != false) | "includePowers 不是 false" ),
+        # prompt 是只读角色约束的所在（票 18 ⑫）：安装器只在「相对 file://」时改写，绝对 file:// 与内联文本原样保留——
+        # 但装完之后它必须是**非空**、且是 file:// **绝对**路径（相对 file:// 复制到 agent 目录后指向不存在的文件，
+        # kiro-cli 会静默用默认系统提示词跑评审：拒绝路径与掩码规则全部失效，而事件流里看不出来）
+        ( select(((.prompt // "") | type) != "string" or ((.prompt // "") | length) == 0) | "prompt 缺失或为空——那等于让默认系统提示词跑评审" ),
+        ( select(((.prompt // "") | startswith("file:///")) | not) | "prompt 不是 file:// 绝对路径（\((.prompt // "") | tojson)）——相对 file:// 在 agent 目录下指向不存在的文件，kiro-cli 会静默回退默认提示词" ),
+        # V3 的 fs_read deny 也要有按两条 allow 根注入的绝对副本（与 toolsSettings 同源）
+        ( select([((.permissions // {}).rules // [])[] | select(.capability == "fs_read")] as $fr
+                 | ($fr | length) > 0
+                   and (($fr[0].match // []) as $m
+                        | [ ($m | deny_abs($ws)), ($m | deny_abs($ch)) | .[] | . as $e | select(($m | index($e)) == null) ] != []))
+          | "permissions.rules 里 fs_read 的 match 缺少按 allow 根注入的绝对拒绝形状（V3 引擎读的是这一处，与 toolsSettings.deniedPaths 同源）" )
       ) // ""
       end' "$f" 2>/dev/null) || { KIRO_AGENT_SELFCHECK_ERROR="定义不是合法 JSON（或 jq 没有产出任何结果）：${f}"; return 1; }
   [[ -z "$reason" ]] || { KIRO_AGENT_SELFCHECK_ERROR="$reason"; return 1; }
