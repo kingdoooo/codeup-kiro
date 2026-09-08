@@ -95,8 +95,19 @@ unset DRY_RUN
 # 已经有一条同作者、同 `kiro-review:<sha> run:<N>` 标记的评论 ⇒ 上一次其实成功了，再发一次会在 MR 上多出第二条汇总（违反 I4）。
 # 列表查询本身失败 / 查不到 ⇒ 照既有策略重试（I10：绝不因为查不到而放弃发布）。
 # 标记形态不许在 codeup-api.sh 里出现第二份字面量（唯一来源是 review-render.sh 的 REVIEW_MARKER_LINE_RE）
-assert_eq "$(LC_ALL=C grep -c 'kiro-review:\[0-9a-zA-Z' ../scripts/lib/codeup-api.sh || true)" "0" \
-  "①：codeup-api.sh 里没有第二份评审标记正则（字符类形态）"
+# 标记的**字符集**只在 review-render.sh 的 REVIEW_MARKER_LINE_RE 里：codeup-api.sh 不许出现第二份（无论写成 `[0-9a-zA-Z…` 还是 `([0-9a-zA-Z…`）
+assert_eq "$(LC_ALL=C grep -cE 'kiro-review:\(?\[0-9a-zA-Z' ../scripts/lib/codeup-api.sh || true)" "0" \
+  "①：codeup-api.sh 里没有第二份评审标记的字符集"
+# 正控：REVIEW_MARKER_LINE_RE 放宽字符集之后，sha/run 仍取得到（证明这里真的用的是库里那条正则，不是自己抄的）
+wide=$(mktemp); printf '# Kiro 代码评审\n<!-- kiro-review:abc+1234 run:7 -->\n' > "$wide"
+widened=$( REVIEW_MARKER_LINE_RE='^<!-- kiro-review:[0-9a-zA-Z._+-]+ run:([0-9]{1,9}) -->[[:space:]]*$'
+           _codeup_post_probe_marker "$wide" >/dev/null 2>&1
+           printf '%s/%s' "$_CODEUP_POST_PROBE_SHA" "$_CODEUP_POST_PROBE_RUN" )
+assert_eq "$widened" "abc+1234/7" "①：sha/run 跟着库里那条正则走（把字符集放宽到含 + 之后照样取到——说明这里没抄第二份）"
+# 反面：用当前（未放宽）的正则，同一份正文取不到（sha 里的 + 不在字符集里）→ 探针跳过、回到既有重试策略（fail-safe）
+_codeup_post_probe_marker "$wide"
+assert_eq "${_CODEUP_POST_PROBE_SHA}/${_CODEUP_POST_PROBE_RUN}" "/" "①：标记不合当前形态时取不到 sha/run（探针跳过而不是猜）"
+rm -f "$wide"
 export DRY_RUN=1
 pmd=$(mktemp)
 printf '# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n<!-- kiro-history:[] -->\n\n正文\n' > "$pmd"

@@ -271,8 +271,15 @@ _codeup_post_probe_marker() {  # <markdown 文件>
   fi
   # -a：正文里一个 NUL 字节不该让 grep 把它当二进制（与 _review_replace_guarded 同一理由）
   line=$(LC_ALL=C grep -a -m1 -E "$REVIEW_MARKER_LINE_RE" "$f") || return 0
-  [[ "$line" =~ ^\<\!--\ kiro-review:([0-9a-zA-Z._-]+)\ run:([0-9]{1,9})\ --\>[[:space:]]*$ ]] || return 0
-  _CODEUP_POST_PROBE_SHA="${BASH_REMATCH[1]}"; _CODEUP_POST_PROBE_RUN="${BASH_REMATCH[2]}"
+  # run 用**库里那条正则**的捕获组取（它的第 1 组就是 run），sha 用去前后缀取——本文件因此不复制标记的字符集：
+  # 复制一份的话，REVIEW_MARKER_LINE_RE 的字符集哪天放宽（比如 sha 允许 `+`），这里会静静地匹配不上、探针整个跳过。
+  [[ "$line" =~ $REVIEW_MARKER_LINE_RE ]] || return 0
+  _CODEUP_POST_PROBE_RUN="${BASH_REMATCH[1]}"
+  local rest="${line#*kiro-review:}"
+  _CODEUP_POST_PROBE_SHA="${rest%% run:*}"
+  # 兜底：万一标记形态变了（取不到 sha、或 sha 里带空白），按「没有可比对的标记」处理——探针跳过 = 回到既有重试策略（fail-safe）
+  [[ -n "$_CODEUP_POST_PROBE_SHA" && "$_CODEUP_POST_PROBE_SHA" != *[[:space:]]* ]] \
+    || { _CODEUP_POST_PROBE_SHA=""; _CODEUP_POST_PROBE_RUN=""; }
 }
 # rc 0 = 已确认评论其实已创建（不要重试）；rc 1 = 无法确认（照既有策略重试）
 _codeup_post_probe_created() {  # <本次 POST 的 HTTP 状态码，只用于日志>
