@@ -1054,13 +1054,35 @@ log "Kiro 引擎：${KIRO_ENGINE}（--agent-engine ${KIRO_ENGINE}；ADR-0004：v
 # 放出来（15-fix #7）。
 log "Kiro 进程环境许可清单（只透传这些变量）：$(kiro_env_allowlist_names | paste -sd' ' -)"
 log "开始 Kiro 评审（超时 ${KIRO_TIMEOUT}s，输出格式 stream-json）……"
+# --- 6. 运行 Kiro：提示词与评审输入**一起走 stdin，不给位置参数 [INPUT]**（D4，2026-09-08）---
+# 真实 kiro-cli 2.21.1 只要收到位置参数，就把 stdin 整个忽略——本机 env -i / 完整环境 × 空 cwd / 业务库 cwd 四种组合实测一致
+# （.scratch/codeup-kiro-v2/acceptance/NOTES.md D4）。旧写法「提示词作位置参数 + input.txt 走 stdin」下模型从未见过 diff，
+# 只是自己读工作树、把整个文件当成本次改动来评。现在 prompt.txt 与 input.txt 拼成一份 stdin：提示词在前（含本次 nonce 的
+# 标记模板），一行固定分隔 REVIEW_INPUT_SENTINEL，之后是输入（=== 变更元信息 === … === DIFF === 直到结尾）。
+# 拼装完先自检：字节数吻合、标记模板在、分隔行恰好一处、input.txt 里 DIFF 节标题恰好一处——缺一处就按 I10 失败回写，绝不静默评空。
+# 分隔行只给测试替身与自检用（模型侧把它当普通分隔标记）；diff 内容行都带 +/-/空格前缀、路径含换行时 git 会转义，
+# 业务库造不出一条顶格的同名行。
+REVIEW_INPUT_SENTINEL='=== REVIEW INPUT BEGIN ==='   # 纯 ASCII：macOS awk 在 UTF-8 locale 下比较中文行会出错（替身实测），字节级检查一律 LC_ALL=C
+{ cat "$WORK/prompt.txt"; printf '\n%s\n' "$REVIEW_INPUT_SENTINEL"; cat "$WORK/input.txt"; } > "$WORK/kiro-stdin.txt" \
+  || die_review "组装 Kiro 输入失败（prompt.txt + input.txt）"
+# 字节数按 wc -c 算（${#var} 在 UTF-8 locale 下是字符数；分隔行现为 ASCII，仍按字节算以防将来改动）
+_p=$(wc -c < "$WORK/prompt.txt" | tr -d ' '); _i=$(wc -c < "$WORK/input.txt" | tr -d ' '); _s=$(wc -c < "$WORK/kiro-stdin.txt" | tr -d ' ')
+_n=$(printf '%s' "$REVIEW_INPUT_SENTINEL" | wc -c | tr -d ' ')
+[[ "$_s" -eq $(( _p + _i + _n + 2 )) ]] \
+  || die_review "Kiro 输入自检失败：拼装后的字节数不等于提示词 + 分隔行 + 输入（${_s} ≠ ${_p} + ${_n} + 2 + ${_i}）"
+LC_ALL=C grep -qF -- "<<<KIRO_REVIEW_JSON:${REVIEW_NONCE}>>>" "$WORK/kiro-stdin.txt" \
+  || die_review "Kiro 输入自检失败：缺少本次标记模板（提示词没进 stdin）"
+[[ "$(LC_ALL=C grep -c -x -F -- "$REVIEW_INPUT_SENTINEL" "$WORK/kiro-stdin.txt")" == "1" ]] \
+  || die_review "Kiro 输入自检失败：分隔行「${REVIEW_INPUT_SENTINEL}」不是恰好一处"
+[[ "$(LC_ALL=C grep -c -x -F -- '=== DIFF ===' "$WORK/input.txt")" == "1" ]] \
+  || die_review "Kiro 输入自检失败：评审输入里 DIFF 节标题不是恰好一处（评审输入没组装出来）"
+unset _p _i _s _n
 kiro_rc=0
 # 在 $KIRO_CWD（空目录）下运行（15-fix4 #1）；业务库路径只在 allowedPaths 与提示词里
 ( cd "$KIRO_CWD" && "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli chat --no-interactive \
   --agent-engine "$KIRO_ENGINE" --output-format stream-json \
-  --agent "$AGENT_NAME" \
-  "$(cat "$WORK/prompt.txt")" ) \
-  < "$WORK/input.txt" > "$WORK/stream.jsonl" 2> "$WORK/kiro-stderr.log" || kiro_rc=$?
+  --agent "$AGENT_NAME" ) \
+  < "$WORK/kiro-stdin.txt" > "$WORK/stream.jsonl" 2> "$WORK/kiro-stderr.log" || kiro_rc=$?
 
 if [[ "$kiro_rc" -ne 0 ]]; then
   # kiro-cli 自己的 stderr 会引用被评审文件内容、失败请求（含 bearer）——也是评论出口，过掩码再打（第 24 条）；

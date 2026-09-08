@@ -112,6 +112,23 @@ assert_eq "$([[ -e "$CASE/work/AGENTS.md" && -e "$CASE/work/src/sub/AGENTS.md" ]
 assert_contains "$(cat "$MD/cwdscan")" "AGENTS.md" "M1：Kiro 启动时工作区扫描到 AGENTS.md——端到端断言「工作区干净」会失败"
 assert_contains "$(cat "$MD/stdin")" "CANARY-AGENTSMD-ROOT" "M1：diff 内容不受移除逻辑影响（对照两侧一致）"
 
+# --- M-d4a：把运行时提示词改回位置参数（2026-09-08 之前的写法）→ 真机会整个忽略 stdin，替身照此行为 ---
+# 观测：脚本照常跑完、契约照常解析（nonce 从位置参数来）——这正是 D4 之前谁都没发现的静默失败形态；
+# 但 stdin 记录为空、positional 非空 → 端到端「diff 已喂入 stdin」「没有位置参数」两条断言会失败。
+pkg=$(make_mutant m-d4a-positional 's|^  --agent "\$AGENT_NAME" ) \\$|  --agent "$AGENT_NAME" "$(cat "$WORK/prompt.txt")" ) \\|')
+run_case m-d4a "$pkg"
+assert_rc "$RC" 0 "M-d4a：变异体仍能跑完（静默失败，不报错）"
+assert_not_contains "$OUT" "结构化解析失败" "M-d4a：契约照常解析（nonce 从位置参数来）——所以这条回归只能靠 stdin 断言抓"
+assert_contains "$(cat "$MD/positional")" "<<<KIRO_REVIEW_JSON:" "M-d4a：位置参数里带着提示词——端到端「没有位置参数」断言会失败"
+assert_eq "$(cat "$MD/stdin")" "" "M-d4a：stdin 记录为空（真机有位置参数时不读 stdin）——端到端「diff 已喂入 stdin」断言会失败"
+
+# --- M-d4b：拼装 stdin 时漏掉 input.txt → 启动 Kiro 前的字节数自检必须拦住（不能评一份没有 diff 的输入）---
+pkg=$(make_mutant m-d4b-no-input 's|; cat "\$WORK/input.txt"; } > "\$WORK/kiro-stdin.txt"|; } > "$WORK/kiro-stdin.txt"|')
+run_case m-d4b "$pkg"
+assert_rc "$RC" 1 "M-d4b：自检失败 → 失败回写、非零退出"
+assert_contains "$OUT" "Kiro 输入自检失败" "M-d4b：日志点名自检项"
+assert_eq "$(grep -c -x -- 'chat' "$MD/calls")" "0" "M-d4b：Kiro 评审没有启动（自检在 chat 之前）"
+
 # --- M2：删掉 --agent-engine 参数 → 引擎不再钉死 ---
 pkg=$(make_mutant m2-engine 's/--agent-engine "\$KIRO_ENGINE"//')
 run_case m2 "$pkg"

@@ -133,6 +133,14 @@ assert_contains "$out" "引擎：v2" "日志显式记录所用引擎为 v2"
 assert_eq "$(grep -c -x -- '--output-format' "$MD/args")" "1" "kiro 参数：只有一个 --output-format"
 assert_contains "$args_line" "--output-format stream-json" "kiro 参数：固定 --output-format stream-json"
 assert_contains "$(cat "$MD/stdin")" "SECRET_KEY" "diff 已喂入 stdin"
+# D4（2026-09-08）：真实 kiro-cli 2.21.1 有位置参数 [INPUT] 时整个忽略 stdin——运行时提示词与评审输入必须一起走 stdin、不给位置参数。
+# 替身按真机行为实现（有位置参数 → stdin 记为空），所以旧写法下面几条会一起变红（变异 M-d4a）。
+assert_eq "$(cat "$MD/positional")" "" "kiro 参数：没有位置参数 INPUT（有的话真机会丢掉 stdin 里的整份评审输入）"
+assert_eq "$([[ "$(cat "$MD/nonce")" == nononcefound000 ]] && echo fallback || echo real)" "real" "替身从 stdin 里的提示词取到了本次 nonce"
+assert_contains "$(cat "$MD/stdin-prompt")" "<<<KIRO_REVIEW_JSON:$(cat "$MD/nonce")>>>" "stdin 前半是运行时提示词（含本次 nonce 的标记模板）"
+assert_eq "$(LC_ALL=C grep -c -x -F -- '=== REVIEW INPUT BEGIN ===' "$MD/stdin-full")" "1" "stdin 里恰好一行「评审输入开始」分隔"
+assert_eq "$(LC_ALL=C grep -c -x -F -- '=== 变更元信息 ===' "$MD/stdin")" "1" "stdin 后半（评审输入）以变更元信息节开头，恰好一处"
+assert_eq "$(LC_ALL=C grep -c -x -F -- '=== DIFF ===' "$MD/stdin")" "1" "stdin 后半（评审输入）恰好一个 DIFF 节标题"
 assert_contains "$out" "changeRequests/7/comments" "回写到 MR 7"
 
 # --- 汇总评论（INLINE_COMMENT=0）：由脚本按契约渲染，不再是模型原文 ---
@@ -210,7 +218,7 @@ assert_eq "$([[ "$kcwd" == "$ROOT" || "$kcwd" == "$ROOT"/* ]] && echo in-pkg || 
 assert_eq "$(cat "$MD/chatcwd-entries")" "0" "chat 启动时运行目录为空（没有任何文件可被 kiro-cli 相对 cwd 发现）"
 assert_contains "$out" "Kiro 运行目录：${kcwd}" "日志打出 Kiro 运行目录"
 # 业务库绝对路径穿进运行时提示词：模型在空目录下必须按绝对路径读文件（相对路径会被拒、静默降低评审质量）
-prompt_arg=$(cat "$MD/args")   # 提示词是最后一个位置参数、多行；args 文件按参数逐行落盘，整份看即可（别的参数里没有路径）
+prompt_arg=$(cat "$MD/stdin-prompt")   # 运行时提示词走 stdin 前半（D4：不再是位置参数），替身按分隔行切出来存 stdin-prompt
 assert_contains "$prompt_arg" "$ws_p" "运行时提示词含业务库 checkout 的物理路径"
 assert_contains "$prompt_arg" "${ws_p}/src/app.py" "运行时提示词用业务库路径举例绝对路径的写法"
 assert_not_contains "$prompt_arg" "{{REVIEW_WORKSPACE}}" "运行时提示词里的 {{REVIEW_WORKSPACE}} 已替换"

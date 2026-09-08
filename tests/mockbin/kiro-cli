@@ -120,9 +120,35 @@ for a in "$@"; do
   fi
   prev="$a"
 done
-# 本次 nonce 从运行时提示词里取——提示词是位置参数，真实 kiro-cli 也是从那里读到它的。
-# 取不到就用一个占位串：脚本会因为标记对不上而降级，正好暴露「提示词没带 nonce」这种回归。
-MOCK_NONCE=$({ printf '%s\n' "$@" | grep -oE '<<<KIRO_REVIEW_JSON:[0-9a-f]+>>>' || true; } | head -1 | sed -E 's/^<<<KIRO_REVIEW_JSON:([0-9a-f]+)>>>$/\1/')
+# 提示词来源按真实 kiro-cli 2.21.1 的行为（D4，2026-09-08 实测）：有位置参数 [INPUT] 就只用它、**整个忽略 stdin**；
+# 没有位置参数才读 stdin 当提示词。生产脚本现在不给位置参数、把运行时提示词与评审输入拼成一份 stdin，中间一行顶格分隔
+# `=== REVIEW INPUT BEGIN ===`。替身各记一份：stdin-full（原样）、stdin-prompt（分隔行之前）、stdin（分隔行之后 = 评审输入；
+# 测试里所有「diff 已喂入 stdin」类断言看的都是它）、positional（位置参数，正常应为空）。
+MOCK_SENT='=== REVIEW INPUT BEGIN ==='   # 与 scripts/kiro-review.sh 的 REVIEW_INPUT_SENTINEL 同值（纯 ASCII，避开 locale 比较问题）
+MOCK_POSITIONAL=""; prev=""; seen_chat=0
+for a in "$@"; do
+  if [[ "$seen_chat" == 0 && "$a" == "chat" ]]; then seen_chat=1; prev="$a"; continue; fi
+  case "$prev" in --agent|--agent-engine|--output-format|--model|--effort|--resume-id) prev="$a"; continue ;; esac
+  [[ "$a" == -* ]] || MOCK_POSITIONAL="$a"
+  prev="$a"
+done
+: > "$M/positional"; : > "$M/stdin-full"; : > "$M/stdin-prompt"; : > "$M/stdin"
+if [[ -n "$MOCK_POSITIONAL" ]]; then
+  printf '%s\n' "$MOCK_POSITIONAL" > "$M/positional"      # 真机：有位置参数时 stdin 一个字节也不读
+  MOCK_PROMPT_TEXT="$MOCK_POSITIONAL"
+else
+  cat > "$M/stdin-full"
+  # LC_ALL=C：按字节比较。macOS 自带 awk（20200816）在 UTF-8 locale 下会把两条不同的中文行判成相等（D4 修复时实测），
+  # 分隔行虽已改成纯 ASCII，仍统一按字节处理，与生产脚本的 LC_ALL=C 约定一致。
+  if LC_ALL=C grep -qxF -- "$MOCK_SENT" "$M/stdin-full"; then
+    LC_ALL=C awk -v s="$MOCK_SENT" -v P="$M/stdin-prompt" -v I="$M/stdin" '!done && $0 == s {done=1; next} done {print > I; next} {print > P}' "$M/stdin-full"
+  else
+    cp "$M/stdin-full" "$M/stdin"                             # 没有分隔行：整段都当评审输入（旧形态 / 变异）
+  fi
+  MOCK_PROMPT_TEXT=$(cat "$M/stdin-full")
+fi
+# 本次 nonce 从提示词里取（真实 kiro-cli 从同一处读到它）。取不到就用占位串：脚本会因标记对不上而降级，正好暴露「提示词没带 nonce」。
+MOCK_NONCE=$({ printf '%s\n' "$MOCK_PROMPT_TEXT" | grep -oE '<<<KIRO_REVIEW_JSON:[0-9a-f]+>>>' || true; } | head -1 | sed -E 's/^<<<KIRO_REVIEW_JSON:([0-9a-f]+)>>>$/\1/')
 [[ -n "$MOCK_NONCE" ]] || MOCK_NONCE="nononcefound000"
 printf '%s\n' "$@" > "$M/args"
 printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env"
@@ -143,7 +169,6 @@ if [[ -n "$AGENT_ARG" ]]; then
   done < <(jq -r '.toolsSettings.read.allowedPaths[]?' "$AGENT_JSON") >> "$M/allowscan"
 fi
 printf '%s\n' "$MOCK_NONCE" > "$M/nonce"
-cat > "$M/stdin"
 # 启动时**业务库**（allowedPaths[0]）里残留的注入面：与生产隔离谓词等价的枚举版（tests/helpers.sh injection_surface_scan，15-fix2 #23）。
 # 生产的 cwd 是 $WORK/cwd 空目录（15-fix4 #1），扫 cwd 会恒空；要扫的是模型能读到的那棵树。没装 agent（变异 M4 删掉 --agent）时退回扫 cwd。
 if [[ -n "$AGENT_ARG" ]] && ws_scan=$(jq -r '.toolsSettings.read.allowedPaths[0] // empty' "$AGENT_JSON") && [[ -n "$ws_scan" && -d "$ws_scan" ]]; then
