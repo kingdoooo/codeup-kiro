@@ -413,7 +413,7 @@ _review_normalize() {
   local f rc=0
   f=$(mktemp) || { echo "review_validate: 建不出临时文件" >&2; return 1; }
   cat > "$f" || { rm -f "$f"; echo "review_validate: 读入契约失败" >&2; return 1; }
-  jq -c --arg cid "$REVIEW_CONTRACT_ID" --arg deny "$REVIEW_CELL_DENY_CHARS" --argjson maxf "$REVIEW_MAX_FINDINGS" \
+  jq -c --slurp --arg cid "$REVIEW_CONTRACT_ID" --arg deny "$REVIEW_CELL_DENY_CHARS" --argjson maxf "$REVIEW_MAX_FINDINGS" \
       --argjson cap_summary "$REVIEW_CAP_SUMMARY" --argjson cap_title "$REVIEW_CAP_TITLE" --argjson cap_body "$REVIEW_CAP_BODY" \
       --argjson cap_fix "$REVIEW_CAP_FIX" --argjson cap_id "$REVIEW_CAP_ID" "${_REVIEW_JQ_SANITIZE}${_REVIEW_JQ_CELL}"'
     # \A / \z 是显式的「字符串首/尾」锚点：jq 的 ^ / $ 在不同版本可能被当行锚点，
@@ -436,7 +436,11 @@ _review_normalize() {
                     elif ($t | startswith("-----")) then null   # 路径不可能长这样；PEM 的 BEGIN 标记当 file 会被 PEM 规则当块起始（第 10 条）
                     else $t end;
     # 三条前置断言（票 18 ⑩）：与主程序同一次解析，用 halt_error 给退出码。文案与 rc 都与拆成三次 `jq -e` 时逐字相同。
-    if type != "object" then ("review_validate: 契约不是 JSON 对象\n" | halt_error(1)) else . end
+    # --slurp + 「恰好一个 JSON 值」（15-fix4 #13 的同一条教训，本票被变异 M9 抓到）：不带它时**空输入 / 纯空白输入**
+    # 一条记录都不处理——jq 不输出且退 0，空契约就被当成「归一化成功但输出为空」，一路走到 review_redact_json 才失败
+    # （rc 4 = 失败评论），而正确行为是 rc 1（降级、贴原文）。两个 JSON 值拼在一起同理（退出码取最后一个）。
+    if length != 1 then ("review_validate: 契约不是 JSON 对象（读到 \(length) 个 JSON 值；纯空白 / 空输入算 0 个）\n" | halt_error(1)) else .[0] end
+    | if type != "object" then ("review_validate: 契约不是 JSON 对象\n" | halt_error(1)) else . end
     | if ((.findings // []) | type) != "array" then ("review_validate: 契约的 findings 不是数组\n" | halt_error(1)) else . end
     | if ((.contract // "") != $cid)
       then ("review_validate: 契约缺少 contract=\"\($cid)\" 字段（该字段只在受信 agent 提示词里要求，说明受信 agent 未生效）\n" | halt_error(3))

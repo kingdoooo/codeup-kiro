@@ -470,6 +470,16 @@ assert_rc "$rc" 1 "validate：非法 JSON 仍是 rc 1（与受信 agent 未生�
 # 票 18 ⑩：三条断言并进主 jq（halt_error）之后，非法 JSON 的 stderr 里仍要有一行**库函数前缀**的说明——
 # kiro-review.sh 的 _validate_err_lib_lines 只放行这种行，没有它失败评论就只剩「另有 N 行 jq 诊断已省略」
 assert_contains "$err" "review_validate: 契约不是合法 JSON（jq 退出码 " "⑩：非法 JSON 的 stderr 带库函数前缀的说明行（失败评论要用它；退出码本身在 jq 1.6=2 / 1.7=5 之间不同，不钉数字）"
+# ⑩ fail-closed（变异 M9 抓到的回归）：**空 / 纯空白 / 两个 JSON 值**都必须是 rc 1（降级、贴原文），不能变成 rc 4（失败评论）。
+# 不带 --slurp 时 jq 对空输入一条记录都不处理——不输出、退 0，于是「归一化成功但输出为空」一路走到字段级掩码才失败。
+for empty_in in "" "   " "$(printf '\n\t ')"; do
+  rc=0; err=$(printf '%s' "$empty_in" | review_validate 2>&1 >/dev/null) || rc=$?
+  assert_rc "$rc" 1 "⑩ fail-closed：空 / 纯空白契约 → rc 1（降级），不是 rc 4"
+  assert_contains "$err" "读到 0 个 JSON 值" "⑩ fail-closed：报错点明读到几个 JSON 值"
+done
+rc=0; err=$(printf '{%s"findings":[]}{%s"findings":[]}' "$C" "$C" | review_validate 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 1 "⑩ fail-closed：两个 JSON 值 → rc 1（不是「按最后一个算」）"
+assert_contains "$err" "读到 2 个 JSON 值" "⑩ fail-closed：报错点明读到 2 个"
 # ⑩：整份契约只解析一次——_review_normalize 里恰好一个 jq 调用，且不再把契约留在 bash 变量里
 norm_body=$(LC_ALL=C awk '/^_review_normalize\(\) \{$/{f=1} f{print} f && /^}$/{exit}' "$ROOT/scripts/lib/review-render.sh")
 assert_eq "$(printf '%s\n' "$norm_body" | LC_ALL=C grep -v '^[[:space:]]*#' | LC_ALL=C grep -c '^[[:space:]]*jq ')" "1" "⑩：_review_normalize 里只有一个 jq 调用行（原先 4 个；注释与错误文案不算）"
