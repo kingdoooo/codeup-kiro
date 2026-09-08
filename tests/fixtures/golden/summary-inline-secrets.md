@@ -4,7 +4,7 @@
 
 | Commit | 分支 | 时间 | diff |
 |---|---|---|---|
-| `90fcb05` | `feature/user-search` → `master` | 2026-09-02 20:10:02 | 完整直传 |
+| `90fcb05` | `feature/user-search` → `main` | 2026-09-02 20:10:02 | 完整直传 |
 
 ## 变更摘要
 

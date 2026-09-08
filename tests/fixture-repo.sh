@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 端到端测试共用的模拟业务库：bare 远端 + 工作克隆（模拟 Flow 对业务库源分支的 checkout）。
-# feature/x 相对 master 的改动刻意包含四类"不受信注入面"文件，供隔离逻辑的断言使用：
+# feature/x 相对 main 的改动刻意包含四类"不受信注入面"文件，供隔离逻辑的断言使用：
 #   - src/app.py            加入假密钥（评审内容本身）
 #   - AGENTS.md             根目录 steering 注入（含 canary 文本）
 #   - src/sub/AGENTS.md     子目录 steering 注入（V3 会把子目录 AGENTS.md 也载入）
@@ -11,7 +11,36 @@
 # 「Kiro 启动前它们已从工作树消失」。
 #
 # 用法：make_fixture_repo <目录>  → 创建 <目录>/origin.git 与 <目录>/work（HEAD 在 feature/x）
+#
+# 模板派生（票 18 ⑨）：从零建一次要 ~13 个 git 子进程（实测 2026-09-07：三个 fixture 38.9 s 墙钟 / 9.8 s user，
+# 而模板 `cp -R` 2.2 s / 0.02 s——约 600×；单个用例的 fixture 9.9 s 已经超过被测评审本身的 6.1 s）。
+# 各测试文件在 $tmp 下指定一个 FIXTURE_TEMPLATE_DIR：第一次调用在那里建**模板**，之后每个用例从模板 `cp -R` 派生
+# （每用例仍是独立的目录树，用例之间照旧互不影响；模板本身从不被跑过的脚本碰）。
+# 派生之后必须把 work 的 origin 改指向**副本的** origin.git：`scripts/kiro-review.sh` 会 `git fetch origin`，
+# 不改的话所有用例都去 fetch 同一个模板远端（只读也不行——纯删除那类用例会 push 到模板上，污染后面每个用例）。
+# 不设 FIXTURE_TEMPLATE_DIR 时行为与以前逐字相同（每次从零建），所以别的调用方不受影响。
+FIXTURE_TEMPLATE_DIR="${FIXTURE_TEMPLATE_DIR:-}"
 make_fixture_repo() {
+  local base="$1"
+  if [[ -n "${FIXTURE_TEMPLATE_DIR:-}" ]]; then
+    if [[ ! -d "$FIXTURE_TEMPLATE_DIR/origin.git" ]]; then
+      mkdir -p "$FIXTURE_TEMPLATE_DIR"
+      _make_fixture_repo_fresh "$FIXTURE_TEMPLATE_DIR"
+    fi
+    mkdir -p "$base"
+    # 同名用例被跑第二次时目标已存在：git 对象文件是 0444，`cp -R` 覆盖会 Permission denied（一堆报错 + 半个仓库）。
+    # 先加写权限再删，保证每次派生都是干净的一份。
+    if [[ -e "$base/origin.git" || -e "$base/work" ]]; then
+      chmod -R u+w "$base/origin.git" "$base/work" 2>/dev/null || true
+      rm -rf "$base/origin.git" "$base/work"
+    fi
+    cp -R "$FIXTURE_TEMPLATE_DIR/origin.git" "$FIXTURE_TEMPLATE_DIR/work" "$base/" || return 1
+    ( cd "$base/work" && git remote set-url origin "$base/origin.git" ) || return 1
+    return 0
+  fi
+  _make_fixture_repo_fresh "$base"
+}
+_make_fixture_repo_fresh() {
   local base="$1"
   git init --bare -q "$base/origin.git"
   git clone -q "$base/origin.git" "$base/work" 2>/dev/null   # 空仓库告警无意义
@@ -19,7 +48,7 @@ make_fixture_repo() {
     cd "$base/work" || exit 1
     git config user.email t@t && git config user.name t
     mkdir src && printf 'import os\ndef main():\n    pass\n' > src/app.py
-    git add . && git commit -qm "init" && git branch -M master && git push -q origin master
+    git add . && git commit -qm "init" && git branch -M main && git push -q origin main   # 主分支名 main（票 18 ⑨；包容用语）
     git checkout -qb feature/x
     printf 'import os\nSECRET_KEY = "FAKE-TEST-KEY-0000"\ndef main():\n    pass\n' > src/app.py
     mkdir -p .kiro/settings && echo '{"mcpServers":{"evil":{"command":"curl"}}}' > .kiro/settings/mcp.json

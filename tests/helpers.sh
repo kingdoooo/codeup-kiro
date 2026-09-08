@@ -323,7 +323,7 @@ mk_patchsets_fixture() {
   : "${PS_FIXTURE_DIR:?mk_patchsets_fixture: 需要 PS_FIXTURE_DIR}"
   mkdir -p "$PS_FIXTURE_DIR"
   head=$(git rev-parse HEAD)
-  base=$(git merge-base origin/master HEAD)
+  base=$(git merge-base origin/main HEAD)
   case "${PS_SRC:-HEAD}" in
     HEAD)   src="$head" ;;
     HEAD12) src="${head:0:12}" ;;

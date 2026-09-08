@@ -13,6 +13,13 @@ Kiro CLI 3.0 目前是 early access：随 2.x 稳定版一起安装，需 `--v3`
 - 调用命令固定为 `kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json --agent codeup-reviewer …`；引擎不写在配置里而写在脚本里，避免被工作区设置覆盖。
 - **实测备注（2026-09-02，不改决策）**：kiro-cli 2.21.0 的 `chat --help` 把 `--agent-engine` 标为 `"v2" (default)`，但 headless（`--no-interactive`）实测不传该参数时 `--output-format stream-json` 被拒「not supported on the v1 engine」，且工作区 `AGENTS.md` 的 canary 出现在输出中（`.scratch/codeup-kiro-v2/probe-results/kiro-headless/kiro-probe-t01-default-iso`）——帮助文本与实际默认行为不一致。因此必须显式传 `--agent-engine v2`，不能信任「默认就是 v2」。
 
+- **实测备注（2026-09-08，不改决策）**：kiro-cli 2.21.1 的 `chat [INPUT]` 一旦收到位置参数就**整个忽略 stdin**
+  （本机 env -i 许可清单 / 完整环境 × 空 cwd / 业务库 cwd 四种组合一致；`chat --help` 只把 `[INPUT]` 写成
+  「The first question to ask」，对 stdin 没有任何说明）。因此集成包自 `06d5028` 起把**运行时提示词与评审输入一起走 stdin、
+  不给位置参数**；在那之前的所有真实运行里，模型从未收到 diff，只是自己读工作树、把整个文件当成本次改动来评
+  （见 `.scratch/codeup-kiro-v2/acceptance/NOTES.md` D4 / D4b）。探测脚本仍用位置参数（提示词短、不喂 diff），
+  两者刻意不同，见 `scripts/probe/README.md`。这条只是记录 CLI 的行为事实，v2 引擎的决策不变。
+
 - 切换到 V3 的门槛，全部满足才切：官方 GA 公告；headless 文档明确支持 V3；`--trust-tools` 在 V3 的语义定型；canary 负向测试（读禁止路径、AGENTS.md 注入、shell 执行）在 V3 下全部通过。**2026-09-02 实测：V3 下 `chat.disableInheritingDefaultResources=true` 不能阻止工作区 `AGENTS.md` 进入自定义 agent 的上下文（v2 可以），因此当前 V3 直接不满足 AGENTS.md 注入这一项。**
 - 探测阶段保留一个时间盒（≤ 半天）的 `--engine v3` 对照实验，只为提前发现迁移成本，不作为上线依据。
 - 不依赖 V3 独有能力（标签式 `tools`、`code` 工具）实现任何功能。

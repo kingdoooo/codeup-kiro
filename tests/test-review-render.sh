@@ -255,7 +255,7 @@ render() { # <契约文件> <输出文件> [额外参数...]
   local src="$1" out="$2"; shift 2
   review_validate < "$src" > "$tmp/validated.json"
   review_render_summary --json "$tmp/validated.json" \
-    --sha 90fcb05 --src feature/user-search --dst master \
+    --sha 90fcb05 --src feature/user-search --dst main \
     --ts "2026-09-02 20:10:02" --diff-note "完整直传" "$@" > "$out"
 }
 
@@ -338,7 +338,7 @@ assert_rc "$rc" 0 "渲染：--inline-comment 0 与默认一致"
 
 # ============ review_render_degraded：结构化解析失败的降级评论 ============
 printf '# 代码评审报告\n\n发现硬编码密钥 src/app.py:2（值已掩码：FAKE****0000）。\n\n总体结论：建议修改后合并。\n' > "$tmp/raw.md"
-review_render_degraded --text "$tmp/raw.md" --sha 90fcb05 --src feature/user-search --dst master \
+review_render_degraded --text "$tmp/raw.md" --sha 90fcb05 --src feature/user-search --dst main \
   --ts "2026-09-02 20:10:02" --diff-note "完整直传" --reason "输出中未找到契约标记" > "$tmp/degraded.md"
 assert_golden "$tmp/degraded.md" summary-degraded.md "渲染：降级评论"
 # 15-fix3 #3：降级评论也要输出调用方的 --notice（kiro-cli 版本未经探测这类），不能只在结构化分支出现
@@ -976,14 +976,14 @@ assert_contains "$body" "&lt;/details>" "R1：模型文本里的 </details> 被�
 assert_contains "$body" "&lt;details" "R1：模型文本里的 <details> 被转义"
 
 # ============ 票 03 复审修复：失败评论与成功评论同形（review_render_failure）============
-review_render_failure --reason "Kiro 评审超时（900s）" --sha 90fcb05 --src feature/x --dst master \
+review_render_failure --reason "Kiro 评审超时（900s）" --sha 90fcb05 --src feature/x --dst main \
   --ts "2026-09-03 02:00:00" --diff-note "（本次未生成 diff）" --run 2 --history "$tmp/prior-hist.json" \
   --log-hint "请查看流水线日志（构建号 42）或重跑流水线。" > "$tmp/failure.md"
 body=$(cat "$tmp/failure.md")
 assert_contains "$body" "# Kiro 代码评审 · ⚠️ 评审未完成" "失败评论：标题"
 assert_contains "$body" "<!-- kiro-review:90fcb05 run:2 -->" "失败评论：评审标记与成功评论同形"
 assert_contains "$body" "<!-- kiro-history:" "失败评论：带历史标记"
-assert_contains "$body" "| \`90fcb05\` | \`feature/x\` → \`master\` |" "失败评论：元信息表与成功评论同形"
+assert_contains "$body" "| \`90fcb05\` | \`feature/x\` → \`main\` |" "失败评论：元信息表与成功评论同形"
 assert_contains "$body" "⚠️ 评审未完成：Kiro 评审超时（900s）" "失败评论：写明失败原因"
 assert_contains "$body" "构建号 42" "失败评论：带日志线索"
 assert_contains "$body" "| 2 | \`90fcb05\` | 评审未完成 | -/-/- |" "失败评论：历次表记本次评审未完成"
@@ -1771,7 +1771,7 @@ assert_eq "$(grep -c '^# Kiro 代码评审' "$tmp/inline-inject.md")" "0" "行�
 render_inline() { # <计划文件> <输出文件> [额外参数…]
   local plan="$1" out="$2"; shift 2
   review_render_summary --json "$plan" --inline-comment 1 \
-    --sha 90fcb05 --src feature/user-search --dst master \
+    --sha 90fcb05 --src feature/user-search --dst main \
     --ts "2026-09-02 20:10:02" --diff-note "完整直传" "$@" > "$out"
 }
 render_inline "$tmp/plan-quiet.json" "$tmp/summary-inline.md"
@@ -1938,7 +1938,7 @@ review_render_summary --json "$tmp/plan-quiet.json" --inline-comment 0 \
 assert_eq "$(grep -c '<!-- kiro-review:' "$tmp/notice-inject.md")" "1" "notice：取值里的伪造评审标记被转义"
 # 不传 --notice 时输出必须与不带该参数完全一致（I7：默认关闭 = 观感不变）
 render fixtures/contract/full.json "$tmp/nonotice.md"
-review_render_summary --json "$tmp/validated.json" --sha 90fcb05 --src feature/user-search --dst master \
+review_render_summary --json "$tmp/validated.json" --sha 90fcb05 --src feature/user-search --dst main \
   --ts "2026-09-02 20:10:02" --diff-note "完整直传" --notice "" > "$tmp/emptynotice.md"
 assert_eq "$(cmp -s "$tmp/nonotice.md" "$tmp/emptynotice.md" && echo same || echo differ)" "same" \
   "notice：空取值与不传该参数逐字节一致"
@@ -2013,7 +2013,7 @@ for payload in 'a|b|c' '`<details><summary>h</summary>' '`<script>x' 'x-->y' 'a<
   done
 done
 # 评审标记仍可解析（修复不能动 run 号）
-out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src 'a|b`<x' --dst master \
+out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src 'a|b`<x' --dst main \
         --ts "2026-09-02 20:10:02" --diff-note "完整直传")
 assert_eq "$(printf '%s\n' "$out" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:[0-9]+ -->$')" "1" \
   "元信息表：过滤分支名不影响评审标记（仍恰好一行、仍可解析）"
@@ -2032,21 +2032,21 @@ assert_eq "$(printf '%s\n' "$out" | grep -cE '^<!-- kiro-review:[0-9a-f]+ run:9 
 assert_not_contains "$out" '<!-- kiro-review:deadbeef' "元信息表：注入的标记前缀不出现在评论里"
 assert_eq "$(meta_row "$out" | tr -cd '|' | wc -c | tr -d ' ')" "5" "元信息表：带换行的分支名不撑破表格"
 # 过滤后为空：不能渲染成一对相邻反引号（GFM 会显示两个裸反引号，分支信息彻底丢失）
-out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src '<<>>' --dst master \
+out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src '<<>>' --dst main \
         --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>/dev/null)
 assert_contains "$(meta_row "$out")" '(名称含非法字符，已过滤)' "元信息表：分支名被过滤空时回填占位而不是空 code span"
 assert_not_contains "$(meta_row "$out")" '``' "元信息表：不出现相邻反引号"
 # 过滤改变取值时必须在 stderr 留痕（评论上的名字与真实 ref 不同，运维要能看出来）
-err=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src 'a|b' --dst master \
+err=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src 'a|b' --dst main \
         --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>&1 >/dev/null)
 assert_contains "$err" "已过滤后显示" "元信息表：分支名被过滤时打日志"
-err=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src feature/ok --dst master \
+err=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src feature/ok --dst main \
         --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>&1 >/dev/null)
 assert_not_contains "$err" "已过滤后显示" "元信息表：正常分支名不打那条日志（正控）"
 # 正常分支名不受影响（过滤只删危险字符，不动普通路径）
-out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src feature/user-search --dst master \
+out=$(review_render_summary --json "$tmp/v07.json" --sha 90fcb05 --src feature/user-search --dst main \
         --ts "2026-09-02 20:10:02" --diff-note "完整直传")
-assert_contains "$(meta_row "$out")" '`feature/user-search` → `master`' "元信息表：正常分支名原样渲染"
+assert_contains "$(meta_row "$out")" '`feature/user-search` → `main`' "元信息表：正常分支名原样渲染"
 
 # ============================================================================
 # 票 16 / 16-fix2（Kent 裁决方案 C）：模型文本在唯一收口点（validated.json）逐字段掩码，评论出口再过一遍严格保行的文档级兜底
@@ -2058,7 +2058,7 @@ validate_redacted() { review_validate < "$1" > "$2"; }   # <契约> <输出 vali
 render_redacted() {  # <契约> <输出 md> [额外参数…]：与 render 同参数，但走字段级掩码
   local src="$1" out="$2"; shift 2
   validate_redacted "$src" "$tmp/validated-redacted.json"
-  review_render_summary --json "$tmp/validated-redacted.json" --sha 90fcb05 --src feature/user-search --dst master \
+  review_render_summary --json "$tmp/validated-redacted.json" --sha 90fcb05 --src feature/user-search --dst main \
     --ts "2026-09-02 20:10:02" --diff-note "完整直传" "$@" > "$out"
 }
 # PEM 夹具常量（D5 / PEM_B / PEM_E / PEM_L64 / PEM_L16）在 tests/helpers.sh；两个占位符是库常量
@@ -2230,7 +2230,7 @@ assert_eq "$([[ $n_golden -ge 13 ]] && echo enough)" "enough" "票 16 golden②�
 # ---- golden③：降级路径的原文含**两个未闭合 BEGIN 行**（第 28 条）——渲染时掩过一遍，出口再过文档级兜底必须逐字节 no-op ----
 printf '# 代码评审报告\n\nP0：写死了 token = %s，还有 %s。\napi_key = "%s"\n%s\nMIIEowIBAAKCAQEAs3cR9tX\n又一处：\n%s\n\n总体结论：不建议合并。\n' \
   "$SEC_GHP" "$SEC_AKIA" "$SEC_B64" "$PEM_B" "$PEM_B" > "$tmp/deg-secrets.raw.md"
-review_render_degraded --text "$tmp/deg-secrets.raw.md" --sha 90fcb05 --src feature/user-search --dst master \
+review_render_degraded --text "$tmp/deg-secrets.raw.md" --sha 90fcb05 --src feature/user-search --dst main \
   --ts "2026-09-02 20:10:02" --diff-note "完整直传" --reason "输出中未找到契约标记" > "$tmp/deg-secrets.md"
 assert_masked "$(cat "$tmp/deg-secrets.md")" "票 16 降级"
 assert_not_contains "$(cat "$tmp/deg-secrets.md")" "MIIEowIBAAKCAQEAs3cR9tX" "票 16 降级：未闭合块后紧跟的密钥正文行被就地屏蔽（第 14 条：保行模式）"
@@ -2243,7 +2243,7 @@ cp "$tmp/deg-secrets.md" "$tmp/deg-secrets.doc.md"; review_redact_file "$tmp/deg
 assert_same_file "$tmp/deg-secrets.md" "$tmp/deg-secrets.doc.md" "票 16 golden③（第 28 条）：含两个 BEGIN 行的降级评论再过文档级兜底逐字节不变（文档级不碰 PEM）"
 # 失败评论：--reason 里带取值时同样要能被文档级兜底掩掉（失败原因是文本级，不经 validated.json）
 review_render_failure --reason "Kiro 自报运行失败（runFinished.status=error ${SEC_GHP}）" --sha 90fcb05 \
-  --src feature/user-search --dst master --ts "2026-09-02 20:10:02" --diff-note "完整直传" > "$tmp/fail-secrets.md"
+  --src feature/user-search --dst main --ts "2026-09-02 20:10:02" --diff-note "完整直传" > "$tmp/fail-secrets.md"
 assert_contains "$(cat "$tmp/fail-secrets.md")" "$SEC_GHP" "票 16 正控：失败评论渲染器自己不掩（掩码在出口）"
 review_redact_file "$tmp/fail-secrets.md"
 assert_not_contains "$(cat "$tmp/fail-secrets.md")" "$SEC_GHP" "票 16：失败评论过文档级兜底后 reason 里的 token 不在"

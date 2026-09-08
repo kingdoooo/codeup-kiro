@@ -13,9 +13,12 @@ if ! command -v timeout >/dev/null && ! command -v gtimeout >/dev/null; then
 fi
 ROOT=$(cd .. && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+# fixture 模板（票 18 ⑨）：本文件的第一个用例在这里建一次业务库模板，之后每个用例从它 `cp -R` 派生
+# （每用例仍是独立目录树；派生时 work 的 origin 会改指向副本的 origin.git，见 tests/fixture-repo.sh）
+FIXTURE_TEMPLATE_DIR="$tmp/fixture-template"
 export PATH="$ROOT/tests/mockbin:$PATH"
 export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456
-export MR_LOCAL_ID=7 MR_TARGET_BRANCH=master CI_COMMIT_REF_NAME=feature/x
+export MR_LOCAL_ID=7 MR_TARGET_BRANCH=main CI_COMMIT_REF_NAME=feature/x
 
 # 变异定义（make_mutant / mutate_more）与它们的静态自检（票 18 ⑨）。
 # 「sed 真的改到了目标文件、改后仍是合法 bash」这两条判定只有 _mut_apply 一份：make_mutant、mutate_more 与文件开头的静态自检
@@ -498,7 +501,7 @@ assert_not_contains "$OUT" "结构化解析失败" "M11：不再降级，而是�
 mut_degraded() { # $1=集成包根 → stdout 降级评论（原文里带未掩码的 AWS 密钥对）
   ( set +e; source "$1/scripts/lib/review-render.sh"
     printf 'P0：写死了凭证 AWS_SECRET_ACCESS_KEY=%s，还有 %s。\n' "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" "AKIAIOSFODNN7EXAMPLE" > "$tmp/m12.raw.md"
-    review_render_degraded --text "$tmp/m12.raw.md" --sha 90fcb05 --src feature/x --dst master \
+    review_render_degraded --text "$tmp/m12.raw.md" --sha 90fcb05 --src feature/x --dst main \
       --ts "2026-09-02 20:10:02" --diff-note "完整直传" --reason "输出中未找到契约标记" 2>/dev/null )
 }
 pkg=$(make_mutant m12-degrade-redact 's|^  _review_redact_to "\$_RR_TEXT" "\$masked" review_render_degraded .*$|  cat "$_RR_TEXT" > "$masked"  # 变异 M12：降级原文不掩码|' scripts/lib/review-render.sh)
@@ -976,7 +979,7 @@ mut_meta_row() { # $1=集成包根 $2=分支名 → stdout 元信息行（提取
   local pkg_root="$1" branch="$2" out
   ( set +e; source "$pkg_root/scripts/lib/review-render.sh"
     review_validate < "$ROOT/tests/fixtures/contract/full.json" > "$tmp/m37.json"
-    out=$(review_render_summary --json "$tmp/m37.json" --sha 90fcb05 --src "$branch" --dst master \
+    out=$(review_render_summary --json "$tmp/m37.json" --sha 90fcb05 --src "$branch" --dst main \
             --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>/dev/null)
     meta_row "$out" )
 }
@@ -984,7 +987,7 @@ mut_render() { # $1=集成包根 $2=分支名 → stdout 整段汇总评论（M3
   local pkg_root="$1" branch="$2"
   ( set +e; source "$pkg_root/scripts/lib/review-render.sh"
     review_validate < "$ROOT/tests/fixtures/contract/full.json" > "$tmp/m37.json"
-    review_render_summary --json "$tmp/m37.json" --sha 90fcb05 --src "$branch" --dst master \
+    review_render_summary --json "$tmp/m37.json" --sha 90fcb05 --src "$branch" --dst main \
       --ts "2026-09-02 20:10:02" --diff-note "完整直传" 2>/dev/null )
 }
 # 元信息行开头那一段（`| \`sha\` | …`）的竖线数：行被换行劈开时前半截只剩 2 个
@@ -1541,7 +1544,7 @@ mkdir -p "$IFXLAG2"
 cp "$IFX"/create-comment-inline.*.json "$IFXLAG2/"
 mk_lag_late() {
   local base
-  base=$(git merge-base origin/master HEAD)
+  base=$(git merge-base origin/main HEAD)
   jq -n --arg sha "$(git rev-parse HEAD)" --arg base "$base" '[
     {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
     {patchSetBizId:"src-2", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
@@ -1632,6 +1635,54 @@ pkg=$(make_mutant m-t18f-entry 's/          | (if $len0 > $entry_max$/          
 f=$(mut_fold "$pkg")
 assert_eq "$(grep -c '折叠区单条上限' "$f")" "0" "M-t18f-entry：单条预算被杀 → 12000 字节那条不再切断——单测「恰好切在 8192」断言会失败"
 assert_eq "$(grep -oE 'A+' "$f" | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')" "12000" "M-t18f-entry：12000 字节整段进了汇总"
+
+# --- M-t18c（票 18 ⑫）：fail-closed:plan / pair-http / pair-nopair 三个出口的变异守卫 ---
+# 这三个出口原先没有变异覆盖（合并后深度复审转票 18）：拆掉之后「发不出行内评论」这件事仍然什么都看不出来——
+# 汇总里没有说明（notice 丢了），而问题清单也不再展开（INLINE_COMMENT=1 的汇总不展开 inline），一条 P0 就此消失。
+# 三个出口的可观测结果都是「汇总里那句 notice + 完整问题清单」，所以断言锚在这两处。
+# ⒜ fail-closed:plan —— review_plan_inline 失败（这里用「让它必然失败」的变异：--json 传一个不存在的文件）
+pkg=$(make_mutant m-t18c-plan-bail 's|^    inline_bail "行内评论未发出：生成行内发布计划失败，下面是完整问题清单。" "警告：生成行内发布计划失败" \|\| return 1  # fail-closed:plan$|    :  # 变异 M-t18c-plan：计划失败也继续往下发|')
+mutate_more "$pkg" 's|--changed-lines "\$WORK/changed-lines.json"|--changed-lines "$WORK/does-not-exist.json"|'
+inline_case m-t18c-plan "$pkg" "$IFX"
+assert_contains "$OUT" "生成行内发布计划失败" "M-t18c-plan：计划确实失败了（双变异的前一半）"
+assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出：生成行内发布计划失败" \
+  "M-t18c-plan：拆掉出口后汇总里没有那句 notice——端到端「MR 上看得见原因」断言会失败"
+# 对照：只让计划失败、出口不动 → notice 在，问题清单在
+pkg2=$(make_mutant m-t18c-plan-control 's|--changed-lines "\$WORK/changed-lines.json"|--changed-lines "$WORK/does-not-exist.json"|')
+inline_case m-t18c-plan-control "$pkg2" "$IFX"
+assert_contains "$(posted_comment "$OUT")" "行内评论未发出：生成行内发布计划失败" "M-t18c-plan 对照：出口在时 notice 上了汇总"
+assert_contains "$(posted_comment "$OUT")" "## 问题清单" "M-t18c-plan 对照：退回完整问题清单"
+# ⒝ fail-closed:pair-http —— 发布前采样时版本列表查询失败（预采样成功、第 2 次起 403）
+pkg=$(make_mutant m-t18c-pairhttp-bail 's|^  if \[\[ "\$rc" == "1" \]\]; then inline_bail_pair http \|\| return 1; fi   # fail-closed:pair-http$|  if [[ "$rc" == "1" ]]; then inline_bail_pair http; fi   # 变异 M-t18c-pairhttp：说明了原因却继续往下发|')
+inline_case m-t18c-pairhttp "$pkg" "$IFX" DRY_RUN_FAIL_ROUTES="list-patchsets:403@2+" CODEUP_RETRY_BACKOFF=0
+assert_contains "$OUT" "查询 MR 版本列表失败" "M-t18c-pairhttp：日志说明查询失败"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
+  "M-t18c-pairhttp：拆掉 return 1 之后仍然发了 3 条行内评论（版本对没核对过）——端到端「fail-closed 时 0 条」断言会失败"
+inline_case m-t18c-pairhttp-control "$ROOT" "$IFX" DRY_RUN_FAIL_ROUTES="list-patchsets:403@2+" CODEUP_RETRY_BACKOFF=0
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "M-t18c-pairhttp 对照：出口在时一条都不发"
+assert_contains "$(posted_comment "$OUT")" "行内评论未发出：查询 MR 版本列表失败" "M-t18c-pairhttp 对照：原因上了汇总"
+# ⒞ fail-closed:pair-nopair —— 发布前采样选不出版本对（第 2 次起的响应只有 MERGE_SOURCE）
+IFXNP="$tmp/ifx-nopair-late"; mkdir -p "$IFXNP"; cp "$IFX"/create-comment-inline.*.json "$IFXNP/"
+mk_nopair_late() {
+  local base; base=$(git merge-base origin/main HEAD)
+  jq -n --arg sha "$(git rev-parse HEAD)" --arg base "$base" '[
+    {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
+    {patchSetBizId:"src-2", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFXNP/list-patchsets.1.json"
+  jq -n --arg sha "$(git rev-parse HEAD)" '[
+    {patchSetBizId:"src-2", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
+  ]' > "$IFXNP/list-patchsets.json"
+}
+pkg=$(make_mutant m-t18c-nopair-bail 's|^  if \[\[ "\$rc" == "2" \]\]; then inline_bail_pair nopair \|\| return 1; fi  # fail-closed:pair-nopair$|  if [[ "$rc" == "2" ]]; then inline_bail_pair nopair; fi  # 变异 M-t18c-nopair：说明了原因却继续往下发|')
+MUT_TWEAK=mk_nopair_late inline_case m-t18c-nopair "$pkg" "$IFXNP"
+assert_contains "$OUT" "选不出行内评论要用的版本对" "M-t18c-nopair：日志说明选不出版本对"
+assert_eq "$(inline_bodies "$OUT" | jq -r '.from_patchset_biz_id' | sort -u | paste -sd, -)" "" \
+  "M-t18c-nopair：拆掉 return 1 之后 from/to 是空串，创建请求被本地前置校验拒掉（0 条），但**汇总说的是「已标注」还是「未发出」要看 notice**"
+assert_contains "$OUT" "from/to 版本必须都给" "M-t18c-nopair：空版本对让每一条都被本地校验拒绝（真实接口上是 400）"
+MUT_TWEAK=mk_nopair_late inline_case m-t18c-nopair-control "$ROOT" "$IFXNP"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "M-t18c-nopair 对照：出口在时一条都不发"
+assert_contains "$(posted_comment "$OUT")" "选不出「最新合并目标版本 + 最新合并源版本」这一对" "M-t18c-nopair 对照：原因上了汇总"
+assert_contains "$(posted_comment "$OUT")" "## 问题清单" "M-t18c-nopair 对照：退回完整问题清单"
 
 # --- M-t18p（票 18 ①）：去掉「重试前先查标记」→ 响应丢失但评论已创建时会再 POST 一次（MR 上多出第二条汇总，违反 I4）---
 # 库级探针：DRY_RUN 下让第一次 create-comment 返回 000，列表 fixture 里有一条同作者同标记的评论 → 数 POST 次数

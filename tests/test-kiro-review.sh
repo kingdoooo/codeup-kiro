@@ -18,6 +18,9 @@ fi
 
 ROOT=$(cd .. && pwd)
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+# fixture 模板（票 18 ⑨）：本文件的第一个用例在这里建一次业务库模板，之后每个用例从它 `cp -R` 派生
+# （每用例仍是独立目录树；派生时 work 的 origin 会改指向副本的 origin.git，见 tests/fixture-repo.sh）
+FIXTURE_TEMPLATE_DIR="$tmp/fixture-template"
 
 # --- 公共环境 ---
 export PATH="$ROOT/tests/mockbin:$PATH"
@@ -25,7 +28,7 @@ export PATH="$ROOT/tests/mockbin:$PATH"
 # 「默认取 Flow 语义」的断言与 golden 比对就会莫名失败（run_case 用 env 继承外部环境）。
 unset REVIEW_RERUN_HINT
 export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456
-export MR_LOCAL_ID=7 MR_TARGET_BRANCH=master CI_COMMIT_REF_NAME=feature/x
+export MR_LOCAL_ID=7 MR_TARGET_BRANCH=main CI_COMMIT_REF_NAME=feature/x
 
 # 每个用例都重建 fixture（全部注入面文件重新就位，否则第一次运行删完后后面的「工作区干净」断言全是空转）、
 # 独立 HOME，并 cd 进业务库 checkout 再调用（模拟 Flow 在 PROJECT_DIR 下调用脚本，让 REVIEW_REPO_DIR
@@ -211,8 +214,8 @@ assert_eq "$([[ "$inst_prompt" == file:///*/prompts/review-agent-prompt.md ]] &&
   "安装后的 prompt 为绝对 file:// 路径（实际：${inst_prompt}）"
 assert_eq "$([[ -r "${inst_prompt#file://}" ]] && echo y || echo n)" "y" "prompt 引用的提示词文件存在且可读"
 assert_eq "$(jq -c '[.includeMcpJson, .includePowers]' "$inst")" "[false,false]" "安装后的 agent 不含 MCP/Powers"
-assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$inst")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths)' "$ROOT/kiro/agent-codeup-reviewer.json")" \
-  "安装只改写 prompt、三处 allowedPaths 与三处 deniedPaths（追加按 allow 根注入的绝对副本），其余字段与集成包一致"
+assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths) | del(.permissions)' "$inst")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths) | del(.permissions)' "$ROOT/kiro/agent-codeup-reviewer.json")" \
+  "安装只改写 prompt、三处 allowedPaths、三处 deniedPaths 与 V3 的 permissions.rules[fs_read].match（都只追加按 allow 根注入的绝对副本），其余字段与集成包一致"
 assert_eq "$(jq -c '.toolsSettings.read.deniedPaths[:32]' "$inst")" "$(jq -c '.toolsSettings.read.deniedPaths' "$ROOT/kiro/agent-codeup-reviewer.json")" "安装后 deniedPaths 前段就是集成包的原条目（顺序不变，只在末尾追加）"
 # --- 读取边界（票 15）：allowedPaths = 业务库 checkout 物理路径 + 本次 $WORK/chunks；allowedTools 为空 ---
 assert_eq "$(jq -r '.toolsSettings.read.allowedPaths | length' "$inst")" "2" "安装后 allowedPaths 恰好两条"
@@ -622,15 +625,6 @@ assert_contains "$comment" "| 1 | \`90fcb05\` | 建议修改后合并 | 1/1/1 |"
 assert_contains "$comment" "| 2 | \`" "二次评审：历次表追加本次那一行"
 assert_eq "$(printf '%s\n' "$comment" | grep -c '<!-- kiro-review:')" "1" "二次评审：更新后的评论里评审标记仍恰好一个"
 
-# --- 票 18 ⑤：同一机器人两条带标记的候选（上一次更新失败退回新建留下的）→ 更新 run 最大那条；日志带前缀列出两条的 id 与 run ---
-run_case tworuns DRY_RUN_FIXTURE_DIR="$CFX/two-runs" CODEUP_BOT_USERNAME="$BOT"
-assert_rc "$RC" 0 "两条候选：成功"
-assert_eq "$(req_count "$OUT" PUT 'comments/f0000000000000000000000000000003$')" "1" "两条候选：PUT 到 run 最大的那条"
-assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "0" "两条候选：不新建第三条"
-assert_contains "$OUT" "[kiro-review] review_select_prior_comment: 警告：同一机器人有 2 条带合法评审标记的汇总评论候选：f0000000000000000000000000000001（run:1）、f0000000000000000000000000000003（run:3）" \
-  "两条候选：选择器的告警经 log 转成带前缀的流水线日志行，列出 id 与 run"
-assert_contains "$(posted_comment "$OUT")" "run:4 -->" "两条候选：run 接在最大的 3 之后"
-
 # --- 机器人用户名未配置（令牌身份接口也不可用）：一律新建，不以评审标记作者作为更新依据 ---
 # 评审标记是明文可复制的，拿它的作者当自己就等于让任何 MR 参与者把报告引到他那条评论上。
 run_case noidentity DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME=
@@ -755,6 +749,11 @@ assert_rc "$RC" 0 "两条候选：成功"
 assert_eq "$(req_count "$OUT" PUT 'comments/f0000000000000000000000000000003$')" "1" "两条候选：更新 run 最大的那条"
 assert_contains "$(posted_comment "$OUT")" "run:4 -->" "两条候选：run 从 3 递增到 4"
 assert_contains "$(posted_comment "$OUT")" "<details><summary>历次评审（4）</summary>" "两条候选：历次表继承 3 行再追加 1 行"
+# 票 18 ⑤：选择器的多候选告警要经 log 转成带前缀的流水线日志行，并列出每条候选的 id 与 run（MR 上多出的那条要人工删）
+assert_contains "$OUT" "[kiro-review] review_select_prior_comment: 警告：同一机器人有 2 条带合法评审标记的汇总评论候选：f0000000000000000000000000000001（run:1）、f0000000000000000000000000000003（run:3）" \
+  "两条候选（票 18 ⑤）：告警经 log 带上 [kiro-review] 前缀，列出两条的 id 与 run"
+assert_contains "$OUT" "本次原地更新 run 最大的那条（f0000000000000000000000000000003）" "两条候选（票 18 ⑤）：告警说明选了哪条"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "0" "两条候选（票 18 ⑤）：不新建第三条"
 
 # ============ 协调者复审修复 ============
 
@@ -1255,7 +1254,7 @@ assert_contains "$comment" "## 问题清单" "版本列表滞后：回落成完�
 # 预采样重查命中之后，发布前还会再采样一次，那一次也必须拿到新版本（票 17-fix3 ⑥）。
 mk_lag_then_ok() {
   local head base
-  head=$(git rev-parse HEAD); base=$(git merge-base origin/master HEAD)
+  head=$(git rev-parse HEAD); base=$(git merge-base origin/main HEAD)
   jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
     {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
     {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
@@ -1280,7 +1279,7 @@ assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出" "滞后�
 # `git rev-parse --verify "<x>^{commit}"` 接受任意 revision 表达式：不锚形状的话 `HEAD` / `@` / 一个 refname
 # 都会解析成克隆里的分支顶端、恰好等于 HEAD，于是「版本已证明」这条结论建立在一个从未核对内容的取值上
 # （fail-open）。锚了形状之后它落到 noid：一条行内评论都不发。
-for shape in HEAD @ master refs/heads/master; do
+for shape in HEAD @ main refs/heads/main; do
   PS_SRC="RAW:$shape" PS_SRC_ID=src-9 run_inline_case "shape-$(printf '%s' "$shape" | tr -c 'A-Za-z0-9' '-')" ifx-shape
   assert_rc "$RC" 0 "形状锚定（${shape}）：评审仍成功"
   assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "形状锚定（${shape}）：0 次创建行内评论（不把 refname 当成已证明的版本）"
@@ -1352,7 +1351,7 @@ assert_contains "$comment" "## 问题清单" "分叉历史：回落成完整清�
 # 第 1 次 GET 滞后 → 触发重查；之后每次都返回一个不在克隆里的提交（评审期间来了新推送）。
 mk_lag_then_push() {
   local base
-  base=$(git merge-base origin/master HEAD)
+  base=$(git merge-base origin/main HEAD)
   jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
     {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
     {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
@@ -1375,7 +1374,7 @@ assert_not_contains "$comment" "重跑流水线即可" "重查期间来了新推
 # 按调用序号注入（DRY_RUN_FAIL_ROUTES 的 `@N+`）：第 1 次（预采样）成功、第 2 次（发布前采样）拿到旧版本
 # 触发重查、第 3 次起全部 403。这正是第 ② 条最坏的实例：403 被说成「滞后，重跑流水线即可」。
 mk_lag_then_403() {
-  jq -n --arg sha "$(git rev-parse HEAD)" --arg base "$(git merge-base origin/master HEAD)" '[
+  jq -n --arg sha "$(git rev-parse HEAD)" --arg base "$(git merge-base origin/main HEAD)" '[
     {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
     {patchSetBizId:"src-2", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
   ]' > "$IFX_DIR/list-patchsets.1.json"
@@ -1395,7 +1394,7 @@ assert_eq "$(printf '%s\n' "$comment" | grep -c '行内评论未发出')" "1" "�
 # ---- A11（17-fix3 ②）：滞后重查期间接口失败 / 选不出版本对 → 各自既有的 notice ----
 mk_lag_then_500() {
   local base
-  base=$(git merge-base origin/master HEAD)
+  base=$(git merge-base origin/main HEAD)
   jq -n --arg sha "$(git rev-parse 'HEAD^')" --arg base "$base" '[
     {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
     {patchSetBizId:"src-9", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
@@ -1613,7 +1612,7 @@ stdin_ol=$(cat "$MD/stdin")
 assert_eq "$(printf '%s\n' "$stdin_ol" | grep -c -F "$IDX_HDR")" "1" "超限：stdin 里恰好一个索引节标题"
 # 索引节 = 标题行之后、下一个空行之前的所有行：每行必须是含 chunk/file/added/removed 的 JSON 对象
 idx_lines=$(printf '%s\n' "$stdin_ol" | awk -v h="$IDX_HDR" 'index($0, h) == 1 {on=1; next} on && $0 == "" {exit} on {print}')
-n_changed=$(git -C "$CASE/work" diff --no-renames --name-only master HEAD | wc -l | tr -d ' ')
+n_changed=$(git -C "$CASE/work" diff --no-renames --name-only main HEAD | wc -l | tr -d ' ')
 assert_eq "$(printf '%s\n' "$idx_lines" | grep -c .)" "$n_changed" "超限：fixture 的全部变更文件（${n_changed} 个）都在索引里（阈值 1 字节，一个都装不下）"
 assert_eq "$(printf '%s\n' "$idx_lines" | jq -r 'type == "object" and has("chunk") and has("file") and (.added|type) == "number" and (.removed|type) == "number"' | sort -u)" "true" \
   "超限：索引每行都是含 chunk/file/added/removed 的 JSON 对象"
@@ -1638,7 +1637,7 @@ assert_rc "$RC" 0 "超限+符号链接 TMPDIR：退出码 0"
 allow_chunks_st=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$CASE/home/.kiro/agents/codeup-reviewer.json")
 assert_eq "$([[ "$allow_chunks_st" == /*/chunks ]] && echo y || echo n)" "y" "超限+符号链接 TMPDIR：allowedPaths[1] 是绝对路径下的 chunks（实际：${allow_chunks_st}）"
 idx_st=$(awk -v h="$IDX_HDR" 'index($0, h) == 1 {on=1; next} on && $0 == "" {exit} on {print}' "$MD/stdin")
-assert_eq "$(printf '%s\n' "$idx_st" | grep -c .)" "$(git -C "$CASE/work" diff --no-renames --name-only master HEAD | wc -l | tr -d ' ')" "超限+符号链接 TMPDIR：索引非空、条数与变更文件数一致"
+assert_eq "$(printf '%s\n' "$idx_st" | grep -c .)" "$(git -C "$CASE/work" diff --no-renames --name-only main HEAD | wc -l | tr -d ' ')" "超限+符号链接 TMPDIR：索引非空、条数与变更文件数一致"
 idx_st_dir=$(printf '%s\n' "$idx_st" | jq -r '.chunk | sub("/[^/]*$"; "")' | sort -u)
 assert_eq "$idx_st_dir" "$allow_chunks_st" "超限+符号链接 TMPDIR：索引里每条 chunk 的目录与 allowedPaths[1] 逐字相同"
 # 前提自检：allowedPaths[1] 已是物理形态（$WORK 已被 trap 删掉，用其父目录——TMPDIR 或 /var/folders/…/T——的 pwd -P 判）
@@ -1836,7 +1835,7 @@ assert_not_contains "$(posted_comment "$out")" "未经 P1-15 探测" "成功路�
 
 # 15-fix4 #3 / A7：降级评论只带 REVIEW_NOTICE——INLINE_NOTICE（「全部问题都归入未定位」这类关于分桶的提示）不该出现在一份没有问题清单的评论里。
 # 纯删除 MR + INLINE_COMMENT=1 让第 4.5 步产生 INLINE_NOTICE，再让评审员不守契约走降级。对 5462175 必须失败（那里降级评论继承 ALL_NOTICE）。
-tweak_pure_delete() { git reset -q --hard origin/master; git rm -q src/app.py; git commit -qm "delete app"; git push -qf origin feature/x; }
+tweak_pure_delete() { git reset -q --hard origin/main; git rm -q src/app.py; git commit -qm "delete app"; git push -qf origin feature/x; }
 CASE_TWEAK=tweak_pure_delete run_case degnoinline INLINE_COMMENT=1 MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
 assert_rc "$RC" 0 "降级 + 纯删除 MR：退出码 0"
 assert_contains "$OUT" "全部问题都归入" "降级 + 纯删除 MR：日志里有分桶提示（INLINE_NOTICE 确实产生了）"
