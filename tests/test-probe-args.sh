@@ -68,9 +68,9 @@ LC_ALL=C awk '/^              run: \|$/ {f=1; next} f && /^                / {su
 assert_eq "$([[ -s "$runblk" ]] && echo nonempty)" "nonempty" "④：从 YAML 里抽出了 run 块"
 assert_rc "$(bash -n "$runblk" && echo 0 || echo 1)" 0 "④：YAML 的 run 块是合法 shell"
 # 语义两条：注入时保留注入值；未注入时取内置变量
-assert_eq "$(env -i PATH="$PATH" CI_COMMIT_TARGET_REF_NAME_1=master MR_TARGET_BRANCH=injected bash -c ': "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"; printf %s "$MR_TARGET_BRANCH"')" "injected" \
+assert_eq "$(env -i PATH="$PATH" CI_COMMIT_TARGET_REF_NAME_1=master MR_TARGET_BRANCH=injected bash --noprofile --norc -c ': "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"; printf %s "$MR_TARGET_BRANCH"')" "injected" \
   "④：已注入 MR_TARGET_BRANCH 时 := 不覆盖它"
-assert_eq "$(env -i PATH="$PATH" CI_COMMIT_TARGET_REF_NAME_1=master bash -c ': "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"; printf %s "$MR_TARGET_BRANCH"')" "master" \
+assert_eq "$(env -i PATH="$PATH" CI_COMMIT_TARGET_REF_NAME_1=master bash --noprofile --norc -c ': "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"; printf %s "$MR_TARGET_BRANCH"')" "master" \
   "④：未注入时 := 取内置变量的取值"
 # 指南与参考 YAML 同一写法（~127 行那段），且「已知坑」段落改成「参考 YAML 已用 := 写法」
 GUIDE="$ROOT/pipeline/setup-guide.md"
