@@ -396,6 +396,29 @@ assert_contains "$OUT" "MAX_COMMENT_BYTES=512 低于下界 1024" "MAX_COMMENT_BY
 assert_not_contains "$OUT" "已截断" "MAX_COMMENT_BYTES=512：按默认 60000 不截断"
 assert_not_contains "$OUT" "拒绝截断" "MAX_COMMENT_BYTES=512：不会走到截断守卫的 rc 3（下界挡在前面）"
 
+# ============ 票 18 ⑩：jq 版本预检（契约校验用 halt_error，需要 jq ≥ 1.6）============
+# 替身 jq 只改写 --version 的输出，其余调用透传给真 jq——脚本必须在第 0 步就拒绝运行（更老的 jq 会在 halt_error 处退 3，
+# 那会被当成「受信 agent 未生效」，把环境问题写成安全结论）
+mkdir -p "$tmp/oldjq"
+{ echo '#!/usr/bin/env bash'
+  echo '[[ "${1:-}" == "--version" ]] && { echo "jq-1.5"; exit 0; }'
+  printf 'exec %q "$@"\n' "$(command -v jq)"
+} > "$tmp/oldjq/jq"; chmod +x "$tmp/oldjq/jq"
+run_case oldjq PATH="$tmp/oldjq:$PATH"
+assert_rc "$RC" 1 "jq 1.5：拒绝运行"
+assert_contains "$OUT" "jq 版本过低" "jq 1.5：报错点名版本"
+assert_contains "$OUT" "halt_error" "jq 1.5：报错说明为什么需要 ≥ 1.6"
+assert_eq "$(call_count "$MD/calls" help)" "0" "jq 1.5：没白跑 kiro-cli（预检在第 0 步）"
+# 认不出版本形态时只告警、不拒绝（自编译 jq 可能打印别的形态）
+mkdir -p "$tmp/weirdjq"
+{ echo '#!/usr/bin/env bash'
+  echo '[[ "${1:-}" == "--version" ]] && { echo "homemade json query"; exit 0; }'
+  printf 'exec %q "$@"\n' "$(command -v jq)"
+} > "$tmp/weirdjq/jq"; chmod +x "$tmp/weirdjq/jq"
+run_case weirdjq PATH="$tmp/weirdjq:$PATH"
+assert_rc "$RC" 0 "认不出 jq 版本：只告警、评审照常跑完"
+assert_contains "$OUT" "认不出 jq 版本" "认不出 jq 版本：日志留痕"
+
 # ============ 失败路径：提示词文件不可读 → 立即失败，不带空提示词跑 Kiro ============
 run_case noprompt PROMPT_FILE=/nonexistent
 assert_nonzero "$RC" "提示词缺失：非零退出"

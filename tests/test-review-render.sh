@@ -465,8 +465,17 @@ assert_rc "$rc" 3 "validate：contract 值不对 → rc 3"
 rc=0; printf '{%s"summary":"s","verdict":"MERGE","findings":[]}' "$C" | review_validate >/dev/null 2>&1 || rc=$?
 assert_rc "$rc" 0 "validate：contract 正确 → 通过"
 # rc 3 必须与「JSON 结构不符」的 rc 1 区分：前者走失败评论，后者走降级
-rc=0; printf 'not json' | review_validate >/dev/null 2>&1 || rc=$?
+rc=0; err=$(printf 'not json' | review_validate 2>&1 >/dev/null) || rc=$?
 assert_rc "$rc" 1 "validate：非法 JSON 仍是 rc 1（与受信 agent 未生效区分）"
+# 票 18 ⑩：三条断言并进主 jq（halt_error）之后，非法 JSON 的 stderr 里仍要有一行**库函数前缀**的说明——
+# kiro-review.sh 的 _validate_err_lib_lines 只放行这种行，没有它失败评论就只剩「另有 N 行 jq 诊断已省略」
+assert_contains "$err" "review_validate: 契约不是合法 JSON（jq 退出码 2）" "⑩：非法 JSON 的 stderr 带库函数前缀的说明行（失败评论要用它）"
+# ⑩：整份契约只解析一次——_review_normalize 里恰好一个 jq 调用，且不再把契约留在 bash 变量里
+norm_body=$(LC_ALL=C awk '/^_review_normalize\(\) \{$/{f=1} f{print} f && /^}$/{exit}' "$ROOT/scripts/lib/review-render.sh")
+assert_eq "$(printf '%s\n' "$norm_body" | LC_ALL=C grep -c '^[^#]*[^_A-Za-z]jq ')" "1" "⑩：_review_normalize 里只有一个 jq 调用（原先 4 个）"
+assert_not_contains "$norm_body" 'input=$(cat)' "⑩：不再把整份契约留在 bash 变量里"
+assert_contains "$norm_body" "halt_error(3)" "⑩：rc 3 由 halt_error 给出"
+assert_contains "$norm_body" "halt_error(1)" "⑩：rc 1 由 halt_error 给出"
 
 # ============ R2：file 含换行/竖线/反引号 → 按未定位处理并计数 ============
 cat > "$tmp/badfile.json" <<'JSON'

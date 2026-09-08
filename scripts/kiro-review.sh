@@ -753,6 +753,18 @@ publish_inline_comments() {
 for cmd in git curl jq; do
   command -v "$cmd" >/dev/null || die "缺少依赖：${cmd}（请在构建机安装）"
 done
+# jq ≥ 1.6（票 18 ⑩）：契约校验的前置断言用 `halt_error(n)` 给退出码（1.6 引入），更老的 jq 会在那里报「halt_error/1 is not defined」
+# 并退 3——那会被当成「受信 agent 未生效」，把一个环境问题写成安全结论。版本号取 `jq-1.7.1-apple` 里的 X.Y，取不到就只告警不拒绝
+# （自编译的 jq 可能打印别的形态；真跑不动时上面那条错误路径仍会失败，只是文案不精确）。
+_jq_ver=$(jq --version 2>/dev/null | LC_ALL=C sed -nE 's/^jq-?[[:space:]]*([0-9]+)\.([0-9]+).*$/\1 \2/p')
+if [[ -n "$_jq_ver" ]]; then
+  read -r _jq_major _jq_minor <<<"$_jq_ver"
+  [[ "$_jq_major" -gt 1 || ( "$_jq_major" -eq 1 && "$_jq_minor" -ge 6 ) ]] \
+    || die "jq 版本过低（$(jq --version 2>/dev/null)）：契约校验依赖 halt_error（jq ≥ 1.6）。请在构建机升级 jq"
+else
+  echo "[kiro-review] 警告：认不出 jq 版本（$(jq --version 2>&1 | head -1)），本集成包要求 jq ≥ 1.6（契约校验用 halt_error）" >&2
+fi
+unset _jq_ver _jq_major _jq_minor
 TIMEOUT_BIN=""
 command -v timeout >/dev/null && TIMEOUT_BIN=timeout
 [[ -z "$TIMEOUT_BIN" ]] && command -v gtimeout >/dev/null && TIMEOUT_BIN=gtimeout

@@ -394,16 +394,16 @@ REVIEW_CAP_ID=256        # id / category / verdict 三个单行槽位：按码�
 # 问题条数上限 REVIEW_MAX_FINDINGS：超出的条数计入 overflow_findings（第 28 条），dropped_findings 只数不合契约的。
 # 计数直接写进输出 JSON 而不是回传全局变量：调用方普遍用 $(…) 取结果，命令替换在子 shell 里跑，全局变量传不回来。
 REVIEW_MAX_FINDINGS=200
+# 一次 jq（票 18 ⑩）：以前是 `input=$(cat)` 把整份契约留在 bash 变量、再向 4 个管道各写一遍（3 次 `jq -e` 前置断言只为区分 rc 1 与 rc 3
+# ——正常 MR 上 +0.21 s / +42%，3 MB 契约要解析 4 遍）。现在 stdin 先落临时文件，三条断言并进主程序用 halt_error 直接给出退出码：
+#   halt_error(1) = 顶层不是对象 / findings 不是数组（调用方走降级）；halt_error(3) = 缺 contract（调用方走失败评论）。
+# jq 的解析错误（输入不是合法 JSON）退 2，在下面映射回 rc 1——「非法 JSON 仍是 rc 1」是既有契约（与 rc 3 区分开）。
+# rc 语义与输出字节都不变；halt_error 需要 jq ≥ 1.6（kiro-review.sh 第 0 步预检版本）。
 _review_normalize() {
-  local input
-  input=$(cat)
-  printf '%s' "$input" | jq -e 'type == "object"' >/dev/null 2>&1 \
-    || { echo "review_validate: 契约不是 JSON 对象" >&2; return 1; }
-  printf '%s' "$input" | jq -e '(.findings // []) | type == "array"' >/dev/null 2>&1 \
-    || { echo "review_validate: 契约的 findings 不是数组" >&2; return 1; }
-  printf '%s' "$input" | jq -e --arg id "$REVIEW_CONTRACT_ID" '(.contract // "") == $id' >/dev/null 2>&1 \
-    || { echo "review_validate: 契约缺少 contract=\"${REVIEW_CONTRACT_ID}\" 字段（该字段只在受信 agent 提示词里要求，说明受信 agent 未生效）" >&2; return 3; }
-  printf '%s' "$input" | jq -c --arg deny "$REVIEW_CELL_DENY_CHARS" --argjson maxf "$REVIEW_MAX_FINDINGS" \
+  local f rc=0
+  f=$(mktemp) || { echo "review_validate: 建不出临时文件" >&2; return 1; }
+  cat > "$f" || { rm -f "$f"; echo "review_validate: 读入契约失败" >&2; return 1; }
+  jq -c --arg cid "$REVIEW_CONTRACT_ID" --arg deny "$REVIEW_CELL_DENY_CHARS" --argjson maxf "$REVIEW_MAX_FINDINGS" \
       --argjson cap_summary "$REVIEW_CAP_SUMMARY" --argjson cap_title "$REVIEW_CAP_TITLE" --argjson cap_body "$REVIEW_CAP_BODY" \
       --argjson cap_fix "$REVIEW_CAP_FIX" --argjson cap_id "$REVIEW_CAP_ID" "${_REVIEW_JQ_SANITIZE}${_REVIEW_JQ_CELL}"'
     # \A / \z 是显式的「字符串首/尾」锚点：jq 的 ^ / $ 在不同版本可能被当行锚点，
@@ -425,7 +425,13 @@ _review_normalize() {
                     elif _cell_has_deny($t) then null
                     elif ($t | startswith("-----")) then null   # 路径不可能长这样；PEM 的 BEGIN 标记当 file 会被 PEM 规则当块起始（第 10 条）
                     else $t end;
-    . as $root
+    # 三条前置断言（票 18 ⑩）：与主程序同一次解析，用 halt_error 给退出码。文案与 rc 都与拆成三次 `jq -e` 时逐字相同。
+    if type != "object" then ("review_validate: 契约不是 JSON 对象\n" | halt_error(1)) else . end
+    | if ((.findings // []) | type) != "array" then ("review_validate: 契约的 findings 不是数组\n" | halt_error(1)) else . end
+    | if ((.contract // "") != $cid)
+      then ("review_validate: 契约缺少 contract=\"\($cid)\" 字段（该字段只在受信 agent 提示词里要求，说明受信 agent 未生效）\n" | halt_error(3))
+      else . end
+    | . as $root
     | ((.findings // []) | length) as $total
     # 先校验、后切上限（合并后复审第 1 条）：以前按模型输出顺序 [:$maxf] 先切——200 条 P2 后面的 3 条 P0 整条消失、MERGE+P0 改写
     # 看不见；200 条不合契约的条目也会吃掉整个预算。现在全部条目先校验归一化，超过上限时按级别稳定排序（P0 → P1 → P2，
@@ -476,7 +482,14 @@ _review_normalize() {
         dropped_findings: ($total - ($valid | length)),
         overflow_findings: (($valid | length) - ($kept | length)),
         duplicate_findings: (($kept | length) - ($uniq | length)),
-        delocated_findings: ([$uniq[] | select(.delocated)] | length) }'
+        delocated_findings: ([$uniq[] | select(.delocated)] | length) }' "$f" || rc=$?
+  rm -f "$f"
+  case "$rc" in
+    0|1|3) return "$rc" ;;
+    # 解析错误（jq 退 2）与其它意外退出码：都按「结构不符」处理，rc 1 → 调用方走降级（贴原文）。
+    # jq 自己的解析错误已经打在 stderr 上，这里再补一行带函数名的说明（_validate_err_lib_lines 只放行库函数前缀的行）
+    *) echo "review_validate: 契约不是合法 JSON（jq 退出码 ${rc}）" >&2; return 1 ;;
+  esac
 }
 # --- 就地 jq 改写（16-fix4 第 3 条；review_finalize_json 与 review_redact_json 共用）---
 # 输出先写到目标同目录的临时文件（跨文件系统的 mv 不是原子的，中途失败会留下半截 JSON），jq 失败或输出为空 → 删临时文件、
