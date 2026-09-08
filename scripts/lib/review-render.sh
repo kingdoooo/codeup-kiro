@@ -1352,18 +1352,20 @@ _review_render_args_only() {
 }
 # --- 内部：一句话 notice 的引用块（三个渲染器共用，15-fix4 #3）---
 # 取值由脚本自己拼（可能带 HTTP 状态码、kiro-cli 版本号之类），仍过一遍结构清洗：评论的结构只能来自渲染器。空取值不输出任何东西。
+# 折成单行（票 18 ⑫）：notice 嵌在一行 `> ` 引用块里，取值带换行时后半截会跳出引用块——那半句在读者眼里就是脚本渲染的正文，
+# 而它是由 API 字符串（HTTP 码、分支名、kiro-cli 版本号）拼出来的。顺序与 _review_sanitize_oneline 一致：先清洗再折行。
 _review_render_notice() {
   [[ -n "$_RR_NOTICE" ]] || return 0
   echo ""
   printf '> ⚠️ '
-  printf '%s' "$_RR_NOTICE" | review_sanitize_md
+  _review_sanitize_oneline "$_RR_NOTICE"
   echo ""
 }
 # --- 内部：日志线索一句话（失败评论用；抽成函数与 notice 同一约定）---
 _review_render_log_hint() {
   [[ -n "$_RR_LOG_HINT" ]] || return 0
   echo ""
-  printf '%s' "$_RR_LOG_HINT" | review_sanitize_md
+  _review_sanitize_oneline "$_RR_LOG_HINT"   # 与 notice 同款折行（票 18 ⑫）：它是脚本自己的一句话，多行只会打乱结构
   echo ""
 }
 
@@ -2526,7 +2528,9 @@ review_render_failure() {
   _review_render_header "$REVIEW_TITLE_FAILED" "$hist"
   echo ""
   printf '⚠️ 评审未完成：'
-  printf '%s' "$_RR_REASON" | review_sanitize_md
+  # 折成单行（票 18 ⑫）：--reason 里可能带事件流 / jq 报错回显的模型取值，多行会在这一段之后凭空多出几行「正文」，
+  # 读者分不清哪部分是脚本写的。与降级评论的 reason 同一处置（那里本来就折行）。
+  _review_sanitize_oneline "$_RR_REASON"
   echo ""
   _review_render_notice
   _review_render_log_hint

@@ -25,6 +25,13 @@ _codeup_should_retry() { [[ "$1" == "000" || "$1" == "429" || "$1" -ge 500 ]]; }
 # 评审标记找到并原地更新其中一条。两者的取舍方向相反。
 _codeup_should_retry_create_inline() { [[ "$1" == "429" ]]; }
 
+# --- 「外层已经在重试」时用的谓词（票 18 ⑫）---
+# 与默认策略同样的可重试分类，但**只重试一次**（第 2 次尝试之后不再试）：调用方（inline_requery_lag）自己就在按退避重查，
+# 内层再退避两次只是把同一段等待算两遍——而那两次退避算不进外层的墙钟预算里，「总等待不超过 45 秒」就成了空话。
+# 实现靠全局尝试序号：_codeup_request_retry 每次尝试前把序号写进 _CODEUP_ATTEMPT。
+_CODEUP_ATTEMPT=1
+_codeup_should_retry_once() { _codeup_should_retry "$1" && [[ "${_CODEUP_ATTEMPT:-1}" -lt 2 ]]; }
+
 # 退避秒数的基数。CODEUP_RETRY_BACKOFF=0 关掉睡眠，供测试真正跑一遍重试循环
 # （否则每条重试路径的负向测试都要等 15 秒，结果就是没人写这类测试）。
 # 必须校验：不带校验时 `five` 会被 $(( )) 当 0 用（退避被静默关掉，生产上把 429/5xx 变成三连击），
@@ -63,6 +70,7 @@ _codeup_request_retry() {
   local prefix="$1" out="$2" method="$3" path="$4" body="${5:-}" pred="${6:-_codeup_should_retry}" probe="${7:-}"
   local attempt tmp code=""
   for attempt in 1 2 3; do
+    _CODEUP_ATTEMPT="$attempt"   # 给「只重试一次」这类谓词用（票 18 ⑫）
     tmp=$(mktemp)
     _codeup_request "$method" "$path" "$body" > "$tmp"
     code="$CODEUP_HTTP_CODE"
@@ -427,12 +435,15 @@ codeup_bot_username() {
 # versionNo / relatedMergeItemType（MERGE_SOURCE | MERGE_TARGET）/ patchSetBizId / commitId / shortId。
 # 该 MR 上有 6 个 MERGE_SOURCE + 1 个 MERGE_TARGET，按 versionNo 取最新即可唯一选出 from/to。
 # $1=localId → stdout=响应体；rc 1=失败（按既有重试策略重试后仍失败）
+# INLINE_REQUERY=1（由 inline_requery_lag 在重查期间设置，票 18 ⑫）时改用「只重试一次」的谓词：外层已经在按退避重查，
+# 内层的第 2、3 次退避算不进外层的墙钟预算里。其余场合（预采样、发布前采样）仍是默认的 3 次尝试。
 codeup_list_patchsets() {
-  local local_id="$1" tmp rc=0
+  local local_id="$1" tmp rc=0 pred=_codeup_should_retry
+  [[ "${INLINE_REQUERY:-0}" == "1" ]] && pred=_codeup_should_retry_once
   tmp=$(mktemp)
   _codeup_request_retry codeup_list_patchsets "$tmp" GET \
     "/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/repositories/${CODEUP_REPO_ID}/changeRequests/${local_id}/diffs/patches" \
-    || rc=$?
+    "" "$pred" || rc=$?
   [[ "$rc" == "0" ]] && cat "$tmp"
   rm -f "$tmp"
   return "$rc"

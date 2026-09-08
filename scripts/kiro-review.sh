@@ -164,7 +164,7 @@ _die_review_minimal() {
     # 下一次评审判它「标记不唯一」而不作为候选 → MR 上多出一条汇总（违反 I4）；
     # 含 `-->` 的取值还会把上面那行隐藏历史提前闭合、把 JSON 露成正文。
     printf '⚠️ 评审未完成（失败评论渲染异常，只保留最小信息）：'
-    printf '%s' "$reason" | review_sanitize_md
+    _review_sanitize_oneline "$reason"   # 与失败评论同款折行（票 18 ⑫）
     echo ""
   else
     echo "⚠️ 评审未完成（脚本侧密钥掩码不可用，为避免泄漏只保留固定文案；失败原因见流水线日志）。"
@@ -338,6 +338,9 @@ inline_bail_to() { # <状态> <to_ps> <to_commit 原值> <head 全 sha>
 inline_sample_pair() { # <head 全 sha>
   local head="$1" pairv
   SAMPLE_FROM_PS=""; SAMPLE_TO_PS=""; SAMPLE_TO_COMMIT=""; SAMPLE_FROM_COMMIT=""
+  # 四分类的结果也复位（票 18 ⑫）：rc 1/2 这两条早退路径不会走到 inline_classify_to，上一轮的取值会留在全局——
+  # 重查里「接口失败一次、随后选不出版本对」时收尾状态曾读到上一轮的 ok / lag，那是最坏的一种错：绑不上却以为能绑。
+  INLINE_TO_STATUS=""; INLINE_TO_NORM=""
   codeup_list_patchsets "$LOCAL_ID" > "$WORK/patchsets.json" || return 1
   pairv=$(codeup_select_patchset_pair < "$WORK/patchsets.json") || return 2
   SAMPLE_FROM_PS=$(printf '%s' "$pairv" | cut -f1)
@@ -350,24 +353,32 @@ inline_sample_pair() { # <head 全 sha>
 # 滞后重查：按既有退避（CODEUP_RETRY_BACKOFF）重取版本对至多 <max> 次。
 # 收尾状态写进 INLINE_END_STATE（四分类之一，或 http / nopair）——调用方按它选 notice（票 17-fix3 ②）。
 inline_requery_lag() { # <head 全 sha> <次数上限>
-  local head="$1" max="$2" attempt rc waited=0 nap
+  local head="$1" max="$2" attempt rc nap t0 elapsed
   INLINE_END_STATE="$INLINE_TO_STATUS"
+  # 预算按**墙钟**算（票 18 ⑫）：原先只累加自己的 sleep，而 codeup_list_patchsets 内部还有 3 次重试各自的退避——
+  # 承诺「总等待不超过 45 秒」实际能到 60 秒以上。$SECONDS 是 bash 内建的秒表，不额外起进程。
+  # 重查期间的列表查询改用**单次重试**谓词（_codeup_should_retry_once）：外层本来就在重查，内层再重试两次只是把
+  # 同一个退避算两遍——而它算不进本函数的预算里。
+  t0=$SECONDS
   # 不用 `seq`（票 17-fix3 ⑭）：那是个未在预检里声明的外部依赖，缺失时 `$(seq …)` 展开为空、
   # 循环一次都不跑，日志却还说「重查至多 N 次」。
   for ((attempt = 1; attempt <= max; attempt++)); do
     # **先查再睡**（票 17-fix3 ⑪）：原先每轮开头先睡，第一次重查白等一个退避，而 codeup_list_patchsets
     # 内部本来就带 3 次重试各自的退避——最坏耗时因此接近 75 秒而不是 ADR 写的 30 秒。
     # 退避只发生在两次尝试之间，且总等待受 INLINE_LAG_BUDGET 约束（超预算就不再等、直接收尾）。
+    elapsed=$(( SECONDS - t0 ))
     if [[ "$attempt" -gt 1 ]]; then
       nap=$(( (attempt - 1) * $(_codeup_retry_backoff) ))
-      if [[ $((waited + nap)) -gt "$INLINE_LAG_BUDGET" ]]; then
-        log "重查：再等 ${nap} 秒会超过总预算 ${INLINE_LAG_BUDGET} 秒（已等 ${waited} 秒），停止重查"
+      if [[ $((elapsed + nap)) -gt "$INLINE_LAG_BUDGET" ]]; then
+        log "重查：再等 ${nap} 秒会超过总预算 ${INLINE_LAG_BUDGET} 秒（本函数已耗 ${elapsed} 秒墙钟，含内层查询的重试与退避），停止重查"
         break
       fi
       [[ "$nap" -gt 0 ]] && sleep "$nap"
-      waited=$((waited + nap))
+    elif [[ "$elapsed" -ge "$INLINE_LAG_BUDGET" ]]; then
+      log "重查：进入本函数时墙钟已耗 ${elapsed} 秒、达到总预算 ${INLINE_LAG_BUDGET} 秒，不再重查"
+      break
     fi
-    rc=0; inline_sample_pair "$head" || rc=$?
+    rc=0; INLINE_REQUERY=1; inline_sample_pair "$head" || rc=$?; INLINE_REQUERY=0
     if [[ "$rc" == "1" ]]; then
       INLINE_END_STATE=http
       log "警告：重查 MR 版本列表失败（HTTP ${CODEUP_HTTP_CODE}），第 ${attempt}/${max} 次"
@@ -384,7 +395,13 @@ inline_requery_lag() { # <head 全 sha> <次数上限>
       return 0
     fi
     log "重查第 ${attempt}/${max} 次：最新合并源版本仍不是本次评审的提交（判定：${INLINE_TO_STATUS}）"
+    # 每轮收尾也看一次墙钟：内层查询本身可能就吃掉了整份预算（3 次重试 × 退避）
+    if [[ $(( SECONDS - t0 )) -ge "$INLINE_LAG_BUDGET" ]]; then
+      log "重查：墙钟已耗 $(( SECONDS - t0 )) 秒、达到总预算 ${INLINE_LAG_BUDGET} 秒（第 ${attempt}/${max} 次之后），停止重查"
+      break
+    fi
   done
+  log "重查结束：共 $(( SECONDS - t0 )) 秒墙钟（预算 ${INLINE_LAG_BUDGET} 秒），收尾判定 ${INLINE_END_STATE}"
   return 0
 }
 
@@ -725,24 +742,24 @@ publish_inline_comments() {
 
   # 发布结果回填：发失败的问题必须落到折叠区，否则它在 MR 上一条都看不到。
   # 结果直接就是 JSON 行（不再经 TSV 再解析）：少一道容易出错的转换。
+  # 三处「已经发出去了、但统计口径算不出来」都走 inline_bail（票 18 ⑫）：原先各手写一份「拼 notice + log + return 1」，
+  # 与上面六个 fail-closed 出口用的是同一套语义却是第七、八、九份拷贝。notice 的固定前后缀因此只有一处。
+  # 与 fail-closed 出口的差别只在措辞：这三处**行内评论已经发出去了**，所以清单可能与行内评论重复（而不是「未发出」）。
+  inline_posted_bail() { # <口径出了什么问题（进 notice）> <日志文案>
+    inline_bail "行内评论已发出，但${1}，因此下面仍给出完整问题清单（可能与行内评论重复）。" "警告：$2"
+  }
   if ! jq -s '.' "$WORK/outcomes.jsonl" > "$WORK/outcomes.json"; then
-    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论已发出，但发布结果的统计口径算不出来，因此下面仍给出完整问题清单（可能与行内评论重复）。"
-    log "警告：发布结果文件解析失败，回落成完整问题清单"
-    return 1
+    inline_posted_bail "发布结果的统计口径算不出来" "发布结果文件解析失败，回落成完整问题清单" || return 1
   fi
   if ! review_plan_apply_outcomes "$WORK/plan.json" "$WORK/outcomes.json" > "$WORK/plan.final.json"; then
     # 回填算不出来时不能拿未回填的计划去渲染：那会把发失败的问题算成「已标注在对应行」而彻底藏起来。
     # 回落到完整清单：已经发出去的行内评论会与清单里的条目重复一次，但没有任何问题被藏起来。
-    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论已发出，但统计口径回填失败，因此下面仍给出完整问题清单（可能与行内评论重复）。"
-    log "警告：发布结果回填失败，回落成完整问题清单"
-    return 1
+    inline_posted_bail "统计口径回填失败" "发布结果回填失败，回落成完整问题清单" || return 1
   fi
   # 这一步也必须判退出码：本函数跑在 `if` 条件里，errexit 不生效，mv 失败会让后面拿**未回填**的
   # 计划去渲染——那正是 M29 要抓的缺陷（发失败的问题被算成「已标注」而从 MR 上消失）。
   if ! mv "$WORK/plan.final.json" "$WORK/plan.json"; then
-    INLINE_NOTICE="${INLINE_NOTICE}${INLINE_NOTICE:+ }行内评论已发出，但发布结果的统计口径写不回去，因此下面仍给出完整问题清单（可能与行内评论重复）。"
-    log "警告：回填后的计划文件落盘失败，回落成完整问题清单"
-    return 1
+    inline_posted_bail "发布结果的统计口径写不回去" "回填后的计划文件落盘失败，回落成完整问题清单" || return 1
   fi
   log "行内评论：新发 ${n_created} 条、已存在跳过 ${n_existing} 条（同一处已有本评审员的行内评论，计入「已标注」）、失败 ${n_failed} 条；折叠区 $(jq -r '.folded_count' "$WORK/plan.json") 条（档位 $(jq -r '.inline_profile' "$WORK/plan.json")，上限 $(jq -r '.max_inline' "$WORK/plan.json")）"
   INLINE_ACTIVE=1

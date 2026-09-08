@@ -80,6 +80,25 @@ assert_eq "$(LC_ALL=C grep -c '已知坑：若之后要从 API 触发流水线' 
 assert_contains "$(cat "$GUIDE")" "参考 YAML（\`pipeline/flow-pipeline.yaml\`）已经用" "④：指南改为指向参考 YAML 的写法"
 rm -f "$runblk"
 
+# ============ 票 18 ⑫：探测脚本的三处静态守卫 ============
+# ① 「命令管进 grep -q」的形状（grep -q 命中即退出 → 上游收 SIGPIPE → pipefail 下管道非零 → 找到了却判成没找到）
+for f in probe-kiro-headless.sh probe-kiro-allowlist.sh probe-codeup-inline.sh probe-flow-run.sh; do
+  assert_eq "$(LC_ALL=C grep -cE '[^|]\|[[:space:]]*grep -[a-zA-Z]*q' "$ROOT/scripts/probe/$f" || true)" "0" \
+    "⑫：${f} 里没有「把命令输出管进 grep -q」的形状（改子串比较；逻辑或后面的 grep -q、以及读文件 / here-string 的 grep -q 不在此列）"
+done
+# ② RAN（实际运行的用例集合）必须在每次 CASES 变化之后重算：清空 CASES 的那一行后面就得跟一次重算
+assert_eq "$(LC_ALL=C grep -c 'CASES=""; recalc_ran' "$ROOT/scripts/probe/probe-kiro-allowlist.sh")" "1" \
+  "⑫：清空 CASES 的地方紧跟一次 recalc_ran（否则汇总会声称门禁用例都跑过）"
+assert_eq "$(LC_ALL=C grep -cE '^CASES=""$|^ *CASES=""$' "$ROOT/scripts/probe/probe-kiro-allowlist.sh" || true)" "0" \
+  "⑫：没有「清空 CASES 却不重算 RAN」的写法"
+# ③ kiro_cli_version 在空目录（$KIRO_CWD）下跑，与生产四处调用一致
+assert_eq "$(LC_ALL=C grep -c 'kiro_cli_version "\$TIMEOUT_BIN" "\$KIRO_CWD"' "$ROOT/scripts/probe/probe-kiro-allowlist.sh")" "1" \
+  "⑫：probe-kiro-allowlist.sh 的 kiro_cli_version 在 \$KIRO_CWD 下跑"
+# ④ run_case / run_case_agent 共用一份实现（_probe_run），拼命令与计时只有一处
+assert_eq "$(LC_ALL=C grep -c 'kiro-cli chat --no-interactive --agent-engine v2' "$ROOT/scripts/probe/probe-kiro-allowlist.sh")" "1" \
+  "⑫：探测里拼 kiro-cli 命令只有一处（run_case 与 run_case_agent 都走 _probe_run）"
+assert_rc "$(bash -n "$ROOT/scripts/probe/probe-kiro-headless.sh" && echo 0 || echo 1)" 0 "⑫：probe-kiro-headless.sh 语法合法"
+
 # --- 缺 jq → 同样退出码 5 ---
 mkdir -p "$tmp/nojq"; for f in "$tmp/nokiro"/*; do ln -sf "$(readlink "$f")" "$tmp/nojq/$(basename "$f")"; done; rm -f "$tmp/nojq/jq"; ln -sf "$tmp/fakebin/kiro-cli" "$tmp/nojq/kiro-cli"
 rc=0; err=$(env -i PATH="$tmp/nojq" HOME="$tmp/home" bash "$PROBE" 2>&1) || rc=$?

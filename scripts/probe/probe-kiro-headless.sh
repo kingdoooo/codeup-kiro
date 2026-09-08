@@ -26,7 +26,12 @@ TIMEOUT_BIN=""; command -v timeout >/dev/null && TIMEOUT_BIN=timeout
 [[ -z "$TIMEOUT_BIN" ]] && command -v gtimeout >/dev/null && TIMEOUT_BIN=gtimeout
 [[ -n "$TIMEOUT_BIN" ]] || { echo "缺少 timeout/gtimeout" >&2; exit 1; }
 if [[ -z "${KIRO_API_KEY:-}" ]]; then
-  kiro-cli whoami 2>/dev/null | grep -qi 'logged in with' || { echo "未设置 KIRO_API_KEY 且 kiro-cli 未登录" >&2; exit 1; }
+  # 子串比较而不是「管进 grep -q」（票 18 ⑫）：grep -q 命中即退出，上游 kiro-cli 收 SIGPIPE → pipefail 下管道非零，
+  # 于是**已登录**也被判成未登录
+  _whoami=$(kiro-cli whoami 2>/dev/null || true)
+  [[ "$(printf '%s' "$_whoami" | tr 'A-Z' 'a-z')" == *"logged in with"* ]] \
+    || { echo "未设置 KIRO_API_KEY 且 kiro-cli 未登录" >&2; exit 1; }
+  unset _whoami
   echo "[probe] 使用本机登录态：$(kiro-cli whoami 2>/dev/null | head -1)" >&2
 fi
 
@@ -200,10 +205,12 @@ READ_TRIED=unknown          # yes / no / unknown（v1 纯文本模式看不到�
 TOOL_REJECT=""
 if [[ "$MODE" == "stream-json" && -s "$KEEP/out.jsonl" ]]; then
   CANARY_BASE=$(basename "$CANARY_PATH")
-  # 工具调用事件里出现 canary 文件名 = 模型真的尝试读它（提示词本身不在这些事件里）
-  if jq -c -R 'fromjson? | select(type == "object")
-               | select((.data.update.sessionUpdate // "") | test("^tool_call"))' "$KEEP/out.jsonl" 2>/dev/null \
-       | grep -qF "$CANARY_BASE"; then
+  # 工具调用事件里出现 canary 文件名 = 模型真的尝试读它（提示词本身不在这些事件里）。
+  # 子串比较而不是「jq 管进 grep -q」（票 18 ⑫）：grep -q 命中即退出，上游 jq 收 SIGPIPE → pipefail 下管道 141，
+  # 于是**尝试过**被判成没尝试过 → P1-11 从 PASS 掉成 INCONCLUSIVE（与 probe-kiro-allowlist.sh 的 read_tried 同一修法）
+  TOOL_EVENTS=$(jq -c -R 'fromjson? | select(type == "object")
+               | select((.data.update.sessionUpdate // "") | test("^tool_call"))' "$KEEP/out.jsonl" 2>/dev/null || true)
+  if [[ "$TOOL_EVENTS" == *"$CANARY_BASE"* ]]; then
     READ_TRIED=yes
   else
     READ_TRIED=no

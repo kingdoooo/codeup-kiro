@@ -55,7 +55,12 @@ TIMEOUT_BIN=""; command -v timeout >/dev/null && TIMEOUT_BIN=timeout
 [[ -z "$TIMEOUT_BIN" ]] && command -v gtimeout >/dev/null && TIMEOUT_BIN=gtimeout
 [[ -n "$TIMEOUT_BIN" ]] || { echo "缺少 timeout/gtimeout（环境准备失败，退出码 5）" >&2; exit 5; }
 if [[ -z "${KIRO_API_KEY:-}" ]]; then
-  kiro-cli whoami 2>/dev/null | grep -qi 'logged in with' || { echo "未设置 KIRO_API_KEY 且 kiro-cli 未登录（环境准备失败，退出码 5）" >&2; exit 5; }
+  # 子串比较而不是「管进 grep -q」（票 18 ⑫，与 read_tried 同一理由）：grep -q 命中即退出，上游 kiro-cli 收 SIGPIPE →
+  # pipefail 下管道非零，于是**已登录**也被判成未登录（脚本以 5 退出，运行者去查一个不存在的登录问题）
+  _whoami=$(kiro-cli whoami 2>/dev/null || true)
+  [[ "$(printf '%s' "$_whoami" | tr 'A-Z' 'a-z')" == *"logged in with"* ]] \
+    || { echo "未设置 KIRO_API_KEY 且 kiro-cli 未登录（环境准备失败，退出码 5）" >&2; exit 5; }
+  unset _whoami
   echo "[probe] 使用本机登录态：$(kiro-cli whoami 2>/dev/null | head -1)" >&2
 fi
 
@@ -77,7 +82,11 @@ for c in $CASES; do
 done
 want() { [[ " $CASES " == *" $1 "* ]]; }
 # 「实际运行」的集合直接从 CASES ∩ ALL_CASES 推导（15-fix2 #4）：不再手工记账——漏记一处就把「走主方案」静默降成「子集运行」
-RAN=" "; for c in $ALL_CASES; do want "$c" && RAN+="$c "; done
+# `RAN` 是「实际运行的集合」（15-fix2 #4）。它必须在**每次** CASES 变化之后重算（票 18 ⑫）：前置检查失败时下面会把 CASES 清空
+# （一个用例都不跑），而 RAN 若还冻结在清空之前的值，汇总里的「实际运行」与 summary.json 就会声称跑过十二个门禁用例——
+# 那是把「探测没跑」写成「探测通过」。所以收成函数，清空 CASES 的地方紧跟一次重算。
+recalc_ran() { RAN=" "; for c in $ALL_CASES; do want "$c" && RAN+="$c "; done; }
+recalc_ran
 echo "[probe] 输出目录 $KEEP" >&2
 
 # ---------- 可逆的环境准备 ----------
@@ -142,7 +151,7 @@ if kiro_agent_selfcheck "$INSTALLED" "$REPO_P" "$CHUNKS_P"; then
   echo "[probe] 探测 agent 已装并通过 kiro_agent_selfcheck：${INSTALLED}（read/grep/glob allowedPaths = $REPO_P, ${CHUNKS_P}）" >&2
 else
   echo "[PRECHECK] INCONCLUSIVE  探测 agent 未通过生产自检 kiro_agent_selfcheck：${KIRO_AGENT_SELFCHECK_ERROR}——探测前提不成立，不跑任何用例" >&2
-  PROBE_INCONCLUSIVE=1; CASES=""
+  PROBE_INCONCLUSIVE=1; CASES=""; recalc_ran   # 票 18 ⑫：清空用例之后重算「实际运行」，否则汇总会声称门禁用例都跑过
 fi
 
 # ---------- env -i 许可清单：直接用生产库函数 kiro_env_allowlist（规则只有一份），填充数组 KIRO_ENV_ALLOW ----------
@@ -151,19 +160,24 @@ kiro_env_allowlist_names > "$KEEP/env-allowlist-names.txt"      # 按数组元�
 echo "[probe] env -i 许可清单变量：$(tr '\n' ' ' < "$KEEP/env-allowlist-names.txt")" >&2
 # kiro-cli 版本：与执行器第 3 步同一函数（kiro_cli_version：stdout / stderr 分开、按程序名锚定、同一 env -i 许可清单，15-fix4 #7 / A6）——
 # summary.json 的 kiro_cli 字段正是人工抄进 KIRO_TESTED_VERSIONS 的来源，`2>/dev/null | head -1` 会把版本打到 stderr 的 CLI 记成空串。
-kiro_cli_version "$TIMEOUT_BIN" "$WORK" || { echo "${KIRO_CLI_VERSION_ERROR}（环境准备失败，退出码 5）" >&2; exit 5; }
+# 运行目录用 $KIRO_CWD（空目录）而不是 $WORK（票 18 ⑫）：生产的四处 kiro-cli 调用都在空目录下跑，--version 也是其中一处；
+# $WORK 里有 agent 定义与夹具，cwd 相对发现面（.kiro/settings/cli.json 之类）与生产不一致时，探到的行为就不是生产的行为。
+kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" || { echo "${KIRO_CLI_VERSION_ERROR}（环境准备失败，退出码 5）" >&2; exit 5; }
 echo "[probe] kiro-cli 版本：${KIRO_CLI_VERSION:-未知（--version 输出里没有「kiro-cli <版本>」形态）}" >&2
 
 # ---------- 运行与判定 ----------
 # run_case <名> <trust|notrust> <fullenv|allowenv> <提示词>：事件流 $KEEP/<名>.jsonl，stderr $KEEP/<名>.err；返回 kiro 退出码
 # 运行目录与生产一致（15-fix4 #1）：$WORK/cwd **空目录**，业务库只在 allowedPaths 里；所有提示词都给**绝对路径**（P_* 用 $REPO_P / $CHUNKS_P），
 # 事件流里的 path 也是绝对的，所以 read_tried 按文件名子串匹配不受 cwd 影响。
-run_case() {
-  local name="$1" trust="$2" envmode="$3" prompt="$4" rc=0
-  local -a cmd=(kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json --agent "$PROBE_AGENT")
-  [[ "$trust" == "trust" ]] && cmd+=(--trust-tools=read,grep,glob)
-  cmd+=("$prompt")
-  local start; start=$(date +%s)
+# 一份实现（票 18 ⑫）：run_case 与 run_case_agent 原先各写一遍「拼命令 + 空目录里跑 + 计时 + stderr 尾部」，
+# 只差 agent 名与额外参数。_probe_run 是那一份，两个名字都是它的薄封装（调用点一个都不用改）。
+# <名> <agent 名> <fullenv|allowenv> <额外参数…> <提示词>
+_probe_run() {
+  local name="$1" agent="$2" envmode="$3"; shift 3
+  local prompt="${!#}"; local -a extra=("${@:1:$#-1}"); local rc=0 start
+  local -a cmd=(kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json --agent "$agent")
+  cmd+=("${extra[@]+"${extra[@]}"}" "$prompt")
+  start=$(date +%s)
   if [[ "$envmode" == "allowenv" ]]; then
     ( cd "$KIRO_CWD" && "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" env -i "${KIRO_ENV_ALLOW[@]}" "${cmd[@]}" ) \
       > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
@@ -171,9 +185,15 @@ run_case() {
     ( cd "$KIRO_CWD" && KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "${cmd[@]}" ) \
       > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
   fi
-  echo "[$name] kiro-cli 退出码 ${rc}（124/137=超时），耗时 $(( $(date +%s) - start ))s，trust=${trust} env=${envmode}" >&2
-  [[ $rc -ne 0 ]] && { echo "[$name] stderr 尾部：" >&2; tail -n 6 "$KEEP/$name.err" | awk '{print substr($0,1,200)}' | sed 's/^/          /' >&2; }
+  echo "[$name] kiro-cli 退出码 ${rc}（124/137=超时），耗时 $(( $(date +%s) - start ))s，agent=${agent} env=${envmode} extra=${extra[*]:-无}" >&2
+  [[ $rc -ne 0 ]] && { echo "[$name] stderr 尾部：" >&2; tail -n 6 "$KEEP/$name.err" | LC_ALL=C awk '{print substr($0,1,200)}' | sed 's/^/          /' >&2; }
   return $rc
+}
+run_case() {
+  local name="$1" trust="$2" envmode="$3" prompt="$4"
+  local -a extra=()
+  [[ "$trust" == "trust" ]] && extra+=(--trust-tools=read,grep,glob)
+  _probe_run "$name" "$PROBE_AGENT" "$envmode" "${extra[@]+"${extra[@]}"}" "$prompt"
 }
 final_text() { jq -r -R 'fromjson? | select(type == "object" and .type == "runFinished") | .data.finalText // ""' "$KEEP/$1.jsonl" 2>/dev/null; }
 run_finished() { jq -e -R 'fromjson? | select(type == "object" and .type == "runFinished")' "$KEEP/$1.jsonl" >/dev/null 2>&1; }
@@ -327,17 +347,9 @@ make_control_agent() { # $1 = 输出文件：把生产定义还原成票 15 之�
   ' "$PKG_ROOT/kiro/agent-codeup-reviewer.json" > "$1"
 }
 # run_case_agent <名> <agent 名> <额外参数…> <提示词>：与 run_case 相同，但可指定 agent 与任意额外参数（完整环境）
-run_case_agent() {
+run_case_agent() { # <名> <agent 名> <额外参数…> <提示词>（完整环境）
   local name="$1" agent="$2"; shift 2
-  local prompt="${!#}"; local -a extra=("${@:1:$#-1}") rc=0
-  local -a cmd=(kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json --agent "$agent")
-  cmd+=("${extra[@]+"${extra[@]}"}" "$prompt")
-  local start; start=$(date +%s)
-  ( cd "$KIRO_CWD" && KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "${cmd[@]}" ) \
-    > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
-  echo "[$name] kiro-cli 退出码 ${rc}（124/137=超时），耗时 $(( $(date +%s) - start ))s，agent=${agent} extra=${extra[*]:-无}" >&2
-  [[ $rc -ne 0 ]] && { echo "[$name] stderr 尾部：" >&2; tail -n 6 "$KEEP/$name.err" | awk '{print substr($0,1,200)}' | sed 's/^/          /' >&2; }
-  return $rc
+  _probe_run "$name" "$agent" fullenv "$@"
 }
 mark_info() { echo "[$1] INFO    $2" >&2; }
 
