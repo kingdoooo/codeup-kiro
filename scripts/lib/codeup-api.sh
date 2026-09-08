@@ -53,24 +53,36 @@ _codeup_retry_sleep() {
 # 而 bot_username 那份当时干脆漏了重试：一次传输抖动（000）就让本次评审退化为新建，
 # 日志还把它写成「令牌未勾选平台用户权限」，把运维引向错误方向。
 # 不能用 $(...) 取响应：命令替换在子 shell 里跑，CODEUP_HTTP_CODE 传不回来。
+# 第 7 个参数是**重试前的探针**（票 18 ①，只有汇总新建 POST 用它）：可重试的失败（000/5xx）之后先跑一次它——
+#   rc 0 = 「请求其实已经成功了，响应丢在路上」⇒ 本函数直接返回 0（不再重试，避免在 MR 上多出一条汇总）；
+#   rc 非 0 = 无法确认 ⇒ 照既有策略重试（I10：查不到不等于没创建，绝不因为查不到而放弃发布）。
+# 探针成功时往 <out> 写一个 `[]`：调用方拿到的是合法 JSON（POST 的响应体确实没拿到，所以「作者用户名」那行日志这次打不出来）。
+# CODEUP_HTTP_CODE 在探针内部会被列表查询改写，所以本函数全程用本次请求的 code 副本记日志、返回前把它写回全局——
+# 调用方（与调用方的调用方）都按它记日志/判定。
 _codeup_request_retry() {
-  local prefix="$1" out="$2" method="$3" path="$4" body="${5:-}" pred="${6:-_codeup_should_retry}"
-  local attempt tmp
+  local prefix="$1" out="$2" method="$3" path="$4" body="${5:-}" pred="${6:-_codeup_should_retry}" probe="${7:-}"
+  local attempt tmp code=""
   for attempt in 1 2 3; do
     tmp=$(mktemp)
     _codeup_request "$method" "$path" "$body" > "$tmp"
-    if _codeup_http_ok "$CODEUP_HTTP_CODE"; then
+    code="$CODEUP_HTTP_CODE"
+    if _codeup_http_ok "$code"; then
       cat "$tmp" > "$out"; rm -f "$tmp"; return 0
     fi
     rm -f "$tmp"
-    if ! "$pred" "$CODEUP_HTTP_CODE"; then
-      echo "${prefix}: HTTP ${CODEUP_HTTP_CODE}，确定性失败不重试" >&2
-      return 1
+    if ! "$pred" "$code"; then
+      echo "${prefix}: HTTP ${code}，确定性失败不重试" >&2
+      CODEUP_HTTP_CODE="$code"; return 1
     fi
-    echo "${prefix}: HTTP ${CODEUP_HTTP_CODE}，第 ${attempt} 次尝试失败" >&2
+    echo "${prefix}: HTTP ${code}，第 ${attempt} 次尝试失败" >&2
+    if [[ -n "$probe" ]] && "$probe" "$code"; then
+      : > "$out"; echo '[]' > "$out"
+      CODEUP_HTTP_CODE="$code"; return 0
+    fi
+    CODEUP_HTTP_CODE="$code"
     [[ "$attempt" -lt 3 ]] && _codeup_retry_sleep "$attempt"
   done
-  return 1
+  CODEUP_HTTP_CODE="$code"; return 1
 }
 
 # --- DRY_RUN 的响应注入：按「方法 + 路径特征 + body 里的评论类型」给请求起一个 route 名 ---
@@ -226,7 +238,64 @@ codeup_find_mr() {
   return 3
 }
 
-# $1=localId $2=Markdown 文件路径。HTTP 2xx=成功；可重试类失败重试至多 2 次。
+# --- 汇总新建 POST 的「响应丢失但评论已创建」探针（票 18 ①）---
+# 为什么只有汇总新建需要它：POST 不幂等，而 000（传输错误）与 5xx 都可能发生在**服务端其实已经建好评论之后**。
+# 行内评论的取舍相反（只重试 429，见 _codeup_should_retry_create_inline）；汇总评论是评审结果唯一的通道，一次抖动就丢掉整份
+# 报告违反 I10，所以仍然重试——但重试之前先查一次 MR 的全局评论：已经有一条「同一作者 + 同一 `kiro-review:<sha> run:<N>` 标记」
+# 的评论，就说明上一次 POST 成功了，再发一次会在 MR 上留下第二条汇总（违反 I4）。
+# 待比对的标记从**待发正文**里取第一处（形态由 review-render.sh 的 REVIEW_MARKER_LINE_RE 定义，本文件不再抄一份正则）。
+_CODEUP_POST_PROBE_ID=""; _CODEUP_POST_PROBE_SHA=""; _CODEUP_POST_PROBE_RUN=""
+# 从待发 Markdown 里取第一处评审标记的 sha 与 run → 全局 _CODEUP_POST_PROBE_SHA / _RUN（取不到则留空，探针据此跳过）
+_codeup_post_probe_marker() {  # <markdown 文件>
+  local f="${1-}" line
+  _CODEUP_POST_PROBE_SHA=""; _CODEUP_POST_PROBE_RUN=""
+  [[ -r "$f" ]] || return 0
+  if [[ -z "${REVIEW_MARKER_LINE_RE:-}" ]]; then
+    echo "codeup_post_comment: 取不到评审标记的形态（REVIEW_MARKER_LINE_RE 未定义，scripts/lib/review-render.sh 没加载），无法核对「响应丢失但评论已创建」，只能按既有策略重试" >&2
+    return 0
+  fi
+  # -a：正文里一个 NUL 字节不该让 grep 把它当二进制（与 _review_replace_guarded 同一理由）
+  line=$(LC_ALL=C grep -a -m1 -E "$REVIEW_MARKER_LINE_RE" "$f") || return 0
+  [[ "$line" =~ ^\<\!--\ kiro-review:([0-9a-zA-Z._-]+)\ run:([0-9]{1,9})\ --\>[[:space:]]*$ ]] || return 0
+  _CODEUP_POST_PROBE_SHA="${BASH_REMATCH[1]}"; _CODEUP_POST_PROBE_RUN="${BASH_REMATCH[2]}"
+}
+# rc 0 = 已确认评论其实已创建（不要重试）；rc 1 = 无法确认（照既有策略重试）
+_codeup_post_probe_created() {  # <本次 POST 的 HTTP 状态码，只用于日志>
+  local code="${1-}" tmp cid
+  if [[ -z "$_CODEUP_POST_PROBE_ID" || -z "$_CODEUP_POST_PROBE_SHA" || -z "$_CODEUP_POST_PROBE_RUN" ]]; then
+    echo "codeup_post_comment: 待发正文里没有可比对的评审标记（sha/run），跳过「响应丢失但评论已创建」的核对，按既有策略重试" >&2
+    return 1
+  fi
+  tmp=$(mktemp) || return 1
+  if ! codeup_list_global_comments "$_CODEUP_POST_PROBE_ID" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "codeup_post_comment: HTTP ${code} 之后核对「评论是否已创建」的列表查询也失败，无法确认，按既有策略重试（查不到不等于没创建，但不能因此放弃发布——I10）" >&2
+    return 1
+  fi
+  # 判定 = 作者匹配（未配置 CODEUP_BOT_USERNAME 时退化为只按标记）**且**正文里有一行与本次标记逐字节相同（容忍行尾空白，与
+  # review_select_prior_comment 的容忍度一致）。标记含本次 sha 与 run，别人复制不到「本次 run」这一形态。
+  cid=$(jq -r --arg bot "${CODEUP_BOT_USERNAME:-}" \
+              --arg m "<!-- kiro-review:${_CODEUP_POST_PROBE_SHA} run:${_CODEUP_POST_PROBE_RUN} -->" '
+    def str(v): if (v | type) == "string" then v else "" end;
+    def author_name: if (.author | type) == "object" then str(.author.username) else "" end;
+    (if type == "object" then (.result // []) else . end)
+    | (if type == "array" then . else [] end)
+    | map(select(type == "object"))
+    | map(select((str(.state) | ascii_upcase) != "DELETED"))
+    | map(select((.draft == true) | not))
+    | map(select(if $bot == "" then true else author_name == $bot end))
+    | map(select([str(.content) | split("\n")[] | sub("[[:space:]]+$"; "")] | index($m) != null))
+    | (.[0] // {}) | str(.comment_biz_id)' "$tmp" 2>/dev/null) || cid=""
+  rm -f "$tmp"
+  if [[ -n "$cid" ]]; then
+    echo "codeup_post_comment: 响应丢失但评论已创建：${cid}（HTTP ${code} 之后在 MR 上查到同一标记 kiro-review:${_CODEUP_POST_PROBE_SHA} run:${_CODEUP_POST_PROBE_RUN} 的评论），不再重试" >&2
+    return 0
+  fi
+  echo "codeup_post_comment: HTTP ${code} 之后 MR 上没有本次标记（kiro-review:${_CODEUP_POST_PROBE_SHA} run:${_CODEUP_POST_PROBE_RUN}）的评论，按既有策略重试" >&2
+  return 1
+}
+
+# $1=localId $2=Markdown 文件路径。HTTP 2xx=成功；可重试类失败重试至多 2 次（重试前先查标记，票 18 ①）。
 codeup_post_comment() {
   local local_id="$1" markdown_file="$2"
   local body tmp author rc=0
@@ -234,9 +303,11 @@ codeup_post_comment() {
   body=$(jq -n --rawfile content "$markdown_file" \
     '{comment_type: "GLOBAL_COMMENT", content: $content, draft: false, resolved: false}')
   tmp=$(mktemp)
+  _CODEUP_POST_PROBE_ID="$local_id"
+  _codeup_post_probe_marker "$markdown_file"
   _codeup_request_retry codeup_post_comment "$tmp" POST \
     "/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/repositories/${CODEUP_REPO_ID}/changeRequests/${local_id}/comments" \
-    "$body" || rc=$?
+    "$body" _codeup_should_retry _codeup_post_probe_created || rc=$?
   if [[ "$rc" == "0" ]]; then
     # 新建评论的响应里带 author.username，这就是本机器人账号的用户名。令牌身份接口实测 403
     # （spec §4.7.1 P1-00），所以这条日志是运维拿到 CODEUP_BOT_USERNAME 取值的**唯一**实用途径。

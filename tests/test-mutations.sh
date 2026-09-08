@@ -1657,4 +1657,19 @@ f=$(mut_fold "$pkg")
 assert_eq "$(grep -c '折叠区单条上限' "$f")" "0" "M-t18f-entry：单条预算被杀 → 12000 字节那条不再切断——单测「恰好切在 8192」断言会失败"
 assert_eq "$(grep -oE 'A+' "$f" | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')" "12000" "M-t18f-entry：12000 字节整段进了汇总"
 
+# --- M-t18p（票 18 ①）：去掉「重试前先查标记」→ 响应丢失但评论已创建时会再 POST 一次（MR 上多出第二条汇总，违反 I4）---
+# 库级探针：DRY_RUN 下让第一次 create-comment 返回 000，列表 fixture 里有一条同作者同标记的评论 → 数 POST 次数
+mut_post() { # <包根> → stdout: POST 次数
+  ( set +e; source "$1/scripts/lib/codeup-api.sh"; source "$1/scripts/lib/review-render.sh"
+    export YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456 YUNXIAO_TOKEN=t DRY_RUN=1 CODEUP_RETRY_BACKOFF=0
+    export CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" DRY_RUN_FIXTURE_DIR="$ROOT/tests/fixtures/comments/post-lost-created"
+    export DRY_RUN_FAIL_ROUTES="create-comment:000"
+    md=$(mktemp); printf '# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n' > "$md"
+    err=$(codeup_post_comment 7 "$md" 2>&1 >/dev/null); rm -f "$md"
+    printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$' )
+}
+assert_eq "$(mut_post "$ROOT")" "1" "M-t18p 对照：响应丢失但评论已创建 → 只发一次 POST"
+pkg=$(make_mutant m-t18p-no-probe 's/    "\$body" _codeup_should_retry _codeup_post_probe_created || rc=\$?/    "$body" || rc=$?/' scripts/lib/codeup-api.sh)
+assert_eq "$(mut_post "$pkg")" "3" "M-t18p：去掉查标记 → 000 之后一路重试，共 3 次 POST——单测「只有一次 POST」断言会失败"
+
 report

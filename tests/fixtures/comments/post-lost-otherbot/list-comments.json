@@ -1,0 +1,12 @@
+[
+  {
+    "comment_biz_id": "bb000000000000000000000000000002",
+    "comment_type": "GLOBAL_COMMENT",
+    "state": "OPENED",
+    "draft": false,
+    "author": {
+      "username": "aliyun:someone_else"
+    },
+    "content": "# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n\n正文"
+  }
+]

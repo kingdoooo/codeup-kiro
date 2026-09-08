@@ -1,0 +1,12 @@
+[
+  {
+    "comment_biz_id": "aa000000000000000000000000000001",
+    "comment_type": "GLOBAL_COMMENT",
+    "state": "OPENED",
+    "draft": false,
+    "author": {
+      "username": "aliyun:kingdooo_hvFXC"
+    },
+    "content": "# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n<!-- kiro-history:[{\"run\":3,\"sha\":\"abc1234\",\"verdict\":\"MERGE\",\"status\":\"\",\"p0\":0,\"p1\":0,\"p2\":0}] -->\n\n正文"
+  }
+]

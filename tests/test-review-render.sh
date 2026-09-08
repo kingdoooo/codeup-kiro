@@ -3040,8 +3040,7 @@ assert_eq "$(grep -c '折叠区全文总量已达上限' "$tmp/fold-cross.md")" 
 assert_eq "$(awk 'length($0) == 7000 && $0 ~ /^A+$/' "$tmp/fold-cross.md" | wc -l | tr -d ' ')" "4" "⑫ 跨桶：未定位 4 条仍全文（先到先得）"
 # --- 正控：预算之内的折叠区逐字节不变（现有 golden 全部走过 assert_golden；这里再确认小正文不带任何预算说明）---
 fold_render "$(fold_contract 3 500)" "$tmp/fold-small.md"
-assert_not_contains "$(cat "$tmp/fold-small.md")" "折叠区" "⑫ 正控：小正文时评论里没有任何预算说明字样（「折叠区」只出现在折叠块标题里才对——）"
-# 上一条把折叠块标题也算进去了；准确地说：预算说明的两个固定句都不出现
+# 「折叠区」三个字本身在折叠块标题里就有，所以按预算说明的两个固定句判
 assert_not_contains "$(cat "$tmp/fold-small.md")" "折叠区单条上限" "⑫ 正控：小正文不触发单条预算"
 assert_not_contains "$(cat "$tmp/fold-small.md")" "折叠区全文总量已达上限" "⑫ 正控：小正文不触发总量预算"
 assert_eq "$(cat "$tmp/fold-small.md.err")" "" "⑫ 正控：小正文时 stderr 没有预算告警"

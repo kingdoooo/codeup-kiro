@@ -3,6 +3,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source helpers.sh
 source ../scripts/lib/codeup-api.sh
+# 票 18 ①：汇总新建 POST 的「响应丢失但评论已创建」探针要用评审标记的形态（REVIEW_MARKER_LINE_RE），
+# 那个常量归 review-render.sh（生产的 kiro-review.sh 也是两个库都 source）。codeup-api.sh 里刻意没有第二份正则字面量，下面有静态断言。
+source ../scripts/lib/review-render.sh
 
 export YUNXIAO_TOKEN="test-token"
 export YUNXIAO_ORG_ID="org123"
@@ -60,9 +63,84 @@ assert_rc "$(_codeup_should_retry 429 && echo y || echo n)" "y" "retry: 429 重�
 assert_rc "$(_codeup_should_retry 403 && echo y || echo n)" "n" "retry: 403 不重试"
 assert_rc "$(_codeup_should_retry 000 && echo y || echo n)" "y" "retry: 传输错误(000) 重试"
 
+FX=fixtures/comments   # 评论列表 fixture 的根（票 03 段落也用它）
+# ============ 票 18 ①：汇总新建 POST 在 000/5xx 之后先查标记再决定重试 ============
+# POST 不幂等，000 与 5xx 都可能发生在「服务端其实已经建好评论之后」。重试之前查一次 MR 的全局评论：
+# 已经有一条同作者、同 `kiro-review:<sha> run:<N>` 标记的评论 ⇒ 上一次其实成功了，再发一次会在 MR 上多出第二条汇总（违反 I4）。
+# 列表查询本身失败 / 查不到 ⇒ 照既有策略重试（I10：绝不因为查不到而放弃发布）。
+# 标记形态不许在 codeup-api.sh 里出现第二份字面量（唯一来源是 review-render.sh 的 REVIEW_MARKER_LINE_RE）
+assert_eq "$(LC_ALL=C grep -c 'kiro-review:\[0-9a-zA-Z' ../scripts/lib/codeup-api.sh || true)" "0" \
+  "①：codeup-api.sh 里没有第二份评审标记正则（字符类形态）"
+export DRY_RUN=1
+pmd=$(mktemp)
+printf '# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n<!-- kiro-history:[] -->\n\n正文\n' > "$pmd"
+# 标记解析：sha 与 run 各自取到（探针的前置条件）
+_codeup_post_probe_marker "$pmd"
+assert_eq "${_CODEUP_POST_PROBE_SHA}/${_CODEUP_POST_PROBE_RUN}" "abc1234/3" "①：从待发正文第一处评审标记取出 sha 与 run"
+# ① 序列一：POST→000，list→含同标记同作者 ⇒ 只有一次 POST、rc 0
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
+            DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="create-comment:000" \
+            codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "①：响应丢失但评论已创建 → rc 0（视为成功）"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "1" \
+  "①：只发了一次 POST（不再重试，MR 上不会多出第二条汇总）"
+assert_contains "$err" "响应丢失但评论已创建：aa000000000000000000000000000001" "①：日志点名查到的评论 id"
+assert_contains "$err" "kiro-review:abc1234 run:3" "①：日志点名比对用的标记"
+# ① 序列二：POST→000，list→不含同标记（fixture 是空列表）⇒ 第二次 POST
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
+            DRY_RUN_FIXTURE_DIR="$FX/empty" DRY_RUN_FAIL_ROUTES="create-comment:000@1" \
+            codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "①：查不到同标记 → 照常重试并成功"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "①：查不到同标记 → 发了第二次 POST"
+assert_contains "$err" "MR 上没有本次标记" "①：查不到时日志说明按既有策略重试"
+# ① 序列三：POST→000，list→失败 ⇒ 第二次 POST（查询失败不等于没创建，但不能因此放弃发布）
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
+            DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="create-comment:000@1,list-comments:500" \
+            codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "①：列表查询失败 → 照常重试并成功"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "①：列表查询失败 → 发了第二次 POST"
+assert_contains "$err" "列表查询也失败" "①：列表查询失败时日志说明无法确认"
+# ① 作者不匹配：标记一样但作者是别人 ⇒ 不认（否则任何 MR 参与者复制一条带标记的评论就能让本次评审「以为发过了」而丢掉报告）
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
+            DRY_RUN_FIXTURE_DIR="$FX/post-lost-otherbot" DRY_RUN_FAIL_ROUTES="create-comment:000@1" \
+            codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "①：同标记但作者不是机器人 → 不认，照常重试"
+# ① 未配置机器人用户名：按标记认（票要求）
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME= \
+            DRY_RUN_FIXTURE_DIR="$FX/post-lost-otherbot" DRY_RUN_FAIL_ROUTES="create-comment:000" \
+            codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "①：未配置 CODEUP_BOT_USERNAME 时按标记认 → rc 0"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "1" "①：未配置用户名时只发一次 POST"
+# ① 正文里没有评审标记（例如失败评论渲染成最小形态之前的中间产物）：跳过核对、按既有策略重试
+nomark=$(mktemp); printf '没有标记的正文\n' > "$nomark"
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="create-comment:000@1" \
+            codeup_post_comment 7 "$nomark" 2>&1 >/dev/null) || rc=$?
+assert_contains "$err" "没有可比对的评审标记" "①：待发正文没有标记时跳过核对并说明"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "①：没有标记时照常重试"
+# ① 4xx 仍然确定性失败、零核对（探针只在可重试的失败之后跑）
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="create-comment:400" \
+            codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "①：400 仍是确定性失败"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*comments/list$')" "0" "①：4xx 不跑标记核对（一次列表查询都不发）"
+# ① 其它写接口不受影响：更新评论仍是 5xx 三次尝试、不查标记
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="update-comment:500" \
+            codeup_update_comment 7 abc "$pmd" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "①：PUT 的策略不变（5xx 重试后仍失败）"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*comments/list$')" "0" "①：PUT 不跑标记核对"
+rm -f "$pmd" "$nomark"
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+unset DRY_RUN
+
 # ============ 票 03：DRY_RUN 响应注入（fixture）============
 export DRY_RUN=1
-FX=fixtures/comments
 
 # 向后兼容：不设 DRY_RUN_FIXTURE_DIR 时一律返回 []（票 01/02 的测试依赖这个）
 out=$(_codeup_request POST "/x/changeRequests/7/comments/list" '{}' 2>/dev/null)
