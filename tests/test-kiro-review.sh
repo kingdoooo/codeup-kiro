@@ -365,9 +365,36 @@ assert_contains "$OUT" "changeRequests/7/comments" "旧版 kiro-cli：评论发�
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "旧版 kiro-cli：Kiro 未被启动"
 
 # ============ 评论截断：MAX_COMMENT_BYTES 很小时评论被截断并注明 ============
-run_case truncate MAX_COMMENT_BYTES=200
+# 1100：高于下界 1024（票 18 ②，更小的取值回落默认 60000、不再截断），低于这条评论的 ~1.9 KB
+run_case truncate MAX_COMMENT_BYTES=1100
 assert_rc "$RC" 0 "截断路径仍成功"
 assert_contains "$OUT" "已截断" "截断注明"
+assert_contains "$OUT" "上限 1100 字节" "截断提示写的是生效的上限"
+
+# ============ MAX_COMMENT_BYTES 的十进制归一与下界（票 18 ②）============
+# 06d5028 上 `0900` 会报「value too great for base」且被判合法 → 截断整体静默失效（正控：那条 assert_not_contains 在基线上失败）
+run_case mcb-01200 MAX_COMMENT_BYTES=01200
+assert_rc "$RC" 0 "MAX_COMMENT_BYTES=01200：前导零按十进制归一后照常运行"
+assert_not_contains "$OUT" "value too great for base" "MAX_COMMENT_BYTES=01200：不漏 bash 算术报错"
+assert_contains "$OUT" "MAX_COMMENT_BYTES=01200 按十进制归一为 1200" "MAX_COMMENT_BYTES=01200：日志写明归一结果"
+assert_contains "$OUT" "上限 1200 字节" "MAX_COMMENT_BYTES=01200：截断按归一后的 1200 生效"
+run_case mcb-0900 MAX_COMMENT_BYTES=0900
+assert_rc "$RC" 0 "MAX_COMMENT_BYTES=0900：照常运行"
+assert_not_contains "$OUT" "value too great for base" "MAX_COMMENT_BYTES=0900：不漏 bash 算术报错（06d5028 上会漏）"
+assert_contains "$OUT" "MAX_COMMENT_BYTES=0900（=900） 低于下界 1024" "MAX_COMMENT_BYTES=0900：归一成 900 后低于下界、告警点明两个数"
+assert_not_contains "$OUT" "已截断" "MAX_COMMENT_BYTES=0900：回落默认 60000 后不截断（06d5028 上是「静默不截断」，这里是「告警后不截断」）"
+run_case mcb-010 MAX_COMMENT_BYTES=010
+assert_rc "$RC" 0 "MAX_COMMENT_BYTES=010：照常运行"
+assert_contains "$OUT" "MAX_COMMENT_BYTES=010（=10） 低于下界 1024" "MAX_COMMENT_BYTES=010：归一成 10 后回落默认并告警"
+run_case mcb-abc MAX_COMMENT_BYTES=abc
+assert_rc "$RC" 0 "MAX_COMMENT_BYTES=abc：照常运行"
+assert_contains "$OUT" "MAX_COMMENT_BYTES=abc 不是整数，按默认 60000 处理" "MAX_COMMENT_BYTES=abc：非整数回落默认并告警"
+assert_not_contains "$OUT" "已截断" "MAX_COMMENT_BYTES=abc：按默认 60000 不截断"
+run_case mcb-512 MAX_COMMENT_BYTES=512
+assert_rc "$RC" 0 "MAX_COMMENT_BYTES=512：照常运行"
+assert_contains "$OUT" "MAX_COMMENT_BYTES=512 低于下界 1024" "MAX_COMMENT_BYTES=512：低于下界回落默认并告警（十进制形态不变时不重复打数字）"
+assert_not_contains "$OUT" "已截断" "MAX_COMMENT_BYTES=512：按默认 60000 不截断"
+assert_not_contains "$OUT" "拒绝截断" "MAX_COMMENT_BYTES=512：不会走到截断守卫的 rc 3（下界挡在前面）"
 
 # ============ 失败路径：提示词文件不可读 → 立即失败，不带空提示词跑 Kiro ============
 run_case noprompt PROMPT_FILE=/nonexistent
@@ -545,7 +572,7 @@ assert_eq "$(printf '%s' "$OUT" | grep -c 'kiro-review:[0-9a-f]* run:1')" "1" "�
 # fix 字段里带一段较长的 ```python 代码块；MAX_COMMENT_BYTES 选在围栏内部切断。
 # 不补闭合围栏的话，后面追加的「已截断」提示会被 Markdown 当成代码块内容渲染掉，
 # 读者只看到评论突然结束、完全不知道内容缺了。
-run_case fencetrunc MAX_COMMENT_BYTES=900 MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/fenced-code.json"
+run_case fencetrunc MAX_COMMENT_BYTES=1200 MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/fenced-code.json"   # 1200：≥ 下界 1024（票 18 ②），仍落在 877–2977 字节的围栏内部
 assert_rc "$RC" 0 "围栏内截断：评审仍成功"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "报告超长已截断" "围栏内截断：评论里能看到截断提示"

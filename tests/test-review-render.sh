@@ -1164,12 +1164,44 @@ trunc_check() { # <上限> → stdout: ok / 失败原因（被截断的源文件
 for max in 1730 1882; do
   assert_eq "$(trunc_check "$max")" "ok" "R4：上限 ${max} 字节（协调者复现的窗口）截断结果可读且结构闭合"
 done
+# 票 18 ②：扫描窗口从「隐藏历史那一行的末尾」开始（原先从 1600 起——56–1880 之间历史被静默清空的那段窗口完全没扫到），
+# 到文件末尾（1980 字节；「覆盖到 2000」按文件长度封顶，INLINE 形态那份 2186 字节在下面另扫）。
+hist_end=$(head -3 "$GOLDEN_FULL" | wc -c | tr -d ' ')    # 标题 + 评审标记 + 隐藏历史三行的字节数
+marker_end=$(head -2 "$GOLDEN_FULL" | wc -c | tr -d ' ')
 sweep_bad=""
+for (( max = hist_end + 8; max < 1600; max += 23 )); do   # 中段步长 23：每次 ~0.3 s，全窗口步长 7 会让本文件多跑一分钟
+  r=$(trunc_check "$max")
+  [[ "$r" == "ok" ]] || sweep_bad="${sweep_bad}${sweep_bad:+; }${max}:${r}"
+done
 for (( max = 1600; max < golden_bytes; max += 7 )); do
   r=$(trunc_check "$max")
   [[ "$r" == "ok" ]] || sweep_bad="${sweep_bad}${sweep_bad:+; }${max}:${r}"
 done
-assert_eq "$sweep_bad" "" "R4：1600..$((golden_bytes - 1)) 每 7 字节扫描一遍，全部满足不变量"
+assert_eq "$sweep_bad" "" "R4：$((hist_end + 8))..1599 每 23 字节、1600..$((golden_bytes - 1)) 每 7 字节扫描一遍，全部满足不变量（票 18 ②：窗口下沿从 1600 提前到隐藏历史行末）"
+# 票 18 ② 截断守历史行：上限落在评审标记之后、隐藏历史行末之前的每一个字节都必须 rc 3 拒绝（那份残片 PUT 上去会把历次记录清空、
+# 下次评审的历次表从头开始）；从历史行末起每一个字节都必须正常截断且两行标记仍在。逐字节扫两侧（边界 ${hist_end}）。
+low_bad=""
+for (( max = 1; max < hist_end + 8; max += (max < marker_end - 2 ? 9 : 1) )); do   # 评审标记行末之前每 9 字节抽样，标记末到历史末逐字节
+  cp "$GOLDEN_FULL" "$tmp/trunc-low.md"
+  rc=0; review_truncate_comment "$tmp/trunc-low.md" "$max" >/dev/null 2>&1 || rc=$?
+  if (( max < hist_end )); then
+    [[ "$rc" == "3" ]] || { low_bad="${low_bad}${low_bad:+; }${max}:rc=${rc}(应拒绝)"; continue; }
+    cmp -s "$GOLDEN_FULL" "$tmp/trunc-low.md" || low_bad="${low_bad}${low_bad:+; }${max}:拒绝时改了文件"
+  else
+    [[ "$rc" == "0" ]] || { low_bad="${low_bad}${low_bad:+; }${max}:rc=${rc}(应截断)"; continue; }
+    [[ "$(grep -c '^<!-- kiro-history:' "$tmp/trunc-low.md")" == "1" ]] || low_bad="${low_bad}${low_bad:+; }${max}:历史行丢失"
+    [[ "$(grep -cE '^<!-- kiro-review:' "$tmp/trunc-low.md")" == "1" ]] || low_bad="${low_bad}${low_bad:+; }${max}:评审标记丢失"
+  fi
+done
+assert_eq "$low_bad" "" "票 18 ②：1..$((hist_end - 1)) 全部 rc 3 且原文不变（标记行末 ${marker_end} 之前每 9 字节抽样、之后逐字节）、${hist_end}..$((hist_end + 7)) 逐字节全部正常截断且两行标记仍在"
+# 边界两侧各点一次名（扫描之外的显式断言，读日志时一眼可见）
+cp "$GOLDEN_FULL" "$tmp/trunc-b1.md"; rc=0; err=$(review_truncate_comment "$tmp/trunc-b1.md" "$((hist_end - 1))" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 3 "票 18 ②：上限 $((hist_end - 1))（评审标记完整、隐藏历史被砍）→ rc 3 拒绝截断"
+assert_contains "$err" "隐藏历史" "票 18 ②：拒绝原因点名隐藏历史"
+assert_eq "$([[ $((hist_end - 1)) -gt $marker_end ]] && echo yes)" "yes" "票 18 ②：这个上限确实在评审标记之后（守的是历史行，不是标记行）"
+cp "$GOLDEN_FULL" "$tmp/trunc-b2.md"; rc=0; review_truncate_comment "$tmp/trunc-b2.md" "$hist_end" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 0 "票 18 ②：上限 ${hist_end}（隐藏历史行刚好完整）→ 正常截断"
+assert_eq "$(head -3 "$tmp/trunc-b2.md" | cmp -s - <(head -3 "$GOLDEN_FULL") && echo same)" "same" "票 18 ②：截断结果前三行（标题 / 评审标记 / 隐藏历史）逐字节保留"
 # 票 04 的汇总有**两个**折叠块（折叠区 + 历次评审），补齐闭合标签的循环要数对个数才行——
 # 只扫一个折叠块的 golden 证明不了这一点，所以对新形态再扫一遍。
 TRUNC_SRC="$GOLDEN/summary-inline.md"

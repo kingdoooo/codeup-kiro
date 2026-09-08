@@ -28,11 +28,21 @@ KIRO_TIMEOUT="${KIRO_TIMEOUT:-900}"
 # 评论字节上限。必须校验：非整数会让下面的 `-gt` 比较在 set -e 下直接崩掉，而 0 会让每条评论
 # 都被截成残片。真正的兜底在 review_truncate_comment 里——截断后如果连评审标记都没了就拒绝截断，
 # 因为那份残片会被 PUT 到上一条汇总上，把上一次的完整报告与全部历次记录不可恢复地覆盖掉。
+# 十进制归一 + 下界（票 18 ②）：与 KIRO_TIMEOUT 同款 `10#`——`0900` 是纯数字、意图明确，但直接拿去做 `-lt` 比较会被 bash 当八进制解析并报
+# 「value too great for base」，而那条 `[[ ]]` 报错后取假：既不回落默认、下面的超限判断也永远为假，截断整体静默失效（本机复现）。
+# 下界 1024：评审标记 + 隐藏历史 + 元信息表本身就有几百字节，更小的上限没有合法用途——只会让每条评论都被截断守卫（rc 3）拒绝、评审永远失败。
 MAX_COMMENT_BYTES_DEFAULT=60000
+MAX_COMMENT_BYTES_MIN=1024
 MAX_COMMENT_BYTES="${MAX_COMMENT_BYTES:-$MAX_COMMENT_BYTES_DEFAULT}"
-if ! [[ "$MAX_COMMENT_BYTES" =~ ^[0-9]+$ ]] || [[ "$MAX_COMMENT_BYTES" -lt 1 ]]; then
-  echo "[kiro-review] 警告：MAX_COMMENT_BYTES=${MAX_COMMENT_BYTES} 不是 ≥1 的整数，按默认 ${MAX_COMMENT_BYTES_DEFAULT} 处理" >&2
+if ! [[ "$MAX_COMMENT_BYTES" =~ ^[0-9]+$ ]]; then
+  echo "[kiro-review] 警告：MAX_COMMENT_BYTES=${MAX_COMMENT_BYTES} 不是整数，按默认 ${MAX_COMMENT_BYTES_DEFAULT} 处理" >&2
   MAX_COMMENT_BYTES="$MAX_COMMENT_BYTES_DEFAULT"
+elif [[ "$(( 10#$MAX_COMMENT_BYTES ))" -lt "$MAX_COMMENT_BYTES_MIN" ]]; then
+  echo "[kiro-review] 警告：MAX_COMMENT_BYTES=${MAX_COMMENT_BYTES}$([[ "$(( 10#$MAX_COMMENT_BYTES ))" != "$MAX_COMMENT_BYTES" ]] && printf '（=%s）' "$(( 10#$MAX_COMMENT_BYTES ))") 低于下界 ${MAX_COMMENT_BYTES_MIN}（评审标记 + 隐藏历史 + 元信息表本身就有几百字节），按默认 ${MAX_COMMENT_BYTES_DEFAULT} 处理" >&2
+  MAX_COMMENT_BYTES="$MAX_COMMENT_BYTES_DEFAULT"
+elif [[ "$(( 10#$MAX_COMMENT_BYTES ))" != "$MAX_COMMENT_BYTES" ]]; then
+  echo "[kiro-review] MAX_COMMENT_BYTES=${MAX_COMMENT_BYTES} 按十进制归一为 $(( 10#$MAX_COMMENT_BYTES ))" >&2
+  MAX_COMMENT_BYTES="$(( 10#$MAX_COMMENT_BYTES ))"
 fi
 # 行内评论开关（spec §4.6）。
 #   0（默认）：MR 上只有一条汇总评论，内含按 P0→P1→P2 分组的完整问题清单（I7 观感不变）。

@@ -543,7 +543,7 @@ assert_contains "$OUT" "AKIAIOSFODNN7EXAMPLE" "M12 双变异：AWS 访问密钥 
 
 # --- M13：让「补齐未闭合代码围栏」的判定永不成立 → 截断提示被吞进代码块 ---
 pkg=$(make_mutant m13-fence-close 's/% 2 )) -eq 1/% 2 )) -eq 99/' scripts/lib/review-render.sh)
-run_case m13 "$pkg" MAX_COMMENT_BYTES=900 MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/fenced-code.json"
+run_case m13 "$pkg" MAX_COMMENT_BYTES=1200 MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/fenced-code.json"   # 1200：≥ 下界 1024（票 18 ②），仍在围栏内部
 assert_rc "$RC" 0 "M13：变异体仍能跑完"
 comment=$(posted_comment "$OUT")
 fences=$(printf '%s\n' "$comment" | grep -c '^```' || true)
