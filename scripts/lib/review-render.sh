@@ -1630,9 +1630,18 @@ _review_render_fold_section() {
     sect=$(mktemp) || { echo "_review_render_fold_section: 建不出临时文件" >&2; return 1; }
     left=$(( REVIEW_FOLD_TOTAL_MAX - _REVIEW_FOLD_USED )); (( left < 0 )) && left=0
     jq -r --arg b "$bucket" --arg unloc "$unloc" --argjson entry_max "$REVIEW_FOLD_ENTRY_MAX" --argjson total_left "$left" \
-          --argjson total_max "$REVIEW_FOLD_TOTAL_MAX" "${_REVIEW_JQ_LOC}${_REVIEW_JQ_BYTECUT}"'
-      # 切断后列 0 的围栏若落单就补一个闭合：否则后面的条目与历次表全被吞进代码块
-      def _close_fences: if (([split("\n")[] | select(test("^[[:space:]]{0,3}(```|~~~)"))] | length) % 2) == 1 then . + "\n```" else . end;
+          --argjson total_max "$REVIEW_FOLD_TOTAL_MAX" "${_REVIEW_JQ_LOC}${_REVIEW_JQ_BYTECUT}${_REVIEW_JQ_SANITIZE}"'
+      # 切断后仍有未闭合的列 0 围栏就补一个**同款**闭合（同一字符、同一长度）：否则后面的条目、历次表与页脚全被吞进代码块。
+      # 判定复用 _REVIEW_JQ_SANITIZE 里那一份 _fence_open / _fence_close（CommonMark 语义），不另写一份「数行数、一律补 ```」的
+      # 简化规则——那份规则对 `~~~` 开的块补 ``` 等于没闭合（复审自查实测：`~~~python` + 12000 字节正文切断后第二条落进代码块）。
+      def _close_fences:
+        . as $t
+        | ($t | split("\n") | reduce .[] as $l ({open: null};
+            if .open != null
+            then (.open.ch as $ch | .open.len as $len
+                  | if ($l | _fence_close($ch; $len)) then {open: null} else . end)
+            else (($l | _fence_open) as $o | if $o != null then {open: $o} else . end) end)) as $st
+        | if $st.open != null then $t + "\n" + ($st.open.ch * $st.open.len) else $t end;
       def _head($f; $i): "\n**\($i + 1). \($f | _loc($unloc)) — \($f.title)**\n\n";
       def _full($f): if $f.fail_reason == "oversize"
                      then "正文 \($f.fail_bytes // "?") 字节超过评论上限 MAX_COMMENT_BYTES=\($f.fail_limit // "?")，未在评论中展示。"

@@ -3084,6 +3084,18 @@ assert_contains "$body" "本条正文 12000 字节超过折叠区单条上限 81
 assert_eq "$(grep -oE 'A+' "$tmp/fold-entry.md" | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')" "8192" "⑫ 单条预算：正文恰好切在 8192 字节（纯 ASCII 时 = 8192 个字符）"
 assert_contains "$body" "第 1 次评审 · P0 必须修复" "⑫ 单条预算：页脚仍在（正文没有把它挤出上限）"
 assert_contains "$(cat "$tmp/fold-entry.md.err")" "触发了预算" "⑫ 单条预算：stderr 留痕（流水线日志能看到）"
+# --- 切在 `~~~` 围栏里：补的闭合必须是**同一种**围栏字符（复审自查发现的缺陷：原先一律补 ```，
+#     `~~~` 开的块因此仍然没闭合，后面的条目、历次表与页脚全被吞进代码块）---
+fold_tilde=$(jq -nc --arg b "$(printf '~~~python\n%s' "$(big 12000 "A")")" '{contract:"codeup-reviewer/1",summary:"s",verdict:"MERGE_AFTER_FIX",verdict_reason:"r",
+  findings:[{severity:"P1",title:"波浪围栏",body:$b,fix:"",file:"nowhere/a.py",line_start:1},
+            {severity:"P1",title:"第二条应当可见",body:"第二条的说明。",fix:"",file:"nowhere/b.py",line_start:1}]}')
+fold_render "$fold_tilde" "$tmp/fold-tilde.md"
+assert_eq "$(( $(grep -c '^~~~' "$tmp/fold-tilde.md" || true) % 2 ))" "0" "⑫ 单条预算：切在 ~~~ 围栏里时补的是 ~~~（同一种围栏字符成对）"
+assert_eq "$(grep -E '^(\`\`\`|~~~)' "$tmp/fold-tilde.md" | tail -1)" "~~~" "⑫ 单条预算：补在末尾的闭合是 ~~~ 而不是 \`\`\`"
+tilde_ln=$(grep -n '^~~~' "$tmp/fold-tilde.md" | tail -1 | cut -d: -f1)
+second_ln=$(grep -n '第二条应当可见' "$tmp/fold-tilde.md" | tail -1 | cut -d: -f1)
+assert_eq "$([[ "$tilde_ln" -lt "$second_ln" ]] && echo yes)" "yes" "⑫ 单条预算：~~~ 块在第二条之前就闭合了（第二条不落在代码块里）"
+
 # --- 切在围栏里：补闭合围栏，说明与历次表不被吞进代码块 ---
 fold_render "$(fold_contract 1 12000 1)" "$tmp/fold-fence.md"
 assert_eq "$(( $(grep -c '^```' "$tmp/fold-fence.md" || true) % 2 ))" "0" "⑫ 单条预算：切在围栏内时补了闭合围栏（列 0 围栏成对）"
