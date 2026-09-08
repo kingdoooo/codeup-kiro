@@ -1568,12 +1568,16 @@ pkg=$(make_mutant m62-lag-exit '/# fail-closed:lag-end$/ s/return 1/:/')
 lag_late_case m62 "$pkg"
 assert_rc "$RC" 0 "M62：变异体仍能跑完"
 comment=$(posted_comment "$OUT")
-# 出口一拆，流程继续往下走，被后面那个 fail-closed:to 出口接住——而它读的是**最后一次分类**的结果，
-# 选不出版本对时那个值还停在 lag。于是同一条汇总里出现两句互相矛盾的成因，而且给出「重跑流水线」
-# 这条只会复现的建议（重跑在同一份陈旧 checkout 上还是选不出版本对）。
-assert_contains "$comment" "尚未包含本次提交" \
-  "M62：出口一拆，最终状态又被回落成「滞后」——端到端「不谎称滞后」断言会失败"
-assert_contains "$comment" "重跑流水线即可" "M62：给出「重跑」这条只会复现的建议"
+# 出口一拆，流程继续往下走，被后面那个 fail-closed:to 出口接住——而它读的是**最后一次分类**的结果。
+# 票 18 ⑫ 之前那个值还停在上一轮的 `lag`，于是汇总会**谎称滞后**并给出「重跑流水线即可」这条只会复现的建议；
+# ⑫ 让 inline_sample_pair 在每次采样开头复位 INLINE_TO_STATUS / INLINE_TO_NORM 之后，那个值是空串，
+# 于是落到 inline_bail_to 的 `*)` 分支——汇总里多出一句「版本对核对得到未知状态」（日志还写「这是脚本自身的缺陷，请报告」）。
+# 两种形态都是「同一条汇总里两句互相矛盾的成因」，所以这个出口仍然是必需的；只是观测点随 ⑫ 从「谎称滞后」变成「未知状态」。
+assert_contains "$comment" "版本对核对得到未知状态" \
+  "M62：出口一拆，最终状态落到「未知状态」分支——端到端「按最终成因给 notice」断言会失败"
+assert_not_contains "$comment" "尚未包含本次提交" \
+  "M62（票 18 ⑫ 之后）：不再**谎称滞后**（复位了 INLINE_TO_STATUS，读不到上一轮的 lag）"
+assert_not_contains "$comment" "重跑流水线即可" "M62（票 18 ⑫ 之后）：也不再给「重跑流水线」这条只会复现的建议"
 # 两句都在同一条 notice 里（INLINE_NOTICE 是拼接的，渲染成一行），所以按子串判而不是数行数
 assert_contains "$comment" "选不出「最新合并目标版本 + 最新合并源版本」这一对" \
   "M62：正确的那句也还在——两句互相矛盾的成因同时进了汇总"
@@ -1644,7 +1648,7 @@ assert_eq "$(grep -oE 'A+' "$f" | awk '{ if (length($0) > m) m = length($0) } EN
 pkg=$(make_mutant m-t18c-plan-bail 's|^    inline_bail "行内评论未发出：生成行内发布计划失败，下面是完整问题清单。" "警告：生成行内发布计划失败" \|\| return 1  # fail-closed:plan$|    :  # 变异 M-t18c-plan：计划失败也继续往下发|')
 mutate_more "$pkg" 's|--changed-lines "\$WORK/changed-lines.json"|--changed-lines "$WORK/does-not-exist.json"|'
 inline_case m-t18c-plan "$pkg" "$IFX"
-assert_contains "$OUT" "生成行内发布计划失败" "M-t18c-plan：计划确实失败了（双变异的前一半）"
+assert_contains "$OUT" "review_plan_inline: --changed-lines 不可读" "M-t18c-plan：计划确实失败了（双变异的前一半，看库自己的 stderr——inline_bail 的那句日志已被拆掉）"
 assert_not_contains "$(posted_comment "$OUT")" "行内评论未发出：生成行内发布计划失败" \
   "M-t18c-plan：拆掉出口后汇总里没有那句 notice——端到端「MR 上看得见原因」断言会失败"
 # 对照：只让计划失败、出口不动 → notice 在，问题清单在
@@ -1652,16 +1656,31 @@ pkg2=$(make_mutant m-t18c-plan-control 's|--changed-lines "\$WORK/changed-lines.
 inline_case m-t18c-plan-control "$pkg2" "$IFX"
 assert_contains "$(posted_comment "$OUT")" "行内评论未发出：生成行内发布计划失败" "M-t18c-plan 对照：出口在时 notice 上了汇总"
 assert_contains "$(posted_comment "$OUT")" "## 问题清单" "M-t18c-plan 对照：退回完整问题清单"
-# ⒝ fail-closed:pair-http —— 发布前采样时版本列表查询失败（预采样成功、第 2 次起 403）
+# ⒝ fail-closed:pair-http —— 发布前采样时版本列表查询失败（预采样成功、第 2 次起 403）。
+# 这里必须**双变异**：拆掉 pair-http 的 `return 1` 之后，流程会被下游的 fail-closed:to 接住（票 18 ⑫ 复位了
+# INLINE_TO_STATUS，空状态落到 inline_bail_to 的 `*)` 分支，那个出口自己也 return 1）——两道叠着正是纵深防御该有的样子，
+# 所以只有两道都拆掉，才回到「拿空的版本对去创建行内评论」。观测：每条都被 codeup_create_inline_comment 的本地前置校验拒掉
+# （真实接口上是 400 `from patch set biz id can not be null`，P1-03 实测），问题从「完整清单」掉进折叠区的「行内发布失败」。
 pkg=$(make_mutant m-t18c-pairhttp-bail 's|^  if \[\[ "\$rc" == "1" \]\]; then inline_bail_pair http \|\| return 1; fi   # fail-closed:pair-http$|  if [[ "$rc" == "1" ]]; then inline_bail_pair http; fi   # 变异 M-t18c-pairhttp：说明了原因却继续往下发|')
+mutate_more "$pkg" '/# fail-closed:to$/ s/|| return 1//'
 inline_case m-t18c-pairhttp "$pkg" "$IFX" DRY_RUN_FAIL_ROUTES="list-patchsets:403@2+" CODEUP_RETRY_BACKOFF=0
 assert_contains "$OUT" "查询 MR 版本列表失败" "M-t18c-pairhttp：日志说明查询失败"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
-  "M-t18c-pairhttp：拆掉 return 1 之后仍然发了 3 条行内评论（版本对没核对过）——端到端「fail-closed 时 0 条」断言会失败"
+assert_eq "$(printf '%s\n' "$OUT" | grep -c 'from/to 版本必须都给')" "3" \
+  "M-t18c-pairhttp：两道出口都拆掉后，三条问题各带着**空的版本对**去创建行内评论（真实接口上是 400）——端到端「fail-closed 时不走到创建」断言会失败"
+assert_contains "$(posted_comment "$OUT")" "**行内发布失败（3）**" \
+  "M-t18c-pairhttp：问题掉进折叠区的「行内发布失败」而不是完整问题清单"
 inline_case m-t18c-pairhttp-control "$ROOT" "$IFX" DRY_RUN_FAIL_ROUTES="list-patchsets:403@2+" CODEUP_RETRY_BACKOFF=0
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "M-t18c-pairhttp 对照：出口在时一条都不发"
+assert_eq "$(printf '%s\n' "$OUT" | grep -c 'from/to 版本必须都给')" "0" "M-t18c-pairhttp 对照：根本没走到创建"
 assert_contains "$(posted_comment "$OUT")" "行内评论未发出：查询 MR 版本列表失败" "M-t18c-pairhttp 对照：原因上了汇总"
-# ⒞ fail-closed:pair-nopair —— 发布前采样选不出版本对（第 2 次起的响应只有 MERGE_SOURCE）
+assert_contains "$(posted_comment "$OUT")" "## 问题清单" "M-t18c-pairhttp 对照：退回完整问题清单"
+# 单变异（只拆 pair-http）：下游 fail-closed:to 接住 → 仍然 0 条。这条断言证明上面用双变异不是偷懒
+pkg=$(make_mutant m-t18c-pairhttp-single 's|^  if \[\[ "\$rc" == "1" \]\]; then inline_bail_pair http \|\| return 1; fi   # fail-closed:pair-http$|  if [[ "$rc" == "1" ]]; then inline_bail_pair http; fi   # 变异 M-t18c-pairhttp-single|')
+inline_case m-t18c-pairhttp-single "$pkg" "$IFX" DRY_RUN_FAIL_ROUTES="list-patchsets:403@2+" CODEUP_RETRY_BACKOFF=0
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "M-t18c-pairhttp 单变异：下游 fail-closed:to 接住，仍然 0 条（两道叠着）"
+assert_contains "$(posted_comment "$OUT")" "版本对核对得到未知状态" "M-t18c-pairhttp 单变异：汇总里多出一句「未知状态」（下游出口读到的是复位后的空状态）"
+
+# ⒞ fail-closed:pair-nopair —— 发布前采样选不出版本对（第 2 次起的响应只有 MERGE_SOURCE），同样双变异
 IFXNP="$tmp/ifx-nopair-late"; mkdir -p "$IFXNP"; cp "$IFX"/create-comment-inline.*.json "$IFXNP/"
 mk_nopair_late() {
   local base; base=$(git merge-base origin/main HEAD)
@@ -1669,17 +1688,21 @@ mk_nopair_late() {
     {patchSetBizId:"tgt-1", versionNo:1, relatedMergeItemType:"MERGE_TARGET", commitId:$base},
     {patchSetBizId:"src-2", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
   ]' > "$IFXNP/list-patchsets.1.json"
-  jq -n --arg sha "$(git rev-parse HEAD)" '[
-    {patchSetBizId:"src-2", versionNo:9, relatedMergeItemType:"MERGE_SOURCE", commitId:$sha}
-  ]' > "$IFXNP/list-patchsets.json"
+}
+# 第 1 次 GET（预采样）取 .1.json：两侧都全 → ok；第 2 次起落到无序号那份，由 inline_case 内部的 mk_patchsets_fixture
+# 按 PS_TGT=NONE 生成（只有 MERGE_SOURCE）→ 选不出版本对。**不要**在 mk_nopair_late 里写 .json：它会被随后的
+# mk_patchsets_fixture 覆盖（M62 的 IFXLAG2 是同一形态）。
+nopair_late_case() { # <用例名> <集成包根>
+  PS_TGT=NONE PS_SRC_ID=src-9 MUT_TWEAK=mk_nopair_late inline_case "$1" "$2" "$IFXNP"
 }
 pkg=$(make_mutant m-t18c-nopair-bail 's|^  if \[\[ "\$rc" == "2" \]\]; then inline_bail_pair nopair \|\| return 1; fi  # fail-closed:pair-nopair$|  if [[ "$rc" == "2" ]]; then inline_bail_pair nopair; fi  # 变异 M-t18c-nopair：说明了原因却继续往下发|')
-MUT_TWEAK=mk_nopair_late inline_case m-t18c-nopair "$pkg" "$IFXNP"
+mutate_more "$pkg" '/# fail-closed:to$/ s/|| return 1//'
+nopair_late_case m-t18c-nopair "$pkg"
 assert_contains "$OUT" "选不出行内评论要用的版本对" "M-t18c-nopair：日志说明选不出版本对"
-assert_eq "$(inline_bodies "$OUT" | jq -r '.from_patchset_biz_id' | sort -u | paste -sd, -)" "" \
-  "M-t18c-nopair：拆掉 return 1 之后 from/to 是空串，创建请求被本地前置校验拒掉（0 条），但**汇总说的是「已标注」还是「未发出」要看 notice**"
-assert_contains "$OUT" "from/to 版本必须都给" "M-t18c-nopair：空版本对让每一条都被本地校验拒绝（真实接口上是 400）"
-MUT_TWEAK=mk_nopair_late inline_case m-t18c-nopair-control "$ROOT" "$IFXNP"
+assert_eq "$(printf '%s\n' "$OUT" | grep -c 'from/to 版本必须都给')" "3" \
+  "M-t18c-nopair：两道出口都拆掉后三条问题各带着空版本对去创建（真实接口上是 400）——端到端断言会失败"
+assert_contains "$(posted_comment "$OUT")" "**行内发布失败（3）**" "M-t18c-nopair：问题掉进折叠区而不是完整清单"
+nopair_late_case m-t18c-nopair-control "$ROOT"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "M-t18c-nopair 对照：出口在时一条都不发"
 assert_contains "$(posted_comment "$OUT")" "选不出「最新合并目标版本 + 最新合并源版本」这一对" "M-t18c-nopair 对照：原因上了汇总"
 assert_contains "$(posted_comment "$OUT")" "## 问题清单" "M-t18c-nopair 对照：退回完整问题清单"
