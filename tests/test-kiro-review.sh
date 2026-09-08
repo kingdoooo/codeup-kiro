@@ -619,6 +619,15 @@ assert_contains "$comment" "| 1 | \`90fcb05\` | 建议修改后合并 | 1/1/1 |"
 assert_contains "$comment" "| 2 | \`" "二次评审：历次表追加本次那一行"
 assert_eq "$(printf '%s\n' "$comment" | grep -c '<!-- kiro-review:')" "1" "二次评审：更新后的评论里评审标记仍恰好一个"
 
+# --- 票 18 ⑤：同一机器人两条带标记的候选（上一次更新失败退回新建留下的）→ 更新 run 最大那条；日志带前缀列出两条的 id 与 run ---
+run_case tworuns DRY_RUN_FIXTURE_DIR="$CFX/two-runs" CODEUP_BOT_USERNAME="$BOT"
+assert_rc "$RC" 0 "两条候选：成功"
+assert_eq "$(req_count "$OUT" PUT 'comments/f0000000000000000000000000000003$')" "1" "两条候选：PUT 到 run 最大的那条"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "0" "两条候选：不新建第三条"
+assert_contains "$OUT" "[kiro-review] review_select_prior_comment: 警告：同一机器人有 2 条带合法评审标记的汇总评论候选：f0000000000000000000000000000001（run:1）、f0000000000000000000000000000003（run:3）" \
+  "两条候选：选择器的告警经 log 转成带前缀的流水线日志行，列出 id 与 run"
+assert_contains "$(posted_comment "$OUT")" "run:4 -->" "两条候选：run 接在最大的 3 之后"
+
 # --- 机器人用户名未配置（令牌身份接口也不可用）：一律新建，不以评审标记作者作为更新依据 ---
 # 评审标记是明文可复制的，拿它的作者当自己就等于让任何 MR 参与者把报告引到他那条评论上。
 run_case noidentity DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME=

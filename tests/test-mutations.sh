@@ -1632,4 +1632,29 @@ assert_nonzero "$RC" "M-t137：变异体仍以失败退出"
 assert_contains "$OUT" "kiro-cli 退出码 137" "M-t137：137 落到通用文案——端到端「不再写成退出码 137」断言会失败"
 assert_not_contains "$(posted_comment "$OUT")" "超时" "M-t137：失败评论里没有「超时」——端到端「失败评论含超时」断言会失败"
 
+# --- M-t18f（票 18 ⑫）：折叠区预算——分别杀掉单条上限与总量上限，库级探针：1 条 12000 字节 + 5 条 7000 字节的未定位正文
+#     （未定位桶按文件名排序，12000 那条的文件名 0-huge 让它排第一——单条预算的观测要靠它先拿到预算）---
+mut_fold() { # <包根> → 渲染后的汇总文件路径（stdout）
+  ( set +e; source "$1/scripts/lib/review-render.sh"
+    big=$(head -c 7000 /dev/zero | tr '\0' A); huge=$(head -c 12000 /dev/zero | tr '\0' A)
+    jq -nc --arg b "$big" --arg h "$huge" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE_AFTER_FIX", verdict_reason:"r",
+        findings:([{severity:"P1",title:"huge",body:$h,fix:"",file:"nowhere/0-huge.py",line_start:1}]
+                  + [range(5) | {severity:"P1",title:("t"+tostring),body:$b,fix:"",file:("nowhere/"+tostring+".py"),line_start:1}])}' \
+      | review_validate > "$tmp/mf-v.json"
+    review_plan_inline --json "$tmp/mf-v.json" --changed-lines "$ROOT/tests/fixtures/changed-lines.json" > "$tmp/mf-plan.json"
+    review_render_summary --json "$tmp/mf-plan.json" --inline-comment 1 --sha 90fcb05 --src a --dst b --ts t --diff-note n > "$tmp/mf-out.md" 2>/dev/null
+    printf '%s' "$tmp/mf-out.md" )
+}
+f=$(mut_fold "$ROOT")
+assert_eq "$(grep -c '折叠区全文总量已达上限' "$f")" "2" "M-t18f 对照：6 条里 2 条被总量预算压成标题（8192 + 3 × 7000 = 29192 ≤ 30000）"
+assert_eq "$(grep -oE 'A+' "$f" | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')" "8192" "M-t18f 对照：12000 字节那条（排第一）被单条预算切到 8192"
+pkg=$(make_mutant m-t18f-total 's/          | if (.used + $len) > $total_left$/          | if false/' scripts/lib/review-render.sh)
+f=$(mut_fold "$pkg")
+assert_eq "$(grep -c '折叠区全文总量已达上限' "$f")" "0" "M-t18f-total：总量预算被杀 → 6 条全文——单测「恰好 1 条被压成标题」断言会失败"
+assert_eq "$([[ $(wc -c < "$f") -gt 40000 ]] && echo big)" "big" "M-t18f-total：汇总涨到 40 KB 以上（对照约 31 KB）（实际 $(wc -c < "$f" | tr -d ' ')）——单测「< 60000 / < 50000」断言会失败"
+pkg=$(make_mutant m-t18f-entry 's/          | (if $len0 > $entry_max$/          | (if false/' scripts/lib/review-render.sh)
+f=$(mut_fold "$pkg")
+assert_eq "$(grep -c '折叠区单条上限' "$f")" "0" "M-t18f-entry：单条预算被杀 → 12000 字节那条不再切断——单测「恰好切在 8192」断言会失败"
+assert_eq "$(grep -oE 'A+' "$f" | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')" "12000" "M-t18f-entry：12000 字节整段进了汇总"
+
 report

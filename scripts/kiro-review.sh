@@ -809,7 +809,10 @@ else
 fi
 if codeup_list_global_comments "$LOCAL_ID" > "$WORK/comments.json"; then
   sel_rc=0
-  review_select_prior_comment "$BOT_USERNAME" < "$WORK/comments.json" > "$WORK/prior.json" || sel_rc=$?
+  # 选择器的 stderr（多候选告警、无身份时的提示）转成 log（票 18 ⑤）：带 [kiro-review] 前缀才能在流水线日志里与其它行一起被过滤到
+  review_select_prior_comment "$BOT_USERNAME" < "$WORK/comments.json" > "$WORK/prior.json" 2> "$WORK/prior-select.log" || sel_rc=$?
+  while IFS= read -r _sel_line || [[ -n "$_sel_line" ]]; do [[ -n "$_sel_line" ]] && log "$_sel_line"; done < "$WORK/prior-select.log"
+  unset _sel_line
   case "$sel_rc" in
     0) PRIOR_COMMENT_ID=$(jq -r '.comment_biz_id // ""' "$WORK/prior.json")
        prior_run=$(jq -r '.run // 1' "$WORK/prior.json")

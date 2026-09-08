@@ -810,6 +810,13 @@ assert_rc "$rc" 1 "select：带标记的评论作者不是机器人 → rc 1（�
 out=$(sel two-runs "$BOT" 2>/dev/null)
 assert_eq "$(printf '%s' "$out" | jq -r .run)" "3" "select：多条候选取 run 最大的"
 assert_eq "$(printf '%s' "$out" | jq -r .comment_biz_id)" "f0000000000000000000000000000003" "select：取到 run 最大那条的 biz_id"
+# 票 18 ⑤：≥ 2 条候选时 stderr 告警列出 id 与 run（选择逻辑不变）；单候选时没有这条告警
+err=$(sel two-runs "$BOT" 2>&1 >/dev/null) || true
+assert_contains "$err" "同一机器人有 2 条带合法评审标记的汇总评论候选" "⑤ 多候选：告警点明条数"
+assert_contains "$err" "f0000000000000000000000000000001（run:1）、f0000000000000000000000000000003（run:3）" "⑤ 多候选：告警按 run 升序列出每条的 id 与 run"
+assert_contains "$err" "本次原地更新 run 最大的那条（f0000000000000000000000000000003）" "⑤ 多候选：告警说明选了哪条"
+err=$(sel prior-run1 "$BOT" 2>&1 >/dev/null) || true
+assert_not_contains "$err" "候选" "⑤ 单候选：没有多候选告警"
 # 机器人用户名未知（既没配 CODEUP_BOT_USERNAME、令牌身份接口也不可用）→ rc 3，一律新建。
 # 评审标记是明文可复制的：拿「带标记的评论作者」当自己，等于让任何 MR 参与者把报告引到他那条评论上。
 rc=0; out=$(sel prior-run1 "" 2>/dev/null) || rc=$?
@@ -2966,5 +2973,87 @@ ctl=$(printf 'src/\001app.py')
 v=$(jq -n --arg f "$ctl" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[{severity:"P0",title:"t",body:"b",fix:"",file:$f,line_start:7},{severity:"P0",title:"t",body:"b",fix:"",file:"src/app.py",line_start:7}]}' | review_validate)
 assert_eq "$(printf '%s' "$v" | jq -c '[(.findings|length), .duplicate_findings, .delocated_findings, .findings[1].file]')" '[2,0,1,"src/app.py"]' \
   "复审⑧：控制字符变体先出现也不会并掉可定位的那条（130f977：并成一条且无定位，正控）"
+
+# ============================================================================
+# 票 18 ⑫：折叠区全文桶（未定位 / 超限 / 发布失败）的单条与总量预算
+# 合并后深度复审复现：5 条 32 KB 正文的未定位问题 → 247 KB 汇总被截到 49870 字节、页脚与历次表消失。
+# 预算之后：单条 body+fix > REVIEW_FOLD_ENTRY_MAX 按码点边界切断 + 补落单围栏 + 一句说明；三桶合计 > REVIEW_FOLD_TOTAL_MAX 之后只留标题。
+# ============================================================================
+big() { head -c "$1" /dev/zero | tr '\0' "$2"; }   # <字节数> <字符>：纯 ASCII 大正文，字节数 = 字符数，便于对账
+# 5 条都不可定位（文件不在变更行集合里），body 各 7000 字节；第 3 条的 body 以代码围栏开头（切断要补闭合）
+fold_contract() {  # <条数> <每条字节数> [围栏在第几条（1 起）]
+  local n="$1" bytes="$2" fenced="${3:-0}" i body items=""
+  for ((i = 1; i <= n; i++)); do
+    body=$(big "$bytes" "A")
+    [[ "$i" == "$fenced" ]] && body=$(printf '```python\n%s' "$body")
+    items="${items}${items:+,}$(jq -nc --arg t "未定位大正文 ${i}" --arg b "$body" --arg f "nowhere/big${i}.py" '{severity:"P1",title:$t,body:$b,fix:"",file:$f,line_start:1}')"
+  done
+  jq -nc --argjson fs "[$items]" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE_AFTER_FIX", verdict_reason:"r", findings:$fs}'
+}
+fold_render() {  # <契约 JSON 文本> <输出文件> [outcomes JSON]：validate → plan → [apply_outcomes] → render(inline=1)
+  printf '%s' "$1" | review_validate > "$tmp/fold-v.json"
+  review_plan_inline --json "$tmp/fold-v.json" --changed-lines "$CL" > "$tmp/fold-plan.json"
+  if [[ -n "${3:-}" ]]; then
+    printf '%s' "$3" > "$tmp/fold-oc.json"
+    review_plan_apply_outcomes "$tmp/fold-plan.json" "$tmp/fold-oc.json" > "$tmp/fold-plan2.json" && mv "$tmp/fold-plan2.json" "$tmp/fold-plan.json"
+  fi
+  render_inline "$tmp/fold-plan.json" "$2" 2> "$2.err"
+}
+# --- 单条预算：一条 12000 字节的正文切到 8192 并说明 ---
+fold_render "$(fold_contract 1 12000)" "$tmp/fold-entry.md"
+body=$(cat "$tmp/fold-entry.md")
+assert_contains "$body" "本条正文 12000 字节超过折叠区单条上限 8192 字节，已截断；完整内容见流水线日志。" "⑫ 单条预算：超限条目带说明（原字节数 + 上限）"
+assert_eq "$(grep -oE 'A+' "$tmp/fold-entry.md" | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }')" "8192" "⑫ 单条预算：正文恰好切在 8192 字节（纯 ASCII 时 = 8192 个字符）"
+assert_contains "$body" "第 1 次评审 · P0 必须修复" "⑫ 单条预算：页脚仍在（正文没有把它挤出上限）"
+assert_contains "$(cat "$tmp/fold-entry.md.err")" "触发了预算" "⑫ 单条预算：stderr 留痕（流水线日志能看到）"
+# --- 切在围栏里：补闭合围栏，说明与历次表不被吞进代码块 ---
+fold_render "$(fold_contract 1 12000 1)" "$tmp/fold-fence.md"
+assert_eq "$(( $(grep -c '^```' "$tmp/fold-fence.md" || true) % 2 ))" "0" "⑫ 单条预算：切在围栏内时补了闭合围栏（列 0 围栏成对）"
+notice_ln=$(grep -n '折叠区单条上限' "$tmp/fold-fence.md" | head -1 | cut -d: -f1)
+before=$(grep -n '^```' "$tmp/fold-fence.md" | cut -d: -f1 | awk -v n="$notice_ln" '$1 < n' | wc -l | tr -d ' ')
+assert_eq "$(( before % 2 ))" "0" "⑫ 单条预算：说明行之前的围栏数为偶数（说明不在代码块里）"
+# --- 总量预算：5 × 7000 → 前 4 条全文（28000 ≤ 30000），第 5 条只留标题 ---
+fold_render "$(fold_contract 5 7000)" "$tmp/fold-total.md"
+body=$(cat "$tmp/fold-total.md")
+assert_eq "$(grep -c '折叠区全文总量已达上限 30000 字节' "$tmp/fold-total.md")" "1" "⑫ 总量预算：恰好 1 条被压成标题 + 说明"
+assert_contains "$body" "**5. \`nowhere/big5.py\`（无法定位到变更行） — 未定位大正文 5**" "⑫ 总量预算：被压的是最后一条（前四条按原序全文）"
+assert_eq "$(awk 'length($0) == 7000 && $0 ~ /^A+$/' "$tmp/fold-total.md" | wc -l | tr -d ' ')" "4" "⑫ 总量预算：4 条全文原样（各 7000 字节）"
+assert_contains "$body" "正文 7000 字节未展示" "⑫ 总量预算：说明里点名被省略的字节数"
+assert_eq "$([[ $(wc -c < "$tmp/fold-total.md") -lt 60000 ]] && echo ok)" "ok" "⑫ 总量预算：汇总总字节 < MAX_COMMENT_BYTES 默认值 60000（实际 $(wc -c < "$tmp/fold-total.md" | tr -d ' ')）"
+assert_contains "$body" "<details><summary>历次评审（1）</summary>" "⑫ 总量预算：历次表仍在"
+# 复审复现的形态：5 × 32 KB 正文 → 现在单条切 8192、总量 30000 → 汇总 < 50 KB，页脚与历次表都在（130f977 上 247 KB 被截到 49870、两者消失）
+fold_render "$(fold_contract 5 32000)" "$tmp/fold-huge.md"
+assert_eq "$([[ $(wc -c < "$tmp/fold-huge.md") -lt 50000 ]] && echo ok)" "ok" "⑫ 复审形态：5 × 32 KB 未定位正文的汇总 < 50000 字节（实际 $(wc -c < "$tmp/fold-huge.md" | tr -d ' ')）——review_truncate_comment 不会触发"
+assert_contains "$(cat "$tmp/fold-huge.md")" "第 1 次评审 · P0 必须修复" "⑫ 复审形态：页脚在"
+assert_eq "$(grep -c '折叠区单条上限' "$tmp/fold-huge.md")" "3" "⑫ 复审形态：3 条按单条上限切断（3 × 8192 ≤ 30000）"
+assert_eq "$(grep -c '折叠区全文总量已达上限' "$tmp/fold-huge.md")" "2" "⑫ 复审形态：其余 2 条只留标题"
+# --- 预算跨桶累计：未定位桶用掉 28000 之后，发布失败桶的一条 7000 也只留标题 ---
+loc=$(jq -nc --arg b "$(big 7000 "B")" '{severity:"P0",title:"可定位但发布失败",body:$b,fix:"",file:"src/app.py",line_start:30}')
+c5=$(fold_contract 4 7000 | jq -c --argjson f "$loc" '.findings += [$f]')
+fidx=$(printf '%s' "$c5" | review_validate | review_plan_inline --json /dev/stdin --changed-lines "$CL" 2>/dev/null | jq -r '.inline[0].idx' || true)
+[[ "$fidx" =~ ^[0-9]+$ ]] || fidx=4
+fold_render "$c5" "$tmp/fold-cross.md" "[{\"idx\":${fidx},\"outcome\":\"failed\"}]"
+body=$(cat "$tmp/fold-cross.md")
+assert_contains "$body" "**行内发布失败（1）**" "⑫ 跨桶：发布失败桶渲染出来了"
+assert_eq "$(awk 'length($0) == 7000 && $0 ~ /^B+$/' "$tmp/fold-cross.md" | wc -l | tr -d ' ')" "0" "⑫ 跨桶：发布失败那条的正文没有全文渲染（预算已被未定位桶用掉）"
+assert_eq "$(grep -c '折叠区全文总量已达上限' "$tmp/fold-cross.md")" "1" "⑫ 跨桶：发布失败那条被压成标题 + 说明"
+assert_eq "$(awk 'length($0) == 7000 && $0 ~ /^A+$/' "$tmp/fold-cross.md" | wc -l | tr -d ' ')" "4" "⑫ 跨桶：未定位 4 条仍全文（先到先得）"
+# --- 正控：预算之内的折叠区逐字节不变（现有 golden 全部走过 assert_golden；这里再确认小正文不带任何预算说明）---
+fold_render "$(fold_contract 3 500)" "$tmp/fold-small.md"
+assert_not_contains "$(cat "$tmp/fold-small.md")" "折叠区" "⑫ 正控：小正文时评论里没有任何预算说明字样（「折叠区」只出现在折叠块标题里才对——）"
+# 上一条把折叠块标题也算进去了；准确地说：预算说明的两个固定句都不出现
+assert_not_contains "$(cat "$tmp/fold-small.md")" "折叠区单条上限" "⑫ 正控：小正文不触发单条预算"
+assert_not_contains "$(cat "$tmp/fold-small.md")" "折叠区全文总量已达上限" "⑫ 正控：小正文不触发总量预算"
+assert_eq "$(cat "$tmp/fold-small.md.err")" "" "⑫ 正控：小正文时 stderr 没有预算告警"
+# --- 超限桶全文（golden summary-inline-max1.md 已随之更新：两条超限条目从首句变成编号 + 说明 + 修复建议）---
+assert_contains "$(cat "$tmp/summary-inline-max1.md")" $'**1. `src/app.py:31` — 查询结果未做数量上限**\n\n结果集没有 LIMIT，超大表会把内存打满。\n\n**修复建议**\n\n加上 LIMIT 并分页返回。' "⑫ 超限桶：全文渲染（说明 + 修复建议），不再只给首句"
+# --- --json 形态门：overflow_findings 存在但不是数字 → rc 2（否则 `-gt 0` 在 set -e 下直接崩）；缺失仍按 0 渲染 ---
+jq '.overflow_findings = "3"' "$tmp/inline-validated.json" > "$tmp/ovf-str.json"
+rc=0; err=$(review_render_summary --json "$tmp/ovf-str.json" --sha x --src a --dst b --ts t --diff-note n 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 2 "⑫ 形态门：overflow_findings 是字符串 → rc 2"
+assert_contains "$err" "overflow_findings" "⑫ 形态门：报错点名字段"
+jq 'del(.overflow_findings)' "$tmp/inline-validated.json" > "$tmp/ovf-none.json"
+rc=0; review_render_summary --json "$tmp/ovf-none.json" --sha x --src a --dst b --ts t --diff-note n >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 0 "⑫ 形态门：缺 overflow_findings（旧 JSON）仍按 0 渲染"
 
 report

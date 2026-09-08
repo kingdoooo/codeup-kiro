@@ -487,6 +487,18 @@ _review_jq_inplace() {
   if ! jq "$@" "$file" > "$out" || [[ ! -s "$out" ]]; then rm -f "$out"; echo "$who: ${step}失败：${file}" >&2; return 1; fi
   mv -f "$out" "$file" || { rm -f "$out"; echo "$who: 写回失败：${file}" >&2; return 1; }
 }
+# --- 共用 jq 片段：按 UTF-8 **字节**预算取最长的码点前缀（不 explode，二分）---
+# review_finalize_json（字段上限）与折叠区的单条预算（_review_render_fold_section，票 18 ⑫）都用它：切点永远落在码点边界上，不会切出半个字符。
+# 参数一进函数就绑成 $变量：jq 的函数参数是闭包，在 until 的状态对象上求值时 `.body` 一类路径参数会变成 null
+_REVIEW_JQ_BYTECUT='
+  def _bytecut(v; n): v as $v | n as $n
+    | if ($v | utf8bytelength) <= $n then $v
+      else ({lo: 0, hi: ($v | length)}
+            | until(.lo >= .hi;
+                (((.lo + .hi + 1) / 2) | floor) as $mid
+                | if ($v[:$mid] | utf8bytelength) <= $n then .lo = $mid else .hi = ($mid - 1) end)
+            | $v[:.lo]) end;
+'
 # --- 清洗 + 上限（掩码**之后**）：Markdown 结构清洗、title 的 `*` 转义、按字节上限截断并计数 ---
 # 用法：review_finalize_json <文件>  就地改写；上限值只在 REVIEW_CAP_* 常量、经 --argjson 注入。
 review_finalize_json() {
@@ -495,20 +507,13 @@ review_finalize_json() {
   # 阶段盖章（16-fix4 第 40 条）：定稿过的契约不能再定稿——再跑一次会再截一次、再加一个「（已截断）」
   if jq -e '.finalized == true' "$file" >/dev/null 2>&1; then echo "review_finalize_json: 已清洗定稿的契约不能再定稿：${file}" >&2; return 2; fi
   _review_jq_inplace "$file" review_finalize_json "清洗 / 上限" -c --argjson cap_summary "$REVIEW_CAP_SUMMARY" --argjson cap_title "$REVIEW_CAP_TITLE" \
-           --argjson cap_body "$REVIEW_CAP_BODY" --argjson cap_fix "$REVIEW_CAP_FIX" "${_REVIEW_JQ_SANITIZE}"'
+           --argjson cap_body "$REVIEW_CAP_BODY" --argjson cap_fix "$REVIEW_CAP_FIX" "${_REVIEW_JQ_SANITIZE}${_REVIEW_JQ_BYTECUT}"'
     # 字段上限（第 21 条，按 UTF-8 **字节**）：最终结果是「清洗过的文本 ≤ 上限」——清洗会膨胀（全是 `<!--` 的字段 4 → 7 字节；`<a` → `&lt;a`
     # 2.5 倍），所以不能洗完再切（切点可能落在围栏中间、留下半个实体），也不能切完就交（洗一遍又超）。做法（16-fix4 第 12b / 19 条）：
     # 原文按字节预算二分找最长的码点前缀（不 explode）→ 清洗 → 超了就按比例缩预算再来，最多 6 轮，**最后一步一定是清洗**；截断标记
     # 「（已截断）」是脚本文案、在清洗之外追加，预算里已经给它留了位置，所以 v 的总字节数 ≤ n。cap 返回 {v, t}，计数就在这里产出（第 6 条）。
     # 掩码不会让字段变长（mask 等长或变短；PEM 占位 / 提示行有界），行内正文 ≈ 上限之和 + 标记 + 页脚 < 60000；出口另有硬守卫。
-    # 参数一进函数就绑成 $变量：jq 的函数参数是闭包，在 until 的状态对象上求值时 `.body` 一类路径参数会变成 null
-    def _bytecut(v; n): v as $v | n as $n
-      | if ($v | utf8bytelength) <= $n then $v
-        else ({lo: 0, hi: ($v | length)}
-              | until(.lo >= .hi;
-                  (((.lo + .hi + 1) / 2) | floor) as $mid
-                  | if ($v[:$mid] | utf8bytelength) <= $n then .lo = $mid else .hi = ($mid - 1) end)
-              | $v[:.lo]) end;
+    # _bytecut 来自 _REVIEW_JQ_BYTECUT（与折叠区单条预算共用，票 18 ⑫）
     def _fit(raw; m): raw as $raw | m as $m
       | {b: $m, c: null, i: 0}
       | until(.i >= 6 or (if .c == null then false else (.c | utf8bytelength) <= $m end);
@@ -1238,13 +1243,22 @@ review_select_prior_comment() {
          inferred: (if ($authors | length) == 1 then $authors[0] else "" end),
          authors: $authors}
       else
-        ([$cands[] | select(._author == $bot)] | sort_by(.run) | last) as $sel
-        | if $sel == null then {status: "none"} else {status: "ok", comment: ($sel | del(._author))} end
+        ([$cands[] | select(._author == $bot)] | sort_by(.run)) as $mine
+        | ($mine | last) as $sel
+        | if $sel == null then {status: "none"}
+          else {status: "ok", comment: ($sel | del(._author)),
+                # 同一机器人的全部候选（id + run，按 run 升序）：≥ 2 条时调用方告警（票 18 ⑤）
+                mine: [$mine[] | {id: str(.comment_biz_id), run: .run}]} end
       end' 2>/dev/null) \
     || { echo "review_select_prior_comment: 评论列表不是合法 JSON，按「未找到」处理" >&2; return 1; }
   status=$(printf '%s' "$out" | jq -r '.status // ""')
   case "$status" in
     ok)
+      # 多候选告警（票 18 ⑤）：同一机器人有 ≥ 2 条带合法标记的汇总（上一次更新失败退回新建留下的，或 v1 → phase1 之外的别的来源）。
+      # 选择逻辑不变（run 最大者），只把 id 与 run 列出来——MR 上多出的那条要人工删，脚本不删别人可见的历史评论。
+      if [[ "$(printf '%s' "$out" | jq -r '.mine | length')" -gt 1 ]]; then
+        echo "review_select_prior_comment: 警告：同一机器人有 $(printf '%s' "$out" | jq -r '.mine | length') 条带合法评审标记的汇总评论候选：$(printf '%s' "$out" | jq -r '[.mine[] | "\(.id)（run:\(.run)）"] | join("、")')——本次原地更新 run 最大的那条（$(printf '%s' "$out" | jq -r '.comment.comment_biz_id // "?"')），其余那些不会再被更新，建议人工删除（脚本不删别人可见的历史评论）" >&2
+      fi
       printf '%s' "$out" | jq -c '.comment'
       return 0 ;;
     no-identity)
@@ -1552,12 +1566,21 @@ _REVIEW_JQ_FIRSTSENT='
     | if ((($s | split("`") | length) - 1) % 2) == 1 then $s + "`" else $s end;
 '
 
+# 折叠区全文桶的预算（票 18 ⑫；合并后深度复审：5 条 32 KB 正文的未定位问题 → 247 KB 汇总被截到 49870 字节、页脚与历次表消失）。
+#   REVIEW_FOLD_ENTRY_MAX  单条 body + fix 的字节上限：超出的按码点边界切断（_bytecut）、补齐落单围栏、追加一句「已截断」说明；
+#   REVIEW_FOLD_TOTAL_MAX  三个全文桶（未定位 / 超限 / 发布失败）合计的字节上限：用完之后的条目只渲染编号 + 定位串 + 标题 + 一句说明。
+# 取值理由：MAX_COMMENT_BYTES 默认 60000；summary + verdict_reason ≤ 2 × 8192，评论头 / 元信息表 / 重点文件表 / 历次表 / 页脚 ≤ 3 KB，
+# 折叠区 ≤ 30000 → 合计 < 50 KB，正常情况下 review_truncate_comment 根本不触发（更不会触发它守历史行的 rc 3，票 18 ②）。
+# 预算跨三个桶累计（_REVIEW_FOLD_USED，_review_render_folded 每次渲染前清零），按每个小节**实际写出的字节数**记账——量的是评论里真实占用的字节。
+REVIEW_FOLD_ENTRY_MAX=8192
+REVIEW_FOLD_TOTAL_MAX=30000
+_REVIEW_FOLD_USED=0
 # _review_render_fold_section <计划文件> <标题模板> <桶名> <是否未定位桶 0|1> [是否完整渲染 0|1]
 # 标题模板里的 `{levels}` 会替换成该桶里实际出现的级别列表（`P0/P1`）。替换刻意放在
 # 「桶为空就直接返回」之后：空桶时那个标题根本不会渲染，先算它等于白跑一个 jq。
-# 完整渲染（full=1）给「行内发布失败」与「未定位问题」两个桶用：这两类问题一条行内评论都没发出去，
-# 说明与修复建议在 MR 上再没有别的地方能看到（I10 失败可见），只给标题 + 首句等于把 P0 的内容丢了。
-# 档位桶（profile）与超限桶（overflow）仍只给首句：它们是「本轮有意不发行内」的问题，读者要的是一眼扫过去。
+# 完整渲染（full=1）给「行内发布失败」「未定位问题」与「超出行内上限」三个桶用（超限桶自票 18 ⑫ 起也全文）：这三类问题一条行内评论
+# 都没发出去，说明与修复建议在 MR 上再没有别的地方能看到（I10 失败可见），只给标题 + 首句等于把 P0 的内容丢了。
+# 档位桶（profile）仍只给首句：它是「本轮有意不发行内」的问题，读者要的是一眼扫过去。
 _review_render_fold_section() {
   local plan="$1" title="$2" bucket="$3" unloc="${4:-0}" full="${5:-0}" n
   n=$(jq -r --arg b "$bucket" '(.folded[$b] // []) | length' "$plan")
@@ -1569,14 +1592,40 @@ _review_render_fold_section() {
   printf '**%s（%s）**\n' "$title" "$n"
   if [[ "$full" == "1" ]]; then
     # 与「问题清单」同款：编号 + 定位串 + 标题 + 说明 + 修复建议。因正文超过评论上限而没发出的条目（fail_reason=oversize，第 38 条）
-    # 只渲染标题 + 一句说明——把 40 KB 正文搬进汇总只会让汇总也超限、把其它问题的文本一起截掉
-    jq -r --arg b "$bucket" --arg unloc "$unloc" "${_REVIEW_JQ_LOC}"'
-      (.folded[$b] // []) | to_entries[]
-      | .value as $f
-      | "\n**\(.key + 1). \($f | _loc($unloc)) — \($f.title)**\n\n"
-        + (if $f.fail_reason == "oversize"
-           then "正文 \($f.fail_bytes // "?") 字节超过评论上限 MAX_COMMENT_BYTES=\($f.fail_limit // "?")，未在评论中展示。"
-           else "\($f.body)" + (if ($f.fix | length) > 0 then "\n\n**修复建议**\n\n\($f.fix)" else "" end) end)' "$plan"
+    # 只渲染标题 + 一句说明——把 40 KB 正文搬进汇总只会让汇总也超限、把其它问题的文本一起截掉。
+    # 预算（票 18 ⑫）：单条超过 REVIEW_FOLD_ENTRY_MAX 的正文按字节切断（码点边界）、补落单围栏、追加说明；本小节可用的总量 = 总上限 −
+    # 前面小节已写出的字节数，用完之后的条目只留标题 + 一句说明（跳过的字节数点名，读者知道去流水线日志找）。
+    # 输出先落临时文件再 cat：按实际写出的字节数记账，又不经命令替换（那会吃掉正文末尾的换行、改变逐字节形态）。
+    local sect left
+    sect=$(mktemp) || { echo "_review_render_fold_section: 建不出临时文件" >&2; return 1; }
+    left=$(( REVIEW_FOLD_TOTAL_MAX - _REVIEW_FOLD_USED )); (( left < 0 )) && left=0
+    jq -r --arg b "$bucket" --arg unloc "$unloc" --argjson entry_max "$REVIEW_FOLD_ENTRY_MAX" --argjson total_left "$left" \
+          --argjson total_max "$REVIEW_FOLD_TOTAL_MAX" "${_REVIEW_JQ_LOC}${_REVIEW_JQ_BYTECUT}"'
+      # 切断后列 0 的围栏若落单就补一个闭合：否则后面的条目与历次表全被吞进代码块
+      def _close_fences: if (([split("\n")[] | select(test("^[[:space:]]{0,3}(```|~~~)"))] | length) % 2) == 1 then . + "\n```" else . end;
+      def _head($f; $i): "\n**\($i + 1). \($f | _loc($unloc)) — \($f.title)**\n\n";
+      def _full($f): if $f.fail_reason == "oversize"
+                     then "正文 \($f.fail_bytes // "?") 字节超过评论上限 MAX_COMMENT_BYTES=\($f.fail_limit // "?")，未在评论中展示。"
+                     else "\($f.body)" + (if ($f.fix | length) > 0 then "\n\n**修复建议**\n\n\($f.fix)" else "" end) end;
+      (.folded[$b] // []) as $items
+      | reduce range($items | length) as $i ({used: 0, out: []};
+          $items[$i] as $f
+          | (_full($f)) as $text0
+          | ($text0 | utf8bytelength) as $len0
+          | (if $len0 > $entry_max
+             then (_bytecut($text0; $entry_max) | _close_fences) + "\n\n> ⚠️ 本条正文 \($len0) 字节超过折叠区单条上限 \($entry_max) 字节，已截断；完整内容见流水线日志。"
+             else $text0 end) as $text
+          | ($text | utf8bytelength) as $len
+          | if (.used + $len) > $total_left
+            then .out += [_head($f; $i) + "正文 \($len0) 字节未展示：折叠区全文总量已达上限 \($total_max) 字节，完整内容见流水线日志。"]
+            else .used += $len | .out += [_head($f; $i) + $text] end)
+      | .out[]' "$plan" > "$sect" || { rm -f "$sect"; echo "_review_render_fold_section: 渲染折叠区小节失败（桶 ${bucket}）" >&2; return 1; }
+    cat "$sect"
+    _REVIEW_FOLD_USED=$(( _REVIEW_FOLD_USED + $(wc -c < "$sect" | tr -d ' ') ))
+    if grep -q '折叠区单条上限\|折叠区全文总量已达上限' "$sect"; then
+      echo "警告：折叠区「${title}」小节触发了预算（单条 ${REVIEW_FOLD_ENTRY_MAX} 字节 / 三桶合计 ${REVIEW_FOLD_TOTAL_MAX} 字节），部分正文只在流水线日志里完整可见" >&2
+    fi
+    rm -f "$sect"
     return 0
   fi
   echo ""
@@ -1596,10 +1645,12 @@ _review_render_folded() {
   local plan="$1" n
   n=$(jq -r '.folded_count // 0' "$plan")
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || return 0
+  _REVIEW_FOLD_USED=0   # 三个全文桶的总量预算从这里开始累计（票 18 ⑫）
   echo ""
   printf '<details><summary>折叠区：未展开的问题（%s）</summary>\n' "$n"
   _review_render_fold_section "$plan" '{levels} 建议'          profile   0
-  _review_render_fold_section "$plan" '超出行内上限的 {levels}' overflow  0
+  # 超限桶也全文（票 18 ⑫）：可定位、档位覆盖、只因超出 MAX_INLINE_COMMENTS 没发——同样一条行内都没有，只给首句会丢掉 P0/P1 的说明与修复建议
+  _review_render_fold_section "$plan" '超出行内上限的 {levels}' overflow  0 1
   # 未定位问题也完整渲染（票 17-fix3 ⑦）：这些问题没有可绑定的行，INLINE_COMMENT=1 的评论里除了折叠区
   # 再没有第二个落脚点（「问题清单」那一节在 inline 形态下根本不渲染）。只给标题 + 首句等于把说明后半段
   # 与修复建议丢掉，而同一轮里说明不同的两条未定位问题（A① 的键改动特意保住了它们）在页面上会看起来一样。
@@ -1634,12 +1685,14 @@ review_render_summary() {
   # --json 必须是 review_validate 的输出。不校验的话：空文件/非 JSON 会让每个 jq -r 都吐空串，
   # 渲染出一条「结论：评审员未给出契约内的结论 / P0 · P1 · P2 全空 / 问题清单里什么也没有」的空壳评论并返回 0；
   # 缺 dropped_findings 时 `[[ "$dropped" -gt 0 ]]` 还会在 set -u 下直接崩（null: unbound variable）。
+  # overflow_findings 是后加的字段（第 28 条）：缺失按 0 算（旧 JSON），但**存在就必须是数字**——否则下面 `-gt 0` 在 set -e 下直接崩（票 18 ⑫）
   jq -e '(type == "object")
          and ((.dropped_findings | type) == "number")
          and ((.delocated_findings | type) == "number")
+         and (((.overflow_findings // 0) | type) == "number")
          and ((.findings | type) == "array")
          and (.finalized == true)' "$_RR_JSON" >/dev/null 2>&1 \
-    || { echo "review_render_summary: --json 不是 review_validate 的输出（需要对象 + 数值 dropped_findings/delocated_findings + 数组 findings + finalized 盖章；归一化的中间产物没盖章、不能渲染）：${_RR_JSON}" >&2; return 2; }
+    || { echo "review_render_summary: --json 不是 review_validate 的输出（需要对象 + 数值 dropped_findings/delocated_findings/overflow_findings + 数组 findings + finalized 盖章；归一化的中间产物没盖章、不能渲染）：${_RR_JSON}" >&2; return 2; }
   # INLINE_COMMENT=1 还需要发布计划的字段：缺了就说明调用方没走 review_plan_inline，
   # 硬渲染只会得到一条没有折叠区、行内计数恒为 0 的评论——那比报错更难发现。
   if [[ "$_RR_INLINE" == "1" ]]; then
@@ -1651,7 +1704,7 @@ review_render_summary() {
       || { echo "review_render_summary: --inline-comment 1 需要 review_plan_inline 的输出（缺 inline/folded/inline_count/folded_count 字段）：${_RR_JSON}" >&2; return 2; }
   fi
 
-  local summary verdict verdict_cn verdict_note verdict_reason dropped delocated n0 n1 n2 total stat hist
+  local summary verdict verdict_cn verdict_note verdict_reason dropped delocated overflow n0 n1 n2 total stat hist
   summary=$(jq -r '.summary // ""' "$_RR_JSON")
   verdict=$(jq -r '.verdict // ""' "$_RR_JSON")
   # 渲染器边界上再挡一次（票 17 B，纵深防御）：`review_validate` 已把契约外取值置空，但本函数是
