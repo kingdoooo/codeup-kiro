@@ -469,7 +469,7 @@ rc=0; err=$(printf 'not json' | review_validate 2>&1 >/dev/null) || rc=$?
 assert_rc "$rc" 1 "validate：非法 JSON 仍是 rc 1（与受信 agent 未生效区分）"
 # 票 18 ⑩：三条断言并进主 jq（halt_error）之后，非法 JSON 的 stderr 里仍要有一行**库函数前缀**的说明——
 # kiro-review.sh 的 _validate_err_lib_lines 只放行这种行，没有它失败评论就只剩「另有 N 行 jq 诊断已省略」
-assert_contains "$err" "review_validate: 契约不是合法 JSON（jq 退出码 2）" "⑩：非法 JSON 的 stderr 带库函数前缀的说明行（失败评论要用它）"
+assert_contains "$err" "review_validate: 契约不是合法 JSON（jq 退出码 " "⑩：非法 JSON 的 stderr 带库函数前缀的说明行（失败评论要用它；退出码本身在 jq 1.6=2 / 1.7=5 之间不同，不钉数字）"
 # ⑩：整份契约只解析一次——_review_normalize 里恰好一个 jq 调用，且不再把契约留在 bash 变量里
 norm_body=$(LC_ALL=C awk '/^_review_normalize\(\) \{$/{f=1} f{print} f && /^}$/{exit}' "$ROOT/scripts/lib/review-render.sh")
 assert_eq "$(printf '%s\n' "$norm_body" | LC_ALL=C grep -c '^[^#]*[^_A-Za-z]jq ')" "1" "⑩：_review_normalize 里只有一个 jq 调用（原先 4 个）"
