@@ -17,18 +17,27 @@ export PATH="$ROOT/tests/mockbin:$PATH"
 export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456
 export MR_LOCAL_ID=7 MR_TARGET_BRANCH=master CI_COMMIT_REF_NAME=feature/x
 
+# 变异定义（make_mutant / mutate_more）与它们的静态自检（票 18 ⑨）。
+# 「sed 真的改到了目标文件、改后仍是合法 bash」这两条判定只有 _mut_apply 一份：make_mutant、mutate_more 与文件开头的静态自检
+# 都调它——自检若自己抄一份判定，实现改写后两份会各说各话。
+# $1=变异名 $2=sed 表达式 $3=源文件（绝对路径） $4=输出文件（绝对路径） $5=显示用的相对路径
+#   rc 0 = 改到了且语法合法；rc 1 = sed 没改变文件（模式与实现失配）；rc 2 = 改后语法错误。失败原因打到 stderr（不 exit，由调用方决定）。
+_mut_apply() {
+  local name="$1" expr="$2" src="$3" dst="$4" rel="$5"
+  sed -e "$expr" "$src" > "$dst" || { echo "FAIL: 变异 ${name} 的 sed 表达式本身出错：[${expr}]" >&2; return 2; }
+  if cmp -s "$src" "$dst"; then
+    echo "FAIL: 变异 ${name} 没有改变 ${rel}——sed 模式 [${expr}] 已与实现失配" >&2; return 1
+  fi
+  # 只对 shell 文件做语法检查（提示词 .md 也可以是变异对象，15-fix4 M5ac）
+  [[ "$rel" == *.md || "$rel" == *.json ]] || bash -n "$dst" 2>/dev/null || { echo "FAIL: 变异 ${name} 让 ${rel} 产生语法错误" >&2; return 2; }
+}
 # $1=变异名 $2=sed 表达式 $3=被变异文件（相对集成包根，默认 scripts/kiro-review.sh）
 #   → stdout 变异后的集成包根目录
 make_mutant() {
   local name="$1" expr="$2" target="${3:-scripts/kiro-review.sh}" dst
   dst="$tmp/pkg-$name"
   mkdir -p "$dst"; cp -R "$ROOT/scripts" "$ROOT/kiro" "$ROOT/prompts" "$dst/"
-  sed -e "$expr" "$ROOT/$target" > "$dst/$target"
-  if cmp -s "$ROOT/$target" "$dst/$target"; then
-    echo "FAIL: 变异 ${name} 没有改变 ${target}——sed 模式 [${expr}] 已与实现失配" >&2; exit 1
-  fi
-  # 只对 shell 文件做语法检查（提示词 .md 也可以是变异对象，15-fix4 M5ac）
-  [[ "$target" == *.md || "$target" == *.json ]] || bash -n "$dst/$target" || { echo "FAIL: 变异 ${name} 让 ${target} 产生语法错误" >&2; exit 1; }
+  _mut_apply "$name" "$expr" "$ROOT/$target" "$dst/$target" "$target" || exit 1
   echo "$dst"
 }
 # 在已有变异包上再变异一处（双变异）：$1=变异包根 $2=sed 表达式 $3=目标文件（相对包根，默认 scripts/kiro-review.sh）
@@ -36,15 +45,68 @@ make_mutant() {
 # （那正是纵深防御该有的样子），只有两道一起杀掉，端到端断言才会失败——这条断言不是空转要靠双变异来证。
 mutate_more() {
   local pkg="$1" expr="$2" target="${3:-scripts/kiro-review.sh}"
-  sed -e "$expr" "$pkg/$target" > "$pkg/$target.mut" || exit 1
-  if cmp -s "$pkg/$target" "$pkg/$target.mut"; then
-    echo "FAIL: 双变异没有改变 ${target}——sed 模式 [${expr}] 已与实现失配" >&2; exit 1
-  fi
+  _mut_apply "双变异@$(basename "$pkg")" "$expr" "$pkg/$target" "$pkg/$target.mut" "$target" || exit 1
   mv -f "$pkg/$target.mut" "$pkg/$target"; chmod +x "$pkg/$target"
-  bash -n "$pkg/$target" || { echo "FAIL: 双变异让 ${target} 产生语法错误" >&2; exit 1; }
 }
 # 汇总 sink 掩码那一行（票 16）：M12 与票 16 段的 M-a/M-c/M-d 都要精确命中它
 REDACT_LINE='^review_redact_file "\$WORK/comment.md" || rrc=\$?$'
+# 票 16 段用到的两条锚（原先定义在那一段开头；静态自检要在文件开头就把每条表达式展开出来，所以所有被表达式引用的常量都放在这里）
+FIELD_LINE='^  review_redact_json "\$f" || { rm -f "\$f"; echo "review_validate: 字段级掩码失败" >\&2; return 4; }$'   # 16-fix3 第 15 条起字段级掩码在 review_validate 内部
+DOC_LINE="$REDACT_LINE"
+
+# ---- 变异定义静态自检（票 18 ⑨；票 15 收尾实测三连红——每红一条要重跑 10 分钟才见下一条）----
+# 在跑任何用例之前，把本文件里**每一处** make_mutant / mutate_more 的 sed 表达式对当前树干跑一遍（_mut_apply 同一份判定），
+# 一次列出全部失配再退出。提取办法：读本文件源码、把反斜杠续行接成一行，只认三种调用形状
+#   `pkg=$(make_mutant …)` / `pkg2=$(make_mutant …)` / `mutate_more "$pkg" …`
+# 把命令名换成记录函数 _mut_decl 后 eval——参数展开与真实调用完全一致（同一份 bash 文本、同一批常量：REDACT_LINE / DOC_LINE /
+# FIELD_LINE 因此必须定义在本段之前），记录函数只把 name / expr / target 追加进清单、不复制包、不跑 sed。
+# 两道数目守卫让「新写法的调用没被提取到」变成红：① 提取到的行数 = 记录到的条数；② 源码里 make_mutant / mutate_more 的
+# 调用总数（去掉两处定义与注释行）= 提取到的行数——用别的变量名或写法调用时请一并扩展这里的形状表。
+# 双变异（mutate_more）的表达式对**未变异**的树干跑：现有两条锚的行在原树里都存在；将来若有只在变异体上才存在的锚，
+# 在这里按名字放行并写明理由。
+# --- mutation-selfcheck-begin ---（守卫 ② 的计数跳过从这一行到 `mutation_selfcheck` 调用行之间的机器代码）
+_MUT_DECLS="$tmp/mut-decls"; : > "$_MUT_DECLS"
+_mut_decl() {  # <make_mutant|mutate_more@行号> <名字（mutate_more 时省略）> <expr> [target]
+  local kind="$1"; shift
+  local name expr target
+  if [[ "$kind" == make_mutant ]]; then name="$1"; expr="$2"; target="${3:-scripts/kiro-review.sh}"
+  else name="$kind"; expr="$1"; target="${2:-scripts/kiro-review.sh}"; fi
+  printf '%s\037%s\037%s\n' "$name" "$expr" "$target" >> "$_MUT_DECLS"
+}
+mutation_selfcheck() {
+  local self="$ROOT/tests/test-mutations.sh" joined n_sites n_calls n_decl line bad="" name expr target scratch
+  # 续行接成一行（sed：以反斜杠结尾的行与下一行合并），再只留三种调用形状；行号前缀给 mutate_more 起名字用
+  joined=$(LC_ALL=C sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "$self" | grep -nE '^(pkg2?=\$\(make_mutant |mutate_more "\$pkg" )')
+  n_sites=$(printf '%s\n' "$joined" | grep -c . || true)
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    local ln="${line%%:*}" body="${line#*:}"
+    body=${body/#pkg=\$(make_mutant /pkg=\$(_mut_decl make_mutant }
+    body=${body/#pkg2=\$(make_mutant /pkg2=\$(_mut_decl make_mutant }
+    body=${body/#mutate_more \"\$pkg\" /_mut_decl mutate_more@L${ln} }
+    eval "$body" || { echo "FAIL: 变异定义静态自检：第 ${ln} 行的调用无法静态求值（表达式引用了此处尚未定义的变量？）：${body:0:160}" >&2; exit 1; }
+  done <<< "$joined"
+  n_decl=$(grep -c . "$_MUT_DECLS" || true)
+  [[ "$n_decl" == "$n_sites" ]] || { echo "FAIL: 变异定义静态自检：提取到 ${n_sites} 处调用，只记录到 ${n_decl} 条（eval 后没有落到 _mut_decl？）" >&2; exit 1; }
+  # 守卫 ②：源码里全部调用（去掉注释行与两处定义）都要被提取到
+  n_calls=$(LC_ALL=C sed -e ':a' -e '/\\$/N; s/\\\n//; ta' "$self" | sed '/mutation-selfcheck-'"begin"'/,/^mutation_selfcheck$/d' \
+              | grep -vE '^[[:space:]]*#' | grep -vE '^(make_mutant|mutate_more)\(\) \{' \
+              | grep -cE '(^|[^_A-Za-z])(make_mutant|mutate_more) ' || true)
+  [[ "$n_calls" == "$n_sites" ]] || { echo "FAIL: 变异定义静态自检：源码里有 ${n_calls} 处 make_mutant / mutate_more 调用，只有 ${n_sites} 处是可提取的形状（pkg=\$(make_mutant …) / pkg2=\$(make_mutant …) / mutate_more \"\$pkg\" …）——请用这三种写法之一，或扩展 mutation_selfcheck 的形状表" >&2; exit 1; }
+  scratch=$(mktemp)
+  while IFS=$'\037' read -r name expr target; do
+    [[ -n "$name" ]] || continue
+    _mut_apply "$name" "$expr" "$ROOT/$target" "$scratch" "$target" 2>/dev/null || bad="${bad}"$'\n'"  - ${name}（${target}）：[${expr}]"
+  done < "$_MUT_DECLS"
+  rm -f "$scratch"
+  if [[ -n "$bad" ]]; then
+    echo "FAIL: 变异定义静态自检：以下 $(printf '%s\n' "$bad" | grep -c '^  - ') 条 sed 模式对当前树不生效（没改到文件 / sed 出错 / 改后语法错误），请先对齐实现再跑用例：${bad}" >&2
+    exit 1
+  fi
+  echo "变异定义静态自检：${n_decl} 条 sed 模式都能改到目标文件" >&2
+}
+mutation_selfcheck
+
 # $1=用例名 $2=集成包根目录 → 新建 fixture 并运行；结果写入全局 CASE(目录) / RC / OUT
 # 用法：run_case <用例名> <集成包根目录> [VAR=值 ...]（额外的 VAR=值 只作用于这一次调用）
 # 可选：MUT_TWEAK=<函数名> 在运行前于 checkout 目录内执行，用来改造 fixture（与 test-kiro-review.sh 的 CASE_TWEAK 同义）。
@@ -1080,8 +1142,7 @@ assert_eq "$(mut_meta_row "$pkg" 'a|b|c' | tr -cd '|' | wc -c | tr -d ' ')" "5" 
 # 仍被字段级掩掉，所以文档级的变异用**分支名**里的 token（MR 作者可控、不经 validated.json）作为观测向量。
 SEC_SUMMARY="$tmp/secrets-summary.json"; with_secrets "$ROOT/tests/fixtures/contract/mock-review.json" > "$SEC_SUMMARY"
 SEC_INLINE="$tmp/secrets-inline.json";   with_secrets "$E2EC" > "$SEC_INLINE"
-FIELD_LINE='^  review_redact_json "\$f" || { rm -f "\$f"; echo "review_validate: 字段级掩码失败" >\&2; return 4; }$'   # 16-fix3 第 15 条起字段级掩码在 review_validate 内部
-DOC_LINE='^review_redact_file "\$WORK/comment.md" || rrc=\$?$'
+# FIELD_LINE / DOC_LINE 两条锚定义在文件开头（票 18 ⑨：静态自检要在那里展开表达式）
 mut_rd() { ( set +e; source "$1/scripts/lib/review-render.sh"; printf '%s\n' "$2" | review_redact_secrets ); }   # 库级探针：<包根> <一行>
 
 # --- 对照：未变异实现三处都不含原文；分支名 token 被文档级掩掉 ---
