@@ -472,7 +472,7 @@ assert_rc "$rc" 1 "validate：非法 JSON 仍是 rc 1（与受信 agent 未生�
 assert_contains "$err" "review_validate: 契约不是合法 JSON（jq 退出码 " "⑩：非法 JSON 的 stderr 带库函数前缀的说明行（失败评论要用它；退出码本身在 jq 1.6=2 / 1.7=5 之间不同，不钉数字）"
 # ⑩：整份契约只解析一次——_review_normalize 里恰好一个 jq 调用，且不再把契约留在 bash 变量里
 norm_body=$(LC_ALL=C awk '/^_review_normalize\(\) \{$/{f=1} f{print} f && /^}$/{exit}' "$ROOT/scripts/lib/review-render.sh")
-assert_eq "$(printf '%s\n' "$norm_body" | LC_ALL=C grep -c '^[^#]*[^_A-Za-z]jq ')" "1" "⑩：_review_normalize 里只有一个 jq 调用（原先 4 个）"
+assert_eq "$(printf '%s\n' "$norm_body" | LC_ALL=C grep -v '^[[:space:]]*#' | LC_ALL=C grep -c '^[[:space:]]*jq ')" "1" "⑩：_review_normalize 里只有一个 jq 调用行（原先 4 个；注释与错误文案不算）"
 assert_not_contains "$norm_body" 'input=$(cat)' "⑩：不再把整份契约留在 bash 变量里"
 assert_contains "$norm_body" "halt_error(3)" "⑩：rc 3 由 halt_error 给出"
 assert_contains "$norm_body" "halt_error(1)" "⑩：rc 1 由 halt_error 给出"
