@@ -186,7 +186,8 @@ _probe_run() {
       > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
   fi
   echo "[$name] kiro-cli 退出码 ${rc}（124/137=超时），耗时 $(( $(date +%s) - start ))s，agent=${agent} env=${envmode} extra=${extra[*]:-无}" >&2
-  [[ $rc -ne 0 ]] && { echo "[$name] stderr 尾部：" >&2; tail -n 6 "$KEEP/$name.err" | LC_ALL=C awk '{print substr($0,1,200)}' | sed 's/^/          /' >&2; }
+  # substr 按**字符**截 200（awk-utf8-substr，同 reject_trace）：LC_ALL=C 会按字节截、把中文截成半个字符（15-fix4 #14）
+  [[ $rc -ne 0 ]] && { echo "[$name] stderr 尾部：" >&2; tail -n 6 "$KEEP/$name.err" | awk '{print substr($0,1,200)}' | sed 's/^/          /' >&2; }   # awk-utf8-substr
   return $rc
 }
 run_case() {
@@ -205,8 +206,11 @@ read_tried() { [[ "$(tool_events "$1")" == *"$2"* ]]; }
 # 所以运行级痕迹天然就是该文件的痕迹，不需要按文件名回扫归因。诊断行按字符截 240（awk substr 在 UTF-8 locale 下按字符；
 # GNU coreutils 的按字节截断会让中文以半个字符结尾，15-fix4 #14）
 reject_trace() {
-  { tool_events "$1" | grep -iE 'forbidden|rejected|denied|"status"[[:space:]]*:[[:space:]]*"failed"' | head -3 | awk '{print substr($0,1,240)}'
-    grep -ihE 'is rejected|was rejected|denied list|not allowed|forbidden|permission' "$KEEP/$1.err" 2>/dev/null | head -3 | awk '{print substr($0,1,240)}'; } || true
+  # 这两处**刻意不加 LC_ALL=C**（票 18 ⑬ 的例外，标注 awk-utf8-substr）：substr 要按**字符**截 240，按字节截会让中文诊断
+  # 以半个字符结尾（15-fix4 #14 就是修这个）。代价是事件流里若有无效 UTF-8 字节，这一行诊断可能打不出来——
+  # 只影响 stderr 上的诊断尾巴，判定本身（judge_* / appears / read_tried）都不经过它。
+  { tool_events "$1" | grep -iE 'forbidden|rejected|denied|"status"[[:space:]]*:[[:space:]]*"failed"' | head -3 | awk '{print substr($0,1,240)}'   # awk-utf8-substr
+    grep -ihE 'is rejected|was rejected|denied list|not allowed|forbidden|permission' "$KEEP/$1.err" 2>/dev/null | head -3 | awk '{print substr($0,1,240)}'; } || true   # awk-utf8-substr
 }
 appears() { grep -qF "$2" "$KEEP/$1.jsonl" || grep -qF "$2" "$KEEP/$1.err"; }
 mark_fail() { echo "[$1] FAIL    $2" >&2; PROBE_FAIL=1; }

@@ -378,6 +378,23 @@ assert_contains "$OUT" "MAX_COMMENT_BYTES=512 低于下界 1024" "MAX_COMMENT_BY
 assert_not_contains "$OUT" "已截断" "MAX_COMMENT_BYTES=512：按默认 60000 不截断"
 assert_not_contains "$OUT" "拒绝截断" "MAX_COMMENT_BYTES=512：不会走到截断守卫的 rc 3（下界挡在前面）"
 
+# ============ 票 18 ⑬：模型输出含 U+FFFD 时只记一行日志（不改文本、不降级）============
+# D4 的 MR #1 运行 #32 实测：服务端存的就是替换符（本地掩码 / 清洗对同一句字节不变）。所以脚本只留痕。
+python3 -c 'import json,sys
+c = json.load(open(sys.argv[1]))
+c["findings"][0]["body"] = "没有\ufffd\ufffd\ufffd闭的引号"
+json.dump(c, open(sys.argv[2], "w"), ensure_ascii=False)' "$ROOT/tests/fixtures/contract/mock-review.json" "$tmp/fffd-contract.json"
+run_case fffd MOCK_KIRO_CONTRACT="$tmp/fffd-contract.json"
+assert_rc "$RC" 0 "含 U+FFFD：退出码 0（不降级）"
+assert_contains "$OUT" "注意：模型输出含 3 个 U+FFFD 替换符" "含 U+FFFD：日志留痕并给出个数"
+assert_contains "$OUT" "已原样保留" "含 U+FFFD：日志说明不改文本"
+assert_not_contains "$OUT" "结构化解析失败" "含 U+FFFD：不走降级"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "没有$(printf '\357\277\275\357\277\275\357\277\275')闭的引号" "含 U+FFFD：正文原样保留（一个字节都没改）"
+assert_contains "$comment" "P0 1 · P1 1 · P2 1" "含 U+FFFD：其余渲染照常"
+run_case nofffd
+assert_not_contains "$OUT" "U+FFFD" "不含 U+FFFD：没有这行日志"
+
 # ============ 票 18 ⑩：jq 版本预检（契约校验用 halt_error，需要 jq ≥ 1.6）============
 # 替身 jq 只改写 --version 的输出，其余调用透传给真 jq——脚本必须在第 0 步就拒绝运行（更老的 jq 会在 halt_error 处退 3，
 # 那会被当成「受信 agent 未生效」，把环境问题写成安全结论）

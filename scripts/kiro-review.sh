@@ -1154,6 +1154,17 @@ case "$extract_rc" in
   8) die_review "内部错误：提取契约时没有传入本次标记随机串（集成包缺陷，请报告）" ;;
 esac
 
+# --- 6.2.1 U+FFFD 留痕（票 18 ⑬）---
+# D4 的 MR #1 运行 #32 里，一条 P1 正文出现了 3 个 U+FFFD（EF BF BD，「没有���闭」）——**服务端存的就是替换符**：
+# 同一句在本机过 review_redact_secrets / review_sanitize_md 字节不变，所以不是脚本掩码或清洗切坏的，判为 kiro-cli 流式解码
+# 或模型侧。这里只**记一行日志**：不改文本（改了就改写了评审员的话）、不降级（内容仍然可读，读者能自己判断）。
+# 按字节数 EF BF BD 计数（LC_ALL=C）；契约提取失败时 contract.json 里是别的东西，所以只在 rc 0/4/5/6 之后这一处数。
+_fffd=$(LC_ALL=C awk '{ n += gsub(/\357\277\275/, "") } END { print n + 0 }' "$WORK/contract.json" 2>/dev/null) || _fffd=0
+[[ "$_fffd" =~ ^[0-9]+$ ]] || _fffd=0
+[[ "$_fffd" == "0" ]] \
+  || log "注意：模型输出含 ${_fffd} 个 U+FFFD 替换符（kiro-cli 流式解码 / 模型侧；本地掩码与清洗对同一句字节不变），已原样保留——不改文本、不降级"
+unset _fffd
+
 DEGRADE_REASON=""; DEGRADE_DETAIL=""
 case "$extract_rc" in
   0) ;;

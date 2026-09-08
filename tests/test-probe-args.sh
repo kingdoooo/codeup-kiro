@@ -99,6 +99,49 @@ assert_eq "$(LC_ALL=C grep -c 'kiro-cli chat --no-interactive --agent-engine v2'
   "⑫：探测里拼 kiro-cli 命令只有一处（run_case 与 run_case_agent 都走 _probe_run）"
 assert_rc "$(bash -n "$ROOT/scripts/probe/probe-kiro-headless.sh" && echo 0 || echo 1)" 0 "⑫：probe-kiro-headless.sh 语法合法"
 
+# ============ 票 18 ⑬：awk locale 静态守卫 ============
+# macOS 自带 awk（20200816）在 UTF-8 locale 下会把两条**不同**的中文行判成相等（D4 修复替身时实测：
+# `=== 变更元信息 ===` == `=== 评审输入开始 ===` 为真，LC_ALL=C 下正确），而且遇到无效 UTF-8 字节会直接罢工。
+# 所以 scripts/ 与测试基建里**每个** awk 调用都必须带 LC_ALL=C。两种例外在同一行注明即放行：
+#   awk-ascii-only —— 确属只处理 ASCII 的调用；
+#   awk-utf8-substr —— 刻意要**字符**语义的 substr 截断（探测脚本的诊断尾巴，按字节截会把中文截成半个字符，15-fix4 #14）。
+# 只数**命令位置**上的 awk（行首 / 管道 / `;` / `&&` / `(` / `$(` 之后）：错误文案里的「awk 退出非零」不算调用。
+# 扫描收成函数，下面用一份「故意去掉一处 LC_ALL=C」的副本做正控（证明这条守卫不是空转）。
+awk_locale_bad() { # <树根> → 每行一个「文件:行号」（缺 LC_ALL=C 的 awk 调用）
+  local root="$1" f
+  for f in "$root"/scripts/*.sh "$root"/scripts/lib/*.sh "$root"/scripts/probe/*.sh "$root"/tests/mockbin/* "$root"/tests/helpers.sh "$root"/tests/fixture-repo.sh; do
+    [[ -f "$f" ]] || continue
+    LC_ALL=C grep -nE '(^|[|;&(]|\$\()[[:space:]]*(LC_ALL=C[[:space:]]+)?awk[[:space:]]' "$f" \
+      | LC_ALL=C grep -v 'LC_ALL=C[[:space:]]*awk' \
+      | LC_ALL=C grep -vE 'awk-ascii-only|awk-utf8-substr' \
+      | LC_ALL=C grep -vE '^[0-9]+:[[:space:]]*#' \
+      | LC_ALL=C sed "s|^|${f#$root/}:|" | LC_ALL=C cut -d: -f1,2
+  done
+  return 0
+}
+assert_eq "$(awk_locale_bad "$ROOT" | LC_ALL=C paste -sd' ' -)" "" \
+  "⑬：scripts/ 与测试基建里每个 awk 调用都带 LC_ALL=C（例外须在同一行注明 awk-ascii-only）"
+# 正控：把替身里的一处 LC_ALL=C 去掉 → 守卫必须报出那一行
+awkroot="$tmp/awkroot"
+mkdir -p "$awkroot/scripts/lib" "$awkroot/scripts/probe" "$awkroot/tests/mockbin"
+cp "$ROOT"/scripts/*.sh "$awkroot/scripts/" 2>/dev/null || true
+cp "$ROOT"/scripts/lib/*.sh "$awkroot/scripts/lib/"
+cp "$ROOT"/scripts/probe/*.sh "$awkroot/scripts/probe/"
+cp "$ROOT"/tests/helpers.sh "$ROOT"/tests/fixture-repo.sh "$awkroot/tests/"
+LC_ALL=C sed 's/LC_ALL=C awk -v s="\$MOCK_SENT"/awk -v s="$MOCK_SENT"/' "$ROOT/tests/mockbin/kiro-cli" > "$awkroot/tests/mockbin/kiro-cli"
+assert_eq "$(LC_ALL=C grep -c 'LC_ALL=C awk -v s="\$MOCK_SENT"' "$awkroot/tests/mockbin/kiro-cli" || true)" "0" "⑬ 正控：副本里那处 LC_ALL=C 确实被去掉了"
+assert_eq "$(awk_locale_bad "$awkroot" | LC_ALL=C paste -sd' ' -)" "tests/mockbin/kiro-cli:$(LC_ALL=C grep -n 'awk -v s="\$MOCK_SENT"' "$awkroot/tests/mockbin/kiro-cli" | LC_ALL=C cut -d: -f1)" \
+  "⑬ 正控：守卫报出替身里缺 LC_ALL=C 的那一行（这条守卫不是空转）"
+# 例外机制：同一行写 awk-ascii-only 就放行（给确属 ASCII-only 的调用留一个显式出口）
+LC_ALL=C sed 's|awk -v s="\$MOCK_SENT"|awk -v s="$MOCK_SENT"  # awk-ascii-only|' "$awkroot/tests/mockbin/kiro-cli" > "$awkroot/tests/mockbin/kiro-cli.tmp"
+mv "$awkroot/tests/mockbin/kiro-cli.tmp" "$awkroot/tests/mockbin/kiro-cli"
+assert_eq "$(awk_locale_bad "$awkroot" | LC_ALL=C paste -sd' ' -)" "" "⑬ 例外机制：同一行注明 awk-ascii-only 的调用被放行"
+# 事实本身也钉一条（不是所有机器都能复现，所以只在 macOS 自带 awk 上断言）：LC_ALL=C 下两条不同的中文行不相等
+if [[ -x /usr/bin/awk ]]; then
+  assert_eq "$(LC_ALL=C /usr/bin/awk 'BEGIN { print ("=== 变更元信息 ===" == "=== 评审输入开始 ===") ? "equal" : "differ" }')" "differ" \
+    "⑬：LC_ALL=C 下两条不同的中文行判为不相等（UTF-8 locale 下 macOS 自带 awk 会判成相等——这就是守卫存在的理由）"
+fi
+
 # --- 缺 jq → 同样退出码 5 ---
 mkdir -p "$tmp/nojq"; for f in "$tmp/nokiro"/*; do ln -sf "$(readlink "$f")" "$tmp/nojq/$(basename "$f")"; done; rm -f "$tmp/nojq/jq"; ln -sf "$tmp/fakebin/kiro-cli" "$tmp/nojq/kiro-cli"
 rc=0; err=$(env -i PATH="$tmp/nojq" HOME="$tmp/home" bash "$PROBE" 2>&1) || rc=$?

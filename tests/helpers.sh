@@ -90,7 +90,9 @@ inline_bodies() {
 # 然后以「过滤失效」的名义失败，把维护者引向错误的方向（与 req_count/inline_bodies 同一理由）。
 # 没匹配到时返回空串而不是让调用方在 pipefail 下直接中止（调用方要能打出自己的诊断）。
 # 用 awk 读完全部输入再只打第一条：`… | head -1` 会在第一行后关管道，上游 printf 收 SIGPIPE → pipefail 下 141 静默退出（15-fix4 #8 / E6）
-meta_row() { printf '%s\n' "$1" | awk 'index($0, "| `") && index($0, " → ") && !done { print; done = 1 }'; }
+# LC_ALL=C（票 18 ⑬）：`index()` 的针是中文箭头，而 macOS 自带 awk（20200816）在 UTF-8 locale 下比较多字节串会出错
+# （D4 修复替身时实测：两条**不同**的中文行被判成相等）。按字节比较结果确定。
+meta_row() { printf '%s\n' "$1" | LC_ALL=C awk 'index($0, "| `") && index($0, " → ") && !done { print; done = 1 }'; }
 
 # 假令牌由片段拼出（15-fix4 #9）：仓库是公开的，密钥扫描器会把 ghp_<36 位> 这类完整形态当真令牌——单测、端到端与替身都从这里取，片段只写一处。
 # 用法：fake_token ghp|gho|ghpat|akia|asia|pem1|pem2|svc|xoxb

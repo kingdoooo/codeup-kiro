@@ -315,7 +315,9 @@ _review_slice_marker() {
 # 模型很容易把 JSON 放进 ```json 围栏里（提示词里的 schema 本身就是围栏形式）。
 # 围栏不是契约的一部分，但它会让 jq 解析失败、把每一次评审都推进降级路径，所以这里宽容处理。
 _review_strip_code_fence() {
-  awk '
+  # LC_ALL=C（票 18 ⑬）：这段 awk 要存下并原样打出**模型文本**，UTF-8 locale 下 BSD awk 遇到无效字节会罢工
+  # （与 review_clean_text 同一理由），而它的判定全是 ASCII 正则，按字节处理结果不变
+  LC_ALL=C awk '
     { line[NR] = $0 }
     END {
       first = 1; last = NR
@@ -1881,7 +1883,7 @@ review_truncate_comment() {
   if [[ $(tail -c1 "$dir/cut" | wc -l | tr -d ' ') -eq 1 ]]; then
     cp "$dir/cut" "$dir/out"
   else
-    awk 'NR > 1 { print prev } { prev = $0 }' "$dir/cut" > "$dir/out"
+    LC_ALL=C awk 'NR > 1 { print prev } { prev = $0 }' "$dir/cut" > "$dir/out"   # 按字节处理（票 18 ⑬）：切出的半个 UTF-8 字符不能让 awk 罢工
   fi
   # iconv 只作兜底（清掉输入本身可能带的非法字节），且**只看输出是否可用，不看退出码**：
   # 实测（macOS）`iconv -f UTF-8 -t UTF-8 -c` 对「EOF 处不完整的字符」以 1 退出，同时照样写出
