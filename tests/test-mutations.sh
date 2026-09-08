@@ -1623,4 +1623,13 @@ T2="$tmp/mr2tree"; mkdir -p "$T2"; ( cd "$T2" && git init -q . && ln -s /etc/hos
 ( set +e; source "$pkg/scripts/lib/isolation.sh"; cd "$T2" && review_isolate_workspace "$tmp/mr2-removed.zlist" >/dev/null 2>&1 )
 assert_eq "$([[ -L "$T2/$(printf 'tabtail\t')" ]] && echo survived || echo gone)" "survived" "M-r2：IFS 切分剥掉尾巴制表符 → 链接幸存——端到端「制表符尾链接被删」断言会失败"
 
+# ============ 票 18 的变异守卫 ============
+# --- M-t137（票 18 ③）：去掉 137 分支 → 忽略 TERM 的挂起被写成「kiro-cli 退出码 137」而不是超时 ---
+# 本用例要等 KIRO_TIMEOUT + 30 秒（-k 30 写死在脚本里）：替身忽略 TERM，只有 KILL 能结束它
+pkg=$(make_mutant m-t137-no-kill-branch 's/\[\[ "\$kiro_rc" == "124" || "\$kiro_rc" == "137" \]\] \&\& die_review/[[ "$kiro_rc" == "124" ]] \&\& die_review/')
+run_case m-t137 "$pkg" MOCK_KIRO_HANG=1 MOCK_KIRO_HANG_IGNORE_TERM=1 KIRO_TIMEOUT=1
+assert_nonzero "$RC" "M-t137：变异体仍以失败退出"
+assert_contains "$OUT" "kiro-cli 退出码 137" "M-t137：137 落到通用文案——端到端「不再写成退出码 137」断言会失败"
+assert_not_contains "$(posted_comment "$OUT")" "超时" "M-t137：失败评论里没有「超时」——端到端「失败评论含超时」断言会失败"
+
 report

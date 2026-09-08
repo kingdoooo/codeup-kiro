@@ -22,6 +22,8 @@
 # 故障注入：
 #   MOCK_KIRO_FAIL=1            chat 失败（退出码 1）
 #   MOCK_KIRO_HANG=1            挂起（验证超时强杀）
+#   MOCK_KIRO_HANG_IGNORE_TERM=1 与 MOCK_KIRO_HANG=1 搭配：忽略 TERM（`trap '' TERM` + 可重入的 sleep 循环），timeout 只能在 -k 之后
+#                               用 KILL 结束它 → 退出码 137（票 18 ③：脚本必须把 137 也当超时）
 #   MOCK_KIRO_EMPTY=1           退出码 0 但输出为空
 #   MOCK_SETTINGS_FAIL=1        settings 子命令失败
 #   MOCK_KIRO_NO_ENGINE_FLAG=1  模拟不支持 --agent-engine 的旧版（--help 不列出、传入即报错）
@@ -176,7 +178,15 @@ if [[ -n "$AGENT_ARG" ]] && ws_scan=$(jq -r '.toolsSettings.read.allowedPaths[0]
 else
   injection_surface_scan > "$M/cwdscan"
 fi
-[[ "${MOCK_KIRO_HANG:-0}" == "1" ]] && sleep 300
+if [[ "${MOCK_KIRO_HANG:-0}" == "1" ]]; then
+  if [[ "${MOCK_KIRO_HANG_IGNORE_TERM:-0}" == "1" ]]; then
+    # GNU timeout 到点时把 TERM 发给整个进程组：`sleep 300` 这个子进程会被杀掉、本进程若只 trap 掉 TERM 会顺着往下跑成「正常退出」。
+    # 所以用「短 sleep + 循环」：每个 sleep 被 TERM 杀掉就再起一个，直到 -k 之后的 KILL 结束本进程（真机里挂死的 kiro-cli 就是这样）
+    trap '' TERM
+    while :; do sleep 1 || true; done
+  fi
+  sleep 300
+fi
 [[ -n "${MOCK_KIRO_STDERR_TEXT:-}" ]] && printf '%s\n' "$MOCK_KIRO_STDERR_TEXT" >&2
 if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
   echo "mock: 模拟 kiro 失败" >&2; exit 1

@@ -1088,7 +1088,9 @@ if [[ "$kiro_rc" -ne 0 ]]; then
   # kiro-cli 自己的 stderr 会引用被评审文件内容、失败请求（含 bearer）——也是评论出口，过掩码再打（第 24 条）；
   # 掩码程序不可用时宁可不打
   tail -20 "$WORK/kiro-stderr.log" 2>/dev/null | review_clean_text | review_redact_secrets --keep-lines >&2 || true
-  [[ "$kiro_rc" == "124" ]] && die_review "Kiro 评审超时（${KIRO_TIMEOUT}s）"
+  # 124 = 到点、TERM 后退出；137 = 子进程忽略 TERM、`-k 30` 之后被 KILL（128+9，GNU timeout 文档）。两种都是超时（票 18 ③）：
+  # 137 落到下面的通用分支时 MR 上只剩「kiro-cli 退出码 137」这种不可行动的信息。写成一行：变异测试删掉 137 那一半即模拟「漏判」。
+  [[ "$kiro_rc" == "124" || "$kiro_rc" == "137" ]] && die_review "Kiro 评审超时（${KIRO_TIMEOUT}s$([[ "$kiro_rc" == "137" ]] && printf '；进程未响应 TERM，已强制结束')）"
   die_review "Kiro 评审失败（kiro-cli 退出码 ${kiro_rc}）"
 fi
 [[ -s "$WORK/stream.jsonl" ]] || die_review "Kiro 退出码为 0 但事件流为空"

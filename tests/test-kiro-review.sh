@@ -337,6 +337,17 @@ assert_contains "$OUT" "评审未完成" "空输出：回写说明评论"
 run_case hang MOCK_KIRO_HANG=1 KIRO_TIMEOUT=3
 assert_nonzero "$RC" "挂起：超时后非零退出"
 assert_contains "$OUT" "评审未完成" "挂起：回写说明评论"
+assert_contains "$OUT" "Kiro 评审超时（3s）" "挂起：124 按超时点名 KIRO_TIMEOUT"
+assert_contains "$(posted_comment "$OUT")" "超时" "挂起：失败评论含「超时」"
+
+# ============ 失败路径：挂起且忽略 TERM → timeout -k 30 以 KILL 结束、退出码 137 也算超时（票 18 ③）============
+# 真机里挂死的 kiro-cli 就是这个形态：TERM 无响应、30 秒后被 KILL。137 不能落到「kiro-cli 退出码 137」那条通用文案里——
+# 那对运维是不可行动的信息。本用例要等 KIRO_TIMEOUT + 30 秒（-k 30 写死在脚本里）。
+run_case hang137 MOCK_KIRO_HANG=1 MOCK_KIRO_HANG_IGNORE_TERM=1 KIRO_TIMEOUT=1
+assert_nonzero "$RC" "挂起忽略 TERM：非零退出"
+assert_contains "$OUT" "Kiro 评审超时（1s；进程未响应 TERM，已强制结束）" "挂起忽略 TERM：137 按超时处理并点明强杀"
+assert_contains "$(posted_comment "$OUT")" "超时" "挂起忽略 TERM：失败评论含「超时」"
+assert_not_contains "$OUT" "kiro-cli 退出码 137" "挂起忽略 TERM：不再写成不可行动的「退出码 137」"
 
 # ============ 失败路径：settings 设置失败 → 隔离不成立，不启动 Kiro，回写"评审未完成" ============
 run_case settingsfail MOCK_SETTINGS_FAIL=1
