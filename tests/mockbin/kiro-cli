@@ -47,6 +47,8 @@
 #   MOCK_KIRO_TRUNCATED=1       finalText 被截断且 finalTextTruncated=true（→ 降级原因应点明截断）
 #   MOCK_KIRO_LEAK_SECRET=1     无标记且原文里带未掩码的真实形态密钥（→ 脚本侧掩码应生效）
 #   MOCK_KIRO_NO_STREAM_FLAG=1  模拟 --help 不列出 --output-format 的版本（→ 脚本应拒绝运行）
+#   MOCK_KIRO_FFFD=1            在最终消息末尾追加一句含 3 个 U+FFFD（EF BF BD）的正文——**对上面每个分支都生效**
+#                               （D4 的 MR #1 运行 #32 实测：服务端存的就是替换符）。脚本应只记一行日志、不改文本、不降级
 #
 # 配置的来路（票 15 / 15-fix #14 / 15-fix2 #18 #19）：生产脚本用 `env -i` + 许可清单启动 kiro-cli，MOCK_* 这类变量到不了本替身。
 # 替身只从 **$HOME/.kiro-mock/** 取配置与写记录（HOME 在固定名单里、每个用例各有 $CASE/home；不借道 KIRO_ENV_PASSTHROUGH——
@@ -265,6 +267,9 @@ elif [[ "${MOCK_KIRO_NO_MARKER:-0}" == "1" ]]; then
 else
   FINAL=$(printf '我已读取 src/app.py 并完成评审，结果如下。\n\n%s\n%s\n%s\n' "$MS" "$CONTRACT" "$ME")
 fi
+# U+FFFD 注入（票 18 ⑬）：放在分支之后，所以契约分支与降级分支（无标记 / 坏 JSON）都能用同一个开关
+[[ "${MOCK_KIRO_FFFD:-0}" == "1" ]] && FINAL="${FINAL}"$'\n'"末尾一句：没有"$'\357\277\275\357\277\275\357\277\275'"闭的引号"
+
 SID="mock-0000-1111-2222-333344445555"
 emit() { jq -nc "$@"; }
 emit '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1,engine:"v2"}}'

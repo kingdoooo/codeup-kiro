@@ -8,6 +8,16 @@ set -euo pipefail
 cd "$(dirname "$0")"
 errdir=$(mktemp -d); trap 'rm -rf "$errdir"' EXIT
 DIAG_RE='unexpected EOF|command substitution|syntax error|unbound variable'
+# 已跑完的那些 stderr 里有没有 bash 解析诊断：命中就打出来并返回 1。**每个退出点之前都要跑一次**——
+# 原先只在全绿之后跑，某个套件先失败时 fail-fast 直接退出、这个块永远不打，而解析错误最常与失败同时出现。
+diag_check() {
+  local bad
+  bad=$(grep -HnE "$DIAG_RE" "$errdir"/*.err 2>/dev/null | sed "s#^${errdir}/##" || true)
+  [[ -n "$bad" ]] || return 0
+  echo "=== bash 解析诊断：以下 stderr 行说明测试脚本自身有解析错误（断言报 OK 也算整体失败）===" >&2
+  printf '%s\n' "$bad" >&2
+  return 1
+}
 t0=$SECONDS
 for t in test-*.sh; do
   echo "=== ${t} ==="
@@ -15,12 +25,8 @@ for t in test-*.sh; do
   rc=0; bash "$t" 2> "$errdir/${t}.err" || rc=$?
   cat "$errdir/${t}.err" >&2
   echo "--- ${t}: ${rc} · $((SECONDS - t1))s"
-  [[ "$rc" == "0" ]] || exit "$rc"
+  # 失败即止（后面的套件不跑），但**先**把已跑完那些的解析诊断打出来；退出码保留失败套件自己的
+  [[ "$rc" == "0" ]] || { diag_check || true; exit "$rc"; }
 done
-bad=$(grep -HnE "$DIAG_RE" "$errdir"/*.err | sed "s#^${errdir}/##" || true)
-if [[ -n "$bad" ]]; then
-  echo "=== bash 解析诊断：以下 stderr 行说明测试脚本自身有解析错误（断言报 OK 也算整体失败）===" >&2
-  printf '%s\n' "$bad" >&2
-  exit 1
-fi
+diag_check || exit 1
 echo "=== 全部测试通过（$((SECONDS - t0))s）==="

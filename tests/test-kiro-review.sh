@@ -402,6 +402,13 @@ assert_contains "$comment" "没有$(printf '\357\277\275\357\277\275\357\277\275
 assert_contains "$comment" "P0 1 · P1 1 · P2 1" "含 U+FFFD：其余渲染照常"
 run_case nofffd
 assert_not_contains "$OUT" "U+FFFD" "不含 U+FFFD：没有这行日志"
+# 降级路径也要留痕：D4 那次的替换符出现在**模型输出**里，而不守契约时（无标记）契约 JSON 是空的，
+# 只数契约文件会让降级路径完全没有这行日志——而降级评论恰恰是把整段原文贴出去的那条路径。
+run_case fffddegrade MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_FFFD=1
+assert_rc "$RC" 0 "降级 + 含 U+FFFD：退出码 0"
+assert_contains "$OUT" "结构化解析失败" "降级 + 含 U+FFFD：走降级路径"
+assert_contains "$OUT" "降级贴出的评审员原文含 3 个 U+FFFD 替换符" "降级 + 含 U+FFFD：降级路径同样留痕，且场景词点明是原文"
+assert_contains "$(posted_comment "$OUT")" "没有$(printf '\357\277\275\357\277\275\357\277\275')闭的引号" "降级 + 含 U+FFFD：原文里的替换符原样贴出（不改文本）"
 
 # ============ 票 18 ⑩：jq 版本预检（契约校验用 halt_error，需要 jq ≥ 1.6）============
 # 替身 jq 只改写 --version 的输出，其余调用透传给真 jq——脚本必须在第 0 步就拒绝运行（更老的 jq 会在 halt_error 处退 3，

@@ -99,6 +99,25 @@ assert_eq "$(LC_ALL=C grep -c 'kiro-cli chat --no-interactive --agent-engine v2'
   "⑫：探测里拼 kiro-cli 命令只有一处（run_case 与 run_case_agent 都走 _probe_run）"
 assert_rc "$(bash -n "$ROOT/scripts/probe/probe-kiro-headless.sh" && echo 0 || echo 1)" 0 "⑫：probe-kiro-headless.sh 语法合法"
 
+# ============ 票 18 ⑦：run-tests.sh 的 bash 解析诊断守卫（行为测试，不是静态断言）============
+# 用两个假测试文件跑一遍真实的 run-tests.sh：一个「断言报 OK 但自身有解析错误」、一个干净的。
+# 两条要求：① 全绿时也要因解析诊断整体失败并打出那几行；② **有套件失败时诊断照样要跑**——
+# 否则「命中即整体失败」只在其它套件都通过时成立，而解析错误恰恰最常与失败同时出现。
+rt_probe() { # <失败套件？yes|no> → stdout: "<rc>|<有没有诊断块>"
+  local withfail="$1" d rc=0 out
+  d=$(mktemp -d)
+  cp "$ROOT/tests/run-tests.sh" "$d/"
+  # 要复现 ⑦ 真正修的那个形态：解析错误在**命令替换内部**（运行期报错），文件本身照样以 0 退出、断言照样报 OK
+  printf '#!/usr/bin/env bash\necho "x ``` %sy" >/dev/null\necho "z ``` w" >/dev/null\necho OK\n' "'" > "$d/test-aaa.sh"
+  printf '#!/usr/bin/env bash\necho OK\n' > "$d/test-bbb.sh"
+  [[ "$withfail" == "yes" ]] && printf '#!/usr/bin/env bash\necho "别的原因失败" >&2; exit 3\n' > "$d/test-ccc.sh"
+  out=$(bash "$d/run-tests.sh" 2>&1) || rc=$?
+  printf '%s|%s' "$rc" "$([[ "$out" == *"bash 解析诊断"* ]] && echo 有 || echo 无)"
+  rm -rf "$d"
+}
+assert_eq "$(rt_probe no)" "1|有" "⑦：全绿但有解析诊断 → 整体以 1 退出并打出诊断块"
+assert_eq "$(rt_probe yes)" "3|有" "⑦：有套件失败时保留该套件的退出码，且诊断块照样打出来（不能被 fail-fast 跳过）"
+
 # ============ 票 18 ⑬：awk locale 静态守卫 ============
 # macOS 自带 awk（20200816）在 UTF-8 locale 下会把两条**不同**的中文行判成相等（D4 修复替身时实测：
 # `=== 变更元信息 ===` == `=== 评审输入开始 ===` 为真，LC_ALL=C 下正确），而且遇到无效 UTF-8 字节会直接罢工。

@@ -1216,11 +1216,17 @@ esac
 # 同一句在本机过 review_redact_secrets / review_sanitize_md 字节不变，所以不是脚本掩码或清洗切坏的，判为 kiro-cli 流式解码
 # 或模型侧。这里只**记一行日志**：不改文本（改了就改写了评审员的话）、不降级（内容仍然可读，读者能自己判断）。
 # 按字节数 EF BF BD 计数（LC_ALL=C）；契约提取失败时 contract.json 里是别的东西，所以只在 rc 0/4/5/6 之后这一处数。
-_fffd=$(LC_ALL=C awk '{ n += gsub(/\357\277\275/, "") } END { print n + 0 }' "$WORK/contract.json" 2>/dev/null) || _fffd=0
-[[ "$_fffd" =~ ^[0-9]+$ ]] || _fffd=0
-[[ "$_fffd" == "0" ]] \
-  || log "注意：模型输出含 ${_fffd} 个 U+FFFD 替换符（kiro-cli 流式解码 / 模型侧；本地掩码与清洗对同一句字节不变），已原样保留——不改文本、不降级"
-unset _fffd
+# 两条路径都要数（票 18 ⑬）：结构化路径数契约 JSON，降级路径数贴出去的原文——降级恰恰是把整段模型输出贴到 MR 上的那条路径，
+# 只数契约文件的话它完全没有这行日志（契约没解析出来时那个文件是空的）。函数只有一份，两处调用。
+# 按字节数 EF BF BD 的**出现次数**（awk gsub；BSD grep 的 `-c` 会盖掉 `-o`，一行三个会被记成 1）。
+_log_fffd() {  # <文件> <场景词>
+  local n
+  n=$(LC_ALL=C awk '{ n += gsub(/\357\277\275/, "") } END { print n + 0 }' "${1-}" 2>/dev/null) || n=0
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  [[ "$n" == "0" ]] && return 0
+  log "注意：${2}含 ${n} 个 U+FFFD 替换符（kiro-cli 流式解码 / 模型侧；本地掩码与清洗对同一句字节不变），已原样保留——不改文本、不降级"
+}
+_log_fffd "$WORK/contract.json" "模型输出"
 
 DEGRADE_REASON=""; DEGRADE_DETAIL=""
 case "$extract_rc" in
@@ -1281,6 +1287,7 @@ if [[ -n "$DEGRADE_REASON" ]]; then
   [[ "$final_rc" == "0" ]] || die_review "结构化解析失败，且取评审员原文也失败（rc=${final_rc}）"
   review_clean_text < "$WORK/final.txt" > "$WORK/raw.md"
   [[ -s "$WORK/raw.md" ]] || die_review "结构化解析失败，且评审员输出为空"
+  _log_fffd "$WORK/raw.md" "降级贴出的评审员原文"   # 票 18 ⑬：契约没解析出来时上面那次数的是空文件，这条路径要自己数一次
   # 降级评论只带 REVIEW_NOTICE（版本 / 环境类）：INLINE_NOTICE 是关于分桶的提示，放进一份没有问题清单的评论里没有意义（15-fix4 #3 / A7）。
   # --notice "" 是已验证的 no-op（解析器接受空值、渲染器按 [[ -n ]] 判断），不需要一次性数组与空数组守卫。
   review_render_degraded --text "$WORK/raw.md" --reason "${DEGRADE_REASON}${DEGRADE_DETAIL:+（${DEGRADE_DETAIL}）}" --notice "$REVIEW_NOTICE" "${render_args[@]}" \
