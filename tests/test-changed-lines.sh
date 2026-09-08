@@ -171,7 +171,7 @@ bad=$(printf 'diff --git a/z.py b/z.py\n--- a/z.py\n+++ b/z.py\n@@ 这不是 hun
 j=$(printf '%s\n' "$bad" | review_changed_lines)
 assert_eq "$(lines_of "$j" z.py)" "2" "畸形 hunk 头被忽略，+0,0 不产生行号，合法的 @@ -1 +2 @@ 仍解析为第 2 行"
 
-# ============ 构建机的 git 配置不能改变解析结果（_git_diff_pinned 的职责）============
+# ============ 执行器的 git 配置不能改变解析结果（_git_diff_pinned 的职责）============
 # 这些配置都能悄悄改掉 patch 的形态，而改掉之后**不报错**：变更行集合会变成空集合或带前缀的键，
 # 于是所有问题都被判成「未定位」，一条行内评论都发不出，日志里也看不出是配置问题。
 m_first()  { printf 'l1\nl2\n' > cfg.py; }
@@ -182,7 +182,7 @@ assert_eq "$(lines_of "$(changed_json "$d")" cfg.py)" "3" "前置：默认配置
 #    而 `-c diff.noprefix=false` 拦不住它——只有命令行的 --dst-prefix 能覆盖
 raw=$( (cd "$d" && git -c diff.dstPrefix=DST/ diff --no-ext-diff --no-renames -U0 HEAD~1 HEAD) )
 assert_contains "$raw" "+++ DST/cfg.py" "前置：diff.dstPrefix 确实会改掉 +++ 行的前缀"
-# GIT_CONFIG_COUNT/KEY/VALUE 模拟「构建机的 gitconfig 里就写着这些」，比 -c 更贴近真实场景
+# GIT_CONFIG_COUNT/KEY/VALUE 模拟「执行器的 gitconfig 里就写着这些」，比 -c 更贴近真实场景
 for cfg in diff.dstPrefix=DST/ diff.srcPrefix=SRC/ diff.noprefix=true diff.mnemonicPrefix=true; do
   j=$( (cd "$d" && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="${cfg%%=*}" GIT_CONFIG_VALUE_0="${cfg#*=}" \
         _git_diff_pinned --no-renames -U0 HEAD~1 HEAD) | review_changed_lines )

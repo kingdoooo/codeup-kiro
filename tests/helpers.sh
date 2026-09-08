@@ -106,6 +106,7 @@ fake_token() {
     pem2)  printf '%s%s' "MIIEvQIBADANBgkqhkiG9w0BAQEF" "AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4" ;;   # 尾巴像随机 base64（16-fix4 第 26 条：块外判定看类别切换率，原 fake02 只有 0.28）
     svc)   printf 'svc_SECRET_%s' "9f3ab21c7de4" ;;        # 合法标识符形态、本身像密钥的名字
     xoxb)  printf 'xoxb_%s_%s' "123456" "abcdef" ;;         # 下划线形态（真实 Slack 令牌带连字符）
+    awssecret) printf '%s%s' "wJalrXUtnFEMI/K7MDENG" "/bPxRfiCYEXAMPLEKEY" ;;   # AWS 秘密访问密钥形态（含 / 的 40 位）；替身的降级原文用它
     *) echo "fake_token: 未知类型 [$1]" >&2; return 2 ;;
   esac
 }
@@ -193,6 +194,35 @@ assert_no_secrets() {  # 内容 说明前缀：三种原文都不在（掩码形
   assert_not_contains "$1" "$SEC_AKIA" "$2：AKIA 形态原文不出现"
   assert_not_contains "$1" "$SEC_B64" "$2：base64 补位形态原文不出现"
 }
+# 从 DRY_RUN 输出里取出将要回写的评论正文（票 18 ⑫：test-kiro-review.sh 与 test-mutations.sh 原先各写一份同款实现）。
+# OUT 同时含日志与超长时回显的全文，有些断言必须只看评论本身：取**最后**一处 `DRY_RUN body: ` 之后的那个 JSON 对象
+# （按花括号配平截出来，正文里的 `}` 都在 JSON 字符串里、已转义），再解出 .content。
+# 用 python3 而不是 jq：body 后面可能紧跟别的日志行，jq 需要先切出恰好一个 JSON 值——那正是这段配平在做的事。
+# 用法：posted_comment "$OUT"
+posted_comment() {
+  printf '%s' "$1" | python3 -c '
+import json, sys
+s = sys.stdin.read()
+i = s.rfind("DRY_RUN body: ")
+if i < 0:
+    sys.exit(0)
+b = s[i + len("DRY_RUN body: "):]
+d = 0
+for n, ch in enumerate(b):
+    if ch == "{":
+        d += 1
+    elif ch == "}":
+        d -= 1
+        if d == 0:
+            b = b[:n + 1]
+            break
+try:
+    sys.stdout.write(json.loads(b).get("content", ""))
+except Exception:
+    pass
+'
+}
+
 # --- PEM 夹具常量与掩码探针（票 18 ⑪：test-review-render.sh 与 test-mutations.sh 原先各写一份同值同注释的定义）---
 # 完整 PEM 头字面量不进源码（Code Defender 会拦），所以由片段拼出。两个占位符不在这里另写一份：
 # 它们的唯一取值是库里的 REVIEW_PEM_PLACEHOLDER / REVIEW_PEM_BODY_PH（本文件顶部已 source scripts/lib/isolation.sh，

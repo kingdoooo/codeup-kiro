@@ -71,7 +71,7 @@ KIRO_INSTALL_URL="${KIRO_INSTALL_URL:-https://cli.kiro.dev/install}"
 PROMPT_FILE="${PROMPT_FILE:-${PKG_ROOT}/prompts/review-prompt.md}"
 AGENT_FILE="${PKG_ROOT}/kiro/agent-codeup-reviewer.json"
 REVIEW_REPO_DIR="${REVIEW_REPO_DIR:-$PWD}"
-# Kiro 进程环境许可清单之外要额外透传的变量**名**（逗号分隔，只放名字不放值；自建执行机可能需要 LD_LIBRARY_PATH /
+# Kiro 进程环境许可清单之外要额外透传的变量**名**（逗号分隔，只放名字不放值；自建执行器可能需要 LD_LIBRARY_PATH /
 # JAVA_HOME / AWS_PROFILE 这类；凭证形状的名字按规则拒绝，AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 显式放行）。固定名单与校验在 scripts/lib/kiro-agent.sh 的 kiro_env_allowlist；
 # 非法名字在第 1.6 步拒绝运行。
 KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
@@ -321,7 +321,7 @@ inline_bail_to() { # <状态> <to_ps> <to_commit 原值> <head 全 sha>
       inline_bail "行内评论未发出：Codeup 版本列表尚未包含本次提交（${head:0:12}，版本列表滞后），下面是完整问题清单；重跑流水线即可。" \
         "警告：Codeup 版本列表仍未包含本次提交（${head:0:12}），最新合并源版本是它的祖先（${INLINE_TO_NORM:0:12}）——本次不发任何行内评论（fail-closed，ADR-0005）：绑到旧版本上会挂错位置；重跑流水线即可" ;;
     unknown_shallow)
-      inline_bail "行内评论未发出：无法确认 Codeup 侧最新合并源版本（${raw:0:12}）与本次评审的提交（${head:0:12}）的关系——构建机上是浅克隆且加深失败，下面是完整问题清单；放开克隆深度后重跑流水线即可。" \
+      inline_bail "行内评论未发出：无法确认 Codeup 侧最新合并源版本（${raw:0:12}）与本次评审的提交（${head:0:12}）的关系——执行器上是浅克隆且加深失败，下面是完整问题清单；放开克隆深度后重跑流水线即可。" \
         "警告：最新合并源版本的提交（${raw:0:12}）在浅克隆里解析不出、加深也失败——无从判定成因（可能是新推送，也可能是 graft 边界之下的旧提交），本次不发任何行内评论（fail-closed，ADR-0005）" ;;
     diverged)
       inline_bail "行内评论未发出：Codeup 侧最新合并源版本（${INLINE_TO_NORM:0:12}）与本次评审的提交（${head:0:12}）不在同一条历史上（源分支被改写或强推），下面是完整问题清单；新推送触发的评审会补上行内评论。" \
@@ -768,7 +768,7 @@ publish_inline_comments() {
 
 # --- 0. 依赖与必填变量检查（timeout 为强制依赖，不允许无超时运行）---
 for cmd in git curl jq; do
-  command -v "$cmd" >/dev/null || die "缺少依赖：${cmd}（请在构建机安装）"
+  command -v "$cmd" >/dev/null || die "缺少依赖：${cmd}（请在执行器安装）"
 done
 # jq ≥ 1.6（票 18 ⑩）：契约校验的前置断言用 `halt_error(n)` 给退出码（1.6 引入），更老的 jq 会在那里报「halt_error/1 is not defined」
 # 并退 3——那会被当成「受信 agent 未生效」，把一个环境问题写成安全结论。版本号取 `jq-1.7.1-apple` 里的 X.Y，取不到就只告警不拒绝
@@ -777,7 +777,7 @@ _jq_ver=$(jq --version 2>/dev/null | LC_ALL=C sed -nE 's/^jq-?[[:space:]]*([0-9]
 if [[ -n "$_jq_ver" ]]; then
   read -r _jq_major _jq_minor <<<"$_jq_ver"
   [[ "$_jq_major" -gt 1 || ( "$_jq_major" -eq 1 && "$_jq_minor" -ge 6 ) ]] \
-    || die "jq 版本过低（$(jq --version 2>/dev/null)）：契约校验依赖 halt_error（jq ≥ 1.6）。请在构建机升级 jq"
+    || die "jq 版本过低（$(jq --version 2>/dev/null)）：契约校验依赖 halt_error（jq ≥ 1.6）。请在执行器升级 jq"
 else
   echo "[kiro-review] 警告：认不出 jq 版本（$(jq --version 2>&1 | head -1)），本集成包要求 jq ≥ 1.6（契约校验用 halt_error）" >&2
 fi
@@ -895,12 +895,12 @@ unset _v
 env_allowlist_or_die() { kiro_env_allowlist || die_review "KIRO_ENV_PASSTHROUGH 不合法：${KIRO_ENV_ALLOW_ERROR}。请修正该流水线变量"; }
 env_allowlist_or_die
 
-# --- 2. 安装/检测 kiro-cli（失败用 die_review：网络受限的构建机上这是最常见的失败，
+# --- 2. 安装/检测 kiro-cli（失败用 die_review：网络受限的执行器上这是最常见的失败，
 #        原来用 die 会让 MR 上什么都看不到、只有流水线标红，违反 I10）---
 if ! command -v kiro-cli >/dev/null; then
-  log "kiro-cli 不存在，尝试安装（云托管构建机场景）……"
+  log "kiro-cli 不存在，尝试安装（云托管执行器场景）……"
   curl -fsSL --connect-timeout 10 --max-time 300 "$KIRO_INSTALL_URL" | bash \
-    || die_review "kiro-cli 安装失败。网络受限时请使用自建构建机预装固定版本，或配置 HTTP_PROXY/HTTPS_PROXY（见 pipeline/setup-guide.md）"
+    || die_review "kiro-cli 安装失败。网络受限时请使用自建执行器预装固定版本，或配置 HTTP_PROXY/HTTPS_PROXY（见 pipeline/setup-guide.md）"
   command -v kiro-cli >/dev/null || export PATH="$HOME/.local/bin:$PATH"
   command -v kiro-cli >/dev/null || die_review "安装后仍找不到 kiro-cli，请检查安装日志中的 PATH 提示"
 fi
@@ -958,7 +958,7 @@ grep -q -- '--output-format' <<<"$KIRO_CHAT_HELP" \
 # 取法在 kiro_cli_version（scripts/lib/kiro-agent.sh，探测脚本共用，15-fix4 #7）：stdout / stderr 分开捕获、按程序名锚定——stderr 上先到的
 # 升级提示「A new version (2.30.0) …」不能被当成已装版本；版本打到 stderr 的 CLI 仍取得到（15-fix3 #8）。--version 退出码非零 → 失败评论：
 # 连 --version 都跑不起来的 CLI，不该再在 chat 上烧掉整个 KIRO_TIMEOUT。
-kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" || die_review "kiro-cli 无法运行，拒绝评审；请检查构建机上的 kiro-cli 安装" "$KIRO_CLI_VERSION_ERROR"   # stderr 尾巴是不受信取值：走第二参数过掩码（合并后复审第 13 条）
+kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" || die_review "kiro-cli 无法运行，拒绝评审；请检查执行器上的 kiro-cli 安装" "$KIRO_CLI_VERSION_ERROR"   # stderr 尾巴是不受信取值：走第二参数过掩码（合并后复审第 13 条）
 if [[ -z "$KIRO_CLI_VERSION" || " $KIRO_TESTED_VERSIONS " != *" $KIRO_CLI_VERSION "* ]]; then
   REVIEW_NOTICE="注意：本次 kiro-cli 版本 ${KIRO_CLI_VERSION:-未知} 未经 P1-15 探测（已探测：${KIRO_TESTED_VERSIONS}），读取边界依赖未验证的路径解析行为（符号链接 / ../ 是否先解析再比对 allowedPaths）；请按 scripts/probe/README.md「升级 kiro-cli 之后」跑一次探测。"
   log "警告：${REVIEW_NOTICE}"
@@ -969,7 +969,7 @@ fi
 # 认不出自己的评论、重跑会在同一行上堆重复评论（违反 I6 幂等）。与 timeout 同理列为硬依赖。
 if [[ "$INLINE_COMMENT" == "1" ]]; then
   command -v sha1sum >/dev/null || command -v shasum >/dev/null \
-    || die_review "INLINE_COMMENT=1 需要 sha1sum 或 shasum 计算行内评论标记里的指纹（缺了下次评审认不出自己的评论，重跑会发重复评论）。请在构建机安装 coreutils 或 perl"
+    || die_review "INLINE_COMMENT=1 需要 sha1sum 或 shasum 计算行内评论标记里的指纹（缺了下次评审认不出自己的评论，重跑会发重复评论）。请在执行器安装 coreutils 或 perl"
 fi
 
 # --- 4. 生成 diff（merge-base 三点比较；浅克隆自动加深）---
@@ -1005,10 +1005,10 @@ if [[ "$INLINE_COMMENT" == "1" ]]; then
     || die_review "变更行集合不是合法 JSON 对象（行号校验完全依赖它，宁可失败也不能把评论发到错的行上）"
   log "变更行集合：$(jq -r 'length' "$WORK/changed-lines.json") 个文件、$(jq -r '[.[][] | (.[1] - .[0] + 1)] | add // 0' "$WORK/changed-lines.json") 行可定位"
   # diff 非空却一个可定位行都没算出来：正常改动不会这样（纯删除的 MR 会，但那时也确实无处可挂）。
-  # 更常见的成因是构建机上还有别的 diff 配置改了输出形态。此时所有问题都会落进「未定位」，
+  # 更常见的成因是执行器上还有别的 diff 配置改了输出形态。此时所有问题都会落进「未定位」，
   # 而阿里云侧开发者看不到上面那行日志，所以必须在汇总评论里说明（I10）。
   if [[ -s "$WORK/inline.diff" && "$(jq -r 'length' "$WORK/changed-lines.json")" == "0" ]]; then
-    INLINE_NOTICE="本次没能从 diff 里算出任何可定位的新增/修改行，因此全部问题都归入「未定位问题」。若本次改动确有新增行，请检查构建机的 git diff 配置。"
+    INLINE_NOTICE="本次没能从 diff 里算出任何可定位的新增/修改行，因此全部问题都归入「未定位问题」。若本次改动确有新增行，请检查执行器的 git diff 配置。"
     log "警告：${INLINE_NOTICE}"
   fi
 fi
@@ -1048,7 +1048,7 @@ log "隔离：已移除业务库工作树中 ${_iso_agents} 个 AGENTS.md、${_i
 unset _iso_agents _iso_kiro _iso_links _iso_lsp
 # 执行环境：禁止 Kiro 继承工作区默认资源（AGENTS.md/README.md 等），只对 v2 引擎有效（ADR-0004）。
 # 它依赖上面对 .kiro/ 的删除（见 ①），本身只覆盖「AGENTS.md 没删干净 / 藏在别处」这一种漏网情形。
-# 写入的是执行器 $HOME 的全局设置且刻意不回滚（spec I1）：常驻构建机上它保持为 true 只会更严格。
+# 写入的是执行器 $HOME 的全局设置且刻意不回滚（spec I1）：常驻执行器上它保持为 true 只会更严格。
 ( cd "$KIRO_CWD" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli settings chat.disableInheritingDefaultResources true ) || die_review "隔离失败：无法设置 kiro-cli chat.disableInheritingDefaultResources=true"
 log "隔离：已设置 chat.disableInheritingDefaultResources=true"
 
@@ -1245,7 +1245,7 @@ else
 fi
 [[ -s "$WORK/comment.md" ]] || die_review "渲染后的评论为空"
 # 文档级兜底掩码（票 16 / 16-fix2 方案 C，spec I3 修订）：validated.json 派生的文本已在字段级掩过，这一遍严格保行地兜住
-# 绕过 validated.json 的输出面（元信息表里的分支名、由 API 字符串拼出的 notice、降级原文）。放在渲染之后、**截断之前**：
+# 绕过 validated.json 的评论出口（元信息表里的分支名、由 API 字符串拼出的 notice、降级原文）。放在渲染之后、**截断之前**：
 # comment.full.md（截断前副本）与下面两处打进流水线日志的全文因此天然是掩码后的，截断量的是掩码后的字节数——依赖的是
 # 这个**顺序**，不是「掩码只会变短」（1 字节的值会掩成 `****`、降级原文里的 PEM 会多出占位与提示行，掩码可能变长）。
 # 降级评论在渲染时已掩过一次，这里再过一遍是幂等的（golden 断言过）。掩码失败 → 失败评论：绝不能把未掩码的原文继续往下送；

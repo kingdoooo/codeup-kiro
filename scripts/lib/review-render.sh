@@ -30,6 +30,14 @@
 
 # 严重级别的中文标签与排序权重。级别词汇以 CONTEXT.md 为准：P0 必须修复 / P1 应当修复 / P2 可选改进。
 REVIEW_SEVERITIES="P0 P1 P2"
+# 级别 → 排序权重的 jq 映射只此一份（票 18 ⑫：原先 review_plan_inline 的 sevrank、review_inline_overlaps 的 rank、
+# _review_fold_levels 的 sort_by 各写一份 `{"P0":0,"P1":1,"P2":2}`）。两种缺省语义不同，所以给两个名字：
+#   sevrank —— 未知级别排最后（3），用于排序；rank —— 未知级别是 null，用于「级别不低于」的门槛比较（null 不压任何级别）。
+_REVIEW_JQ_SEVRANK='
+  def _sevmap: {"P0": 0, "P1": 1, "P2": 2};
+  def sevrank: _sevmap[.] // 3;
+  def rank: _sevmap[.] // null;
+'
 
 # 汇总评论的标题（成功 / 降级 / 失败三条同形）。一级标题、不带图标（用户要求，2026-09-04）。
 # kiro-review.sh 的最小失败评论也用 REVIEW_TITLE_FAILED，不要再手写第二份字面量。
@@ -801,8 +809,7 @@ review_plan_inline() {
     max="$REVIEW_MAX_INLINE_DEFAULT"
   fi
   jq -c --slurpfile changed "$changed" --argjson max "$max" \
-        --arg profile "$profile" --arg levels "$levels" --arg notice "$notice" '
-    def sevrank: {"P0":0,"P1":1,"P2":2}[.] // 3;
+        --arg profile "$profile" --arg levels "$levels" --arg notice "$notice" "$_REVIEW_JQ_SEVRANK"'
     def ordered: sort_by([(.severity | sevrank), (.file // ""), (.line_start // 0), .idx]);
     ($changed[0] // {}) as $cl
     | ($levels | split(" ")) as $elig
@@ -1055,8 +1062,7 @@ review_inline_overlaps() {
   [[ -z "$sev" || "$sev" =~ ^P[0-2]$ ]] || { echo "review_inline_overlaps: 级别不是 P0/P1/P2：${sev}" >&2; return 2; }
   if (( end < start )); then t="$start"; start="$end"; end="$t"; fi
   hits=$(jq -r --arg f "$file" --argjson s "$start" --argjson e "$end" --arg sev "$sev" \
-            --argjson tol "$REVIEW_INLINE_DEDUP_TOLERANCE" '
-    def rank: {"P0": 0, "P1": 1, "P2": 2}[.] // null;
+            --argjson tol "$REVIEW_INLINE_DEDUP_TOLERANCE" "$_REVIEW_JQ_SEVRANK"'
     (if type == "array" then . else [] end)
     | .[]
     | select(type == "object" and .file == $f and (.start | type) == "number" and (.end | type) == "number")
@@ -1651,8 +1657,8 @@ _review_render_fold_section() {
 
 # 档位桶/超限桶里实际出现的级别，升序连成 `P0/P1`
 _review_fold_levels() {
-  jq -r --arg b "$2" '[(.folded[$b] // [])[] | .severity] | unique
-                      | sort_by({"P0":0,"P1":1,"P2":2}[.] // 3) | join("/")' "$1"
+  jq -r --arg b "$2" "$_REVIEW_JQ_SEVRANK"'[(.folded[$b] // [])[] | .severity] | unique
+                      | sort_by(sevrank) | join("/")' "$1"
 }
 
 # _review_render_folded <计划文件>：折叠区整块（为空时整体省略，不发一个空折叠块）
@@ -2362,7 +2368,10 @@ review_redact_json() {
   # 两份倒出只差第一行的字段清单，所以走同一个 _review_dump_fields（票 18 ⑪）：**发射约定**（每个字段后跟一行
   # `<pre><序号><suf>`）只在那里定义一次，切回时按同一个序号取——两份程序各写一遍的话，错位的后果是 title 拿到 category 的
   # 内容而 rc 仍是 0（评论里的标题与分类静静地对调，没有任何守卫会响）。
-  if ! _review_dump_fields "$file" '[.verdict, (.findings[] | .title, .id, .category)]' "$pre" "$suf" > "$dir/dump-k" \
+  # verdict_raw 也进 dump-k（票 18 ⑫）：它是**模型原值**（契约外结论折行截 80 字），原先只经 _untrusted_for_log 打一行日志，
+  # 却照样留在 validated.json 里、跟着流进 plan.json——那份文件是渲染器与折叠区的输入，一个未掩码的模型取值不该待在那里。
+  # 单行槽位（保行模式）：它要渲染进一行日志，不能被 PEM 规则变成两行。
+  if ! _review_dump_fields "$file" '[.verdict, .verdict_raw, (.findings[] | .title, .id, .category)]' "$pre" "$suf" > "$dir/dump-k" \
      || ! _review_dump_fields "$file" '[.summary, .verdict_reason, (.findings[] | .body, .fix)]' "$pre" "$suf" > "$dir/dump-f"; then
     rm -rf "$dir"; echo "review_redact_json: 倒出字段失败：${file}" >&2; return 1
   fi
@@ -2375,9 +2384,11 @@ review_redact_json() {
   if ! _review_jq_inplace "$file" review_redact_json "回注字段" -c --rawfile mk "$dir/masked-k" --rawfile mf "$dir/masked-f" --arg re "${sre}"$'\n' '
         ($mk | split($re; null) | map(rtrimstr("\n"))) as $k
         | ($mf | split($re; null) | map(rtrimstr("\n"))) as $f
-        | .verdict = $k[0] | .summary = $f[0] | .verdict_reason = $f[1]
+        # 切回约定：与 _review_dump_fields 的发射顺序成对——dump-k 是 [verdict, verdict_raw, (title, id, category) × N]，
+        # 所以第 i 条 finding 的三个单行槽位从下标 2 开始（票 18 ⑫ 把 verdict_raw 插在第 1 位，这里的偏移随之 +1）
+        | .verdict = $k[0] | .verdict_raw = $k[1] | .summary = $f[0] | .verdict_reason = $f[1]
         | reduce range(.findings | length) as $i (.;
-            .findings[$i].title = $k[1 + 3 * $i] | .findings[$i].id = $k[2 + 3 * $i] | .findings[$i].category = $k[3 + 3 * $i]
+            .findings[$i].title = $k[2 + 3 * $i] | .findings[$i].id = $k[3 + 3 * $i] | .findings[$i].category = $k[4 + 3 * $i]
             | .findings[$i].body = $f[2 + 2 * $i] | .findings[$i].fix = $f[3 + 2 * $i])'; then
     rm -rf "$dir"; return 1
   fi
@@ -2441,7 +2452,7 @@ _review_replace_guarded() {
 # 用法：review_redact_file <文件>   就地改写；rc 0 = 已改写；rc 1 = 掩码程序失败；rc 2 = 文件不可读 / 为空；
 #   rc 3 = 守卫拒绝（行数变化或标记行丢失）；rc 4 = 写回失败；rc 5 = 守卫命令（grep / 行数统计）本身失败。
 #   非零时**原文件一个字节都没动**，调用方按渲染失败处理。
-# 字段级掩码（review_redact_json）已经覆盖了 validated.json 派生的全部文本；这一遍兜住任何绕过 validated.json 的输出面
+# 字段级掩码（review_redact_json）已经覆盖了 validated.json 派生的全部文本；这一遍兜住任何绕过 validated.json 的评论出口
 # （元信息表里的分支名、由 API 字符串拼出的 notice、失败评论的 --reason）。--keep-lines：不删行不加行，行内替换为主；
 # 唯一的整行改写是 PEM 块内的正文行 / RFC 1421 头等行数换成占位（16-fix3 第 11 条起有块状态，第 15 条起块状态最多 128 行），
 # 所以结构上不可能吞掉章节；守卫两条都要：行数前后相等（结构上排除吞行）+ 标记行逐字节仍在。

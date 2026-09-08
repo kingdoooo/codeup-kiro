@@ -146,6 +146,9 @@ _codeup_dry_seq_next() {
 _codeup_dry_seq_reset() {
   local v
   for v in $(compgen -v _CODEUP_DRY_SEQ_ 2>/dev/null || true); do unset "$v"; done
+  # 调用计数也要清（票 18 ⑫）：`@N` / `@N+` 的失败注入按它判「第几次调用」，不清的话同一测试文件里后面几组用例的
+  # 「第 1 次」其实是第 5 次，注入静默不生效（用例看起来通过，测的却是没注入的路径）
+  _codeup_dry_calls=""
 }
 
 # method path [body] → stdout=响应体；全局 CODEUP_HTTP_CODE=状态码（传输失败=000）
@@ -169,9 +172,13 @@ _codeup_request() {
       spec="${pair#*:}"          # <code>[@N|@N+]
       code="${spec%%@*}"; when="${spec#*@}"
       if [[ "$when" != "$spec" ]]; then
+        # `10#`（票 18 ⑫）：`@08+` 这种带前导零的序号会被 bash 当八进制，`08` 直接是算术错误（在 set -e 下杀掉整个脚本），
+        # `@010+` 则静默变成 8。序号先做十进制归一，非数字按「不匹配」处理（写错的注入宁可不生效，也不要让脚本崩）
+        local _w="${when%+}"
+        [[ "$_w" =~ ^[0-9]+$ ]] || { echo "DRY_RUN 注入：忽略 route=${route} 的非法调用序号「${when}」" >&2; continue; }
         case "$when" in
-          *+) [[ "$calls" -ge "${when%+}" ]] || continue ;;
-          *)  [[ "$calls" == "$when" ]] || continue ;;
+          *+) [[ "$calls" -ge "$(( 10#$_w ))" ]] || continue ;;
+          *)  [[ "$calls" -eq "$(( 10#$_w ))" ]] || continue ;;
         esac
       fi
       CODEUP_HTTP_CODE="$code"

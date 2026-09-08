@@ -311,7 +311,7 @@ assert_eq "$([[ -e "$tmp/agents-badtools" ]] && echo written || echo none)" "non
 
 # --- 15-fix4 #13：空 / 纯空白 / 非对象 / 多值的定义文件必须 fail-closed ---
 # 5462175 及之前：单次 jq 对空输入不输出且退出 0 → reason="" → 自检返回 0。--print-paths 交叉核对已删（15-fix3 #12），自检是**唯一**
-# 一道门：长驻构建机上一份被截断 / 清零 / 误编辑的 ~/.kiro/agents/codeup-reviewer.json 会通过自检，评审带着 kiro-cli 回退的 agent 跑——
+# 一道门：长驻执行器上一份被截断 / 清零 / 误编辑的 ~/.kiro/agents/codeup-reviewer.json 会通过自检，评审带着 kiro-cli 回退的 agent 跑——
 # 没有 allowedPaths、没有 deniedPaths。两个（各自合格的）定义拼在同一文件里同样放行（两行空 reason 被 $(…) 吃掉）。
 # 正控（对 5462175）：空文件、纯空白、双对象三条必须失败（实测 rc=0）。
 : > "$tmp/sc-empty.json"; printf ' \n\t \n' > "$tmp/sc-ws.json"; echo null > "$tmp/sc-null.json"; echo '{}' > "$tmp/sc-obj.json"
@@ -463,7 +463,7 @@ env_names=$(names_under HOME="$tmp/h" USER=u TERM=dumb TMPDIR="$tmp" LANG=C.UTF-
   CORP_SECRET_PROXY=s PROXY_USER=pu SSL_CERT_FILE=/c.pem SSL_CERT_DIR=/certs CURL_CA_BUNDLE=/b.pem \
   XDG_CONFIG_HOME=/x1 XDG_DATA_HOME=/x2 XDG_CACHE_HOME=/x3 XDG_STATE_HOME=/x4 XDG_RUNTIME_DIR=/x5 XDG_SESSION_TYPE=tty \
   YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=o CODEUP_REPO_ID=r CODEUP_BOT_USERNAME=b AWS_SECRET_ACCESS_KEY=a GIT_ASKPASS=/g CI_COMMIT_REF_NAME=x LD_LIBRARY_PATH=/l)
-# 15-fix2 #14：ALL_PROXY/all_proxy、FTP_PROXY/ftp_proxy、XDG_RUNTIME_DIR、LC_MESSAGES、LANGUAGE 补进固定名单（A/B 实测用 ALL_PROXY 的构建机升级后评审全部在网络层失败）
+# 15-fix2 #14：ALL_PROXY/all_proxy、FTP_PROXY/ftp_proxy、XDG_RUNTIME_DIR、LC_MESSAGES、LANGUAGE 补进固定名单（A/B 实测用 ALL_PROXY 的执行器升级后评审全部在网络层失败）
 for v in PATH HOME USER TERM TMPDIR LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES KIRO_API_KEY \
          HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy ftp_proxy all_proxy no_proxy \
          SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR KIRO_LOG_NO_COLOR; do

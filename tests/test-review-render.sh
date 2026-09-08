@@ -2073,6 +2073,16 @@ done
 assert_eq "$(LC_ALL=C grep -cF "$REVIEW_PEM_BODY_PH" "$ROOT/tests/test-mutations.sh" "$ROOT/tests/test-kiro-review.sh" | LC_ALL=C awk -F: '{s += $2} END {print s + 0}')" "0" \
   "⑪：另两个测试文件里不再手抄 PEM 正文占位符的字面量（取库常量 REVIEW_PEM_BODY_PH；本文件的这条断言自己带着那个取值，所以只扫另两个）"
 assert_eq "$(LC_ALL=C grep -c '^redact_probe() {' "$ROOT/tests/helpers.sh")" "1" "⑪：统一掩码探针只有 helpers.sh 一份"
+# 票 18 ⑫：verdict_raw 也过字段级掩码（原先只经日志出口掩，却照样留在 validated.json → plan.json）
+vr=$(jq --arg v "DONOTMERGE $SEC_GHP" '.verdict = $v' fixtures/contract/full.json | review_validate)
+assert_eq "$(printf '%s' "$vr" | jq -r '.verdict_raw')" "DONOTMERGE $SEC_GHP_MASKED" "⑫：verdict_raw 里的 token 被字段级掩码（进 dump-k 单行槽位）"
+assert_eq "$(printf '%s' "$vr" | jq -r '.verdict')" "" "⑫：契约外结论仍置空（掩码不改这条语义）"
+assert_no_secrets "$vr" "⑫ verdict_raw"
+# 单行槽位：起始标记当 verdict 时不能变成两行（保行模式）
+vr2=$(jq --arg v "$PEM_B" '.verdict = $v' fixtures/contract/full.json | review_validate)
+assert_eq "$(printf '%s' "$vr2" | jq -r '.verdict_raw | split("\n") | length')" "1" "⑫：verdict_raw 走保行模式，PEM 起始标记不会把它变成两行"
+# 级别映射只有一处（原先三份 {"P0":0,"P1":1,"P2":2}）
+assert_eq "$(LC_ALL=C grep -v '^[[:space:]]*#' "$ROOT/scripts/lib/review-render.sh" | LC_ALL=C grep -c '"P0": *0, *"P1": *1, *"P2": *2')" "1" "⑫：级别→权重的 jq 映射只此一份（_REVIEW_JQ_SEVRANK；注释行不算）"
 assert_eq "$(LC_ALL=C grep -c 'to_entries\[\] | (if (.value | type) == "string"' "$ROOT/scripts/lib/review-render.sh")" "1" \
   "⑪：字段倒出的「发射约定」只在 _review_dump_fields 一处（原先两份程序各一遍）"
 assert_eq "$(LC_ALL=C grep -c 'split(\$re; null) | map(rtrimstr("' "$ROOT/scripts/lib/review-render.sh")" "2" \
@@ -2201,11 +2211,11 @@ strip_secrets < "$tmp/secrets-inline-body.md" > "$tmp/secrets-inline-body.stripp
 assert_same_file "$tmp/secrets-inline-body.stripped.md" "$GOLDEN/inline-range.md" "票 16 golden①：行内正文掩码后剔掉掩码与 inline-range.md 逐字节一致（含 kiro-inline 标记行）"
 cp "$tmp/secrets-inline-body.md" "$tmp/secrets-inline-body.doc.md"; review_redact_file "$tmp/secrets-inline-body.doc.md"
 assert_same_file "$tmp/secrets-inline-body.md" "$tmp/secrets-inline-body.doc.md" "票 16 golden①：行内正文再过文档级兜底逐字节 no-op"
-# 文档级兜底覆盖绕过 validated.json 的输出面：元信息表里的分支名（MR 作者可控，不经 review_validate）
+# 文档级兜底覆盖绕过 validated.json 的评论出口：元信息表里的分支名（MR 作者可控，不经 review_validate）
 render fixtures/contract/full.json "$tmp/branch-token.md" --src "feature/${SEC_GHP}"
 assert_contains "$(meta_row "$(cat "$tmp/branch-token.md")")" "feature/${SEC_GHP}" "票 16 正控：分支名里的 token 不经字段级掩码，原样进元信息表"
 review_redact_file "$tmp/branch-token.md"
-assert_contains "$(meta_row "$(cat "$tmp/branch-token.md")")" "feature/${SEC_GHP_MASKED}" "票 16：文档级兜底把元信息表里的分支名 token 掩掉（绕过 validated.json 的输出面）"
+assert_contains "$(meta_row "$(cat "$tmp/branch-token.md")")" "feature/${SEC_GHP_MASKED}" "票 16：文档级兜底把元信息表里的分支名 token 掩掉（绕过 validated.json 的评论出口）"
 
 # ---- golden②：现有全部 golden 过文档级兜底逐字节不变——「不碰脚本结构」的直接证据 ----
 n_golden=0

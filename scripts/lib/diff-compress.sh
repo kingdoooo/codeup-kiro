@@ -14,7 +14,7 @@ DIFF_SIZE_LIMIT="${DIFF_SIZE_LIMIT:-307200}"
 # --- 钉死 patch 形态的 git diff（与 review_changed_lines 的解析器成对）---
 # 用法：_git_diff_pinned <git diff 的其余参数…>
 # review_changed_lines（scripts/lib/review-render.sh）认死了 git 默认的 unified patch 形态：
-# `+++ b/<路径>` 与 `@@ -a,b +c,d @@`。构建机的 gitconfig 能改掉这个形态，而改掉之后**不会报错**
+# `+++ b/<路径>` 与 `@@ -a,b +c,d @@`。执行器的 gitconfig 能改掉这个形态，而改掉之后**不会报错**
 # ——变更行集合会静默变成空集合或带前缀的键，于是所有问题都被判成「未定位」，一条行内评论都发不出。
 # 所以凡是能改形态的开关都在命令行上钉死，一个都不能漏：
 #   --no-ext-diff / -c diff.external=   外置 diff 驱动（diff.external、GIT_EXTERNAL_DIFF）输出的

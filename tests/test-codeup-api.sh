@@ -64,6 +64,32 @@ assert_rc "$(_codeup_should_retry 403 && echo y || echo n)" "n" "retry: 403 不�
 assert_rc "$(_codeup_should_retry 000 && echo y || echo n)" "y" "retry: 传输错误(000) 重试"
 
 FX=fixtures/comments   # 评论列表 fixture 的根（票 03 段落也用它）
+# ============ 票 18 ⑫：干跑的失败注入——序号按十进制归一、复位清调用计数 ============
+export DRY_RUN=1
+seqprobe() { # <注入串> → 连续 10 次同 route 调用得到的状态码序列
+  local spec="$1" out="" i
+  _codeup_dry_seq_reset
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    DRY_RUN_FAIL_ROUTES="$spec" _codeup_request POST "/a/changeRequests/7/comments/list" '{}' >/dev/null 2>/dev/null
+    out="${out}${CODEUP_HTTP_CODE} "
+  done
+  printf '%s' "${out% }"
+}
+assert_eq "$(seqprobe 'list-comments:500@8+')" "200 200 200 200 200 200 200 500 500 500" "⑫：@8+ 从第 8 次起失败"
+assert_eq "$(seqprobe 'list-comments:500@08+')" "200 200 200 200 200 200 200 500 500 500" "⑫：@08+ 按十进制归一（不再是八进制算术错误）"
+assert_eq "$(seqprobe 'list-comments:500@010')" "200 200 200 200 200 200 200 200 200 500" "⑫：@010 归一成第 10 次（八进制会算成 8）"
+assert_eq "$(seqprobe 'list-comments:500@2')" "200 500 200 200 200 200 200 200 200 200" "⑫：@2 只在第 2 次失败（既有行为不变）"
+assert_eq "$(seqprobe 'list-comments:500@x')" "200 200 200 200 200 200 200 200 200 200" "⑫：非法序号忽略注入（不让脚本崩）"
+# 复位要把调用计数一起清掉：不清的话第二组用例的「第 1 次」其实是第 11 次，注入静默失效
+_codeup_dry_seq_reset
+for i in 1 2 3; do DRY_RUN_FAIL_ROUTES="list-comments:500@1" _codeup_request POST "/a/changeRequests/7/comments/list" '{}' >/dev/null 2>/dev/null; done
+_codeup_dry_seq_reset
+DRY_RUN_FAIL_ROUTES="list-comments:500@1" _codeup_request POST "/a/changeRequests/7/comments/list" '{}' >/dev/null 2>/dev/null
+assert_eq "$CODEUP_HTTP_CODE" "500" "⑫：_codeup_dry_seq_reset 清掉调用计数，复位后的第 1 次调用确实是第 1 次"
+assert_eq "${_codeup_dry_calls:-<空>}" "list-comments" "⑫：复位后调用清单只剩这一次"
+_codeup_dry_seq_reset
+unset DRY_RUN
+
 # ============ 票 18 ①：汇总新建 POST 在 000/5xx 之后先查标记再决定重试 ============
 # POST 不幂等，000 与 5xx 都可能发生在「服务端其实已经建好评论之后」。重试之前查一次 MR 的全局评论：
 # 已经有一条同作者、同 `kiro-review:<sha> run:<N>` 标记的评论 ⇒ 上一次其实成功了，再发一次会在 MR 上多出第二条汇总（违反 I4）。

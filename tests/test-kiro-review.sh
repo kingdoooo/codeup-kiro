@@ -60,31 +60,7 @@ call_count() { local f="$1" name="$2"; [[ -f "$f" ]] || { echo 0; return 0; }; g
 # 注入面文件是否还在（任意深度 AGENTS.md / 任意深度 .kiro / 根 lsp.json）
 leftovers() { (cd "$CASE/work" && injection_surface_scan | sort | paste -sd' ' -); }   # 谓词只在 helpers.sh 一份（15-fix2 #23）
 
-# 从 DRY_RUN 输出里取出将要回写的评论正文（OUT 同时含日志与超长时回显的全文，
-# 有些断言必须只看评论本身）。用法：posted_comment "$OUT"
-posted_comment() {
-  printf '%s' "$1" | python3 -c '
-import json, sys
-s = sys.stdin.read()
-i = s.rfind("DRY_RUN body: ")
-if i < 0:
-    sys.exit(0)
-b = s[i + len("DRY_RUN body: "):]
-d = 0
-for n, ch in enumerate(b):
-    if ch == "{":
-        d += 1
-    elif ch == "}":
-        d -= 1
-        if d == 0:
-            b = b[:n + 1]
-            break
-try:
-    sys.stdout.write(json.loads(b).get("content", ""))
-except Exception:
-    pass
-'
-}
+# posted_comment（从 DRY_RUN 输出里取回写的评论正文）在 tests/helpers.sh（票 18 ⑫：原先两个文件各一份）
 
 # ============ 成功路径 ============
 run_case ok
@@ -552,18 +528,19 @@ assert_contains "$OUT" "重跑同样会截断" "finalText 被截断：明确告�
 run_case leaksecret MOCK_KIRO_LEAK_SECRET=1
 assert_rc "$RC" 0 "原文含未掩码凭证：退出码 0"
 assert_contains "$OUT" "结构化解析失败" "原文含未掩码凭证：走降级路径"
-assert_not_contains "$OUT" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" "原文含未掩码凭证：评论里不出现完整密钥"
-assert_not_contains "$OUT" "AKIAIOSFODNN7EXAMPLE" "原文含未掩码凭证：评论里不出现完整 AWS 访问密钥 ID"
+# 取值取 helpers.sh 的 fake_token（票 18 ⑫：替身与断言两边原先各写一份字面量）
+assert_not_contains "$OUT" "$(fake_token awssecret)" "原文含未掩码凭证：评论里不出现完整密钥"
+assert_not_contains "$OUT" "$(fake_token akia)" "原文含未掩码凭证：评论里不出现完整 AWS 访问密钥 ID"
 assert_contains "$OUT" "wJal****EKEY" "原文含未掩码凭证：脚本掩码后保留前 4 后 4"
 assert_contains "$OUT" "AKIA****MPLE" "原文含未掩码凭证：AWS 访问密钥 ID 同样掩码"
 # 票 10 ①：取值末尾带 base64 补位（值里含 `=`）的形态同样要掩掉
-assert_not_contains "$OUT" "dGhpcyBpcyBh""IHNlY3JldA==" "原文含未掩码凭证：base64 补位结尾的取值不进评论"
+assert_not_contains "$OUT" "$SEC_B64" "原文含未掩码凭证：base64 补位结尾的取值不进评论（替身用的就是 SEC_B64）"
 # DRY_RUN 打的是 JSON body，引号在里面是 \"，所以只断言取值本身（不带引号）
 assert_contains "$OUT" 'dGhp****dA==' "原文含未掩码凭证：补位形态也保留前 4 后 4"
 assert_contains "$OUT" 'api_key = ' "原文含未掩码凭证：键名保留"
 # 票 10 ②：只引用了 PEM 起始行时，其后的结论不能被吞掉，且要给出未闭合提示
-pem_body="MIIEowIBAAKCAQEA""fakekey0123456"
-pem_body2="MIIEvQIBADANBgkqhkiG9w0BAQEF""AASCBKcwggSjAgEAAoIBAQC7x9Kf2Lm4"   # 与 mockbin/kiro-cli 的 PEM_BODY2 一致（第 26 条改定义后尾巴要像随机 base64）
+pem_body=$(fake_token pem1)    # 与替身的 PEM_BODY / PEM_BODY2 同一来源（helpers.sh 的 fake_token，票 18 ⑫）
+pem_body2=$(fake_token pem2)   # 第 26 条改定义后尾巴要像随机 base64）
 assert_not_contains "$OUT" "$pem_body" "原文含未掩码凭证：说明行之后的整行私钥正文不进评论"
 # 16-fix3 第 14 条：降级原文走保行模式——正文行就地换成占位、起始行保留为标记、不插提示行、不删任何行
 assert_contains "$OUT" "$REVIEW_PEM_BODY_PH" "原文含未掩码凭证：整行正文换成等行数的屏蔽占位（保行模式）"
@@ -1724,7 +1701,7 @@ done
 # 替身按 --agent 在 $HOME/.kiro/agents 下找定义、找不到就失败：rc 0 已证明 HOME 透传的是安装 agent 的那个 HOME
 assert_contains "$(paste -sd' ' "$MD/args")" "--agent codeup-reviewer" "环境许可清单：仍以受信 agent 运行"
 
-# ---- KIRO_ENV_PASSTHROUGH：名单之外要额外透传的变量**名**（逗号分隔；自建执行机的 LD_LIBRARY_PATH / AWS_PROFILE 这类）----
+# ---- KIRO_ENV_PASSTHROUGH：名单之外要额外透传的变量**名**（逗号分隔；自建执行器的 LD_LIBRARY_PATH / AWS_PROFILE 这类）----
 run_case passthrough KIRO_ENV_PASSTHROUGH=" KIRO_FOO,LD_LIBRARY_PATH" KIRO_FOO=1 LD_LIBRARY_PATH=/opt/lib
 assert_rc "$RC" 0 "KIRO_ENV_PASSTHROUGH：评审正常完成"
 env_names=$(cat "$MD/env")
@@ -2128,7 +2105,7 @@ assert_contains "$OUT" "评论掩码失败（rc=1" "第 21 条：失败发生在
 assert_not_contains "$OUT" "契约字段级掩码或清洗失败" "第 21 条：字段级掩码没有被 doc 模式替身误伤（旧替身按 stdin 含标记判定会在这里失败）"
 assert_no_secrets "$OUT" "第 21 条：全部输出不含原文"
 assert_no_secrets "$OUT" "A10 文档级掩码失败：全部输出不含原文（字段级已掩）"
-# 文档级兜底覆盖绕过 validated.json 的输出面：分支名（MR 作者可控）里的 token 只有文档级能掩
+# 文档级兜底覆盖绕过 validated.json 的评论出口：分支名（MR 作者可控）里的 token 只有文档级能掩
 run_case sinkleak-branch CI_COMMIT_REF_NAME="feature/${SEC_AKIA}" MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/mock-review.json"
 assert_rc "$RC" 0 "A10 分支名：评审成功"
 comment=$(posted_comment "$OUT")

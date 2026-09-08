@@ -123,30 +123,7 @@ run_case() {
   RC=0; OUT=$(env "$@" "$pkg/scripts/kiro-review.sh" 2>&1) || RC=$?
 }
 
-# 从 DRY_RUN 输出里取出将要回写的评论正文（与 test-kiro-review.sh 同一份实现意图）
-posted_comment() {
-  printf '%s' "$1" | python3 -c '
-import json, sys
-s = sys.stdin.read()
-i = s.rfind("DRY_RUN body: ")
-if i < 0:
-    sys.exit(0)
-b = s[i + len("DRY_RUN body: "):]
-d = 0
-for n, ch in enumerate(b):
-    if ch == "{":
-        d += 1
-    elif ch == "}":
-        d -= 1
-        if d == 0:
-            b = b[:n + 1]
-            break
-try:
-    sys.stdout.write(json.loads(b).get("content", ""))
-except Exception:
-    pass
-'
-}
+# posted_comment（从 DRY_RUN 输出里取回写的评论正文）在 tests/helpers.sh（票 18 ⑫：原先两个文件各一份）
 
 # --- 对照：未变异的实现，三项守卫全部成立（否则下面的「失败」没有参照意义）---
 run_case baseline "$ROOT"
@@ -564,7 +541,7 @@ assert_eq "$(printf '%s\n' "$comment" | grep -c '^## 结论：')" "2" \
   "M14：模型文本里的伪造结论章节成了真章节——端到端断言会失败"
 
 # --- M15：让「受信 agent 契约标识」检查永远通过 → 非受信产出会被贴到 MR 上 ---
-pkg=$(make_mutant m15-contract-id 's/(.contract \/\/ "") == $id/true/' scripts/lib/review-render.sh)
+pkg=$(make_mutant m15-contract-id 's/if ((.contract \/\/ "") != $cid)/if false/' scripts/lib/review-render.sh)
 run_case m15 "$pkg" MOCK_KIRO_NO_CONTRACT=1
 assert_rc "$RC" 0 "M15：变异体仍能跑完（这正是问题：本该失败）"
 assert_not_contains "$OUT" "受信 agent 未生效" "M15：不再识别受信 agent 未生效——端到端断言会失败"
@@ -1613,7 +1590,7 @@ pkg=$(make_mutant m-r5-abs-only-globstar 's/select(type == "string" and (startsw
 n_env=$( ( set +e; source "$pkg/scripts/lib/kiro-agent.sh"; mkdir -p "$tmp/mr5-ws" "$tmp/mr5-ch"; jq --arg p "file://$ROOT/prompts/review-agent-prompt.md" '.prompt = $p | .toolsSettings.read.deniedPaths += [".env"]' "$ROOT/kiro/agent-codeup-reviewer.json" > "$tmp/mr5.json"; d=$(kiro_install_agent "$tmp/mr5.json" "$tmp/mr5-agents" --workspace "$tmp/mr5-ws" --chunks "$tmp/mr5-ch"); jq '[.toolsSettings.read.deniedPaths[] | select(endswith("/.env"))] | length' "$d" ) )
 assert_eq "$n_env" "0" "M-r5：只给 **/ 形状生成副本 → .env 零副本——单测「相对形状都有两组绝对副本」断言会失败"
 # --- M-r7：--version 的 stderr 尾巴退回 die_review 第一参数 → 令牌原样进日志 ---
-pkg=$(make_mutant m-r7-version-arg1 's/die_review "kiro-cli 无法运行，拒绝评审；请检查构建机上的 kiro-cli 安装" "$KIRO_CLI_VERSION_ERROR"/die_review "${KIRO_CLI_VERSION_ERROR}。kiro-cli 无法运行，拒绝评审"/')
+pkg=$(make_mutant m-r7-version-arg1 's/die_review "kiro-cli 无法运行，拒绝评审；请检查执行器上的 kiro-cli 安装" "$KIRO_CLI_VERSION_ERROR"/die_review "${KIRO_CLI_VERSION_ERROR}。kiro-cli 无法运行，拒绝评审"/')
 run_case m-r7 "$pkg" MOCK_KIRO_VERSION_RC=127 MOCK_KIRO_VERSION_ERRTOKEN="$SEC_GHP"
 assert_contains "$OUT" "$SEC_GHP" "M-r7：令牌原样进流水线日志——端到端「日志不含原文」断言会失败"
 # --- M-r2：隔离清单改回 IFS 切分 → 名字以制表符结尾的链接幸存 ---

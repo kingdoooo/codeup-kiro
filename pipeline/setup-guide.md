@@ -8,8 +8,8 @@
 - 组织 ID：云效「组织管理后台 → 基本信息」；代码库数字 ID：库设置 → 基本信息。
 - **kiro-cli ≥ 2.21**：脚本固定以 `--agent-engine v2 --output-format stream-json --agent codeup-reviewer`
   调用，启动前检查 `--agent-engine` / `--output-format` / `--agent` 三个参数，缺任一即拒绝运行
-  （原因见第 12 节）。构建机上 `kiro-cli --version` 自查。
-- 构建机命令：`git`、`curl`、`jq`（≥1.6）、`timeout`/`gtimeout`（GNU coreutils，**强制依赖**）；
+  （原因见第 12 节）。执行器上 `kiro-cli --version` 自查。
+- 执行器命令：`git`、`curl`、`jq`（≥1.6）、`timeout`/`gtimeout`（GNU coreutils，**强制依赖**）；
   开启行内评论还需 `sha1sum` 或 `shasum`（算行内评论隐藏标记里的指纹，缺了下次评审认不出自己的评论、会重复发，因此同为硬依赖）。
 - 成本预估：一次完整评审约 **0.4–1.5 credit**（取决于 diff 大小、评审员读了多少上下文文件，
   以及所选模型的 credit 倍率）。该区间来自 kiro-cli 2.21 + 本仓库完整评审提示词的试跑；
@@ -70,7 +70,7 @@ Codeup 无第三方 App/Bot 平台身份能力，专用成员账号是最接近�
 本方案中评审员仅有只读权限，且读取范围是**许可清单**——只有业务库 checkout 与本次 diff 片段目录
 （工具、路径与工作区资源的限制见第 12 节），Kiro 进程环境里没有云效令牌与 Flow 注入的其它变量。
 注入成功时的最坏影响是：**许可路径内的业务库内容**被误导性地引用进评论、评审结论失真；
-执行机上业务库之外的文件读不到。评论仅供参考、不设合并卡点，最终合并决策始终在人工评审。
+执行器上业务库之外的文件读不到。评论仅供参考、不设合并卡点，最终合并决策始终在人工评审。
 
 ## 2. 部署集成包（信任边界）
 **必须**将本集成包放入独立代码库（如 codeup-kiro），流水线以第二代码源引入固定分支/tag。
@@ -141,7 +141,7 @@ Flow 在多代码源流水线里给每个代码源的内置变量加数字下标
   照抄即可，不需要再改。`CI_COMMIT_REF_NAME` 那行刻意仍是无条件 `export`：不带下标的取值在多代码源下可能是集成包那个
   代码源的分支，必须显式压掉。
 
-## 6. 连通性验证（云托管构建机必做）
+## 6. 连通性验证（云托管执行器必做）
 前提：先在该验证流水线的「变量和缓存」中配置 `KIRO_API_KEY`（私密变量）——
 headless 调用必须依赖它认证，未配置时 chat 命令会因认证失败而报错。
 最小验证流水线命令：
@@ -152,7 +152,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
     # 三个参数各查一次，缺任一就退出：合成一条 grep 时任一命中即通过，而 `--agent` 又会被
     # `--agent-engine` 那一行命中，于是缺 --agent 也照样"通过"。
     # --agent 用与评审脚本相同的正则（前后必须是空白或行首尾）；help 一并收 stderr（脚本也是 2>&1）。
-    h=$(mktemp)                              # 不要用 /tmp 下的固定名：共享构建机上会互相覆盖
+    h=$(mktemp)                              # 不要用 /tmp 下的固定名：共享执行器上会互相覆盖
     kiro-cli chat --help > "$h" 2>&1
     grep -q -- '--agent-engine'  "$h" || { echo "缺 --agent-engine，请升级 kiro-cli ≥ 2.21"; exit 1; }
     grep -q -- '--output-format' "$h" || { echo "缺 --output-format，请升级 kiro-cli ≥ 2.21"; exit 1; }
@@ -163,29 +163,29 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
       --agent-engine v2 --output-format stream-json "回复 ok 两个字母即可"
 末一条命令输出逐行 JSON（最后一行 `runFinished`，其 `data.finalText` 含 ok）→ 可用。
 失败时先区分三类：
-- `curl | bash` 安装失败 → 网络不通 → 第 7 节自建构建机；
+- `curl | bash` 安装失败 → 网络不通 → 第 7 节自建执行器；
 - `chat --help` 里没有 `--agent-engine` / `--output-format` / `--agent` → 版本过旧，升级到 ≥ 2.21
   （评审脚本对这三项做启动前检查，缺任一即拒绝运行并在 MR 上回写「评审未完成」）；
 - 安装成功但 chat 失败 → 多为认证问题（KIRO_API_KEY 未配置/无效/订阅无 API Key 权限），
   与网络无关，回到第 1 节核对 Key。
-同时验证构建机具备 timeout 命令（GNU coreutils）：`command -v timeout`；
+同时验证执行器具备 timeout 命令（GNU coreutils）：`command -v timeout`；
 计划开启行内评论的话再验 `command -v sha1sum || command -v shasum`。
 
-## 7. 自建构建机（网络受限/生产推荐）
+## 7. 自建执行器（网络受限/生产推荐）
 1. ECS/物理机按 Flow 文档接入为自有构建集群。
 2. 预装：git、curl、jq（≥1.6）、coreutils（`timeout`、`sha1sum`）、kiro-cli 固定版本
    （建议 2.21.1——探测 P1-15 与真实验收都在这个版本上做，`KIRO_TESTED_VERSIONS` 亦为它；`kiro-cli --version` 验证；固定版本可规避 curl|bash 供应链漂移）。
 3. 代理：流水线变量配置 HTTP_PROXY / HTTPS_PROXY / NO_PROXY
    （NO_PROXY 含 openapi-rdc.aliyuncs.com 与内网地址）。
 4. 流水线任务指定运行在该构建集群。
-5. **【常驻构建机必读】脚本会对执行账号的 `$HOME` 做两处持久改动，都不回滚**
+5. **【常驻执行器必读】脚本会对执行账号的 `$HOME` 做两处持久改动，都不回滚**
    （安全隔离要求，见第 12 节）：
    - kiro-cli 全局设置 `chat.disableInheritingDefaultResources` 置为 `true`——
      同账号下其他人的 kiro-cli 会话在 v2 引擎下也不再继承工作区 `AGENTS.md`；
    - 往 `$HOME/.kiro/agents/` 写入 `codeup-reviewer.json`，并**删除**该目录下其它
      声明同名 agent（`name` 为 `codeup-reviewer`）的文件——同账号下别人自己写的同名 agent 会被删掉。
 
-   因此建议用**评审专用的构建机或专用系统账号**跑本流水线；若必须与人共用，
+   因此建议用**评审专用的执行器或专用系统账号**跑本流水线；若必须与人共用，
    请事先告知使用者这两点（尤其不要在该账号下自建名为 `codeup-reviewer` 的 agent）。
 6. **脚本会改动业务库工作树**（第 12 节隔离步骤）：在 diff 算好之后、Kiro 启动之前，删除工作树里任意深度的
    `AGENTS.md`、`.kiro`（任何类型、不分大小写）、**全部符号链接**与根 `lsp.json`（任意深度的 `.git` 目录内部不动）。本流水线只有评审这一个任务；
@@ -252,7 +252,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
     许可路径）——提交一个 >300KB 的大 MR，确认评审报告覆盖了省略清单中的文件。若整份评审降级成
     「结构化解析失败」且原文里有「Permission request failed」，多半是 chunk 目录的许可路径与实际落盘目录不一致。
 12. 安装源核对：确认 `https://cli.kiro.dev/install` 与 kiro.dev 官方文档一致；
-    生产环境建议自建构建机预装固定版本（见第 7 节）。
+    生产环境建议自建执行器预装固定版本（见第 7 节）。
 13. 模型是否生效：agent 配置指定了 `"model": "gpt-5.6-sol"`（GPT-5.6 Sol，
     Kiro 官方已上线，实验性支持，credit 倍率 2.4x）。确切模型 ID 以交互式会话 `/model`
     列表为准——若 ID 不匹配或组织管理员的模型访问策略未放行，Kiro 会**静默回退默认模型**
@@ -401,7 +401,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 | 现象 | 排查 |
 |---|---|
 | MR 提交后流水线未触发 | Codeup 库 Webhooks 页无 Flow 条目 → 服务连接无自动配置权限，手动配置；确认触发事件勾选「合并请求新建/更新」；YAML 模式确认 triggerEvents 已配置 |
-| 报错「缺少依赖：timeout/gtimeout」 | 构建机安装 GNU coreutils（超时是强制依赖，防 Kiro 挂起占死流水线） |
+| 报错「缺少依赖：timeout/gtimeout」 | 执行器安装 GNU coreutils（超时是强制依赖，防 Kiro 挂起占死流水线） |
 | kiro-cli 安装失败 | 网络不通 → 第 6/7 节 |
 | 报错「缺少 KIRO_API_KEY」等 | 流水线变量未配置或拼写错误 |
 | 同一 MR 上出现两份行内评论，或历次表少了一行、上一次的结论不见了 | 同一 MR 的两次触发并行跑了（推两次、或人工重跑叠上 webhook）。检查流水线「触发设置 → 并发度限制」的并发运行实例数是否为 1（第 4 节第 4 步，接入必做）。已经发生的：重复的行内评论需人工删除；丢掉的那一行历次记录不可恢复，重跑一次即可让当前结论正确 |
@@ -422,15 +422,15 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 | 汇总评论的「历次评审」表只剩本次一行 | 说明脚本没能从上一条评论里读回历史：多为那条评论在 Codeup 网页上被人手工编辑过（隐藏的历史标记被改坏、被删掉、或出现了两份）。脚本对历史采取「读不回就当没有」的策略——**不是少几行，而是整段历史丢失，重写后只剩本次这一行**（之前各次的提交、结论与计数不可恢复）。评审本身不受影响，`run:N` 计数取自评审标记、仍会继续递增。另：该表最多保留最近 20 次，更早的记录会正常滚掉（避免评论撑到长度上限） |
 | 页脚的「重新评审」提示写的操作在本档位做不到 | 页脚与降级提示里那句话取自 `REVIEW_RERUN_HINT`（第 11.2 节），默认是「重跑流水线可重新评审」——Flow 档位接不到 Codeup 的评论事件，所以默认**不**承诺 `/kiro review` 这类评论命令。若评论里出现了评论命令的说法，是该变量被配成了 AWS 档位的取值，改回默认即可；本档位要重审请在 Flow 里手动重跑该次运行，或向源分支再推一次提交 |
 | 开了 INLINE_COMMENT=1 但没有行内评论 | 见下方「行内评论未出现的排查顺序」 |
-| 汇总说「评审期间源分支有新推送」且没有行内评论 | 预期行为（fail-closed，见 `docs/adr/0005-inline-comments-bind-to-reviewed-commit.md`）：Codeup 侧最新合并源版本的提交在构建机的克隆里找不到，说明本次 checkout 之后源分支又被推过。行号是按本次评审的提交算的，绑到别的版本上会挂错位置，所以一条行内评论都不发，问题以完整清单形式留在汇总里。**新推送触发的那次评审会补上行内评论**，无需人工干预；反复出现就查是否有自动化（格式化机器人、自动 rebase 等）在持续推送 |
+| 汇总说「评审期间源分支有新推送」且没有行内评论 | 预期行为（fail-closed，见 `docs/adr/0005-inline-comments-bind-to-reviewed-commit.md`）：Codeup 侧最新合并源版本的提交在执行器的克隆里找不到，说明本次 checkout 之后源分支又被推过。行号是按本次评审的提交算的，绑到别的版本上会挂错位置，所以一条行内评论都不发，问题以完整清单形式留在汇总里。**新推送触发的那次评审会补上行内评论**，无需人工干预；反复出现就查是否有自动化（格式化机器人、自动 rebase 等）在持续推送 |
 | 汇总说「Codeup 版本列表尚未包含本次提交（滞后）」且没有行内评论 | 同为 fail-closed，成因相反：那个版本是本次提交的**祖先**，说明 Codeup 还没为本次推送建出版本（流水线被触发得比建版本更快）。脚本已按退避重查过仍未等到（重查次数与总等待上限是脚本里的 `INLINE_LAG_MAX` / `INLINE_LAG_BUDGET`，日志里写着这次实际重查了几次、等了多久），这一种**不会自愈**——重跑流水线即可；若同一个提交连续多次都这样，在 MR 页面确认「版本」列表里有没有该提交 |
-| 汇总说「无法确认…与本次评审的提交的关系——构建机上是浅克隆且加深失败」 | 同为 fail-closed，但成因**判不出来**：那个提交在浅克隆里解析不出，可能是评审期间的新推送，也可能是 graft 边界之下的旧提交，两者的处置正好相反（等下一轮 / 重跑）。脚本已尝试 `fetch --unshallow`（再退到 `--deepen`）但失败了，多为构建机网络受限或服务端不允许。放开流水线的克隆深度（或允许加深）后重跑 |
+| 汇总说「无法确认…与本次评审的提交的关系——执行器上是浅克隆且加深失败」 | 同为 fail-closed，但成因**判不出来**：那个提交在浅克隆里解析不出，可能是评审期间的新推送，也可能是 graft 边界之下的旧提交，两者的处置正好相反（等下一轮 / 重跑）。脚本已尝试 `fetch --unshallow`（再退到 `--deepen`）但失败了，多为执行器网络受限或服务端不允许。放开流水线的克隆深度（或允许加深）后重跑 |
 | 汇总说「不在同一条历史上（源分支被改写或强推）」且没有行内评论 | 同为 fail-closed：那个版本在克隆里存在，但与本次评审的提交分属两条历史（force-push、rebase 改写）。按新推送处置，新推送触发的评审会补上；若不是有意改写历史，查是否有工具在自动 rebase 源分支 |
 | 汇总说「Codeup 版本列表未给出该版本的提交号」且没有行内评论 | 同样是 fail-closed：接口返回的最新合并源版本里没有 `commitId`（或只有空白），脚本无从证明行内评论会绑到本次评审的提交上，于是退回完整清单。多为接口返回字段缺失或改名，查日志里那条警告与 `GET …/diffs/patches` 的返回；`INLINE_COMMENT=0` 的完整清单形态不受影响 |
 | 结论行写「不建议合并」，下面一行说「评审员给出「可合并」，但报告了 N 条 P0」 | 预期行为：契约要求有 P0 时不得给 MERGE，评审员违约时脚本按不建议合并处理并明说原因（历次表记的也是不建议合并）。修掉 P0 重跑即可（日志里也有一条「已按 DO_NOT_MERGE 渲染」的警告，便于统计契约违约）。结论行写「评审员未给出契约内的结论」有两种成因：评审员给的 verdict 不是 MERGE / MERGE_AFTER_FIX / DO_NOT_MERGE 三者之一时，原值在流水线日志里（搜「结论不在契约内」）；评审员**根本没给** verdict（字段缺失、为空或不是字符串）时没有原值可记，日志里就没有这条，只有这句固定文案 |
 | 重跑后同一处出现重复的行内评论 | 去重按「同文件、行区间重叠或相距 ≤ 2 行、旧评论级别不低于新问题」判定（不看标题）：新评论离旧评论 ≥ 3 行、或新问题级别比旧评论高（如旧 P1 处新出现 P0）就是新的一条，后者是预期行为；旧评论的级别解析不出（标记是升级前的旧格式、首行又被人改过）时它不压任何新问题，同一处会多出一条，这也是有意为之（宁可重复，不吞掉 P0）。其余成因看日志：「本次跳过去重」= 查现有行内评论失败；上一次的评论已被删除；或那条评论已过期（绑在被取代的旧版本上，会按当前版本重发一条，这是预期行为）。日志里每条被跳过的问题都写明「与已有行内评论 <id> 同文件且行区间重叠/相邻」 |
 | 折叠区出现「行内发布失败」小节 | 那些问题的行内评论没发出去（接口 4xx、草稿提交被服务端拒、提交后回读不到），脚本把它们**完整**渲染进折叠区（说明与修复建议都在），下次评审会重发。日志里有对应的失败原因与 HTTP 状态码 |
-| 报错「需要 sha1sum 或 shasum」 | INLINE_COMMENT=1 依赖它算行内评论隐藏标记里的指纹；构建机安装 coreutils 或 perl |
+| 报错「需要 sha1sum 或 shasum」 | INLINE_COMMENT=1 依赖它算行内评论隐藏标记里的指纹；执行器安装 coreutils 或 perl |
 | 评审员的评论卡住合并 | 业务库若开启了「评论全部解决才可合并」类门禁，行内评论带「待解决」徽标会计入门禁 → 见第 11.3 节 |
 
 ### 行内评论未出现的排查顺序
@@ -444,7 +444,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 4. **可定位判定**：折叠区「未定位问题」小节 = 评审员给的行号不在本次变更行集合内，
    或没给文件/行号。Codeup 只接受**新文件侧**行号，被删除行上的问题永远只能进折叠区。
    若日志出现「本次没能从 diff 里算出任何可定位的新增/修改行」（同时会写进汇总评论），
-   检查构建机的 git diff 相关配置。
+   检查执行器的 git diff 相关配置。
 5. **版本对**：日志里「行内评论版本对：from=… → to=…」缺失，说明版本列表查不到或选不出
    「最新合并目标版本 + 最新合并源版本」这一对；此时汇总评论会退回一条**完整问题清单**
    并在评论里写明原因。
@@ -484,7 +484,7 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 
 | 开关 | 默认 | 关（默认）时 | 开（改值）时 | 前提 | 适用档位 |
 |---|---|---|---|---|---|
-| `INLINE_COMMENT` | `0` | MR 上只有一条汇总评论，问题清单**完整展开**（按 P0→P1→P2 分组，每条给文件:行、标题、说明、修复建议） | `1` = 可定位的问题按档位发成**行内评论**，汇总退化为状态面板（元信息 + 计数 + 结论 + 折叠区），明细不再在汇总里重复 | 构建机有 `sha1sum` 或 `shasum`；**强烈建议**先配好 `CODEUP_BOT_USERNAME`（否则去重只按隐藏标记、不校验作者，见 11.4） | Flow |
+| `INLINE_COMMENT` | `0` | MR 上只有一条汇总评论，问题清单**完整展开**（按 P0→P1→P2 分组，每条给文件:行、标题、说明、修复建议） | `1` = 可定位的问题按档位发成**行内评论**，汇总退化为状态面板（元信息 + 计数 + 结论 + 折叠区），明细不再在汇总里重复 | 执行器有 `sha1sum` 或 `shasum`；**强烈建议**先配好 `CODEUP_BOT_USERNAME`（否则去重只按隐藏标记、不校验作者，见 11.4） | Flow |
 | `INLINE_PROFILE` | `quiet` | `quiet` = 只有 P0 与 P1 可发行内评论，P2 进折叠区 | `balanced` = P0/P1/P2 全部可发行内；`critical` = 仅 P0 可发行内，P1/P2 进折叠区 | 仅在 `INLINE_COMMENT=1` 时有意义 | Flow |
 | `MAX_INLINE_COMMENTS` | `10` | 单次评审最多发 10 条行内评论，其余进折叠区「超出行内上限的…」 | 非负整数；`0` = 一条行内评论都不发（全部进折叠区），适合先只看汇总 | 同上 | Flow |
 | `CODEUP_BOT_USERNAME` | 空 | 汇总评论**每次新建一条**（不做原地更新）；行内评论去重退化为只按隐藏标记判定（不校验作者） | 配成机器人账号的用户名后：汇总评论原地更新（计数 +1、历次表 +1 行），行内去重只认「本账号发的、同文件且行区间重叠或相邻」的评论 | 取值照抄首次运行日志里「新建评论的作者用户名=…」那一行，或在 MR 页面看机器人评论的作者名；令牌若勾选了平台用户信息权限，脚本可自查 | Flow |
@@ -495,8 +495,8 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 | `MR_LOCAL_ID` + `MR_TARGET_BRANCH` | 空 | 按源分支反查 OpenAPI 定位 MR；同源分支有多个打开的 MR 时明确报错 | 两个**必须同时**设置，直接指定 MR 编号与目标分支，免去反查 | 只设其一时脚本仍走反查路径 | Flow |
 | `CI_COMMIT_REF_NAME` | 由 Flow 注入 | 未注入时取 `git rev-parse --abbrev-ref HEAD` | 多代码源下须显式 `export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"`（带下标的内置变量，见第 5.1 节与 flow-pipeline.yaml） | 不带下标的取值在多代码源下不可预期（可能是集成包的分支） | Flow |
 | `REVIEW_REPO_DIR` | `$PWD` | 把当前目录当业务库 | 多代码源下必须显式指向业务库 checkout 目录 | 不得与集成包目录互相包含（隔离步骤会删文件，脚本直接拒绝运行） | Flow |
-| `KIRO_INSTALL_URL` | 官方安装脚本 | 云托管构建机上按需 `curl \| bash` 安装 | 指向内部镜像源 | 自建构建机预装固定版本时不会触发安装 | Flow |
-| `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行机可能需要 `LD_LIBRARY_PATH`、`JAVA_HOME` 这类；例：`LD_LIBRARY_PATH,JAVA_HOME` | 任一名字不合法（写成 `NAME=value`、带连字符/空格、或直接贴了个令牌）时**拒绝运行**并回写「评审未完成」；**凭证形状的名字也拒绝**：`YUNXIAO_*`、`CODEUP_*`、`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/`AWS_DEFAULT_REGION` 是配置不是凭证，显式放行）、含 `TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`、以 `_KEY`/`_PAT` 结尾或含 `_PAT_`、`DCKR_PAT_*`，以及 `ghp_`/`gho_`/`github_pat_`/`AKIA`/`ASIA` 开头的名字一律不放行。这份拒绝清单是**防运维手滑**，不是安全边界（受信 agent 没有 shell/env 工具，变量到不了模型手里）。失败评论按**条目序号 + 掩码 + 命中规则**列出（「第 2 项 `AWS****`（命中 `AWS_*`）」；掩码 = 首段 + `****`，形如 `svc_SECRET_9f3a…` 的名字本身就是密钥，不能原样进 MR）；**流水线日志**里给完整名字 + 规则（贴了令牌形态的条目除外，日志也只留掩码）。写成 `NAME=value` 的语法错误条目打完整标识符 + `****`（手误不是秘密，只隐藏 `=` 后面的取值）。点名的变量未设置时跳过 | Flow |
+| `KIRO_INSTALL_URL` | 官方安装脚本 | 云托管执行器上按需 `curl \| bash` 安装 | 指向内部镜像源 | 自建执行器预装固定版本时不会触发安装 | Flow |
+| `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行器可能需要 `LD_LIBRARY_PATH`、`JAVA_HOME` 这类；例：`LD_LIBRARY_PATH,JAVA_HOME` | 任一名字不合法（写成 `NAME=value`、带连字符/空格、或直接贴了个令牌）时**拒绝运行**并回写「评审未完成」；**凭证形状的名字也拒绝**：`YUNXIAO_*`、`CODEUP_*`、`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/`AWS_DEFAULT_REGION` 是配置不是凭证，显式放行）、含 `TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`、以 `_KEY`/`_PAT` 结尾或含 `_PAT_`、`DCKR_PAT_*`，以及 `ghp_`/`gho_`/`github_pat_`/`AKIA`/`ASIA` 开头的名字一律不放行。这份拒绝清单是**防运维手滑**，不是安全边界（受信 agent 没有 shell/env 工具，变量到不了模型手里）。失败评论按**条目序号 + 掩码 + 命中规则**列出（「第 2 项 `AWS****`（命中 `AWS_*`）」；掩码 = 首段 + `****`，形如 `svc_SECRET_9f3a…` 的名字本身就是密钥，不能原样进 MR）；**流水线日志**里给完整名字 + 规则（贴了令牌形态的条目除外，日志也只留掩码）。写成 `NAME=value` 的语法错误条目打完整标识符 + `****`（手误不是秘密，只隐藏 `=` 后面的取值）。点名的变量未设置时跳过 | Flow |
 
 ### 11.2.1 测试/高级变量（生产流水线不要设）
 这些变量脚本确实会读，但它们是给本仓库的测试与排障用的。**生产流水线里一个都不要配**——
@@ -515,13 +515,13 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 
 ### 11.2.2 升级说明：Kiro 进程环境改为固定名单
 票 15 之前 Kiro 进程继承执行器的完整环境；票 15 起改为 `env -i` + **固定名单**（第 12 节）。升级后以下变量**不再透传**——
-构建机若依赖它们，评审会在网络层或启动层失败（表现为「Kiro 评审失败（kiro-cli 退出码 N）」或超时）：
+执行器若依赖它们，评审会在网络层或启动层失败（表现为「Kiro 评审失败（kiro-cli 退出码 N）」或超时）：
 - 形状匹配时代放行、现在不在名单里的：`LC_*` 中除 `LC_ALL`/`LC_CTYPE`/`LC_MESSAGES` 以外的（如 `LC_TIME`）、`XDG_*` 中除
   `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_CACHE_HOME`/`XDG_STATE_HOME`/`XDG_RUNTIME_DIR` 以外的、`KIRO_*` 中除 `KIRO_API_KEY`/
   `KIRO_LOG_NO_COLOR` 以外的、`*_PROXY` 中除 `HTTP/HTTPS/FTP/ALL/NO_PROXY`（及小写）以外的；
 - 以及所有其它变量（`JAVA_HOME`、`LD_LIBRARY_PATH`、`GIT_*`、`SSH_AUTH_SOCK`、`AWS_*`……）。
 需要的用 `KIRO_ENV_PASSTHROUGH` 按名字加回（凭证形状的名字除外，见上表）。`ALL_PROXY`/`all_proxy`、`FTP_PROXY`/`ftp_proxy`、
-`XDG_RUNTIME_DIR`、`LC_MESSAGES`、`LANGUAGE` 已在 15-fix2 补进固定名单——用 `ALL_PROXY` 出网的构建机不用再配。
+`XDG_RUNTIME_DIR`、`LC_MESSAGES`、`LANGUAGE` 已在 15-fix2 补进固定名单——用 `ALL_PROXY` 出网的执行器不用再配。
 
 ### 11.2.3 升级说明：从 v1 升级——v1 遗留的汇总评论不再更新
 v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评审标记是 `<!-- kiro-review:<sha> -->`，没有 `run:N`；phase1 的选择器
@@ -593,7 +593,7 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   也当 steering 载入。切换门槛见 `docs/adr/0004-pin-kiro-cli-v2-engine.md`。
 - **`chat.disableInheritingDefaultResources=true` 的作用与局限**：让 Kiro 不继承工作区的默认资源
   （实测验证过的是工作区 `AGENTS.md`）。局限有三点：① **只对 v2 引擎有效**；② 它写在执行账号
-  `$HOME` 的**全局**设置里且不回滚（常驻构建机注意事项见第 7 节第 5 条）；
+  `$HOME` 的**全局**设置里且不回滚（常驻执行器注意事项见第 7 节第 5 条）；
   ③ 工作区级 `.kiro/settings/cli.json` 能把它顶掉——所以 kiro-cli 从不在业务库里运行（下一条）。
 - **kiro-cli 从不在业务库里运行（第一道）**：四处 kiro-cli 调用（`chat --help`、`--version`、`settings`、`chat`）都在本次
   工作目录下的**空目录** `$WORK/cwd` 里执行，业务库只出现在受信 agent 的 `allowedPaths` 里，模型按运行时提示词给出的
@@ -612,7 +612,7 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   diff 已从 git 对象算好，删文件不影响评审输入，这些文件的**改动本身**照样会被评审。**这一步改动的是业务库工作树**：
   同一工作区里不要再追加别的任务，要追加就先重新 checkout（第 7 节第 6 项）。业务库在 allowedPaths 里，这些文件若被
   kiro-cli 按别的途径发现（未来版本、v3 的子目录 steering）仍不该在，所以第一道之外仍保留这一步。**已知局限**：执行账号
-  `~/.kiro/hooks`、`~/.kiro/steering` 里别的任务残留的文件不在删除范围（Flow 构建机是一次性容器；共用长驻构建机的客户见第 7 节第 5 条）。
+  `~/.kiro/hooks`、`~/.kiro/steering` 里别的任务残留的文件不在删除范围（Flow 执行器是一次性容器；共用长驻执行器的客户见第 7 节第 5 条）。
 - **受信 agent 与读取边界（许可清单）**：`kiro/agent-codeup-reviewer.json` 只给 read/grep/glob，禁 shell/write/web/MCP。
   三个工具的读取范围由 `toolsSettings.*.allowedPaths` **许可清单**决定，只含两条运行时路径：业务库 checkout
   与本次 diff 片段目录（`$WORK/chunks`）。脚本安装时把 read/grep/glob 三处 allowedPaths **结构化写成**这两条
@@ -626,7 +626,7 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   或 TMPDIR 本身是符号链接时，这一点决定评审员能不能读到 chunk）。kiro-cli 2.21.1 v2 headless 实测（`scripts/probe/probe-kiro-allowlist.sh`，P1-15）：
   allow 内的读取免确认；allow 外的读取被 CLI 直接拒绝（`Permission request failed … not supported in
   non-interactive mode`），运行正常结束、不等待到超时。**为什么改成许可清单**：此前只有拒绝清单，
-  CodeX 复审用真实 kiro-cli 证明拒绝清单之外整台执行机可读（把一个安全 canary 放在令牌文件同目录，
+  CodeX 复审用真实 kiro-cli 证明拒绝清单之外整台执行器可读（把一个安全 canary 放在令牌文件同目录，
   评审员读出来了）——拒绝清单枚举不完（`.npmrc`、`.pypirc`、临时凭证、Flow 注入的任何文件）。
   拒绝清单**仍在、且先于 allow 判定**，作为第二道：敏感路径（`~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、
   `/var/run/secrets` 等）加 `**/.git`、`**/.git/**`（`.git/FETCH_HEAD`、`.git/logs/*` 可能带凭证 URL；
@@ -647,7 +647,7 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
 - **Kiro 进程环境只含固定名单变量**：四处 kiro-cli 调用（能力检查 `chat --help` 与 `--version`、隔离 `settings`、评审 `chat`）
   都以 `env -i` 启动，只透传**固定名单**（下一行与代码 `KIRO_ENV_FIXED_NAMES` 逐名比对，由 `tests/test-agent-config.sh` 守卫；HOME 承载登录态与 agent 目录）：
   固定名单（KIRO_ENV_FIXED_NAMES）：PATH、HOME、USER、TERM、TMPDIR、LANG、LANGUAGE、LC_ALL、LC_CTYPE、LC_MESSAGES、KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY、HTTPS_PROXY、FTP_PROXY、ALL_PROXY、NO_PROXY、http_proxy、https_proxy、ftp_proxy、all_proxy、no_proxy、SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、XDG_CONFIG_HOME、XDG_DATA_HOME、XDG_CACHE_HOME、XDG_STATE_HOME、XDG_RUNTIME_DIR
-  **不做形状匹配**（`KIRO_*`、`*_PROXY` 这类模式会放行 `CORP_SECRET_PROXY`、客户自定义的 `KIRO_…`）。自建执行机需要别的变量时
+  **不做形状匹配**（`KIRO_*`、`*_PROXY` 这类模式会放行 `CORP_SECRET_PROXY`、客户自定义的 `KIRO_…`）。自建执行器需要别的变量时
   用 `KIRO_ENV_PASSTHROUGH` 点名（第 11 节；只放名字，非法名字拒绝运行；`YUNXIAO_*`/`CODEUP_*`/`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/
   `AWS_DEFAULT_REGION` 除外）/含 TOKEN、SECRET、PASSWORD、CREDENTIAL、以 `_KEY`/`_PAT` 结尾、含 `_PAT_`、`ghp_`/`gho_`/`github_pat_`/
   `AKIA`/`ASIA` 开头的凭证形状名字也拒绝——这是防运维手滑，不是安全边界：受信 agent 没有 shell/env 工具，变量到不了模型手里；
@@ -673,7 +673,7 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   PEM 私钥块的整块删除只在这里发生），渲染器、行内正文、折叠区、截断副本与流水线日志拿到的都是掩码后的文本；标题里的 `*`
   （包括掩码本身的四颗星）一律转义，两处掩码也拆不开级别前缀的加粗；**文档级兜底**——每个评论出口（汇总 / 行内 / 失败评论，sink）前再过一遍
   **严格保行**的 `review_redact_file`（只做行内替换，行数前后必须相等、评审标记 / 隐藏历史 / 行内标记逐字节仍在，否则拒绝写回、
-  评审按失败处理），兜住绕过 `validated.json` 的输出面（元信息表里的分支名、失败评论里的失败原因、降级原文）。失败原因 /
+  评审按失败处理），兜住绕过 `validated.json` 的评论出口（元信息表里的分支名、失败评论里的失败原因、降级原文）。失败原因 /
   降级原因 / kiro-cli 自己的 stderr / 去重日志里的文件名在打进流水线日志前同样过掩码；掩码程序不可用时不打原文、失败评论退回
   只含固定文案的最小形态。模型字段另有上限（summary / verdict_reason 8 KB、title 2 KB、body 32 KB、fix 16 KB，在结构清洗之后按字节施加，
   超出截断并标注），单条行内评论正文正常情况下落在评论上限之内；万一超过 `MAX_COMMENT_BYTES`（清洗 / 掩码的膨胀），该条不发、
@@ -705,7 +705,7 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   提交进业务库，正确动作永远是轮换。
 - **残余风险**：被评审代码仍可能试图误导评审结论（提示词注入）。评审员只读、读取范围是许可清单、
   进程环境只有许可清单变量、评论不设合并卡点。注入成功时的最坏影响是**许可路径内的业务库内容**被误导性地
-  引用进评论、评审结论失真（业务库本来就是评审员该读的内容，没有额外泄露面）；执行机上业务库之外的文件读不到，
+  引用进评论、评审结论失真（业务库本来就是评审员该读的内容，没有额外泄露面）；执行器上业务库之外的文件读不到，
   被拒的读取会以「Permission request failed」出现在降级评论里、带出路径名而不是内容（第 10 节）。
   边界由 kiro-cli 的路径规则决定，不依赖模型配合；提示词里的只读要求只是第一道。最终合并决策始终在人工评审。
 

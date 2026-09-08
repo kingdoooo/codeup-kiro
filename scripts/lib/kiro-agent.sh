@@ -163,7 +163,7 @@ kiro_install_agent() {
 # 失败返回 1，原因放进 KIRO_AGENT_SELFCHECK_ERROR。执行器第 3 步用它把「日志声称的事实」变成断言；单测直接对篡改过的定义调用。
 # 全部检查在**一次** jq 里完成（15-fix3 #13），输出第一条不符的原因（都符合则为空）。
 # fail-closed（15-fix4 #13）：这是安装器「打回路径」stdout 交叉核对删掉后（15-fix3 #12）**唯一**的一道门。单次 jq 对空 / 纯空白文件不输出且
-# 退出 0 → reason="" → 自检通过——长驻构建机上一份被截断 / 清零 / 误编辑的 ~/.kiro/agents/codeup-reviewer.json 会放行，评审带着
+# 退出 0 → reason="" → 自检通过——长驻执行器上一份被截断 / 清零 / 误编辑的 ~/.kiro/agents/codeup-reviewer.json 会放行，评审带着
 # kiro-cli 回退的 agent 跑（没有 allowedPaths、没有 deniedPaths）；两个各自合格的定义拼在一个文件里也放行（两行空 reason 被 $(…) 吃掉）。
 # 三道：① `-s` 拒 0 字节（固定文案）；② `--slurp` 把整个文件读成数组，要求恰好一个元素且是对象（固定文案点明个数 / 类型）——
 # 「恰好一个 JSON 值」是被检查的条件，不是数输出行数；③ `-e`：任何无输出的路径都退 4 而不是 0（有 --slurp 时不会发生，防有人删掉 --slurp）。
@@ -251,7 +251,7 @@ kiro_cli_version() {
 #   PATH、HOME（登录态与 ~/.kiro/agents 都靠它）、USER、TERM、TMPDIR、LANG、LANGUAGE、LC_ALL、LC_CTYPE、LC_MESSAGES、
 #   KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY/HTTPS_PROXY/FTP_PROXY/ALL_PROXY/NO_PROXY 与小写五个、
 #   SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、XDG_CONFIG_HOME、XDG_DATA_HOME、XDG_CACHE_HOME、XDG_STATE_HOME、XDG_RUNTIME_DIR。
-# **逃生口** KIRO_ENV_PASSTHROUGH：逗号分隔的变量**名**（自建执行机可能需要 LD_LIBRARY_PATH / JAVA_HOME / AWS_PROFILE 这类），
+# **逃生口** KIRO_ENV_PASSTHROUGH：逗号分隔的变量**名**（自建执行器可能需要 LD_LIBRARY_PATH / JAVA_HOME / AWS_PROFILE 这类），
 #   只放名字不放值。两道校验，任一不过 → 返回 1、原因放进 KIRO_ENV_ALLOW_ERROR，调用方必须拒绝运行而不是静默忽略：
 #   ① 语法：不是 [A-Za-z_][A-Za-z0-9_]*（例如写成 NAME=value）→ 拒绝。
 #   ② 凭证形状的名字 → 拒绝（15-fix2 #13 / 15-fix3 #6 / 15-fix4 #4）：规则表 KIRO_ENV_CRED_RULES（YUNXIAO_*、CODEUP_*、AWS_*、*TOKEN*、
@@ -325,7 +325,9 @@ kiro_env_allowlist() {
     done
     if [[ ${#bad[@]} -gt 0 ]]; then KIRO_ENV_ALLOW_ERROR="KIRO_ENV_PASSTHROUGH 含非法变量名：$(_kiro_env_join 、 "${bad[@]}")（只接受逗号分隔的变量名，例如 LD_LIBRARY_PATH,JAVA_HOME；不能带 = 或取值；非法部分已掩码）"; echo "kiro_env_allowlist: ${KIRO_ENV_ALLOW_ERROR}" >&2; return 1; fi
     if [[ ${#cred[@]} -gt 0 ]]; then
-      KIRO_ENV_ALLOW_ERROR="KIRO_ENV_PASSTHROUGH 含凭证形状的变量名，拒绝透传：$(_kiro_env_join 、 "${cred[@]}")（已掩码；规则：YUNXIAO_*、CODEUP_*、AWS_*（AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 除外）、*TOKEN*、*SECRET*、*PASSWORD*、*CREDENTIAL*、*_KEY、*_PAT、*_PAT_*、DCKR_PAT_*，令牌前缀 GHP_*/GHO_*/GITHUB_PAT_*/AKIA*/ASIA*——固定名单刚把令牌关在门外，不能被一个变量名重新打开；完整名字见流水线日志）"
+      # 规则清单从规则表派生（票 18 ⑫）：原先这句散文把 16 条规则又抄了一遍，加一条规则忘了改文案时，MR 上那句
+      # 「规则：…」就会漏掉真正命中的那一条，运维照着它排查会得出「这个名字不该被拒」的结论。
+      KIRO_ENV_ALLOW_ERROR="KIRO_ENV_PASSTHROUGH 含凭证形状的变量名，拒绝透传：$(_kiro_env_join 、 "${cred[@]}")（已掩码；规则：$(_kiro_env_join 、 "${KIRO_ENV_CRED_RULES[@]}")，其中 $(_kiro_env_join 、 "${KIRO_ENV_CRED_TOKEN_RULES[@]}") 是令牌前缀；显式放行 $(_kiro_env_join 、 "${KIRO_ENV_CRED_ALLOW[@]}")——固定名单刚把令牌关在门外，不能被一个变量名重新打开；完整名字见流水线日志）"
       echo "kiro_env_allowlist: KIRO_ENV_PASSTHROUGH 含凭证形状的变量名，拒绝透传：$(_kiro_env_join 、 "${cred_log[@]}")" >&2
       return 1
     fi
