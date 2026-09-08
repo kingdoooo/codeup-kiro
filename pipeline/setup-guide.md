@@ -125,8 +125,8 @@ Flow 在多代码源流水线里给每个代码源的内置变量加数字下标
 **不带下标的 `CI_COMMIT_REF_NAME` 取值不可预期**——它可能取到集成包那个代码源的分支，
 于是脚本会拿集成包的分支名去反查 MR，报「无法定位 MR」。所以流水线命令里必须显式转成脚本认的名字：
 
-    export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"        # 业务库的源分支
-    export MR_TARGET_BRANCH="$CI_COMMIT_TARGET_REF_NAME_1"   # 该 MR 的目标分支
+    export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"        # 业务库的源分支（无条件覆盖：不带下标的取值可能是集成包的分支）
+    : "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"; export MR_TARGET_BRANCH   # 该 MR 的目标分支（仅在未注入时取内置变量）
 
 要点：
 - 上面的 `_1` 假定业务库是第一个代码源（实测配置就是这样）。**哪个下标对应哪个代码源必须自己核对**：
@@ -136,9 +136,10 @@ Flow 在多代码源流水线里给每个代码源的内置变量加数字下标
 - `MR_TARGET_BRANCH` 与 `MR_LOCAL_ID` 是**成对**生效的（见第 11 节矩阵）：只导出目标分支时
   脚本仍走源分支反查。反查能自己找到目标分支，所以只导出 `CI_COMMIT_REF_NAME` 也能跑通；
   两个都配则免去反查。
-- 已知坑：若之后要从 API 触发流水线并用 `envs` 注入 `MR_TARGET_BRANCH`，
-  上面这种无条件 `export` 会把注入值覆盖成空。那种链路要改成
-  `: "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"`（仅在未注入时才取内置变量）。
+- 从 API 触发流水线并用 `envs` 注入 `MR_TARGET_BRANCH` 的链路：参考 YAML（`pipeline/flow-pipeline.yaml`）已经用
+  `: "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"` 这种 `:=` 写法（仅在未注入时才取内置变量），上面这段与它一致，
+  照抄即可，不需要再改。`CI_COMMIT_REF_NAME` 那行刻意仍是无条件 `export`：不带下标的取值在多代码源下可能是集成包那个
+  代码源的分支，必须显式压掉。
 
 ## 6. 连通性验证（云托管构建机必做）
 前提：先在该验证流水线的「变量和缓存」中配置 `KIRO_API_KEY`（私密变量）——

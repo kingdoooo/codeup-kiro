@@ -53,6 +53,33 @@ rc=0; err=$(env -i PATH="$tmp/nokiro" HOME="$tmp/home" bash "$PROBE" 2>&1) || rc
 assert_eq "$rc" "5" "缺 kiro-cli：退出码 5（环境准备失败，不是门禁 FAIL 的 1）"
 assert_contains "$err" "缺少 kiro-cli" "缺 kiro-cli：报错点名"
 
+# ============ 票 18 ④：参考 YAML 里 MR_TARGET_BRANCH 用 `:=`（envs 注入不被覆盖）============
+# 这段是**静态**断言（不跑 Flow）：YAML 的 run 块是一段 shell，抽出来做语法检查与两条语义检查。
+YAML="$ROOT/pipeline/flow-pipeline.yaml"
+assert_eq "$(LC_ALL=C grep -c '^                : "\${MR_TARGET_BRANCH:=\$CI_COMMIT_TARGET_REF_NAME_1}"; export MR_TARGET_BRANCH$' "$YAML")" "1" \
+  "④：YAML 用 : \"\${MR_TARGET_BRANCH:=…}\" 写法（不是无条件 export）"
+assert_eq "$(LC_ALL=C grep -c '^ *export MR_TARGET_BRANCH="\$CI_COMMIT_TARGET_REF_NAME_1"' "$YAML")" "0" \
+  "④：YAML 里不再有无条件 export MR_TARGET_BRANCH=…（那会把 envs 注入值覆盖掉）"
+assert_eq "$(LC_ALL=C grep -c '^                export CI_COMMIT_REF_NAME="\$CI_COMMIT_REF_NAME_1"$' "$YAML")" "1" \
+  "④：CI_COMMIT_REF_NAME 那行仍是无条件覆盖（多代码源歧义，必须显式压掉）"
+# run 块（`run: |` 之后缩进 16 空格的那些行）本身要是合法 shell
+runblk=$(mktemp)
+LC_ALL=C awk '/^              run: \|$/ {f=1; next} f && /^                / {sub(/^                /, ""); print; next} f {exit}' "$YAML" > "$runblk"
+assert_eq "$([[ -s "$runblk" ]] && echo nonempty)" "nonempty" "④：从 YAML 里抽出了 run 块"
+assert_rc "$(bash -n "$runblk" && echo 0 || echo 1)" 0 "④：YAML 的 run 块是合法 shell"
+# 语义两条：注入时保留注入值；未注入时取内置变量
+assert_eq "$(env -i PATH="$PATH" CI_COMMIT_TARGET_REF_NAME_1=master MR_TARGET_BRANCH=injected bash -c ': "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"; printf %s "$MR_TARGET_BRANCH"')" "injected" \
+  "④：已注入 MR_TARGET_BRANCH 时 := 不覆盖它"
+assert_eq "$(env -i PATH="$PATH" CI_COMMIT_TARGET_REF_NAME_1=master bash -c ': "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"; printf %s "$MR_TARGET_BRANCH"')" "master" \
+  "④：未注入时 := 取内置变量的取值"
+# 指南与参考 YAML 同一写法（~127 行那段），且「已知坑」段落改成「参考 YAML 已用 := 写法」
+GUIDE="$ROOT/pipeline/setup-guide.md"
+assert_eq "$(LC_ALL=C grep -c ': "\${MR_TARGET_BRANCH:=\$CI_COMMIT_TARGET_REF_NAME_1}"; export MR_TARGET_BRANCH' "$GUIDE")" "1" \
+  "④：setup-guide 第 5.1 节示例与 YAML 同一写法"
+assert_eq "$(LC_ALL=C grep -c '已知坑：若之后要从 API 触发流水线' "$GUIDE")" "0" "④：指南里的「已知坑」段落已改写"
+assert_contains "$(cat "$GUIDE")" "参考 YAML（\`pipeline/flow-pipeline.yaml\`）已经用" "④：指南改为指向参考 YAML 的写法"
+rm -f "$runblk"
+
 # --- 缺 jq → 同样退出码 5 ---
 mkdir -p "$tmp/nojq"; for f in "$tmp/nokiro"/*; do ln -sf "$(readlink "$f")" "$tmp/nojq/$(basename "$f")"; done; rm -f "$tmp/nojq/jq"; ln -sf "$tmp/fakebin/kiro-cli" "$tmp/nojq/kiro-cli"
 rc=0; err=$(env -i PATH="$tmp/nojq" HOME="$tmp/home" bash "$PROBE" 2>&1) || rc=$?

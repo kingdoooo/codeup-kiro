@@ -57,7 +57,10 @@ stages:
                 # 首次接入务必用 `env | cut -d= -f1 | sort`（只打变量名）核对本组织的变量名。
                 export REVIEW_REPO_DIR="$PROJECT_DIR"
                 export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"
-                export MR_TARGET_BRANCH="$CI_COMMIT_TARGET_REF_NAME_1"
+                # MR_TARGET_BRANCH 用 `:=`（票 18 ④）：从 API 触发流水线并用 envs 注入它时，无条件 export 会把注入值覆盖成
+                # 内置变量的取值（多代码源下那个取值可能是空的）。CI_COMMIT_REF_NAME 那行**刻意仍是无条件覆盖**：
+                # 不带下标的取值可能是集成包那个代码源的分支，必须显式压掉。
+                : "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"; export MR_TARGET_BRANCH
                 # business_repo 与 integration_repo 是兄弟目录，故用 ../ 定位集成包脚本
                 bash "$PROJECT_DIR/../integration_repo/scripts/kiro-review.sh"
 
