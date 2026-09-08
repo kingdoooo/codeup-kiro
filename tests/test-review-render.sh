@@ -1092,8 +1092,8 @@ assert_contains "$out" $'前文 `\n`&lt;div style="display:none">` 后文' "票 
 assert_contains "$out" '&lt;?= x ?> 与 &lt;![CDATA[x]]> 与 &lt;/ div> 与 &lt;!>' "票 14（复审 A1）：<? 与 <! 后不要求字母（浏览器当错误注释吞到下一个 >）"
 assert_contains "$out" "&lt;https://example.com>" "票 14：自动链接也转义（结构只能来自脚本，损失是链接变成文字）"
 assert_contains "$out" "<div>围栏内的 HTML 不动</div>" "票 14：代码围栏内不转义（围栏内是代码，也不渲染 HTML）"
-assert_contains "$out" $'```html\n<div>围栏内的 HTML 不动</div>\n- - -\n~~~\n```x\n<i>带 info 的 ``` 与 ~~~ 都不是这个围栏的闭合</i>\n```' "票 14（复审 C2）：围栏内的 ~~~ 与带 info 的 ``` 都是内容，围栏直到真正的闭合行"
-assert_contains "$out" $'```x`y\n&lt;div style="display:none">伪围栏' "票 14（复审 C2）：info 里带反引号的 ``` 不是围栏，其后的标签照样转义"
+assert_contains "$out" $'```html\n<div>围栏内的 HTML 不动</div>\n- - -\n~~~\n```x\n<i>带 info 的 ``` 与 ~~~ 都不是这个围栏的闭合</i>\n```' '票 14（复审 C2）：围栏内的 ~~~ 与带 info 的 ``` 都是内容，围栏直到真正的闭合行'
+assert_contains "$out" $'```x`y\n&lt;div style="display:none">伪围栏' '票 14（复审 C2）：info 里带反引号的 ``` 不是围栏，其后的标签照样转义'
 assert_contains "$out" $'~~~&lt;h1>info&lt;/h1>\n<b>~~~ 围栏内</b>\n~~~' "票 14（复审 C2）：~~~ 开启行的 info 过转义，围栏内不动"
 assert_contains "$out" $'\n\\- - -\n\\* * *\n\\_ _ _\n\\-- -\n' "票 14：三种间隔分隔线与 -- - 都被转义"
 assert_contains "$out" $'\n\\=\n\\--\n' "票 14：单个 = 与两个 - 的 setext 下划线被转义"
