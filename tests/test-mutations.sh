@@ -805,6 +805,22 @@ assert_rc "$RC" 0 "M27：变异体仍能跑完"
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
   "M27：去重被拿掉后重跑又发了 3 条——端到端「重跑一条都不重发」断言会失败（违反 I6 幂等）"
 
+# --- M-cx4：身份未知时的行内评论关闭是两道（第 1.6 步降级 + publish_inline_comments 入口 fail-closed）→ 双变异（CodeX 2026-09-09 P0-3）---
+# 只拆第 1.6 步：入口守卫接住，仍 0 条行内（说明为 inline_bail 的文案）；两道都拆：回到旧行为，3 条行内照发、按标记去重——
+# 端到端「身份未知：一条行内评论都不发」断言会失败。
+pkg=$(make_mutant m-cx4-no-gate 's|^  INLINE_COMMENT=0   # 身份未知：本轮按 0 处理（CodeX 2026-09-09 P0-3）$|  : # 身份未知：降级被拆掉|')
+inline_case m-cx4a "$pkg" "$tmp/ifx-cx4a" CODEUP_BOT_USERNAME=
+assert_rc "$RC" 0 "M-cx4a：只拆第 1.6 步，变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "M-cx4a：只拆一道仍 0 条行内（入口守卫 fail-closed 接住）"
+assert_contains "$(posted_comment "$OUT")" "不能只按隐藏标记识别已有评论" "M-cx4a：入口守卫的说明进了汇总（两道文案不同，可辨认是哪一道在工作）"
+mutate_more "$pkg" 's|^  \[\[ -n "\${BOT_USERNAME:-}" \]\] \\$|  [[ -n "x" ]] \\|'
+inline_case m-cx4b "$pkg" "$tmp/ifx-cx4b" CODEUP_BOT_USERNAME=
+assert_rc "$RC" 0 "M-cx4b：两道都拆，变异体仍能跑完"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "M-cx4b：两道都拆后身份未知也发了 3 条行内（旧行为：按标记去重，可被伪造压制）——端到端「一条都不发」断言会失败"
+
+
+
+
 # --- M32 / M33：区间匹配的容差与重叠判定（真实验收 2026-09-03 暴露的缺陷）---
 # fixture = 真实回读的第一次运行的 4 条行内评论（旧格式标记：app/download.py 14–22 / 20–23 / 29–30 / 37–38）；
 # 契约 = 第二次运行的形态：标题全变、行号漂移（20→21、37→36）、一条拆成两条（14 与 22）。

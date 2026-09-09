@@ -1110,13 +1110,22 @@ run_inline_case otherbotdup ifx-otherbot
 assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" \
   "去重：带指纹的评论是别人发的 → 不算已发出（否则任何人都能压掉一条 P0）"
 
-# ---- 未配置机器人账号：去重退化为只按标记，必须留痕提示 ----
+# ---- 身份未知 + INLINE_COMMENT=1：本轮不发行内评论、退回完整清单（CodeX 2026-09-09 P0-3；Kent 2026-09-09 推翻 2026-09-03 裁决 3）----
+# 旧行为「只按隐藏标记去重」让任何 MR 参与者贴一条 `<!-- kiro-inline:… L42-42 sev=P0 -->` 就能压制那一处的 P0。
 IFX_DIR="$tmp/ifx-noid"; mkdir -p "$IFX_DIR"
 run_inline_case inlinenoid ifx-noid CODEUP_BOT_USERNAME=
-assert_rc "$RC" 0 "未配置机器人账号：行内评论仍照发"
-assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "未配置机器人账号：3 条照发"
-assert_contains "$OUT" "去重无法按作者过滤" "未配置机器人账号：日志说明去重的局限"
-assert_contains "$OUT" "CODEUP_BOT_USERNAME" "未配置机器人账号：日志点名要配的变量"
+assert_rc "$RC" 0 "身份未知：评审正常完成（退回完整清单，不是失败）"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "0" "身份未知：一条行内评论都不发"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/review$')" "0" "身份未知：不建草稿、不提交"
+assert_eq "$(printf '%s\n' "$OUT" | grep -c 'DRY_RUN body: {"comment_type":"INLINE_COMMENT"}' || true)" "0" "身份未知：不查询现有行内评论（不做区间去重）"
+assert_eq "$(req_count "$OUT" GET 'diffs/patches')" "0" "身份未知：不采样版本对"
+assert_contains "$(posted_comment "$OUT")" "本轮未发行内评论；以下为完整问题清单。配置 CODEUP_BOT_USERNAME 后可启用行内评论" "身份未知：汇总写明原因与配置项"
+assert_contains "$(posted_comment "$OUT")" "**P0 必须修复（" "身份未知：汇总是完整清单形态（按级别分组展开）"
+assert_not_contains "$(posted_comment "$OUT")" "已标注在「文件改动」对应行" "身份未知：不是状态面板形态"
+assert_contains "$OUT" "INLINE_COMMENT=1 但身份未知" "身份未知：日志点名降级与恢复条件"
+# 对照：有身份时行内照发（上面的 ok1 用例即正控，这里只钉住「同一 fixture 有身份就发 3 条」）
+run_inline_case inlinenoid-ctl ifx-noid
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "身份未知 正控：同一 fixture 配了机器人账号就照发 3 条"
 
 # ---- 草稿一次提交失败 → 先删已建草稿，再逐条非草稿发布 ----
 run_inline_case submitfail ifx-submitfail DRY_RUN_FAIL_ROUTES="submit-review:400"
@@ -1867,7 +1876,8 @@ assert_not_contains "$(posted_comment "$out")" "未经 P1-15 探测" "成功路�
 # 15-fix4 #3 / A7：降级评论只带 REVIEW_NOTICE——INLINE_NOTICE（「全部问题都归入未定位」这类关于分桶的提示）不该出现在一份没有问题清单的评论里。
 # 纯删除 MR + INLINE_COMMENT=1 让第 4.5 步产生 INLINE_NOTICE，再让评审员不守契约走降级。对 5462175 必须失败（那里降级评论继承 ALL_NOTICE）。
 tweak_pure_delete() { git reset -q --hard origin/main; git rm -q src/app.py; git commit -qm "delete app"; git push -qf origin feature/x; }
-CASE_TWEAK=tweak_pure_delete run_case degnoinline INLINE_COMMENT=1 MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
+# CODEUP_BOT_USERNAME：身份未知时 INLINE_COMMENT=1 会被第 1.6 步降为 0（P0-3），这里要的是第 4.5 步真的跑出 INLINE_NOTICE，所以给身份
+CASE_TWEAK=tweak_pure_delete run_case degnoinline INLINE_COMMENT=1 CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
 assert_rc "$RC" 0 "降级 + 纯删除 MR：退出码 0"
 assert_contains "$OUT" "全部问题都归入" "降级 + 纯删除 MR：日志里有分桶提示（INLINE_NOTICE 确实产生了）"
 comment=$(posted_comment "$OUT")

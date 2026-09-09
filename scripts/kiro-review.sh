@@ -575,9 +575,11 @@ publish_inline_comments() {
   existing_rg="$WORK/existing-ranges.json"
   draft_rg="$WORK/draft-ranges.json"
   echo '[]' > "$existing_rg"; echo '[]' > "$draft_rg"
-  if [[ -z "${BOT_USERNAME:-}" ]]; then
-    log "警告：未配置 CODEUP_BOT_USERNAME（令牌身份接口也不可用——P1-00 实测 403），行内评论去重无法按作者过滤，只能按评论正文里的隐藏标记识别本评审员的评论。重跑仍不会重复，**但任何 MR 参与者只要在同一处贴一条带同样标记的评论，就能压制掉对应那条问题（连 P0 也发不出去）**。强烈建议配置该变量"
-  fi
+  # 第二道（CodeX 2026-09-09 P0-3）：第 1.6 步已把身份未知时的 INLINE_COMMENT 降为 0，正常到不了这里；万一到了也绝不按标记去重——
+  # 那等于让任何 MR 参与者用一条伪造标记压制 P0。fail-closed：退回完整清单。
+  [[ -n "${BOT_USERNAME:-}" ]] \
+    || { inline_bail "行内评论未发出：本次无法取得可信的机器人账号用户名，不能只按隐藏标记识别已有评论（其他 MR 参与者可伪造），下面是完整问题清单。" \
+                     "警告：publish_inline_comments 在身份未知时被调用（第 1.6 步的降级没生效——集成包缺陷，请报告），按 fail-closed 退回完整清单"; return 1; }
   if codeup_list_inline_comments "$LOCAL_ID" > "$WORK/inline-comments.json"; then
     review_inline_existing_ranges "${BOT_USERNAME:-}" < "$WORK/inline-comments.json" > "$existing_rg" \
       || echo '[]' > "$existing_rg"
@@ -840,6 +842,18 @@ if BOT_USERNAME=$(codeup_bot_username); then
 else
   BOT_USERNAME=""
   log "未取得机器人账号用户名（CODEUP_BOT_USERNAME 未配置，令牌身份接口也不可用——P1-00 实测 403）：本次只能新建汇总评论，不做原地更新"
+fi
+# --- 1.6 身份未知时行内评论整轮关闭（CodeX 2026-09-09 P0-3；Kent 2026-09-09 推翻 2026-09-03 裁决 3）---
+# 行内去重的主键是「同文件 + 行区间重叠/相邻 + 级别」，隐藏标记里的指纹可以随便填：身份未知时只按标记识别「本评审员的评论」，
+# MR 作者只要知道自己改了哪几行，预先贴一条 `<!-- kiro-inline:… L42-42 sev=P0 -->` 就能让那一处的新 P0 被算成「已有评论」、
+# 静默消失（不进折叠区）。MR 作者正是本项目定义的不受信输入，「已认证」不是缓解。所以：请求了行内评论但拿不到可信身份 →
+# 本轮按 INLINE_COMMENT=0 处理（不查行内评论、不做区间去重、不采样版本对、不建草稿），汇总恢复完整清单并写明原因；
+# 配上 CODEUP_BOT_USERNAME（或身份接口可用）后下一轮自动恢复。身份未知时汇总本来就只能新建，多次重跑会留下多条完整汇总——
+# 那是既有降级行为（setup-guide §11.2 / §11.4 已写明）。
+if [[ "$INLINE_COMMENT" == "1" && -z "$BOT_USERNAME" ]]; then
+  INLINE_COMMENT=0   # 身份未知：本轮按 0 处理（CodeX 2026-09-09 P0-3）
+  INLINE_NOTICE="已请求行内评论，但本次无法取得可信的机器人账号用户名。为防止其他 MR 参与者伪造隐藏标记并压制问题，本轮未发行内评论；以下为完整问题清单。配置 CODEUP_BOT_USERNAME 后可启用行内评论。"
+  log "警告：INLINE_COMMENT=1 但身份未知（CODEUP_BOT_USERNAME 未配置且身份接口不可用）——本轮不发行内评论、不做区间去重，汇总退回完整问题清单；配置 CODEUP_BOT_USERNAME 后恢复"
 fi
 if codeup_list_global_comments "$LOCAL_ID" > "$WORK/comments.json"; then
   sel_rc=0
