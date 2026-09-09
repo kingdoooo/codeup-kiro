@@ -1360,6 +1360,25 @@ for spec in '^~~~python$|~~~' '^````text$|````' '^~~~~~txt$|~~~~~'; do
 done
 TRUNC_SRC="$GOLDEN_FULL"
 
+# ---- CodeX 2026-09-09 P1-3 复审：评论头第 4 行 = 本次发布随机串（REVIEW_POST_NONCE 非空时），汇总 POST 探针据此认「本次」 ----
+hist_empty=$(mktemp); printf '[]\n' > "$hist_empty"
+head4=$(REVIEW_POST_NONCE=0123456789abcdef review_render_comment_head "# T" abc1234 2 "$hist_empty")
+assert_eq "$(printf '%s\n' "$head4" | wc -l | tr -d ' ')" "4" "P1-3：REVIEW_POST_NONCE 非空 → 评论头 4 行"
+assert_eq "$(printf '%s\n' "$head4" | sed -n 4p)" "<!-- kiro-review-post:0123456789abcdef -->" "P1-3：第 4 行是发布随机串行"
+assert_eq "$([[ "$(printf '%s\n' "$head4" | sed -n 4p)" =~ $REVIEW_POST_NONCE_LINE_RE ]] && echo match)" "match" "P1-3：该行匹配 REVIEW_POST_NONCE_LINE_RE（探针用的就是这条）"
+assert_eq "$(printf '%s\n' "$head4" | head -3)" "$(REVIEW_POST_NONCE= review_render_comment_head "# T" abc1234 2 "$hist_empty")" "P1-3：前三行（标题 / 评审标记 / 隐藏历史）不受影响"
+assert_eq "$(REVIEW_POST_NONCE= review_render_comment_head "# T" abc1234 2 "$hist_empty" | wc -l | tr -d ' ')" "3" "P1-3：REVIEW_POST_NONCE 为空 → 评论头仍是 3 行（golden 不变）"
+assert_eq "$(REVIEW_POST_NONCE='x<!-- -->' review_render_comment_head "# T" abc1234 2 "$hist_empty" | wc -l | tr -d ' ')" "3" "P1-3：随机串形态不合法（非 16 位十六进制）→ 不写第 4 行"
+# 守卫：随机串行是脚本标记行，截断把它砍掉必须 rc 3 拒绝（否则探针在截断后静默失效）；砍在它之后照常截断且该行仍在
+nf=$(mktemp); { printf '%s\n' "$head4"; echo; for i in $(seq 1 40); do echo "正文第 ${i} 行，凑字节数用"; done; } > "$nf"
+nonce_end=$(head -4 "$nf" | wc -c | tr -d ' ')
+cp "$nf" "$tmp/nf1.md"; rc=0; review_truncate_comment "$tmp/nf1.md" "$((nonce_end - 5))" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 3 "P1-3：截断上限砍进随机串行 → rc 3 拒绝（守卫把它当脚本标记行）"
+cp "$nf" "$tmp/nf2.md"; rc=0; review_truncate_comment "$tmp/nf2.md" "$((nonce_end + 40))" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 0 "P1-3：上限在随机串行之后 → 正常截断"
+assert_eq "$(grep -c '^<!-- kiro-review-post:0123456789abcdef -->$' "$tmp/nf2.md")" "1" "P1-3：截断后随机串行仍在"
+rm -f "$hist_empty" "$nf"
+
 # ============================================================================
 # 票 04：行内评论管线
 # ============================================================================

@@ -648,6 +648,7 @@ assert_rc "$RC" 0 "首次评审：成功"
 assert_contains "$OUT" "changeRequests/7/comments/list" "首次评审：发汇总前先查询 MR 全局评论"
 assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "1" "首次评审：新建评论（POST …/comments）"
 assert_eq "$(req_count "$OUT" PUT)" "0" "首次评审：不调用更新接口"
+assert_eq "$(posted_comment "$OUT" | grep -cE '^<!-- kiro-review-post:[0-9a-f]{16} -->$')" "1" "首次评审：评论头带本次发布随机串行（CodeX 2026-09-09 P1-3：汇总 POST 探针据此认「本次」）"
 assert_contains "$OUT" "未找到本评审员的旧汇总评论" "首次评审：日志说明按新建处理"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "<!-- kiro-review:" "首次评审：评论带评审标记"

@@ -110,10 +110,11 @@ assert_eq "${_CODEUP_POST_PROBE_SHA}/${_CODEUP_POST_PROBE_RUN}" "/" "①：标�
 rm -f "$wide"
 export DRY_RUN=1
 pmd=$(mktemp)
-printf '# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n<!-- kiro-history:[] -->\n\n正文\n' > "$pmd"
-# 标记解析：sha 与 run 各自取到（探针的前置条件）
+printf '# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n<!-- kiro-history:[] -->\n<!-- kiro-review-post:0123456789abcdef -->\n\n正文\n' > "$pmd"
+# 标记解析：sha 与 run 各自取到（探针的前置条件）；本次发布随机串也取到（CodeX 2026-09-09 P1-3 复审）
 _codeup_post_probe_marker "$pmd"
 assert_eq "${_CODEUP_POST_PROBE_SHA}/${_CODEUP_POST_PROBE_RUN}" "abc1234/3" "①：从待发正文第一处评审标记取出 sha 与 run"
+assert_eq "$_CODEUP_POST_PROBE_NONCE" "0123456789abcdef" "P1-3：从待发正文取出本次发布随机串"
 # ① 序列一：POST→000，list→含同标记同作者 ⇒ 只有一次 POST、rc 0
 _codeup_dry_seq_reset; _codeup_dry_calls=""
 rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
@@ -167,6 +168,30 @@ rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME= \
             codeup_post_comment 7 "$pmd" "$TEST_BOT_USERNAME" 2>&1 >/dev/null) || rc=$?
 assert_rc "$rc" 0 "P1-1：环境未配置但显式传入了解析出的身份 → 认，rc 0"
 assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "1" "P1-1：显式身份匹配作者 → 只发一次 POST"
+# CodeX 2026-09-09 P1-3 复审：sha + run 不是本次独有的——列表查询失败时 REVIEW_RUN 回落到 1，MR 上可能已有同作者、同 sha、run:1 的旧评论
+# （同提交并发重跑亦然）。探针必须认**本次发布随机串**（评论头第 4 行 <!-- kiro-review-post:… -->）：旧评论带的是上一次的随机串 → 不认，
+# 否则 POST 其实没建成、脚本却停止重试并报告成功，本次报告静默丢失。
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 DRY_RUN_FIXTURE_DIR="$FX/post-lost-stale" DRY_RUN_FAIL_ROUTES="create-comment:500" \
+            codeup_post_comment 7 "$pmd" "$TEST_BOT_USERNAME" 2>&1 >/dev/null) || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "P1-3：POST 每次都 500、MR 上只有同作者同标记但随机串不同的旧评论 → 不算成功（rc 非零）"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "3" "P1-3：旧评论不算创建成功 → 三次尝试都发了 POST"
+assert_contains "$err" "post:0123456789abcdef" "P1-3：日志点名比对用的本次随机串"
+assert_not_contains "$err" "响应丢失但评论已创建" "P1-3：没有把旧评论报成「已创建」"
+# 正控：同一 fixture 形态、随机串一致（post-lost-created 带 0123456789abcdef）→ 认（上面序列一已覆盖，这里只确认差异仅在随机串）
+assert_eq "$(jq -r '.[0].content' "$FX/post-lost-stale/list-comments.json" | sed 's/ffffffffffffffff/0123456789abcdef/')" \
+          "$(jq -r '.[0].content' "$FX/post-lost-created/list-comments.json")" "P1-3 正控：stale 与 created 两个 fixture 只差随机串一处"
+# 待发正文没有随机串行（例如集成包里 REVIEW_POST_NONCE 生成失败）：探针不作数、照常重试——宁可留第二条汇总也不把旧评论当成功
+nononce=$(mktemp); printf '# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n<!-- kiro-history:[] -->\n\n正文\n' > "$nononce"
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="create-comment:000@1" \
+            codeup_post_comment 7 "$nononce" "$TEST_BOT_USERNAME" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "P1-3：待发正文没有发布随机串 → 探针不作数、照常重试并成功"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "P1-3：没有随机串时发了第二次 POST"
+assert_contains "$err" "没有本次发布随机串" "P1-3：日志说明为什么不核对"
+rm -f "$nononce"
+# 随机串行的形态只在 review-render.sh（REVIEW_POST_NONCE_LINE_RE）：codeup-api.sh 不许出现第二份
+assert_eq "$(LC_ALL=C grep -cE 'kiro-review-post:\(?\[0-9a-f' ../scripts/lib/codeup-api.sh || true)" "0" "P1-3：codeup-api.sh 里没有第二份发布随机串行的形态"
 # ① 正文里没有评审标记（例如失败评论渲染成最小形态之前的中间产物）：跳过核对、按既有策略重试
 nomark=$(mktemp); printf '没有标记的正文\n' > "$nomark"
 _codeup_dry_seq_reset; _codeup_dry_calls=""

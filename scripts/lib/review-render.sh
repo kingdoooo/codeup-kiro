@@ -1159,6 +1159,13 @@ review_render_inline_body() {
 # `$((prior_run + 1))` 静默溢出成负数、渲染出一个再也匹配不上的标记。位数上限让这类值直接不算候选
 # （于是新建一条正常的汇总），而不是把 run 号搞坏。
 REVIEW_MARKER_LINE_RE='^<!-- kiro-review:[0-9a-zA-Z._-]+ run:([0-9]{1,9}) -->[[:space:]]*$'
+# --- 本次发布随机串行（CodeX 2026-09-09 P1-3 复审）---
+# 评论头第 4 行：<!-- kiro-review-post:{nonce} -->（REVIEW_POST_NONCE 非空且形态合法时才写；kiro-review.sh 每次运行生成一个）。
+# 汇总新建 POST 的「响应丢失但评论已创建」探针只认带**本次**随机串的评论：sha + run 不是本次独有的——列表查询失败时 REVIEW_RUN
+# 回落到 1，MR 上可能已有同作者、同 sha、run:1 的旧评论（同提交并发重跑亦然），把它当成功会让脚本停止重试并报告成功，而本次
+# 报告根本没发出去。形态只定义在这里，codeup-api.sh 引用、不抄第二份；这一行也是守卫保护的脚本标记行（截断砍掉它 → 拒绝截断）。
+REVIEW_POST_NONCE_PREFIX='<!-- kiro-review-post:'
+REVIEW_POST_NONCE_LINE_RE='^<!-- kiro-review-post:([0-9a-f]{16}) -->[[:space:]]*$'
 
 # --- 历次评审记录 ---
 # 汇总评论里嵌一行隐藏 JSON 作为机器可读的历次记录，「历次评审」表只是它的人类可读投影：
@@ -1483,7 +1490,7 @@ review_render_footer() {
 # `###` 以下虽不再渲染成标题，转义成字面量也不损失什么。这条只约束脚本自己发出的行：模型文本
 # 代码围栏内的 `###` 是代码，原样保留（所以「评论里没有 ### 行」不是全局不变量，测试只对无围栏 fixture 断言）。
 
-# --- 评论头（标题 + 评审标记 + 历史标记）：成功 / 降级 / 失败评论与 kiro-review.sh 的最小失败评论**同一份**（第 13 条）---
+# --- 评论头（标题 + 评审标记 + 历史标记 [+ 本次发布随机串]）：成功 / 降级 / 失败评论与 kiro-review.sh 的最小失败评论**同一份**（第 13 条）---
 # 用法：review_render_comment_head <标题> <sha> <run> <历史 JSON 文件（已含本次那一行）>
 # 评审标记那一行的形态必须与 REVIEW_MARKER_LINE_RE 严格一致：定位旧评论、守卫、去重全靠它。以前最小失败评论在
 # kiro-review.sh 里手写了第三份，守卫漏掉那一份就会在 MR 上多出一条汇总（违反 I4）。
@@ -1492,6 +1499,11 @@ review_render_comment_head() {
   echo "$title"
   echo "<!-- kiro-review:${sha} run:${run} -->"
   review_render_history_marker "$hist"
+  # 第 4 行：本次发布随机串（P1-3）。只在形态合法（16 位十六进制）时写：这一行是脚本标记行（守卫保护、探针逐字比对），
+  # 不能让任何别的取值借它进评论头。为空 / 不合法就不写——探针据此不作数、回到既有重试策略（fail-safe），前三行形态不变。
+  if [[ "${REVIEW_POST_NONCE:-}" =~ ^[0-9a-f]{16}$ ]]; then
+    echo "${REVIEW_POST_NONCE_PREFIX}${REVIEW_POST_NONCE} -->"
+  fi
 }
 # --- 本次一行历史（status=failed / degraded）的三步回退：读回的历史 + 本次 → 只有本次 → 空数组（第 13 条，一处定义）---
 # 用法：review_history_for_run <历史 JSON 文件或 -> <run> <sha> <status> <调用方名> → stdout = 历史 JSON 数组
@@ -2447,8 +2459,9 @@ _review_ere_escape() {
 # 加载期算一次的常量（16-fix4 第 16 条）：三个常量与 _review_ere_escape 都在上面定义完了才能算；_review_marker_line_re 只是它的取值口，
 # _review_marker_line_re_build 是派生公式（测试改常量后用它重算，证明没有第四份手写字面量）
 _review_marker_line_re_build() {
-  printf '%s|^%s|^%s' "$REVIEW_MARKER_LINE_RE" \
-    "$(_review_ere_escape "$REVIEW_INLINE_MARKER_PREFIX")" "$(_review_ere_escape "$REVIEW_HISTORY_PREFIX")"
+  printf '%s|^%s|^%s|^%s' "$REVIEW_MARKER_LINE_RE" \
+    "$(_review_ere_escape "$REVIEW_INLINE_MARKER_PREFIX")" "$(_review_ere_escape "$REVIEW_HISTORY_PREFIX")" \
+    "$(_review_ere_escape "$REVIEW_POST_NONCE_PREFIX")"   # 本次发布随机串行也是脚本标记行（P1-3）：截断砍掉它，探针就静默失效
 }
 REVIEW_MARKER_LINE_RE_ALL=$(_review_marker_line_re_build)
 _review_marker_line_re() { printf '%s' "$REVIEW_MARKER_LINE_RE_ALL"; }
