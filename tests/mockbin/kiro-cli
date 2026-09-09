@@ -164,6 +164,11 @@ if [[ -n "$AGENT_ARG" ]]; then
   if [[ ! -r "$AGENT_JSON" ]]; then
     echo "mock kiro-cli: agent '${AGENT_ARG}' not found under ${HOME:-<HOME 未设置>}/.kiro/agents" >&2; exit 1
   fi
+  # 生产脚本退出时会删掉本次的 agent 文件（P1-2），测试要看安装结果只能看替身在 chat 时拷的这一份
+  cp "$AGENT_JSON" "$M/agent.json"; printf '%s\n' "$AGENT_JSON" > "$M/agent-path"
+  # 真实 kiro-cli 2.21.1 加载 agent 时会在旁边写 <文件>.backup 与 <文件>.backup.<UTC 时间戳>（本机实测 2026-09-09）：替身照做，
+  # 端到端「退出后 ~/.kiro/agents 为空」的断言才能证明清理连备份一起删了
+  cp "$AGENT_JSON" "$AGENT_JSON.backup"; cp "$AGENT_JSON" "$AGENT_JSON.backup.2026-09-09T00-00-00Z"
   : > "$M/allowscan"
   while IFS= read -r p; do
     if [[ -d "$p" ]]; then printf '%s\tdir\t%s\n' "$p" "$(ls -A "$p" | paste -sd, -)"

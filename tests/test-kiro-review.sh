@@ -207,15 +207,23 @@ assert_not_contains "$prompt_arg" "{{REVIEW_WORKSPACE}}" "运行时提示词里�
 assert_not_contains "$prompt_arg" "{{" "运行时提示词里没有任何占位符残留"
 
 # --- 受信 agent 安装：按 name 落盘，prompt 改写为集成包内提示词的绝对 file:// 路径 ---
-inst="$CASE/home/.kiro/agents/codeup-reviewer.json"
-assert_eq "$([[ -f "$inst" ]] && echo y || echo n)" "y" "受信 agent 已安装到 ~/.kiro/agents/codeup-reviewer.json"
+inst="$MD/agent.json"   # 替身在 chat 时拷的安装文件（脚本退出时会删掉 ~/.kiro/agents 下本次的文件，P1-2）
+assert_eq "$([[ -f "$inst" ]] && echo y || echo n)" "y" "受信 agent 已安装（替身在 chat 时读到了 --agent 指向的文件）"
+# P1-2（CodeX 2026-09-09）：每次运行独占一个 agent 名 codeup-reviewer-<本次 nonce>，文件按该名落盘，退出后精确删除
+agent_name=$(paste -sd' ' "$MD/args" | sed -nE 's/.*--agent ([^ ]+).*/\1/p')
+assert_eq "$([[ "$agent_name" =~ ^codeup-reviewer-[0-9a-f]{16}$ ]] && echo y || echo n)" "y" "P1-2：--agent 取值带本次 16 位随机串（实际：${agent_name}）"
+assert_eq "$agent_name" "codeup-reviewer-$(cat "$MD/nonce")" "P1-2：agent 名里的随机串就是本次契约标记的随机串（同源）"
+assert_eq "$(cat "$MD/agent-path")" "$CASE/home/.kiro/agents/${agent_name}.json" "P1-2：agent 文件按动态名落在 ~/.kiro/agents 下"
+assert_eq "$([[ -e "$(cat "$MD/agent-path")" ]] && echo present || echo gone)" "gone" "P1-2：脚本退出后本次 agent 文件已删除（共享 HOME 上不留竞态面）"
+assert_eq "$(jq -r .name "$inst")" "$agent_name" "P1-2：安装文件里的 name 与文件名 / --agent 一致"
+assert_eq "$(ls "$CASE/home/.kiro/agents" | wc -l | tr -d ' ')" "0" "P1-2：退出后 ~/.kiro/agents 里没有留下任何文件"
 inst_prompt=$(jq -r .prompt "$inst")
 assert_eq "$([[ "$inst_prompt" == file:///*/prompts/review-agent-prompt.md ]] && echo abs || echo other)" "abs" \
   "安装后的 prompt 为绝对 file:// 路径（实际：${inst_prompt}）"
 assert_eq "$([[ -r "${inst_prompt#file://}" ]] && echo y || echo n)" "y" "prompt 引用的提示词文件存在且可读"
 assert_eq "$(jq -c '[.includeMcpJson, .includePowers]' "$inst")" "[false,false]" "安装后的 agent 不含 MCP/Powers"
-assert_eq "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths) | del(.permissions)' "$inst")" "$(jq -c 'del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths) | del(.permissions)' "$ROOT/kiro/agent-codeup-reviewer.json")" \
-  "安装只改写 prompt、三处 allowedPaths、三处 deniedPaths 与 V3 的 permissions.rules[fs_read].match（都只追加按 allow 根注入的绝对副本），其余字段与集成包一致"
+assert_eq "$(jq -c 'del(.name) | del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths) | del(.permissions)' "$inst")" "$(jq -c 'del(.name) | del(.prompt) | del(.toolsSettings[].allowedPaths) | del(.toolsSettings[].deniedPaths) | del(.permissions)' "$ROOT/kiro/agent-codeup-reviewer.json")" \
+  "安装只改写 name（本次动态名，P1-2）、prompt、三处 allowedPaths、三处 deniedPaths 与 V3 的 permissions.rules[fs_read].match（都只追加按 allow 根注入的绝对副本），其余字段与集成包一致"
 assert_eq "$(jq -c '.toolsSettings.read.deniedPaths[:32]' "$inst")" "$(jq -c '.toolsSettings.read.deniedPaths' "$ROOT/kiro/agent-codeup-reviewer.json")" "安装后 deniedPaths 前段就是集成包的原条目（顺序不变，只在末尾追加）"
 # --- 读取边界（票 15）：allowedPaths = 业务库 checkout 物理路径 + 本次 $WORK/chunks；allowedTools 为空 ---
 assert_eq "$(jq -r '.toolsSettings.read.allowedPaths | length' "$inst")" "2" "安装后 allowedPaths 恰好两条"
@@ -1674,7 +1682,7 @@ assert_eq "$(printf '%s\n' "$idx_lines" | jq -r '.chunk | test("/chunks/[0-9]{4}
 mkdir -p "$tmp/tmp-real"; ln -s "$tmp/tmp-real" "$tmp/tmp-link"
 run_case overlimit-symtmp DIFF_SIZE_LIMIT=1 TMPDIR="$tmp/tmp-link"
 assert_rc "$RC" 0 "超限+符号链接 TMPDIR：退出码 0"
-allow_chunks_st=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$CASE/home/.kiro/agents/codeup-reviewer.json")
+allow_chunks_st=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$MD/agent.json")
 assert_eq "$([[ "$allow_chunks_st" == /*/chunks ]] && echo y || echo n)" "y" "超限+符号链接 TMPDIR：allowedPaths[1] 是绝对路径下的 chunks（实际：${allow_chunks_st}）"
 idx_st=$(awk -v h="$IDX_HDR" 'index($0, h) == 1 {on=1; next} on && $0 == "" {exit} on {print}' "$MD/stdin")
 assert_eq "$(printf '%s\n' "$idx_st" | grep -c .)" "$(git -C "$CASE/work" diff --no-renames --name-only main HEAD | wc -l | tr -d ' ')" "超限+符号链接 TMPDIR：索引非空、条数与变更文件数一致"

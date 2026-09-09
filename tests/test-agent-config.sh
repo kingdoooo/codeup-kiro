@@ -86,6 +86,19 @@ INJECTED=$(jq -nc --arg a "$WS_P" --arg b "$CH_P" '[$a, $b]')
 allowed_of() { jq -c --arg t "$2" '.toolsSettings[$t].allowedPaths' "$1"; }
 dest=$(kiro_install_agent "$A" "$tmp/agents" --workspace "$WS" --chunks "$CH")
 assert_eq "$dest" "$tmp/agents/codeup-reviewer.json" "安装路径 = <dest>/<name>.json"
+# P1-2（CodeX 2026-09-09）：--name 覆盖定义里的 name，文件名与 JSON 里的 name 同步；形状校验；不误删别的动态名文件
+mkdir -p "$tmp/agents-dyn"
+printf '{"name":"codeup-reviewer-aaaaaaaaaaaaaaaa"}\n' > "$tmp/agents-dyn/codeup-reviewer-aaaaaaaaaaaaaaaa.json"   # 模拟并发的另一次运行
+dest_dyn=$(kiro_install_agent "$A" "$tmp/agents-dyn" --workspace "$WS" --chunks "$CH" --name codeup-reviewer-bbbbbbbbbbbbbbbb)
+assert_eq "$dest_dyn" "$tmp/agents-dyn/codeup-reviewer-bbbbbbbbbbbbbbbb.json" "P1-2：--name 决定落盘文件名"
+assert_eq "$(jq -r .name "$dest_dyn")" "codeup-reviewer-bbbbbbbbbbbbbbbb" "P1-2：安装文件里的 name 同步为 --name"
+assert_eq "$([[ -f "$tmp/agents-dyn/codeup-reviewer-aaaaaaaaaaaaaaaa.json" ]] && echo kept || echo removed)" "kept" "P1-2：别的动态名文件不被当成「同名旧文件」删掉（stale 清理只认完全相同的 name）"
+assert_eq "$(allowed_of "$dest_dyn" read)" "$INJECTED" "P1-2：--name 不影响 allowedPaths 注入"
+rc=0; err=$(kiro_install_agent "$A" "$tmp/agents-dyn" --workspace "$WS" --chunks "$CH" --name '../evil' 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 1 "P1-2：--name 含路径分隔符 → 拒绝"
+assert_contains "$err" "--name 只接受" "P1-2：拒绝时点名 --name 形状"
+rc=0; err=$(kiro_install_agent "$A" "$tmp/agents-dyn" --workspace "$WS" --chunks "$CH" --name '' 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "P1-2：--name 空串等于不给（沿用定义里的 name）"
 assert_rc "$(jq -e . "$dest" >/dev/null 2>&1 && echo 0 || echo 1)" 0 "安装后 JSON 合法（路径带空格）"
 assert_eq "$(jq -r .prompt "$dest")" "file://$ROOT/prompts/review-agent-prompt.md" "安装后 prompt 为绝对 file:// 路径"
 for t in read grep glob; do

@@ -72,15 +72,22 @@ _kiro_agent_deny_missing() {
 
 kiro_install_agent() {
   local src="$1" dest_dir="$2"; shift 2
-  local ws="" ch="" ws_set=0 ch_set=0 allow_none=0
+  local ws="" ch="" ws_set=0 ch_set=0 allow_none=0 run_name=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --workspace) [[ $# -ge 2 ]] || { echo "kiro_install_agent: --workspace 缺少取值" >&2; return 1; }; ws="$2"; ws_set=1; shift 2 ;;
       --chunks)    [[ $# -ge 2 ]] || { echo "kiro_install_agent: --chunks 缺少取值" >&2; return 1; };    ch="$2"; ch_set=1; shift 2 ;;
       --allow-none)  allow_none=1; shift ;;
-      *) echo "kiro_install_agent: 未知参数：$1（只接受 --workspace <目录> / --chunks <目录> / --allow-none）" >&2; return 1 ;;
+      # --name：覆盖定义里的 name（同时决定落盘文件名）。执行器每次运行独占一个名字（codeup-reviewer-<nonce>），避免共享 HOME 上
+      # 并发运行互相覆盖同一个 agent 文件（CodeX 2026-09-09 P1-2）。只接受 kiro-cli 能当文件名与 --agent 取值的形状。
+      --name)      [[ $# -ge 2 ]] || { echo "kiro_install_agent: --name 缺少取值" >&2; return 1; }; run_name="$2"; shift 2 ;;
+      *) echo "kiro_install_agent: 未知参数：$1（只接受 --workspace <目录> / --chunks <目录> / --allow-none / --name <agent 名>）" >&2; return 1 ;;
     esac
   done
+  if [[ -n "$run_name" ]]; then
+    [[ "$run_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+      || { echo "kiro_install_agent: --name 只接受字母数字开头、[A-Za-z0-9._-]、不超过 64 字符：${run_name}" >&2; return 1; }
+  fi
   local src_dir name prompt dest rel abs prompt_new rendered stale stale_name deny_missing
   [[ -r "$src" ]] || { echo "kiro_install_agent: agent 定义不可读：${src}" >&2; return 1; }
   if [[ "$allow_none" == "1" ]]; then
@@ -95,6 +102,7 @@ kiro_install_agent() {
   name=$(jq -r '.name // empty' "$src" 2>/dev/null) \
     || { echo "kiro_install_agent: agent 定义不是合法 JSON：${src}" >&2; return 1; }
   [[ -n "$name" ]] || { echo "kiro_install_agent: agent 定义缺少 name：${src}" >&2; return 1; }
+  [[ -z "$run_name" ]] || name="$run_name"   # 定义里的 name 只是默认值；--name 给了就整份用它（文件名与 JSON 里的 name 一致）
   prompt=$(jq -r '.prompt // empty' "$src")
   # prompt 是只读角色约束所在，缺失就等于让默认系统提示词跑评审——拒绝安装
   [[ -n "$prompt" ]] || { echo "kiro_install_agent: agent 定义缺少 prompt：${src}" >&2; return 1; }
@@ -122,8 +130,9 @@ kiro_install_agent() {
   # V3 的 fs_read deny 规则（permissions.rules）与 toolsSettings.*.deniedPaths **同源**（票 18 ⑫）：两处都有 `**/…` 形状，
   # 而 kiro-cli 把它们按 cwd 解析（15-fix4 #1 补）。V3 不上生产（ADR-0004），但定义是 V2/V3 双兼容的，切引擎时不该只有一半形状
   # 拿到绝对副本——那种「一半生效」的边界比明确不支持更危险。--allow-none 同样不注入（正控 agent 要旧形态）。
-  rendered=$(jq --arg p "$prompt_new" --arg ws "$ws" --arg ch "$ch" --argjson none "$allow_none" "$_KIRO_DENY_ABS_JQ"'
-      (if $p != "" then .prompt = $p else . end)
+  rendered=$(jq --arg p "$prompt_new" --arg ws "$ws" --arg ch "$ch" --arg nm "$name" --argjson none "$allow_none" "$_KIRO_DENY_ABS_JQ"'
+      .name = $nm
+      | (if $p != "" then .prompt = $p else . end)
       | if $none == 1 then del(.toolsSettings[].allowedPaths)
         else reduce '"$KIRO_AGENT_TOOLS_JQ"' as $t (.;
                .toolsSettings[$t].allowedPaths = [$ws, $ch]

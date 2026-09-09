@@ -225,6 +225,17 @@ run_case m5b "$pkg"
 assert_rc "$RC" 0 "M5b：变异体仍能跑完"
 assert_eq "$(grep -c -x -- '--trust-all-tools' "$MD/args")" "1" "M5b：参数里出现 --trust-all-tools——端到端断言「绝不传 --trust-all-tools」会失败"
 
+# --- M-cx6（CodeX 2026-09-09 P1-2）：agent 文件不再按本次随机串独占 / 退出不清理 → 共享 HOME 上并发运行互相覆盖 ---
+pkg=$(make_mutant m-cx6a-fixed-name 's| --name "\$AGENT_RUN_NAME") \\| ) \\|')
+run_case m-cx6a "$pkg"
+assert_rc "$RC" 0 "M-cx6a：变异体仍能跑完"
+assert_eq "$(paste -sd' ' "$MD/args" | sed -nE 's/.*--agent ([^ ]+).*/\1/p')" "codeup-reviewer" "M-cx6a：去掉 --name 后 agent 名退回固定的 codeup-reviewer——端到端「带 16 位随机串」断言会失败"
+pkg=$(make_mutant m-cx6b-no-cleanup 's|  if \[\[ -n "\${INSTALLED_AGENT:-}" \]\]; then rm -f "\$INSTALLED_AGENT" "\$INSTALLED_AGENT".backup "\$INSTALLED_AGENT".backup.\*; fi|  :|')
+run_case m-cx6b "$pkg"
+assert_rc "$RC" 0 "M-cx6b：变异体仍能跑完"
+assert_eq "$([[ -e "$(cat "$MD/agent-path")" ]] && echo present || echo gone)" "present" "M-cx6b：退出后本次 agent 文件还在——端到端「已删除」断言会失败"
+assert_eq "$(ls "$CASE/home/.kiro/agents" | wc -l | tr -d ' ')" "3" "M-cx6b：agent 文件 + kiro-cli 写的两份 backup 都留下了——端到端「目录为空」断言会失败"
+
 # --- M5c：去掉 env -i 许可清单 → Kiro 进程继承完整环境，YUNXIAO_TOKEN 可见（票 15）---
 pkg=$(make_mutant m5c-env-i 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" kiro-cli chat --no-interactive/kiro-cli chat --no-interactive/')
 run_case m5c "$pkg"
@@ -260,13 +271,13 @@ idx5e_dir=$(idx_dir_of "$MD/stdin")
 assert_eq "$([[ -n "$idx5e_dir" ]] && echo nonempty)" "nonempty" "M5e：索引非空"
 assert_eq "$([[ "$(dirname "$(dirname "$idx5e_dir")")" == "$(phys_of_parent "$idx5e_dir")" ]] && echo physical || echo logical)" "logical" \
   "M5e 前提自检：变异体写出的索引 chunk 目录是逻辑形态（${idx5e_dir}）——此主机上逻辑≠物理成立"
-allow5e=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$CASE/home/.kiro/agents/codeup-reviewer.json")
+allow5e=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$MD/agent.json")
 assert_eq "$([[ "$idx5e_dir" == "$allow5e" ]] && echo same || echo differs)" "differs" \
   "M5e：索引里的 chunk 目录（${idx5e_dir}）与 allowedPaths[1]（${allow5e}）形态不一致——端到端「逐字相同」断言会失败"
 # 对照：未变异实现下两者逐字相同，且都是物理形态
 run_case m5e-control "$ROOT" DIFF_SIZE_LIMIT=1 TMPDIR="$tmp/m5e-tmp-link"
 idx5ec_dir=$(idx_dir_of "$MD/stdin")
-allow5ec=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$CASE/home/.kiro/agents/codeup-reviewer.json")
+allow5ec=$(jq -r '.toolsSettings.read.allowedPaths[1]' "$MD/agent.json")
 assert_eq "$idx5ec_dir" "$allow5ec" "M5e 对照：未变异实现下索引 chunk 目录与 allowedPaths[1] 逐字相同"
 assert_eq "$([[ "$(dirname "$(dirname "$idx5ec_dir")")" == "$(phys_of_parent "$idx5ec_dir")" ]] && echo physical || echo logical)" "physical" \
   "M5e 对照：未变异实现写出的索引 chunk 目录是物理形态"

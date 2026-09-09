@@ -831,7 +831,23 @@ else
 fi
 SHORT_SHA=$(git rev-parse --short HEAD)
 MR_LOCATED=1
-WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+WORK=$(mktemp -d)
+# 退出清理：工作目录 + **本次**安装的 agent 文件——只删精确路径，不 glob（同一 HOME 下并发的别的运行有各自的文件；CodeX 2026-09-09 P1-2）
+INSTALLED_AGENT=""
+# kiro-cli 2.21.1 加载 agent 时会在旁边写 <文件>.backup 与 <文件>.backup.<时间戳>（本机实测），一并删——glob 只带本次文件的完整
+# 文件名前缀（含随机串），不会碰到别的运行的文件。
+_review_cleanup() {
+  rm -rf "$WORK"
+  if [[ -n "${INSTALLED_AGENT:-}" ]]; then rm -f "$INSTALLED_AGENT" "$INSTALLED_AGENT".backup "$INSTALLED_AGENT".backup.*; fi
+  return 0
+}
+trap _review_cleanup EXIT
+# 本次运行的随机串提前到这里生成（CodeX 2026-09-09 P1-2）：同时用作受信 agent 的名字 / 文件名与契约标记。
+# 原先 agent 固定装到 $HOME/.kiro/agents/codeup-reviewer.json：共享 HOME 的执行器上两条流水线并发时，B 的安装会在 A 自检通过之后、
+# A 启动 kiro-cli 之前把文件覆盖成 B 的 allowedPaths（TOCTOU），A 按同名启动就读到 B 的配置。每次运行独占一个名字就没有共享文件可抢。
+REVIEW_NONCE=$(review_new_nonce)
+[[ "$REVIEW_NONCE" =~ ^[0-9a-f]{16}$ ]] || die_review "生成契约标记随机串失败（得到：${REVIEW_NONCE}）"
+AGENT_RUN_NAME="codeup-reviewer-${REVIEW_NONCE}"
 
 # --- 1.5 定位本评审员上一次的汇总评论（spec §4.5 第 8 步、I4；票 03）---
 # 放在这里而不是「发评论前」：此后任何失败都要能带着正确的 run 号与历次记录去更新**同一条**评论，
@@ -942,7 +958,8 @@ fi
 mkdir -p "$WORK/chunks" "$WORK/cwd" || die_review "无法创建工作目录：$WORK/chunks、$WORK/cwd"
 KIRO_CWD=$(cd "$WORK/cwd" && pwd -P) || die_review "无法进入 Kiro 运行目录：$WORK/cwd"   # 物理路径：与日志、替身记录逐字一致
 WS_P=$(pwd -P); CH_P=$(cd "$WORK/chunks" && pwd -P) || die_review "无法进入 diff chunk 目录：$WORK/chunks"
-INSTALLED_AGENT=$(kiro_install_agent "$AGENT_FILE" "$HOME/.kiro/agents" --workspace "$WS_P" --chunks "$WORK/chunks") \
+# --name：本次独占的 agent 名（P1-2），安装文件 = $HOME/.kiro/agents/<AGENT_RUN_NAME>.json，退出 trap 精确删除它
+INSTALLED_AGENT=$(kiro_install_agent "$AGENT_FILE" "$HOME/.kiro/agents" --workspace "$WS_P" --chunks "$WORK/chunks" --name "$AGENT_RUN_NAME") \
   || die_review "受信 agent 安装失败：$AGENT_FILE"
 # 安装器 stdout 单行只是约定（15-fix4 #15）：将来多一行 debug 就让 AGENT_NAME 拿到多行串、传给 --agent
 [[ "$INSTALLED_AGENT" != *$'\n'* ]] || die_review "内部错误：安装器输出不是单行（集成包缺陷，请报告）"
@@ -1111,8 +1128,7 @@ inline_presample
 # 评审报告要从 runFinished.data.finalText 里取（spec §4.1、§4.7.1 P1-08）。
 # 本次运行的契约标记随机串。固定字面量标记可被业务库利用：提示词要求把注入企图作为 P0 报出来，
 # 模型常常直接原文引用那行标记，标记计数变 2 → 每次评审都降级。nonce 让攻击者无法预先提交。
-REVIEW_NONCE=$(review_new_nonce)
-[[ "$REVIEW_NONCE" =~ ^[0-9a-f]{16}$ ]] || die_review "生成契约标记随机串失败（得到：${REVIEW_NONCE}）"
+# REVIEW_NONCE 已在第 1 步建 $WORK 时生成（P1-2：与 agent 名同源）
 grep -q '{{REVIEW_NONCE}}' "$PROMPT_FILE" \
   || die_review "运行时提示词缺少 {{REVIEW_NONCE}} 占位符：模型拿不到本次标记，每次评审都会降级。请同步更新 ${PROMPT_FILE}"
 # 业务库**绝对路径**穿进运行时提示词（15-fix4 #1）：kiro-cli 在空目录下运行，模型写相对路径会落在 cwd 之外被拒、静默降低评审质量。
