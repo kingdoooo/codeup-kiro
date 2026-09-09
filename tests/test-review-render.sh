@@ -1178,8 +1178,10 @@ trunc_check() { # <上限> → stdout: ok / 失败原因（被截断的源文件
   grep -qiE '^</?d[a-z]*$' "$f" && { echo "残留半个 <details> 标签"; return 0; }
   o=$(grep -ci '^<details' "$f" || true); c=$(grep -ci '^</details>[[:space:]]*$' "$f" || true)
   [[ "$o" == "$c" ]] || { echo "<details> 未闭合（${o}/${c}）"; return 0; }
-  fences=$(grep -c '^```' "$f" || true)
-  [[ $(( fences % 2 )) -eq 0 ]] || { echo "代码围栏落单（${fences}）"; return 0; }
+  # 围栏判据用 review_unclosed_fence（CommonMark 状态机）而不是「数 ``` 行数的奇偶」：后者对 ~~~ 视而不见、对 ```` 补 ``` 也判成对
+  # （CodeX 2026-09-09 P1-1 复审：oracle 与实现共享同一盲区）。下面 P1-1 那节有它自己的正 / 负控与元测试。
+  fences=$(review_unclosed_fence "$f") || { echo "围栏判定失败（rc $?）"; return 0; }
+  [[ -z "$fences" ]] || { echo "代码围栏落单（该补 ${fences}）"; return 0; }
   grep -q '报告超长已截断' "$f" || { echo "截断提示不见了"; return 0; }
   # 提示必须在所有折叠块之外
   notice_ln=$(grep -n '报告超长已截断' "$f" | tail -1 | cut -d: -f1)
@@ -1288,6 +1290,75 @@ printf '第一行足够长一些的中文正文\n第二行脏字节还有正文\
 assert_not_contains "$(cat "$tmp/iconvrc.md")" "脏字节" "R4：iconv 以 1 退出但输出可用时仍采用其清理结果（不看退出码）"
 assert_contains "$(cat "$tmp/iconvrc.md")" "第二行还有正文" "R4：清理后的正文被保留"
 assert_contains "$(cat "$tmp/iconvrc.md")" "报告超长已截断" "R4：iconv 退出码为 1 时后续补齐与提示照常进行"
+
+# ---- CodeX 2026-09-09 P1-1 复审：整条评论截断补的闭合围栏也必须与开启同款（~~~ / ```` / ~~~~~），判定与折叠区切断共用一份状态机 ----
+# v1.1.1（票 18 ⑫）只修了折叠区单条切断；review_truncate_comment 仍是「数列 0 的 ``` 行数、奇数就补 ```」：对 ~~~ 开的块视而不见、
+# 对 ```` 开的块补 ``` 等于没闭合，默认汇总模式（INLINE_COMMENT=0、MAX_COMMENT_BYTES=60000）下截断提示落进代码块。
+# 先证明 oracle 自己会响（正控 / 负控），再证明旧判据对同一输入是盲的（元测试），最后对渲染出的默认汇总扫描截断窗口。
+uf() { printf '%b' "$1" > "$tmp/uf.md"; review_unclosed_fence "$tmp/uf.md"; }
+assert_eq "$(uf 'a\n~~~python\nb\n')" "~~~" "P1-1 oracle：~~~python 未闭合 → 该补 ~~~"
+assert_eq "$(uf 'a\n````\nfoo ```\nb\n')" '````' "P1-1 oracle：四反引号围栏未闭合（块里的三反引号行是内容）→ 该补四反引号"
+assert_eq "$(uf 'a\n~~~~~txt\nb\n~~~\n')" "~~~~~" "P1-1 oracle：~~~~~ 开的块用 ~~~ 关不上 → 该补 ~~~~~"
+assert_eq "$(uf 'a\n~~~\n```\nb\n')" "~~~" "P1-1 oracle：~~~ 块里的三反引号行是内容 → 仍该补 ~~~"
+assert_eq "$(uf 'a\n```\nx\n~~~\n')" '```' "P1-1 oracle：三反引号块用 ~~~ 关不上 → 该补三反引号"
+assert_eq "$(uf 'a\n~~~\nx\n~~~~\nb\n')" "" "P1-1 oracle：更长的同字符闭合围栏算闭合 → 不补"
+assert_eq "$(uf 'a\n```py\nx\n```\n')" "" "P1-1 oracle：正常闭合 → 不补"
+assert_eq "$(uf '   ```\nx\n')" '```' "P1-1 oracle：缩进 ≤ 3 空格的围栏也算开启（原先只数列 0）"
+assert_eq "$(uf '')" "" "P1-1 oracle：空文件 → 不补"
+rc=0; review_unclosed_fence "$tmp/does-not-exist.md" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 5 "P1-1 oracle：文件读不到 → rc 5（判不出来不猜）"
+# 元测试：旧判据（``` 行数奇偶）对未闭合的 ~~~ 判成「闭合」，新判据报未闭合——证明 trunc_check 换 oracle 不是同义改写
+printf 'a\n~~~python\nb\n' > "$tmp/uf.md"
+assert_eq "$(( $(grep -c '^```' "$tmp/uf.md" || true) % 2 ))" "0" "P1-1 元测试：旧判据把未闭合的 ~~~ 判成闭合（盲区）"
+assert_eq "$(review_unclosed_fence "$tmp/uf.md")" "~~~" "P1-1 元测试：新判据对同一文件报未闭合"
+# 默认汇总模式的扫描：三条问题分别带 ~~~python（30 行）、````（内含一行 ```）、~~~~~txt 围栏，渲染后从隐藏历史行末扫到文件末
+fence_body() { # <开围栏行> <关围栏行> <行数> [<第 5 行替换文本>] → 修复建议文本（换行写成字面 \n，jq 里再换回来）
+  local open="$1" close="$2" n="$3" inject="${4-}" i out
+  out="修复建议如下：\n\n${open}\n"
+  for (( i = 1; i <= n; i++ )); do
+    if [[ "$i" == 5 && -n "$inject" ]]; then out="${out}${inject}\n"
+    else out="${out}    row_${i} = fetch(cursor, ${i})  # 把代码块撑长，让截断窗口落进围栏内部\n"; fi
+  done
+  printf '%s' "${out}${close}\n\n并补一个用例。"
+}
+jq -n --arg f1 "$(fence_body '~~~python' '~~~' 30)" --arg f2 "$(fence_body '````text' '````' 20 '    x = "```"  # 块里的 ``` 是内容')" \
+      --arg f3 "$(fence_body '~~~~~txt' '~~~~~' 20)" '{
+  contract: "codeup-reviewer/1", summary: "三种围栏", verdict: "MERGE_AFTER_FIX", verdict_reason: "见清单。",
+  findings: [
+    {id: "F1", severity: "P0", category: "security", title: "波浪线围栏", file: "src/a.py", line_start: 3, line_end: 3, body: "正文一", fix: ($f1 | gsub("\\\\n"; "\n"))},
+    {id: "F2", severity: "P1", category: "bug",      title: "四反引号围栏", file: "src/b.py", line_start: 5, line_end: 5, body: "正文二", fix: ($f2 | gsub("\\\\n"; "\n"))},
+    {id: "F3", severity: "P2", category: "style",    title: "五波浪线围栏", file: "src/c.py", line_start: 7, line_end: 7, body: "正文三", fix: ($f3 | gsub("\\\\n"; "\n"))}
+  ]}' > "$tmp/fences3.json"
+render "$tmp/fences3.json" "$tmp/fences3.md"
+assert_eq "$(grep -c '^~~~python$' "$tmp/fences3.md")/$(grep -c '^````text$' "$tmp/fences3.md")/$(grep -c '^~~~~~txt$' "$tmp/fences3.md")/$(grep -c '^    x = "```"' "$tmp/fences3.md")" "1/1/1/1" \
+  "P1-1 扫描前置：渲染结果里三种开启围栏都在（~~~python / 四反引号+text / ~~~~~txt 各一），四反引号块里那行三反引号原样保留"
+assert_eq "$(review_unclosed_fence "$tmp/fences3.md")" "" "P1-1 扫描前置：未截断的渲染结果所有围栏都闭合"
+TRUNC_SRC="$tmp/fences3.md"
+f3_bytes=$(wc -c < "$TRUNC_SRC" | tr -d ' ')
+f3_hist_end=$(head -3 "$TRUNC_SRC" | wc -c | tr -d ' ')
+sweep_bad=""
+for (( max = f3_hist_end + 8; max < f3_bytes; max += 11 )); do
+  r=$(trunc_check "$max")
+  [[ "$r" == "ok" ]] || sweep_bad="${sweep_bad}${sweep_bad:+; }${max}:${r}"
+done
+assert_eq "$sweep_bad" "" "P1-1：默认汇总（~~~ / 四反引号 / ~~~~~ 三种围栏）在 $((f3_hist_end + 8))..$((f3_bytes - 1)) 每 11 字节扫描一遍，全部满足不变量"
+# 三个显式窗口（各切在一种围栏内部）：补的闭合围栏必须与开启同款，且截断提示在它之后
+fence_win() { # <开围栏行的正则> → 该行末字节偏移 + 200（落在块内）
+  local ln; ln=$(grep -nE "$1" "$TRUNC_SRC" | head -1 | cut -d: -f1)
+  echo $(( $(head -"$ln" "$TRUNC_SRC" | wc -c | tr -d ' ') + 200 ))
+}
+for spec in '^~~~python$|~~~' '^````text$|````' '^~~~~~txt$|~~~~~'; do
+  open_re="${spec%%|*}"; closer="${spec##*|}"
+  w=$(fence_win "$open_re")
+  cp "$TRUNC_SRC" "$tmp/fw.md"; rc=0; review_truncate_comment "$tmp/fw.md" "$w" >/dev/null 2>&1 || rc=$?
+  assert_rc "$rc" 0 "P1-1 窗口 ${w}（切在 ${open_re} 块内）：正常截断"
+  assert_eq "$(grep -cE "$open_re" "$tmp/fw.md")" "1" "P1-1 窗口 ${w}：开启围栏仍在（确实切在块内）"
+  assert_eq "$(grep -cxF -- "$closer" "$tmp/fw.md")" "1" "P1-1 窗口 ${w}：补的闭合围栏与开启同款（恰好一行 ${closer}）"
+  assert_eq "$(( $(grep -nxF -- "$closer" "$tmp/fw.md" | cut -d: -f1) < $(grep -n '报告超长已截断' "$tmp/fw.md" | cut -d: -f1) ))" "1" \
+    "P1-1 窗口 ${w}：截断提示在闭合围栏之后（不在代码块里）"
+  assert_eq "$(review_unclosed_fence "$tmp/fw.md")" "" "P1-1 窗口 ${w}：截断结果没有未闭合围栏"
+done
+TRUNC_SRC="$GOLDEN_FULL"
 
 # ============================================================================
 # 票 04：行内评论管线

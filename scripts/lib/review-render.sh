@@ -171,6 +171,20 @@ _REVIEW_JQ_SANITIZE="def dectl(v): (v | gsub(\"${REVIEW_CTRL_JQ_RE}\"; \"\"));"'
     | (if .fch != null then (.out + [(.fch * .flen)]) else .out end)
     | join("\n")
     end;
+  # 未闭合围栏的判定（CodeX 2026-09-09 P1-1 复审）：整条评论截断（review_truncate_comment，bash 经 review_unclosed_fence）与折叠区单条切断
+  # （_review_render_fold_section，jq）**共用这一份** CommonMark 状态机——v1.1.1 只把折叠区那份换成同款闭合，bash 那边仍是「数列 0 的 ```
+  # 行数、奇数就补 ```」：对 `~~~` 开的块视而不见、对 ```` 开的块补 ``` 等于没闭合，默认汇总模式下截断提示落进代码块
+  # （复现：5 条 ~~~python 正文、MAX_COMMENT_BYTES=60000）。输入 = 整段文本；输出 = 仍未闭合的开启围栏 {ch, len} 或 null。
+  def _unclosed_fence:
+    split("\n")
+    | reduce .[] as $l ({open: null};
+        if .open != null
+        then (.open.ch as $ch | .open.len as $len
+              | if ($l | _fence_close($ch; $len)) then {open: null} else . end)
+        else (($l | _fence_open) as $o | if $o != null then {open: $o} else . end) end)
+    | .open;
+  # 切断后仍有未闭合的围栏就补一个**同款**闭合（同一字符、同一长度）：否则后面的条目、历次表与页脚全被吞进代码块
+  def _close_fences: . as $t | ($t | _unclosed_fence) as $o | if $o != null then $t + "\n" + ($o.ch * $o.len) else $t end;
   # 单行槽位（verdict / title / id / category）的清洗（16-fix4 第 41 条）：_sanitize_md 用「另起一行补闭合围栏」修未闭合围栏，单行槽位因此
   # 变成两行，把列 0 的 ``` 注进汇总结构（`verdict = "``` MERGE"` 让其后 30 行全进代码块）。先把 ≥ 3 个反引号 / ~ 的串首字符转义
   # （不可能再成围栏），再 _sanitize_md，最后把换行折成空格兜底保证单行。
@@ -1631,17 +1645,8 @@ _review_render_fold_section() {
     left=$(( REVIEW_FOLD_TOTAL_MAX - _REVIEW_FOLD_USED )); (( left < 0 )) && left=0
     jq -r --arg b "$bucket" --arg unloc "$unloc" --argjson entry_max "$REVIEW_FOLD_ENTRY_MAX" --argjson total_left "$left" \
           --argjson total_max "$REVIEW_FOLD_TOTAL_MAX" "${_REVIEW_JQ_LOC}${_REVIEW_JQ_BYTECUT}${_REVIEW_JQ_SANITIZE}"'
-      # 切断后仍有未闭合的列 0 围栏就补一个**同款**闭合（同一字符、同一长度）：否则后面的条目、历次表与页脚全被吞进代码块。
-      # 判定复用 _REVIEW_JQ_SANITIZE 里那一份 _fence_open / _fence_close（CommonMark 语义），不另写一份「数行数、一律补 ```」的
-      # 简化规则——那份规则对 `~~~` 开的块补 ``` 等于没闭合（复审自查实测：`~~~python` + 12000 字节正文切断后第二条落进代码块）。
-      def _close_fences:
-        . as $t
-        | ($t | split("\n") | reduce .[] as $l ({open: null};
-            if .open != null
-            then (.open.ch as $ch | .open.len as $len
-                  | if ($l | _fence_close($ch; $len)) then {open: null} else . end)
-            else (($l | _fence_open) as $o | if $o != null then {open: $o} else . end) end)) as $st
-        | if $st.open != null then $t + "\n" + ($st.open.ch * $st.open.len) else $t end;
+      # 切断后补同款闭合围栏的 _close_fences 在 _REVIEW_JQ_SANITIZE 里（CommonMark 状态机，与 review_truncate_comment 共用一份；
+      # CodeX 2026-09-09 P1-1 复审）：不另写「数行数、一律补 ```」的简化规则——那对 `~~~` 开的块补 ``` 等于没闭合。
       def _head($f; $i): "\n**\($i + 1). \($f | _loc($unloc)) — \($f.title)**\n\n";
       def _full($f): if $f.fail_reason == "oversize"
                      then "正文 \($f.fail_bytes // "?") 字节超过评论上限 MAX_COMMENT_BYTES=\($f.fail_limit // "?")，未在评论中展示。"
@@ -1875,6 +1880,16 @@ review_render_summary() {
   review_render_footer "$_RR_RUN"
 }
 
+# --- 文本末尾仍未闭合的代码围栏（CommonMark 语义；与 _sanitize_md / 折叠区切断共用 _REVIEW_JQ_SANITIZE 里那一份状态机）---
+# 用法：review_unclosed_fence <文件> → stdout = 该补的闭合围栏（与开启同字符、同长度，例如 `~~~` / ````），全部闭合时为空
+#   rc 0 = 判定完成；rc 5 = jq 失败（判不出来，调用方按守卫命令失败处理）。
+# 按字节读入（-Rs）、只输出闭合串、绝不回写正文：文件里残缺的 UTF-8 不会经 jq 变形写回评论。
+review_unclosed_fence() {
+  local out
+  out=$(jq -Rsr "${_REVIEW_JQ_SANITIZE}"'_unclosed_fence | if . == null then "" else (.ch * .len) end' "$1" 2>/dev/null) || return 5
+  printf '%s' "$out"
+}
+
 # --- 超长评论的截断（Codeup 的 content 有长度上限）---
 # 用法：review_truncate_comment <评论文件（就地改写）> <字节上限>
 #   rc 0 = 已截断并追加提示；rc 1 = 未超限（文件不变）；rc 2 = 用法错误
@@ -1913,11 +1928,14 @@ review_truncate_comment() {
   fi
   # 空文件（上限小于第一行）时补一个换行，保证后面追加的内容仍在行首
   [[ $(tail -c1 "$dir/out" | wc -l | tr -d ' ') -eq 1 ]] || printf '\n' >> "$dir/out"
-  # fix 字段里会带 ```代码块```：截断点落在围栏中间时，随后追加的截断提示会被 Markdown 当成
-  # 代码块内容渲染掉，读者只看到评论突然结束、完全看不到「已截断」。所以先补闭合围栏，再写提示。
-  if [[ $(( $(grep -c '^```' "$dir/out" || true) % 2 )) -eq 1 ]]; then
-    echo '```' >> "$dir/out"
-  fi
+  # fix 字段里会带代码块：截断点落在围栏中间时，随后追加的截断提示会被 Markdown 当成代码块内容渲染掉，读者只看到评论突然结束、
+  # 完全看不到「已截断」。所以先补闭合围栏，再写提示。判定与补法走 review_unclosed_fence（CommonMark 状态机，与折叠区切断共用一份）：
+  # 原先「数列 0 的 ``` 行数、奇数就补 ```」对 `~~~` 开的块视而不见、对 ```` 开的块补 ``` 等于没闭合——v1.1.1 只修了折叠区那份，
+  # 默认汇总模式下整条评论截断照样把提示藏进代码块（CodeX 2026-09-09 P1-1 复审）。
+  # 判不出来（jq 失败）按守卫命令失败处理（rc 5）：宁可让调用方退回失败评论，也不发一条提示可能藏在代码块里的残片。
+  local closer
+  closer=$(review_unclosed_fence "$dir/out") || { rm -rf "$dir"; echo "review_truncate_comment: 判定未闭合围栏失败（jq 不可用或出错），拒绝写回" >&2; return 5; }
+  [[ -z "$closer" ]] || printf '%s\n' "$closer" >> "$dir/out"
   # 同理对「历次评审」折叠区：截断点落在 <details> 里面时，未闭合的标签会把随后追加的截断提示
   # 一起吞进折叠块（甚至吞掉页脚）。补齐缺的闭合标签，提示才落在折叠块外面。
   # 只数**行首**的标签：脚本渲染的折叠块都是行首整行，而模型文本里的折叠标签已被 _sanitize_md

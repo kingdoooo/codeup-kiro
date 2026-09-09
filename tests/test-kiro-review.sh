@@ -615,6 +615,26 @@ notice_ln=$(printf '%s\n' "$comment" | grep -n '报告超长已截断' | tail -1
 before=$(printf '%s\n' "$comment" | grep -n '^```' | cut -d: -f1 | awk -v n="$notice_ln" '$1 < n' | wc -l | tr -d ' ')
 assert_eq "$(( before % 2 ))" "0" "围栏内截断：截断提示之前的围栏数为偶数，提示不在代码块内（提示在第 ${notice_ln:-?} 行，之前有 ${before} 个围栏）"
 
+# ---- CodeX 2026-09-09 P1-1 复审：同一路径换成 ~~~ 围栏 ----
+# v1.1.1 只把折叠区切断换成同款闭合；review_truncate_comment 仍是「数 ``` 行数、奇数就补 ```」，~~~python 块里切断后提示落进代码块
+# （默认汇总模式、默认 MAX_COMMENT_BYTES 可复现）。这里走真实脚本路径：契约 fix 字段用 ~~~python，MAX_COMMENT_BYTES 切在块内。
+jq '.findings[0].fix |= (gsub("```python"; "~~~python") | gsub("\n```"; "\n~~~"))' \
+   "$ROOT/tests/fixtures/contract/fenced-code.json" > "$tmp/fenced-tilde.json"
+assert_eq "$(jq -r '.findings[0].fix' "$tmp/fenced-tilde.json" | grep -c '^~~~')" "2" "~~~ 围栏内截断（前置）：fixture 的 fix 字段确实是一对 ~~~ 围栏"
+run_case tildetrunc MAX_COMMENT_BYTES=1200 MOCK_KIRO_CONTRACT="$tmp/fenced-tilde.json"
+assert_rc "$RC" 0 "~~~ 围栏内截断：评审仍成功"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "报告超长已截断" "~~~ 围栏内截断：评论里能看到截断提示"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^~~~python$')" "1" "~~~ 围栏内截断：确实切在 ~~~python 块内（开启围栏在评论里）"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^~~~$')" "1" "~~~ 围栏内截断：补的闭合围栏是同款 ~~~（恰好一行）"
+assert_eq "$(printf '%s\n' "$comment" | grep -c '^```')" "0" "~~~ 围栏内截断：没有补错成三反引号（旧逻辑对 ~~~ 视而不见、什么都不补）"
+printf '%s\n' "$comment" > "$tmp/tilde-comment.md"
+assert_eq "$(review_unclosed_fence "$tmp/tilde-comment.md")" "" "~~~ 围栏内截断：评论里没有未闭合围栏（提示不在代码块里）"
+notice_ln=$(printf '%s\n' "$comment" | grep -n '报告超长已截断' | tail -1 | cut -d: -f1)
+close_ln=$(printf '%s\n' "$comment" | grep -n '^~~~$' | tail -1 | cut -d: -f1)
+assert_eq "$([[ -n "$close_ln" && -n "$notice_ln" && "$close_ln" -lt "$notice_ln" ]] && echo yes)" "yes" \
+  "~~~ 围栏内截断：闭合围栏（第 ${close_ln:-?} 行）在截断提示（第 ${notice_ln:-?} 行）之前"
+
 
 # ============ 票 03：汇总评论原地更新 ============
 # DRY_RUN 下用 DRY_RUN_FIXTURE_DIR 注入「MR 上现有的全局评论列表」，
