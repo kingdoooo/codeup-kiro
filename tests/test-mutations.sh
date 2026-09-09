@@ -154,6 +154,24 @@ assert_eq "$([[ -e "$CASE/work/AGENTS.md" && -e "$CASE/work/src/sub/AGENTS.md" ]
 assert_contains "$(cat "$MD/cwdscan")" "AGENTS.md" "M1：Kiro 启动时工作区扫描到 AGENTS.md——端到端断言「工作区干净」会失败"
 assert_contains "$(cat "$MD/stdin")" "CANARY-AGENTSMD-ROOT" "M1：diff 内容不受移除逻辑影响（对照两侧一致）"
 
+# --- M-cx1：去掉「属性触发时加 --text」→ MR 里的 `*.py -diff` 又能把改动藏进 Binary files differ（CodeX 2026-09-09 P0-1）---
+# 观测：日志与汇总仍说「已强制按文本比较」（扫描没变），但评审输入里只剩 Binary files、没有 SECRET_KEY——端到端两条断言会失败。
+pkg=$(make_mutant m-cx1-no-force-text 's|\[\[ "\${REVIEW_DIFF_FORCE_TEXT:-0}" == "1" \]\] && text=(--text)|: "${REVIEW_DIFF_FORCE_TEXT:-0}"|' scripts/lib/diff-compress.sh)
+tweak_hostile_attr_m() { printf '*.py -diff\n' > .gitattributes; git add -A && git commit -qm "hide"; }
+MUT_TWEAK=tweak_hostile_attr_m run_case m-cx1 "$pkg"
+assert_rc "$RC" 0 "M-cx1：变异体仍能跑完（静默漏评，不报错）"
+assert_contains "$(cat "$MD/stdin")" "Binary files a/src/app.py and b/src/app.py differ" "M-cx1：src/app.py 的改动被藏进 Binary files——端到端「没有 Binary files 行」断言会失败"
+assert_not_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "M-cx1：恶意 / 敏感改动不在评审输入里——端到端「改动仍在评审输入里」断言会失败"
+assert_contains "$(posted_comment "$OUT")" "强制按文本比较" "M-cx1：说明照写（扫描没变），静默失败正是要靠 stdin 断言抓"
+
+# --- M-cx2：去掉 --no-color 与 color.ui=never → 执行器 color.ui=always 时评审输入带 ANSI 前缀 ---
+pkg=$(make_mutant m-cx2-color 's/ -c color.ui=never//; s/--no-color //' scripts/lib/diff-compress.sh)
+tweak_color_always_m() { git config color.ui always; }
+MUT_TWEAK=tweak_color_always_m run_case m-cx2 "$pkg"
+assert_rc "$RC" 0 "M-cx2：变异体仍能跑完"
+assert_eq "$([[ "$(LC_ALL=C grep -c $'\x1b\\[' "$MD/stdin" || true)" -gt 0 ]] && echo colored || echo plain)" "colored" \
+  "M-cx2：评审输入带 ANSI 序列——端到端「没有 ANSI 序列」断言会失败"
+
 # --- M-d4a：把运行时提示词改回位置参数（2026-09-08 之前的写法）→ 真机会整个忽略 stdin，替身照此行为 ---
 # 观测：脚本照常跑完、契约照常解析（nonce 从位置参数来）——这正是 D4 之前谁都没发现的静默失败形态；
 # 但 stdin 记录为空、positional 非空 → 端到端「diff 已喂入 stdin」「没有位置参数」两条断言会失败。

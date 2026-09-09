@@ -30,10 +30,48 @@ DIFF_SIZE_LIMIT="${DIFF_SIZE_LIMIT:-307200}"
 #                                       pathspec 也会对不上、每个 chunk 都是 0 字节（复审实测，票 12 ①）
 # 喂给评审员的 diff（kiro-review.sh 第 4 步，经本文件）与变更行集合（第 4.5 步）共用这一个封装：
 # 模型看到的行与脚本判定「可定位」的行必须出自同一次、同一形态的比较。
+#   --no-color / -c color.ui=never      执行器上 color.ui=always 会给每行加 ANSI 前缀，变更行解析器一行都对不上
+#                                       （CodeX 2026-09-09 P0-1 附带项）
+#   --no-textconv                       执行器配置的 textconv 驱动能改写乃至清空 diff（同上，属执行器侧配置，一并钉死）
+#   --text（按需）                       见下面 REVIEW_DIFF_FORCE_TEXT：树内 .gitattributes 的 `-diff` 是 MR 作者可控的
+# 是否对整份 diff 强制按文本比较（--text）。默认 0；kiro-review.sh 第 4.0 步用 review_diff_attr_scan 发现业务库 Git 属性把
+# 改动文件标成 -diff 或指定了自定义驱动时置 1（CodeX 2026-09-09 P0-1）。不无条件加 --text：真正的二进制文件会把大量原始字节
+# 送进评审输入。四处调用（直传 / 枚举 / 逐文件 chunk / 零上下文 inline.diff）都经本封装，一次判定对整轮一致。
+REVIEW_DIFF_FORCE_TEXT="${REVIEW_DIFF_FORCE_TEXT:-0}"
 _git_diff_pinned() {
+  local -a text=()
+  [[ "${REVIEW_DIFF_FORCE_TEXT:-0}" == "1" ]] && text=(--text)
   git -c core.quotePath=false -c diff.external= -c diff.noprefix=false -c diff.mnemonicPrefix=false \
-      -c diff.relative=false \
-    diff --no-ext-diff --src-prefix=a/ --dst-prefix=b/ "$@"
+      -c diff.relative=false -c color.ui=never \
+    diff --no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ "${text[@]+"${text[@]}"}" "$@"
+}
+
+# --- 变更文件的 Git diff 属性扫描（CodeX 2026-09-09 P0-1）---
+# 树内 .gitattributes 是 MR 作者可控的：同一个 MR 里加一行 `*.sh -diff` 再改 Shell 文件，git diff 对该文件只输出
+# 「Binary files a/… and b/… differ」、numstat 是 `-  -`——改动既不进评审输入也进不了变更行集合，评审在没看到代码的情况下
+# 静默完成（2026-09-09 复现）。git 没有「忽略树内属性」的开关，所以按 changed paths 查 `git check-attr diff`：
+#   unset（即 -diff）或任何驱动名 → 触发；unspecified / set 都是正常文本比较，不触发（set 是「明确文本」，不能误报）。
+# 只统计数目、不把文件名带出（文件名不受信）。全程 NUL 分隔：文件名含空格 / Tab / 换行都安全。
+# 用法：review_diff_attr_scan <base> <head> → 设置 REVIEW_DIFF_ATTR_UNSET / REVIEW_DIFF_ATTR_DRIVER，rc 0；git 失败 rc 1。
+# 须在业务仓库内调用（check-attr 读的是工作树 / 索引里的属性，与随后 git diff 用的是同一套）。
+REVIEW_DIFF_ATTR_UNSET=0; REVIEW_DIFF_ATTR_DRIVER=0
+review_diff_attr_scan() {
+  local base="$1" head="$2" names attrs path _attr val n_unset=0 n_driver=0
+  names=$(mktemp) || return 1
+  attrs=$(mktemp) || { rm -f "$names"; return 1; }
+  if ! _git_diff_pinned --no-renames --name-only -z "$base" "$head" > "$names"; then rm -f "$names" "$attrs"; return 1; fi
+  if ! git check-attr --stdin -z diff < "$names" > "$attrs"; then rm -f "$names" "$attrs"; return 1; fi
+  # -z 输出：<path> NUL <attr> NUL <value> NUL，三个一组
+  while IFS= read -r -d '' path && IFS= read -r -d '' _attr && IFS= read -r -d '' val; do
+    case "$val" in
+      unspecified|set) ;;
+      unset) n_unset=$((n_unset + 1)) ;;
+      *) n_driver=$((n_driver + 1)) ;;
+    esac
+  done < "$attrs"
+  rm -f "$names" "$attrs"
+  REVIEW_DIFF_ATTR_UNSET=$n_unset; REVIEW_DIFF_ATTR_DRIVER=$n_driver
+  return 0
 }
 
 # $1=文件路径 $2=该文件的 diff chunk 文件；输出优先级 0-3
@@ -70,6 +108,15 @@ _chunk_numstat() {
   [[ "$ns" == *$'\t'*$'\t'* ]] \
     || { echo "build_review_input: numstat 没有给出 ${3} 的增删行数（内部错误）：[${ns}]" >&2; return 1; }
   added=${ns%%$'\t'*}; removed=${ns#*$'\t'}; removed=${removed%%$'\t'*}
+  # 强制文本比较时（CodeX 2026-09-09 P0-1）：--numstat 对 -diff 属性的文件仍按二进制给 `-  -`（--text 只改 patch 输出，实测 git 2.50），
+  # 而这些正是被藏起来的文件，清单里写 0/0 会让模型把它们排到最后。此时按该文件的 patch 数 +/- 行（单文件 patch 恰好各有一行
+  # +++ / --- 头，减掉即可；`++i` 这类内容行在这里数得对，因为数的是 ^+ 而不是 ^+[^+]）。
+  if [[ "$added" == "-" && "$removed" == "-" && "${REVIEW_DIFF_FORCE_TEXT:-0}" == "1" ]]; then
+    local patch
+    patch=$(_git_diff_pinned --no-renames "$1" "$2" -- ":(top,literal)$3") || return 1
+    added=$(printf '%s\n' "$patch" | LC_ALL=C grep -c '^+' || true); removed=$(printf '%s\n' "$patch" | LC_ALL=C grep -c '^-' || true)
+    added=$(( added > 0 ? added - 1 : 0 )); removed=$(( removed > 0 ? removed - 1 : 0 ))
+  fi
   [[ "$added" == "-" ]] && added=0
   [[ "$removed" == "-" ]] && removed=0
   [[ "$added" =~ ^[0-9]+$ && "$removed" =~ ^[0-9]+$ ]] \

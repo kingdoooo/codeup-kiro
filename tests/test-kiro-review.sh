@@ -859,6 +859,20 @@ submit_body() { printf '%s\n' "$1" | grep -F 'DRY_RUN body: {"submitDraftComment
 
 # ---- 成功路径（默认档位 quiet、默认上限 10）----
 run_inline_case ok1 ifx-ok1
+# CodeX 2026-09-09 P0-1（行内）：-diff 藏改动时零上下文 diff 也是 Binary files，变更行集合为空 → 全部问题未定位、行内一条都发不出；
+# 强制 --text 后变更行集合照常、行内照发。要先提交再写版本列表（HEAD 变了）。
+mk_hostile_attr_inline() {
+  printf '*.py -diff\n' > .gitattributes
+  git add -A && git commit -qm "hide changes via gitattributes"
+  mk_patchsets
+}
+IFX_DIR="$tmp/ifx-hostileattr"; mkdir -p "$IFX_DIR"
+CASE_TWEAK=mk_hostile_attr_inline run_case hostileattrinline DRY_RUN_FIXTURE_DIR="$IFX_DIR" \
+  CODEUP_BOT_USERNAME="$BOT" INLINE_COMMENT=1 MOCK_KIRO_CONTRACT="$E2E_CONTRACT"
+assert_rc "$RC" 0 "hostile .gitattributes（行内）：退出码 0"
+assert_not_contains "$OUT" "没能从 diff 里算出任何可定位的新增/修改行" "hostile .gitattributes（行内）：变更行集合非空（-U0 diff 也强制了文本）"
+assert_eq "$(inline_bodies "$OUT" | wc -l | tr -d ' ')" "3" "hostile .gitattributes（行内）：3 条行内评论照发"
+assert_contains "$(posted_comment "$OUT")" "本次已对全部改动强制按文本比较" "hostile .gitattributes（行内）：汇总带说明"
 assert_rc "$RC" 0 "行内开启：退出码 0"
 assert_contains "$OUT" "changeRequests/7/diffs/patches" "行内开启：先查 MR 版本列表"
 # 票 17-fix3 ⑥ 起是两次：Kiro 之前预采样一次（提前发现滞后/配置错），发布前再采样一次（两次比对证明成因）
@@ -1882,6 +1896,50 @@ assert_contains "$(cat "$MD/stdin")" "link-to-hosts" "符号链接：链接本�
 assert_eq "$([[ -d "$CASE/work/src/sub2" ]] && echo kept || echo gone)" "kept" "符号链接：只删链接，普通目录保留"
 assert_eq "$([[ -e "$CASE/work/src/app.py" ]] && echo kept || echo gone)" "kept" "符号链接：普通文件保留"
 assert_eq "$(git -C "$CASE/work" rev-parse --is-inside-work-tree 2>/dev/null)" "true" "符号链接：.git 未被触碰"
+
+# ---- CodeX 2026-09-09 P0-1：MR 自带 .gitattributes `-diff` 不能把改动藏进「Binary files differ」 ----
+# fixture 的 feature/x 已经改了 src/app.py（加 SECRET_KEY 行）；再在 MR 里加一行 `*.py -diff`，
+# 未修复时 git diff 对 src/app.py 只输出 Binary files differ，改动既不进评审输入也进不了变更行集合。
+tweak_hostile_attr() {
+  printf '*.py -diff\n' > .gitattributes
+  odd=$(printf 'src/odd name\twith\nnewline.py'); printf 'x = 1\n' > "$odd"   # 文件名含空格 / Tab / 换行：属性扫描 NUL 分隔
+  git add -A && git commit -qm "hide changes via gitattributes"
+}
+CASE_TWEAK=tweak_hostile_attr run_case hostileattr
+assert_rc "$RC" 0 "hostile .gitattributes：评审正常完成"
+assert_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "hostile .gitattributes：被 -diff 标记的 src/app.py 改动仍在评审输入里（强制 --text）"
+assert_not_contains "$(cat "$MD/stdin")" "Binary files" "hostile .gitattributes：评审输入里没有任何 Binary files 行"
+assert_contains "$OUT" "警告：注意：Git 属性把 2 个改动文件标成不作文本比较（-diff）、给 0 个改动文件指定了自定义 diff 驱动" "hostile .gitattributes：日志按数目点名（2 个 .py，含奇怪文件名的那个）"
+assert_contains "$(posted_comment "$OUT")" "本次已对全部改动强制按文本比较" "hostile .gitattributes：汇总评论里有说明（I10，阿里云侧看不到日志）"
+# 正控：`diff` 属性为 set（明确文本）不算，不触发、不出说明
+tweak_attr_set() { printf '*.py diff\n' > .gitattributes; git add -A && git commit -qm "attr set"; }
+CASE_TWEAK=tweak_attr_set run_case attrset
+assert_rc "$RC" 0 "attr set：评审正常完成"
+assert_contains "$OUT" "全部为文本比较，不强制 --text" "attr set：set 视为明确文本，不触发"
+assert_not_contains "$(posted_comment "$OUT")" "强制按文本比较" "attr set：汇总里没有强制文本的说明（不误报）"
+# 自定义驱动名（无论执行器有没有配这个驱动）同样触发
+tweak_attr_driver() { printf '*.py diff=custom\n' > .gitattributes; git add -A && git commit -qm "attr driver"; }
+CASE_TWEAK=tweak_attr_driver run_case attrdriver
+assert_rc "$RC" 0 "attr driver：评审正常完成"
+assert_contains "$OUT" "给 1 个改动文件指定了自定义 diff 驱动" "attr driver：日志计 1 个驱动"
+assert_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "attr driver：改动仍在评审输入里"
+# 强制文本时同时存在真正的二进制文件：仍正常完成，文本改动在、二进制按原始字节列出而不是 Binary files
+tweak_hostile_attr_binary() {
+  printf '*.py -diff\n' > .gitattributes
+  printf 'PNG\x00\x01\x02\xff\xfe binary payload\x00\n' > blob.bin
+  git add -A && git commit -qm "hide changes + real binary"
+}
+CASE_TWEAK=tweak_hostile_attr_binary run_case hostileattrbin
+assert_rc "$RC" 0 "hostile .gitattributes + 真二进制：评审正常完成"
+assert_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "hostile .gitattributes + 真二进制：文本改动在评审输入里"
+assert_contains "$(cat "$MD/stdin")" "+++ b/blob.bin" "hostile .gitattributes + 真二进制：二进制文件按文本列出（有 +++ 头）"
+assert_not_contains "$(cat "$MD/stdin")" "Binary files" "hostile .gitattributes + 真二进制：没有 Binary files 行"
+# 执行器侧 color.ui=always：评审输入与变更行集合都不得带 ANSI（否则变更行解析器一行都对不上、全部问题变未定位）
+tweak_color_always() { git config color.ui always; }
+CASE_TWEAK=tweak_color_always run_case colorui
+assert_rc "$RC" 0 "color.ui=always：评审正常完成"
+assert_eq "$(LC_ALL=C grep -c $'\x1b\\[' "$MD/stdin" || true)" "0" "color.ui=always：评审输入里没有 ANSI 序列"
+assert_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "color.ui=always：改动仍在评审输入里"
 
 # ---- 嵌套 .git（15-fix2 #15）：旧写法 -path ./.git -prune 只剪根目录那一份，vendored clone / fixture 仓库的 .git 内部会被改动 ----
 tweak_nested_git() {

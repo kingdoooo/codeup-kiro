@@ -112,7 +112,12 @@ _validate_err_lib_lines() {
 # 归属（15-fix4 #3）：REVIEW_NOTICE 是版本 / 环境类提示，三种评论都带；INLINE_NOTICE 是关于分桶的提示（「全部问题都归入未定位」），
 # 只对带问题清单的汇总评论有意义——降级 / 失败评论只传 REVIEW_NOTICE。all_notice() 是汇总评论那一份合成，读全局、只在这里拼一次。
 REVIEW_NOTICE=""
-all_notice() { printf '%s' "${REVIEW_NOTICE}${REVIEW_NOTICE:+${INLINE_NOTICE:+ }}${INLINE_NOTICE}"; }
+DIFF_NOTICE=""   # 第 4.0 步：Git 属性触发的强制文本比较说明（CodeX 2026-09-09 P0-1）
+all_notice() {
+  local out="" n
+  for n in "${REVIEW_NOTICE:-}" "${DIFF_NOTICE:-}" "${INLINE_NOTICE:-}"; do [[ -n "$n" ]] && out="${out}${out:+ }${n}"; done
+  printf '%s' "$out"
+}
 
 # 定位到 MR 后的失败：best-effort 回写"评审未完成"评论再退出
 MR_LOCATED=0
@@ -979,6 +984,20 @@ if ! BASE=$(git merge-base "origin/${TARGET_BRANCH}" HEAD 2>/dev/null); then
   log "浅克隆缺少历史，尝试 --unshallow……"
   git fetch -q --unshallow origin 2>/dev/null || true
   BASE=$(git merge-base "origin/${TARGET_BRANCH}" HEAD) || die_review "无法计算 merge-base"
+fi
+# --- 4.0 变更文件的 Git 属性（CodeX 2026-09-09 P0-1）---
+# MR 里一行 `*.sh -diff` 就能让 git diff 把改动文件打成「Binary files … differ」：改动既不进评审输入也进不了变更行集合，
+# 评审在没看到代码的情况下静默「完成」（fail-open）。git 无法忽略树内 .gitattributes，所以查出来就对整轮强制 --text
+# （scripts/lib/diff-compress.sh 的 REVIEW_DIFF_FORCE_TEXT），并写进汇总（I10）。执行器侧的 diff 属性同样会触发——代价只是
+# 二进制文件按原始字节列出，比漏评一个 Shell 文件便宜。
+REVIEW_DIFF_FORCE_TEXT=0
+review_diff_attr_scan "$BASE" HEAD || die_review "检查变更文件的 Git diff 属性失败（git check-attr）"
+if (( REVIEW_DIFF_ATTR_UNSET + REVIEW_DIFF_ATTR_DRIVER > 0 )); then
+  REVIEW_DIFF_FORCE_TEXT=1
+  DIFF_NOTICE="注意：Git 属性把 ${REVIEW_DIFF_ATTR_UNSET} 个改动文件标成不作文本比较（-diff）、给 ${REVIEW_DIFF_ATTR_DRIVER} 个改动文件指定了自定义 diff 驱动。为防止改动被藏进「Binary files differ」，本次已对全部改动强制按文本比较（真正的二进制文件会按原始字节列出）。"
+  log "警告：${DIFF_NOTICE}"
+else
+  log "变更文件的 Git diff 属性：全部为文本比较，不强制 --text"
 fi
 truncated=0
 build_review_input "$BASE" "HEAD" "$WORK/review.diff" "$WORK/omitted.txt" "$WORK/chunks" || truncated=$?
