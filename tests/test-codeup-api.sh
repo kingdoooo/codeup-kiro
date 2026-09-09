@@ -118,7 +118,7 @@ assert_eq "${_CODEUP_POST_PROBE_SHA}/${_CODEUP_POST_PROBE_RUN}" "abc1234/3" "①
 _codeup_dry_seq_reset; _codeup_dry_calls=""
 rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
             DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="create-comment:000" \
-            codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
+            codeup_post_comment 7 "$pmd" "$TEST_BOT_USERNAME" 2>&1 >/dev/null) || rc=$?
 assert_rc "$rc" 0 "①：响应丢失但评论已创建 → rc 0（视为成功）"
 assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "1" \
   "①：只发了一次 POST（不再重试，MR 上不会多出第二条汇总）"
@@ -128,7 +128,7 @@ assert_contains "$err" "kiro-review:abc1234 run:3" "①：日志点名比对用�
 _codeup_dry_seq_reset; _codeup_dry_calls=""
 rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
             DRY_RUN_FIXTURE_DIR="$FX/empty" DRY_RUN_FAIL_ROUTES="create-comment:000@1" \
-            codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
+            codeup_post_comment 7 "$pmd" "$TEST_BOT_USERNAME" 2>&1 >/dev/null) || rc=$?
 assert_rc "$rc" 0 "①：查不到同标记 → 照常重试并成功"
 assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "①：查不到同标记 → 发了第二次 POST"
 assert_contains "$err" "MR 上没有本次标记" "①：查不到时日志说明按既有策略重试"
@@ -136,7 +136,7 @@ assert_contains "$err" "MR 上没有本次标记" "①：查不到时日志说�
 _codeup_dry_seq_reset; _codeup_dry_calls=""
 rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
             DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="create-comment:000@1,list-comments:500" \
-            codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
+            codeup_post_comment 7 "$pmd" "$TEST_BOT_USERNAME" 2>&1 >/dev/null) || rc=$?
 assert_rc "$rc" 0 "①：列表查询失败 → 照常重试并成功"
 assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "①：列表查询失败 → 发了第二次 POST"
 assert_contains "$err" "列表查询也失败" "①：列表查询失败时日志说明无法确认"
@@ -144,15 +144,29 @@ assert_contains "$err" "列表查询也失败" "①：列表查询失败时日�
 _codeup_dry_seq_reset; _codeup_dry_calls=""
 rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
             DRY_RUN_FIXTURE_DIR="$FX/post-lost-otherbot" DRY_RUN_FAIL_ROUTES="create-comment:000@1" \
-            codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
+            codeup_post_comment 7 "$pmd" "$TEST_BOT_USERNAME" 2>&1 >/dev/null) || rc=$?
 assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "①：同标记但作者不是机器人 → 不认，照常重试"
-# ① 未配置机器人用户名：按标记认（票要求）
+# ① 无可信身份（第三个参数为空）：探针不能证明创建成功，按既有策略重试（CodeX 2026-09-09 P1-1：票 18 ① 原「未配置时按标记认」作废）
 _codeup_dry_seq_reset; _codeup_dry_calls=""
 rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME= \
-            DRY_RUN_FIXTURE_DIR="$FX/post-lost-otherbot" DRY_RUN_FAIL_ROUTES="create-comment:000" \
+            DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="create-comment:000@1" \
             codeup_post_comment 7 "$pmd" 2>&1 >/dev/null) || rc=$?
-assert_rc "$rc" 0 "①：未配置 CODEUP_BOT_USERNAME 时按标记认 → rc 0"
-assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "1" "①：未配置用户名时只发一次 POST"
+assert_rc "$rc" 0 "P1-1：无可信身份 → 照常重试并成功"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "P1-1：无可信身份时同标记评论不算创建成功，发了第二次 POST"
+assert_contains "$err" "没有可信的机器人账号用户名可供核对作者" "P1-1：日志说明为什么不认"
+# P1-1 探针只认显式传入的身份，不读环境：环境里配了 fixture 里那个作者，但显式传的是别的账号 → 不认
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
+            DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="create-comment:000@1" \
+            codeup_post_comment 7 "$pmd" "aliyun:realbot_other" 2>&1 >/dev/null) || rc=$?
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "P1-1：显式身份 ≠ 评论作者 → 不认（环境变量里的同名账号不算）"
+# P1-1 反过来：环境变量为空、显式传入解析出的身份（模拟令牌身份接口拿到的账号）→ 认
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME= \
+            DRY_RUN_FIXTURE_DIR="$FX/post-lost-created" DRY_RUN_FAIL_ROUTES="create-comment:000" \
+            codeup_post_comment 7 "$pmd" "$TEST_BOT_USERNAME" 2>&1 >/dev/null) || rc=$?
+assert_rc "$rc" 0 "P1-1：环境未配置但显式传入了解析出的身份 → 认，rc 0"
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "1" "P1-1：显式身份匹配作者 → 只发一次 POST"
 # ① 正文里没有评审标记（例如失败评论渲染成最小形态之前的中间产物）：跳过核对、按既有策略重试
 nomark=$(mktemp); printf '没有标记的正文\n' > "$nomark"
 _codeup_dry_seq_reset; _codeup_dry_calls=""

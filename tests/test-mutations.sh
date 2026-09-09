@@ -1760,11 +1760,19 @@ mut_post() { # <包根> → stdout: POST 次数
     export CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" DRY_RUN_FIXTURE_DIR="$ROOT/tests/fixtures/comments/post-lost-created"
     export DRY_RUN_FAIL_ROUTES="create-comment:000"
     md=$(mktemp); printf '# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n' > "$md"
-    err=$(codeup_post_comment 7 "$md" 2>&1 >/dev/null); rm -f "$md"
+    err=$(codeup_post_comment 7 "$md" "${MUT_POST_AUTHOR-$TEST_BOT_USERNAME}" 2>&1 >/dev/null); rm -f "$md"
     printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$' )
 }
 assert_eq "$(mut_post "$ROOT")" "1" "M-t18p 对照：响应丢失但评论已创建 → 只发一次 POST"
 pkg=$(make_mutant m-t18p-no-probe 's/    "\$body" _codeup_should_retry _codeup_post_probe_created || rc=\$?/    "$body" || rc=$?/' scripts/lib/codeup-api.sh)
 assert_eq "$(mut_post "$pkg")" "3" "M-t18p：去掉查标记 → 000 之后一路重试，共 3 次 POST——单测「只有一次 POST」断言会失败"
+
+# --- M-cx5（CodeX 2026-09-09 P1-1）：探针在没有可信身份时又按「只看标记」认 → 别人贴的同标记评论被当成本次已创建，停止重试、假报成功 ---
+# 两道：入口「无身份就返回 1」+ jq 里 author_name == $bot。只拆入口：jq 仍要求作者相等（空串对不上任何作者）→ 仍重试；两道都拆 → 只发一次 POST。
+assert_eq "$(MUT_POST_AUTHOR= mut_post "$ROOT")" "3" "M-cx5 对照：无可信身份 → 不认同标记评论，000 之后一路重试 3 次"
+pkg=$(make_mutant m-cx5-marker-only 's/  if \[\[ -z "\$_CODEUP_POST_PROBE_AUTHOR" \]\]; then/  if false; then/' scripts/lib/codeup-api.sh)
+assert_eq "$(MUT_POST_AUTHOR= mut_post "$pkg")" "3" "M-cx5a：只拆入口守卫，jq 仍要求作者相等 → 仍重试 3 次（只拆一道不够）"
+mutate_more "$pkg" 's/    | map(select(author_name == \$bot))/    | map(select(if $bot == "" then true else author_name == $bot end))/' scripts/lib/codeup-api.sh
+assert_eq "$(MUT_POST_AUTHOR= mut_post "$pkg")" "1" "M-cx5b：两道都拆 → 无身份也按标记认、只发一次 POST——单测「发了第二次 POST」断言会失败"
 
 report

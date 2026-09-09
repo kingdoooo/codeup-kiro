@@ -259,7 +259,7 @@ codeup_find_mr() {
 # 报告违反 I10，所以仍然重试——但重试之前先查一次 MR 的全局评论：已经有一条「同一作者 + 同一 `kiro-review:<sha> run:<N>` 标记」
 # 的评论，就说明上一次 POST 成功了，再发一次会在 MR 上留下第二条汇总（违反 I4）。
 # 待比对的标记从**待发正文**里取第一处（形态由 review-render.sh 的 REVIEW_MARKER_LINE_RE 定义，本文件不再抄一份正则）。
-_CODEUP_POST_PROBE_ID=""; _CODEUP_POST_PROBE_SHA=""; _CODEUP_POST_PROBE_RUN=""
+_CODEUP_POST_PROBE_ID=""; _CODEUP_POST_PROBE_SHA=""; _CODEUP_POST_PROBE_RUN=""; _CODEUP_POST_PROBE_AUTHOR=""
 # 从待发 Markdown 里取第一处评审标记的 sha 与 run → 全局 _CODEUP_POST_PROBE_SHA / _RUN（取不到则留空，探针据此跳过）
 _codeup_post_probe_marker() {  # <markdown 文件>
   local f="${1-}" line
@@ -288,6 +288,13 @@ _codeup_post_probe_created() {  # <本次 POST 的 HTTP 状态码，只用于日
     echo "codeup_post_comment: 待发正文里没有可比对的评审标记（sha/run），跳过「响应丢失但评论已创建」的核对，按既有策略重试" >&2
     return 1
   fi
+  # 可信身份是探针的前置条件（CodeX 2026-09-09 P1-1）：标记（sha + run）是任何 MR 参与者都能预先贴出来的，没有作者核对时
+  # 「MR 上有同标记的评论」证明不了是本次 POST 创建的——把它当成功会让脚本停止重试、报告评审成功，而真正的汇总根本没建。
+  # 身份由调用方显式传入（kiro-review.sh 解析出的 BOT_USERNAME，来源可以是 CODEUP_BOT_USERNAME 或令牌身份接口），不在这里猜全局变量。
+  if [[ -z "$_CODEUP_POST_PROBE_AUTHOR" ]]; then
+    echo "codeup_post_comment: HTTP ${code} 之后没有可信的机器人账号用户名可供核对作者，探针不能证明评论已创建（只按标记会把别人贴的同标记评论当成自己的），按既有策略重试" >&2
+    return 1
+  fi
   tmp=$(mktemp) || return 1
   if ! codeup_list_global_comments "$_CODEUP_POST_PROBE_ID" > "$tmp" 2>/dev/null; then
     rm -f "$tmp"
@@ -296,7 +303,7 @@ _codeup_post_probe_created() {  # <本次 POST 的 HTTP 状态码，只用于日
   fi
   # 判定 = 作者匹配（未配置 CODEUP_BOT_USERNAME 时退化为只按标记）**且**正文里有一行与本次标记逐字节相同（容忍行尾空白，与
   # review_select_prior_comment 的容忍度一致）。标记含本次 sha 与 run，别人复制不到「本次 run」这一形态。
-  cid=$(jq -r --arg bot "${CODEUP_BOT_USERNAME:-}" \
+  cid=$(jq -r --arg bot "$_CODEUP_POST_PROBE_AUTHOR" \
               --arg m "<!-- kiro-review:${_CODEUP_POST_PROBE_SHA} run:${_CODEUP_POST_PROBE_RUN} -->" '
     def str(v): if (v | type) == "string" then v else "" end;
     def author_name: if (.author | type) == "object" then str(.author.username) else "" end;
@@ -305,7 +312,7 @@ _codeup_post_probe_created() {  # <本次 POST 的 HTTP 状态码，只用于日
     | map(select(type == "object"))
     | map(select((str(.state) | ascii_upcase) != "DELETED"))
     | map(select((.draft == true) | not))
-    | map(select(if $bot == "" then true else author_name == $bot end))
+    | map(select(author_name == $bot))
     | map(select([str(.content) | split("\n")[] | sub("[[:space:]]+$"; "")] | index($m) != null))
     | (.[0] // {}) | str(.comment_biz_id)' "$tmp" 2>/dev/null) || cid=""
   rm -f "$tmp"
@@ -318,14 +325,14 @@ _codeup_post_probe_created() {  # <本次 POST 的 HTTP 状态码，只用于日
 }
 
 # $1=localId $2=Markdown 文件路径。HTTP 2xx=成功；可重试类失败重试至多 2 次（重试前先查标记，票 18 ①）。
-codeup_post_comment() {
-  local local_id="$1" markdown_file="$2"
+codeup_post_comment() {   # <localId> <Markdown 文件> [<可信机器人用户名>]——第三个参数缺省或为空时探针不核对、只按既有策略重试（P1-1）
+  local local_id="$1" markdown_file="$2" trusted_author="${3-}"
   local body tmp author rc=0
   # 注意：中心站 CreateChangeRequestComment 要求 resolved 字段必填（缺失报 400 "resolved can not be null"）
   body=$(jq -n --rawfile content "$markdown_file" \
     '{comment_type: "GLOBAL_COMMENT", content: $content, draft: false, resolved: false}')
   tmp=$(mktemp)
-  _CODEUP_POST_PROBE_ID="$local_id"
+  _CODEUP_POST_PROBE_ID="$local_id"; _CODEUP_POST_PROBE_AUTHOR="$trusted_author"
   _codeup_post_probe_marker "$markdown_file"
   _codeup_request_retry codeup_post_comment "$tmp" POST \
     "/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/repositories/${CODEUP_REPO_ID}/changeRequests/${local_id}/comments" \

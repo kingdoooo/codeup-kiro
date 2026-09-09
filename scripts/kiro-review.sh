@@ -146,7 +146,9 @@ post_summary() {
     # 最常见的原因是旧评论刚被人删掉（404）：4xx 不重试，直接退回新建
     log "警告：原地更新汇总评论 ${PRIOR_COMMENT_ID} 失败（已按既有重试策略处理），退回新建"
   fi
-  codeup_post_comment "$LOCAL_ID" "$file"
+  # 第三个参数 = 本次解析出的可信机器人用户名（CODEUP_BOT_USERNAME 或身份接口；第 1.5 步之前调用时为空）：
+  # 「响应丢失但评论已创建」探针只在能核对作者时才作数（CodeX 2026-09-09 P1-1）
+  codeup_post_comment "$LOCAL_ID" "$file" "${BOT_USERNAME:-}"
 }
 
 # 最小失败评论（die_review 的两种回退形态共用一份渲染）：仍带评审标记（下次评审才找得到这条）、隐藏历史与页脚。
