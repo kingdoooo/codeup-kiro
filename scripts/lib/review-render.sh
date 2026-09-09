@@ -386,6 +386,7 @@ REVIEW_CAP_ID=256        # id / category / verdict 三个单行槽位：按码�
 #   **只给流水线日志用**，且必须经 _untrusted_for_log 打出（它不进 dump-k、不进渲染）。缺 verdict 时两者都为空。
 # duplicate_findings（票 17 C，判定键见下面 dupkey 处）：同一轮里**全部有意义字段**逐字段相同的问题只留首条（原顺序），
 #   被并掉的条数记在这里；dropped_findings 只算不合契约被丢弃的，overflow_findings 只算超 REVIEW_MAX_FINDINGS 的。
+#   三步顺序固定：校验 → 去重 → 按级别排序切上限（CodeX 2026-09-09 P1：先切再去重会让重复条挤掉后面唯一的 P0）。
 # 丢弃规则（spec §4.1「字段校验失败的 finding 丢弃并计数」）：
 #   - 不是 JSON 对象
 #   - severity 规范化（去首尾空白 + 大写）后不是 P0/P1/P2
@@ -475,14 +476,16 @@ _review_normalize() {
             body: (if (.body | type) == "string" then dectl(.body | pre(.; 2 * $cap_body)) else "" end),
             fix: (if (.fix | type) == "string" then dectl(.fix | pre(.; 2 * $cap_fix)) else "" end) }
       ] as $valid
-    | (if ($valid | length) > $maxf
-       then ([$valid[] | select(.severity == "P0")] + [$valid[] | select(.severity == "P1")] + [$valid[] | select(.severity == "P2")])[:$maxf]
-       else $valid end) as $kept
+    # 顺序固定为 **先去重、再按级别排序切上限**（CodeX 2026-09-09 P1）：反过来（先切 200 再去重）时 200 条逐字段相同的 P0 会把
+    # 第 201 条唯一的 P0 挤出上限、再被去重并成 1 条——唯一的那条永久消失，违反「宁可重复，绝不吞掉 P0」。
     # 只留首条（票 17 C；CodeX 复审 P1-3 末段）。相邻两行上的两条不同问题归区间去重管（Q8，已裁决维持）。
     # 用 reduce + 已见集合而不是 unique_by：后者按键重排，会打乱「按原始次序编号」的稳定性。
-    | ($kept | reduce .[] as $f ({seen: {}, out: []};
+    | ($valid | reduce .[] as $f ({seen: {}, out: []};
           $f.dupkey as $k
-          | if .seen[$k] then . else .seen[$k] = true | .out += [$f] end)).out as $uniq
+          | if .seen[$k] then . else .seen[$k] = true | .out += [$f] end)).out as $uniq_all
+    | (if ($uniq_all | length) > $maxf
+       then ([$uniq_all[] | select(.severity == "P0")] + [$uniq_all[] | select(.severity == "P1")] + [$uniq_all[] | select(.severity == "P2")])[:$maxf]
+       else $uniq_all end) as $kept
     # 结论只认三个契约取值（票 17 B）：契约外置空，渲染器对空串有固定文案；原值只进 verdict_raw 供日志用。
     # 单行枚举槽位同样预切 256 码点（16-fix4 第 12a 条补：200 KB 的 verdict 曾原样进 ## 结论）。
     | (if ($root.verdict | type) == "string" then (tr(dectl($root.verdict) | pre(.; $cap_id)) | gsub("[[:space:]]+"; " ")) else "" end) as $vraw
@@ -492,11 +495,11 @@ _review_normalize() {
         verdict: (if $vok then $vnorm else "" end),
         verdict_raw: (if $vok or $vraw == "" then "" else ($vraw | .[0:80]) end),
         verdict_reason: (tr($root.verdict_reason | pre(.; 2 * $cap_summary))),
-        findings: ($uniq | map(del(.delocated, .dupkey))),
+        findings: ($kept | map(del(.delocated, .dupkey))),
         dropped_findings: ($total - ($valid | length)),
-        overflow_findings: (($valid | length) - ($kept | length)),
-        duplicate_findings: (($kept | length) - ($uniq | length)),
-        delocated_findings: ([$uniq[] | select(.delocated)] | length) }' "$f" || rc=$?
+        overflow_findings: (($uniq_all | length) - ($kept | length)),
+        duplicate_findings: (($valid | length) - ($uniq_all | length)),
+        delocated_findings: ([$kept[] | select(.delocated)] | length) }' "$f" || rc=$?
   rm -f "$f"
   case "$rc" in
     0|1|3) return "$rc" ;;

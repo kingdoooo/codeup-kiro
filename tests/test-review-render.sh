@@ -2694,6 +2694,19 @@ assert_eq "$(printf '\033[38;5;141mReading\033[0m 报告正文\n' | review_clean
 # 第 22 条：问题条数上限
 assert_eq "$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[range(201) | {severity:"P2",title:("t" + tostring),body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -c '[(.findings|length), .dropped_findings, .overflow_findings, .duplicate_findings]')" "[200,0,1,0]" "第 22 条 / 16-fix4 第 28 条：201 条问题只保留 200 条，多出的计入 overflow_findings、不算不合契约"
 assert_eq "$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[range(250) | {severity:"P2",title:("t" + tostring),body:"b",fix:"",file:"src/app.py",line_start:1}]}' | review_validate | jq -c '[(.findings|length), .dropped_findings, .overflow_findings]')" "[200,0,50]" "第 28 条：250 条合法问题 → kept 200 / dropped 0 / overflow 50（cf29da0 记成 dropped 50：正控）"
+# CodeX 2026-09-09 P1：顺序必须是 校验 → 去重 → 切上限。200 条逐字段相同的 P0 + 第 201 条唯一的 P0：先切再去重会把唯一那条挤掉再把 200 条并成 1 条。
+dup_p0=$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"DO_NOT_MERGE", verdict_reason:"r",
+  findings:([range(200) | {severity:"P0",title:"dup",body:"b",fix:"",file:"src/app.py",line_start:1}]
+            + [{severity:"P0",title:"unique-p0",body:"b2",fix:"",file:"src/app.py",line_start:9}])}' | review_validate)
+assert_eq "$(printf '%s' "$dup_p0" | jq -c '[(.findings|length), .overflow_findings, .duplicate_findings]')" "[2,0,199]" \
+  "CodeX P1：200 条重复 P0 + 1 条唯一 P0 → 保留 2 条、overflow 0、duplicate 199（先去重再切上限）"
+assert_eq "$(printf '%s' "$dup_p0" | jq -r '[.findings[].title] | join(",")')" "dup,unique-p0" "CodeX P1：唯一的第 201 条 P0 没有被重复条挤掉"
+# 计数口径：去重后仍超上限时，overflow 只数去重后超出的、duplicate 只数被并掉的（两者不重叠）
+dup_mix=$(jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"DO_NOT_MERGE", verdict_reason:"r",
+  findings:([range(205) | {severity:"P2",title:("t" + tostring),body:"b",fix:"",file:"src/app.py",line_start:1}]
+            + [range(30) | {severity:"P1",title:"dup1",body:"b",fix:"",file:"src/app.py",line_start:2}])}' | review_validate)
+assert_eq "$(printf '%s' "$dup_mix" | jq -c '[(.findings|length), .overflow_findings, .duplicate_findings, (.findings[0].severity)]')" "[200,6,29,\"P1\"]" \
+  "CodeX P1：205 条 P2 + 30 条重复 P1 → 去重后 206 条、保留 200（P1 排最前）、overflow 6、duplicate 29"
 jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:([range(205) | {severity:"P2",title:("t" + tostring),body:"b",fix:"",file:"src/app.py",line_start:1}] + [{severity:"P9",title:"x",body:"y"}])}' \
   | review_validate > "$tmp/overflow.json"
 assert_eq "$(jq -c '[(.findings|length), .dropped_findings, .overflow_findings]' "$tmp/overflow.json")" "[200,1,5]" "第 28 条 + 合并后复审①：先校验后切上限——不合契约的条目计入 dropped、不再占预算（130f977：[200,0,6]）"

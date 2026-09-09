@@ -189,6 +189,17 @@ assert_rc "$RC" 1 "M-d4b：自检失败 → 失败回写、非零退出"
 assert_contains "$OUT" "Kiro 输入自检失败" "M-d4b：日志点名自检项"
 assert_eq "$(grep -c -x -- 'chat' "$MD/calls")" "0" "M-d4b：Kiro 评审没有启动（自检在 chat 之前）"
 
+# --- M-cx3：把去重步骤变成空转（不记已见键）→ 201 条里唯一的第 201 条 P0 被上限挤掉（CodeX 2026-09-09 P1）---
+# 单靶：去重 + 切上限的顺序不是文本上能「交换」的一处，能证明单测有牙的最小变异是让去重失效：此时 200 条重复 P0 不再合并，
+# 上限 200 直接把唯一的那条切掉——单测「唯一的第 201 条 P0 没有被挤掉」与「[2,0,199]」都会失败。
+pkg=$(make_mutant m-cx3-no-dedup 's/| if \.seen\[\$k\] then \. else \.seen\[\$k\] = true | \.out += \[\$f\] end)).out as \$uniq_all/| .out += [$f])).out as $uniq_all/' scripts/lib/review-render.sh)
+mut_cx3=$( ( set +e; source "$pkg/scripts/lib/review-render.sh"
+  jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"DO_NOT_MERGE", verdict_reason:"r",
+    findings:([range(200) | {severity:"P0",title:"dup",body:"b",fix:"",file:"src/app.py",line_start:1}]
+              + [{severity:"P0",title:"unique-p0",body:"b2",fix:"",file:"src/app.py",line_start:9}])}' \
+  | review_validate | jq -c '[(.findings|length), .overflow_findings, .duplicate_findings, ([.findings[].title] | unique | join(","))]' ) )
+assert_eq "$mut_cx3" '[200,1,0,"dup"]' "M-cx3：去重空转后保留 200 条全是 dup、唯一的 P0 成了 overflow——单测「[2,0,199]」与「dup,unique-p0」都会失败"
+
 # --- M2：删掉 --agent-engine 参数 → 引擎不再钉死 ---
 pkg=$(make_mutant m2-engine 's/--agent-engine "\$KIRO_ENGINE"//')
 run_case m2 "$pkg"
@@ -1603,7 +1614,7 @@ assert_contains "$comment" "选不出「最新合并目标版本 + 最新合并�
 
 # ============ 合并后深度复审（phase1 130f977）阻断项的变异守卫 ============
 # --- M-r1：上限切片退回「模型顺序先切」→ 200 条 P2 后的 3 条 P0 消失 ---
-pkg=$(make_mutant m-r1-slice-order 's/       then (\[$valid\[\] | select(.severity == "P0")\] + \[$valid\[\] | select(.severity == "P1")\] + \[$valid\[\] | select(.severity == "P2")\])\[:$maxf\]/       then $valid[:$maxf]/' scripts/lib/review-render.sh)
+pkg=$(make_mutant m-r1-slice-order 's/       then (\[$uniq_all\[\] | select(.severity == "P0")\] + \[$uniq_all\[\] | select(.severity == "P1")\] + \[$uniq_all\[\] | select(.severity == "P2")\])\[:$maxf\]/       then $uniq_all[:$maxf]/' scripts/lib/review-render.sh)
 p0n=$( ( set +e; source "$pkg/scripts/lib/review-render.sh"; jq -n '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:([range(200) | {severity:"P2",title:("t"+tostring),body:"b",fix:"",file:"src/app.py",line_start:1}] + [range(3) | {severity:"P0",title:("p"+tostring),body:"b",fix:"",file:"src/app.py",line_start:1}])}' | review_validate | jq '[.findings[]|select(.severity=="P0")]|length' ) )
 assert_eq "$p0n" "0" "M-r1：按模型顺序先切 → P0 全丢——单测「3 条 P0 全留」断言会失败"
 # --- M-r3：保行块 128 行上界后直接退回普通行 → 第 129 行起正文裸露 ---
