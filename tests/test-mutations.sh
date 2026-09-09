@@ -561,8 +561,9 @@ assert_contains "$OUT" "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" \
   "M12 双变异：降级评论里出现完整密钥——端到端「评论里不出现完整密钥」断言会失败"
 assert_contains "$OUT" "AKIAIOSFODNN7EXAMPLE" "M12 双变异：AWS 访问密钥 ID 同样泄漏"
 
-# --- M13：让「补齐未闭合代码围栏」的判定永不成立 → 截断提示被吞进代码块 ---
-pkg=$(make_mutant m13-fence-close 's/% 2 )) -eq 1/% 2 )) -eq 99/' scripts/lib/review-render.sh)
+# --- M13：让「补齐未闭合代码围栏」永不发生 → 截断提示被吞进代码块 ---
+# CodeX 2026-09-09 P1-1 复审后闭合围栏由 review_unclosed_fence 判定、按「闭合串非空才追加」写回：把 -z 反成 -n，闭合串非空时就不追加
+pkg=$(make_mutant m13-fence-close 's/-z "\$closer" \]\] || printf/-n "$closer" ]] || printf/' scripts/lib/review-render.sh)
 run_case m13 "$pkg" MAX_COMMENT_BYTES=1200 MOCK_KIRO_CONTRACT="$ROOT/tests/fixtures/contract/fenced-code.json"   # 1200：≥ 下界 1024（票 18 ②），仍在围栏内部
 assert_rc "$RC" 0 "M13：变异体仍能跑完"
 comment=$(posted_comment "$OUT")
@@ -1768,9 +1769,10 @@ assert_contains "$(posted_comment "$OUT")" "## 问题清单" "M-t18c-nopair 对�
 mut_post() { # <包根> → stdout: POST 次数
   ( set +e; source "$1/scripts/lib/codeup-api.sh"; source "$1/scripts/lib/review-render.sh"
     export YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456 YUNXIAO_TOKEN=t DRY_RUN=1 CODEUP_RETRY_BACKOFF=0
-    export CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" DRY_RUN_FIXTURE_DIR="$ROOT/tests/fixtures/comments/post-lost-created"
+    export CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" DRY_RUN_FIXTURE_DIR="$ROOT/tests/fixtures/comments/${MUT_POST_FIXTURE-post-lost-created}"
     export DRY_RUN_FAIL_ROUTES="create-comment:000"
-    md=$(mktemp); printf '# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n' > "$md"
+    # 待发正文带本次发布随机串行（CodeX 2026-09-09 P1-3 复审）：post-lost-created fixture 里的评论带同一串；post-lost-stale 带的是上一次的
+    md=$(mktemp); printf '# Kiro 代码评审\n<!-- kiro-review:abc1234 run:3 -->\n<!-- kiro-history:[] -->\n<!-- kiro-review-post:0123456789abcdef -->\n' > "$md"
     err=$(codeup_post_comment 7 "$md" "${MUT_POST_AUTHOR-$TEST_BOT_USERNAME}" 2>&1 >/dev/null); rm -f "$md"
     printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$' )
 }
@@ -1785,5 +1787,15 @@ pkg=$(make_mutant m-cx5-marker-only 's/  if \[\[ -z "\$_CODEUP_POST_PROBE_AUTHOR
 assert_eq "$(MUT_POST_AUTHOR= mut_post "$pkg")" "3" "M-cx5a：只拆入口守卫，jq 仍要求作者相等 → 仍重试 3 次（只拆一道不够）"
 mutate_more "$pkg" 's/    | map(select(author_name == \$bot))/    | map(select(if $bot == "" then true else author_name == $bot end))/' scripts/lib/codeup-api.sh
 assert_eq "$(MUT_POST_AUTHOR= mut_post "$pkg")" "1" "M-cx5b：两道都拆 → 无身份也按标记认、只发一次 POST——单测「发了第二次 POST」断言会失败"
+
+# --- M-cx-p13（CodeX 2026-09-09 复审 P1-3）：探针不认本次发布随机串 → 同作者同标记的**旧**评论被当成本次已创建，停止重试、假报成功 ---
+# fixture post-lost-stale：同作者、同 sha、同 run，随机串是上一次的（ffff…）。两道：入口「待发正文无随机串就返回 1」+ jq 里 index($pn)。
+# 只拆入口：jq 仍要求随机串行相等 → 仍重试；两道都拆 → 旧评论被认、只发一次 POST（这正是复审复现的静默丢报告）。
+assert_eq "$(MUT_POST_FIXTURE=post-lost-stale mut_post "$ROOT")" "3" "M-cx-p13 对照：MR 上只有随机串不同的旧评论 → 不认，000 之后一路重试 3 次"
+pkg=$(make_mutant m-cx-p13-no-nonce-guard 's/  if \[\[ -z "\$_CODEUP_POST_PROBE_NONCE" \]\]; then/  if false; then/' scripts/lib/codeup-api.sh)
+assert_eq "$(MUT_POST_FIXTURE=post-lost-stale mut_post "$pkg")" "3" "M-cx-p13a：只拆入口守卫，jq 仍要求随机串行相等 → 仍重试 3 次（只拆一道不够）"
+mutate_more "$pkg" 's/ and (\$ls | index(\$pn) != null)))/ and true))/' scripts/lib/codeup-api.sh
+assert_eq "$(MUT_POST_FIXTURE=post-lost-stale mut_post "$pkg")" "1" "M-cx-p13b：两道都拆 → 旧评论被当成本次已创建、只发一次 POST——单测「三次尝试都发了 POST」断言会失败"
+assert_eq "$(MUT_POST_FIXTURE=post-lost-created mut_post "$pkg")" "1" "M-cx-p13 正控：随机串一致的 fixture 在变异体上同样只发一次（变异只放宽、没弄坏探针）"
 
 report
