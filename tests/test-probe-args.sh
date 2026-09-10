@@ -117,6 +117,16 @@ rt_probe() { # <失败套件？yes|no> → stdout: "<rc>|<有没有诊断块>"
 }
 assert_eq "$(rt_probe no)" "1|有" "⑦：全绿但有解析诊断 → 整体以 1 退出并打出诊断块"
 assert_eq "$(rt_probe yes)" "3|有" "⑦：有套件失败时保留该套件的退出码，且诊断块照样打出来（不能被 fail-fast 跳过）"
+# CodeX 2026-09-09 复审 P2：`生产函数 | head -1` 让 printf 吃 EPIPE——stderr 一行 `printf: write error: Broken pipe`、断言照样 OK。诊断要认它。
+rt_probe_epipe() { # → "<rc>|<有没有诊断块>"
+  local d rc=0 out
+  d=$(mktemp -d); cp "$ROOT/tests/run-tests.sh" "$d/"
+  printf '#!/usr/bin/env bash\necho "%s: line 1: printf: write error: Broken pipe" >&2\necho OK\n' "test-aaa.sh" > "$d/test-aaa.sh"
+  out=$(bash "$d/run-tests.sh" 2>&1) || rc=$?
+  printf '%s|%s' "$rc" "$([[ "$out" == *"bash 解析诊断"* ]] && echo 有 || echo 无)"
+  rm -rf "$d"
+}
+assert_eq "$(rt_probe_epipe)" "1|有" "P2：stderr 里的 write error: Broken pipe 也算诊断 → 全绿也整体以 1 退出"
 
 # ============ 票 18 ⑬：awk locale 静态守卫 ============
 # macOS 自带 awk（20200816）在 UTF-8 locale 下会把两条**不同**的中文行判成相等（D4 修复替身时实测：

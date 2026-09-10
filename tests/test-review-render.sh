@@ -2305,7 +2305,7 @@ jq --arg t "硬编码 ${SEC_AKIA} 与 ${SEC_GHP} 两处密钥" '.title = $t' "$t
 jq -n --slurpfile it "$tmp/two-mask-item.json" '{contract:"codeup-reviewer/1", summary:"s", verdict:"MERGE", verdict_reason:"r", findings:[$it[0] + {severity:"P0", file:"src/app.py"}]}' \
   | review_validate > "$tmp/two-mask-validated.json"
 jq -c '.findings[0] + {finalized: true}' "$tmp/two-mask-validated.json" > "$tmp/two-mask-item.validated.json"
-assert_eq "$(review_render_inline_body "$tmp/two-mask-item.validated.json" 90fcb05 "$fpR" | head -1)" "**P0 · 硬编码 ${SEC_AKIA_MASKED_TITLE} 与 ${SEC_GHP_MASKED_TITLE} 两处密钥（L30–L31）**" \
+assert_eq "$(review_render_inline_body "$tmp/two-mask-item.validated.json" 90fcb05 "$fpR" | sed -n '1p')" "**P0 · 硬编码 ${SEC_AKIA_MASKED_TITLE} 与 ${SEC_GHP_MASKED_TITLE} 两处密钥（L30–L31）**" \
   "第 22 条：标题里两处掩码的八颗星全部转义，级别前缀的加粗不被拆开（cf29da0 只转义掩码之外的 *：正控）"
 strip_secrets < "$tmp/secrets-inline-body.md" > "$tmp/secrets-inline-body.stripped.md"
 assert_same_file "$tmp/secrets-inline-body.stripped.md" "$GOLDEN/inline-range.md" "票 16 golden①：行内正文掩码后剔掉掩码与 inline-range.md 逐字节一致（含 kiro-inline 标记行）"
