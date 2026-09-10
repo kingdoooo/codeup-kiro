@@ -72,15 +72,18 @@ stages:
 #   YUNXIAO_TOKEN      （私密）云效令牌，建议专用机器人账号（代码只读 + MR 读写）
 #   YUNXIAO_ORG_ID     云效组织 ID
 #   CODEUP_REPO_ID     业务代码库数字 ID
-#   DIFF_SIZE_LIMIT    可选，默认 307200（300KB）
+#   DIFF_SIZE_LIMIT    可选，默认 307200（300KB）。**只是提示词预算**：不限制原始 diff 总量、磁盘、变更文件数与
+#                      预处理时间（超限时脚本仍把整份 diff 落盘、逐文件生成 chunk），KIRO_TIMEOUT 也不包住这段预处理；
+#                      并发 = 1 下一个极端 MR 会占住整条流水线，务必给任务配超时（setup-guide 第 4 节第 5 步）。
+#                      硬上限（文件数 / 原始字节 / 单 chunk / 预处理墙钟）是 Phase 2 backlog（issue 19）
 #   KIRO_TIMEOUT       可选，默认 900（秒）
-#   MAX_COMMENT_BYTES  可选，默认 60000（字节）
-#   CODEUP_BOT_USERNAME 可选但强烈建议，机器人账号在 Codeup 上的用户名。
-#                      未配置且令牌身份接口不可用时：汇总评论每次新建（不原地更新）；INLINE_COMMENT=1 也整轮
 #   KIRO_ACK_UNTESTED_VERSION 可选，默认空。执行器上的 kiro-cli 版本不在脚本 KIRO_TESTED_VERSIONS 名单内时脚本
 #                      **拒绝评审**并回写「评审未完成」（读取边界依赖实测过的版本；云托管执行器 curl|bash 装的是
 #                      latest，升级后就会这样）。确需在该版本上运行，把它设成与实际版本逐字相同的版本号（如 2.22.0）
 #                      临时放行，汇总评论带醒目 notice；探测通过、版本进名单后删掉。不是布尔开关，不匹配仍拒绝
+#   MAX_COMMENT_BYTES  可选，默认 60000（字节）
+#   CODEUP_BOT_USERNAME 可选但强烈建议，机器人账号在 Codeup 上的用户名。
+#                      未配置且令牌身份接口不可用时：汇总评论每次新建（不原地更新）；INLINE_COMMENT=1 也整轮
 #                      不发行内评论、汇总退回完整问题清单（防止他人伪造隐藏标记压制问题；setup-guide 第 11 节）；
 #                      取值照抄首次运行日志里「新建评论的作者用户名=…」那一行
 #   INLINE_COMMENT     可选，默认 0（关）。1 = 可定位的问题发成行内评论、汇总退化为状态面板 +
