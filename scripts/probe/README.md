@@ -76,7 +76,7 @@ bash scripts/probe/probe-kiro-allowlist.sh
 # 只跑子集省额度：PROBE_CASES="T1 T2 T4" bash scripts/probe/probe-kiro-allowlist.sh
 #   用例名逐个校验（写错 → 退出码 2、零调用）；子集运行时结论打「不作发布判定」并以 4 退出，只有八个门禁用例全跑才打「走主方案」
 # 升级 kiro-cli 之后：跑一次（至少 T8a T8b）→ 全 PASS 后把 summary.json 里的 kiro_cli 版本号加进 scripts/kiro-review.sh 的 KIRO_TESTED_VERSIONS，
-#   否则每次评审的日志与汇总评论都会带「本次 kiro-cli 版本未经 P1-15 探测」的 notice
+#   否则评审会被版本门**拒绝**（名单外默认拒绝，2026-09-10 起；临时放行只能设流水线变量 KIRO_ACK_UNTESTED_VERSION=<准确版本>，汇总带醒目 notice）
 # 原始输出默认留在 /tmp/kiro-probe-allowlist-<时间>（每用例 .jsonl/.err、agent-installed.json、
 # env-allowlist-names.txt、summary.json）
 ```

@@ -20,6 +20,12 @@ Kiro CLI 3.0 目前是 early access：随 2.x 稳定版一起安装，需 `--v3`
   （见 `.scratch/codeup-kiro-v2/acceptance/NOTES.md` D4 / D4b）。探测脚本仍用位置参数（提示词短、不喂 diff），
   两者刻意不同，见 `scripts/probe/README.md`。这条只是记录 CLI 的行为事实，v2 引擎的决策不变。
 
+- **修订（2026-09-10，CodeX 复审 P1-2）**：版本门从「名单外只 notice」（15-fix2 #24）改为**默认拒绝**。`scripts/kiro-review.sh` 的
+  `KIRO_TESTED_VERSIONS`（当前 2.21.1——探测 P1-15 与全部真实验收所用版本；上文正文写的 2.21.0 是决策当时的版本）之外的 kiro-cli
+  版本拒绝评审并回写失败评论，Kiro 不启动；只有流水线变量 `KIRO_ACK_UNTESTED_VERSION` 与实际版本**逐字相等**才放行（汇总带醒目
+  notice），刻意不做布尔开关（会永久留在环境里放行以后所有未知版本）；版本解析不出一律拒绝。原因：官方安装脚本只装 latest、没有版本
+  开关、sha256 只对在线 manifest，Kiro 3.x 的权限模型是 breaking change，「新版本仍保持已探测版本的路径解析语义」不能当默认假设；本 ADR
+  要求的「固定版本 + 校验」只有 setup-guide 第 7 节的预装执行器能满足，第 6 节 curl|bash 路径降为评估 / PoC。这是运维可见的行为变化。
 - 切换到 V3 的门槛，全部满足才切：官方 GA 公告；headless 文档明确支持 V3；`--trust-tools` 在 V3 的语义定型；canary 负向测试（读禁止路径、AGENTS.md 注入、shell 执行）在 V3 下全部通过。**2026-09-02 实测：V3 下 `chat.disableInheritingDefaultResources=true` 不能阻止工作区 `AGENTS.md` 进入自定义 agent 的上下文（v2 可以），因此当前 V3 直接不满足 AGENTS.md 注入这一项。**
 - 探测阶段保留一个时间盒（≤ 半天）的 `--engine v3` 对照实验，只为提前发现迁移成本，不作为上线依据。
 - 不依赖 V3 独有能力（标签式 `tools`、`code` 工具）实现任何功能。

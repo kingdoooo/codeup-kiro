@@ -394,7 +394,7 @@ assert_contains "$OUT" "liveSecret123" "M5r：像令牌的 token 原文进了输
 
 # --- M5s：去掉 kiro-cli 版本 notice → 版本不在名单也没有任何提示（15-fix2 #24）---
 pkg=$(make_mutant m5s-version-notice '/REVIEW_NOTICE="注意：本次 kiro-cli 版本/d')
-run_case m5s "$pkg" MOCK_KIRO_VERSION=9.9.9
+run_case m5s "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9   # P1-2 之后名单外要 break-glass 放行才走到 notice
 assert_rc "$RC" 0 "M5s：变异体仍能跑完"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5s：汇总评论没有版本 notice——端到端「版本不在名单：汇总评论带 notice」断言会失败"
 
@@ -417,17 +417,26 @@ assert_eq "$([[ -d "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "gone" 
 
 # --- M5v：降级评论不再接 --notice → 版本 notice 只在日志、评论里没有（15-fix3 #3）---
 pkg=$(make_mutant m5v-degraded-notice '/review_render_degraded --text/s/ --notice "\$REVIEW_NOTICE"//')
-run_case m5v "$pkg" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
+run_case m5v "$pkg" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
 assert_rc "$RC" 0 "M5v：变异体仍能跑完"
 assert_contains "$OUT" "未经 P1-15 探测" "M5v：日志仍有警告"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5v：降级评论丢了 notice——端到端「降级评论也带版本 notice」断言会失败"
 
 # --- M5ad：die_review 不再给失败评论传 --notice → kiro-cli 非零退出 + 未探测版本时失败评论没有版本告警（15-fix4 #3）---
 pkg=$(make_mutant m5ad-failure-notice '/^      --notice "\$REVIEW_NOTICE" \\$/d')
-run_case m5ad "$pkg" MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9
+run_case m5ad "$pkg" MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5ad：仍是失败"
 assert_contains "$OUT" "未经 P1-15 探测" "M5ad：日志仍有警告"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5ad：失败评论丢了版本告警——端到端「失败评论带版本告警引用块」断言会失败"
+
+# --- M-cx-p12（CodeX 2026-09-09 复审 P1-2）：版本门的拒绝换成 log → 名单外版本不确认也照跑，安全边界跑在未验证的 kiro-cli 上 ---
+pkg=$(make_mutant m-cx-p12-version-gate 's/^  die_review "kiro-cli 版本 \${KIRO_CLI_VERSION} 未经 P1-15 探测/  log "kiro-cli 版本 ${KIRO_CLI_VERSION} 未经 P1-15 探测/')
+run_case m-cx-p12 "$pkg" MOCK_KIRO_VERSION=9.9.9
+assert_rc "$RC" 0 "M-cx-p12：变异体不拒绝、评审照跑——端到端「版本不在名单且未确认 → 拒绝评审」断言会失败"
+assert_contains "$OUT" "开始 Kiro 评审" "M-cx-p12：Kiro 真的在未验证版本上被启动了（额度烧在未验证的读取边界上）"
+run_case m-cx-p12-control "$ROOT" MOCK_KIRO_VERSION=9.9.9
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-cx-p12 对照：原实现拒绝"
+assert_not_contains "$OUT" "开始 Kiro 评审" "M-cx-p12 对照：原实现不启动 Kiro"
 
 # --- M5w：被拒的凭证形状名字不再掩码 → 完整名字进失败评论（15-fix3 #6）---
 pkg=$(make_mutant m5w-cred-mask 's/cred+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")（命中 ${rule}）")/cred+=("第 ${idx} 项 ${tok}（命中 ${rule}）")/' scripts/lib/kiro-agent.sh)
@@ -438,18 +447,23 @@ assert_contains "$(posted_comment "$OUT")" "$(fake_token svc)" "M5w：完整名�
 # --- M5x：kiro_cli_version 去掉 stderr 回退 → 版本打到 stderr 的 CLI 让版本永远「未知」（15-fix3 #8 / 15-fix4 #7）---
 pkg=$(make_mutant m5x-version-stderr '/KIRO_CLI_VERSION=$(_kiro_cli_version_pick "$err")/d' scripts/lib/kiro-agent.sh)
 run_case m5x "$pkg" MOCK_KIRO_VERSION_STDERR=1
-assert_rc "$RC" 0 "M5x：变异体仍能跑完"
-assert_contains "$(posted_comment "$OUT")" "未知" "M5x：版本永远「未知」、评论带 notice——端到端「--version 打到 stderr：无 notice」断言会失败"
+# P1-2 之后版本解析不出直接拒绝：变异体在名单内的 2.21.1 上也被版本门拒绝（端到端「--version 打到 stderr：评审照常完成」断言会失败）
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5x：版本永远解析不出 → 被版本门拒绝"
+assert_contains "$(posted_comment "$OUT")" "版本号无法解析" "M5x：失败评论说版本无法解析——端到端「--version 打到 stderr：仍取得到版本、名单内」断言会失败"
 # --- M5x2：执行器退回旧取法 `2>&1 | head -1 | grep -oE 数字`（正控，15-fix4 #7）→ stderr 上先到的升级提示 2.30.0 被当成本次版本 ---
 pkg=$(make_mutant m5x2-version-merged 's|^kiro_cli_version "\$TIMEOUT_BIN" "\$KIRO_CWD" \|\| die_review .*$|KIRO_CLI_VERSION=$(cd "$PKG_ROOT" \&\& "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli --version 2>\&1 \| head -1 \| grep -oE "[0-9]+(\\.[0-9]+)+" \| head -1 \|\| true)|')
 run_case m5x2 "$pkg" MOCK_KIRO_VERSION_WARN=1
-assert_rc "$RC" 0 "M5x2：变异体仍能跑完"
-assert_contains "$OUT" "2.30.0 未经 P1-15 探测" "M5x2：升级提示里的 2.30.0 被当成本次版本——端到端「取到的是已装版本 2.21.1」断言会失败"
+# P1-2 之后名单外拒绝：把 2.30.0 当成本次版本的变异体在装着 2.21.1 的机器上被版本门拒绝（端到端「取到的是已装版本 2.21.1、评审照常完成」断言会失败）
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5x2：升级提示里的 2.30.0 被当成本次版本 → 名单外、被拒绝"
+assert_contains "$OUT" "2.30.0 未经 P1-15 探测" "M5x2：拒绝原因点名的是 2.30.0 而不是已装的 2.21.1"
 # --- M5x3：--version 退出码不再判 → 跑不起来的 CLI 只留软 notice、继续去 chat（15-fix4 #7）---
 pkg=$(make_mutant m5x3-version-rc 's|^kiro_cli_version "\$TIMEOUT_BIN" "\$KIRO_CWD" \|\| die_review .*$|kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" \|\| true|')
 run_case m5x3 "$pkg" MOCK_KIRO_VERSION_RC=127
-assert_rc "$RC" 0 "M5x3：--version 退出 127 也照跑——端到端「kiro-cli --version 退出 127：评审失败」断言会失败"
-assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "launched" "M5x3：Kiro chat 仍被启动（额度照烧）"
+# P1-2 之后版本解析不出也拒绝：去掉 --version 退出码判定的变异体仍被版本门挡住（第二道），但失败评论丢了退出码 127 这条线索——
+# 端到端「kiro-cli --version 退出 127：失败评论带退出码」断言会失败
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5x3：--version 退出 127 → 版本解析不出，仍被版本门拒绝"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "M5x3：Kiro chat 未启动（版本门是第二道）"
+assert_not_contains "$(posted_comment "$OUT")" "退出码 127" "M5x3：失败评论丢了退出码 127 这条排障线索——端到端「失败评论带退出码」断言会失败"
 
 # --- M5y：自检去掉 `[[ -s ]]` 0 字节检查（15-fix4 #13）→ 空文件仍被第二道（--slurp 恰好一个值）拦下，但固定文案不再点明「0 字节」---
 # 单测「selfcheck：空文件的固定文案点明 0 字节」断言会失败。两道都在才是 fail-closed 的纵深：这条变异证明第一道有单独的可观测结果。

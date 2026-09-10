@@ -26,7 +26,7 @@
          includeMcpJson/includePowers=false、deniedPaths 含 **/.git/**）不符即拒绝运行；敏感路径、.git 与仓库相对形状
          （**/.ssh/**、**/.aws/**、**/id_rsa*、**/id_ed25519*）的拒绝清单是第二道）
          + 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行）+ kiro-cli 版本核对（不在 P1-15 探测过的
-         KIRO_TESTED_VERSIONS 里不失败、但日志与汇总评论带 notice）；这几次 kiro-cli 调用同样以 env -i 固定名单启动
+         KIRO_TESTED_VERSIONS 名单外**拒绝评审**，只有流水线变量 KIRO_ACK_UNTESTED_VERSION 逐字等于实际版本才放行并带醒目 notice）；这几次 kiro-cli 调用同样以 env -i 固定名单启动
       4. merge-base 三点 diff；>300KB 按优先级压缩，省略文件以 diff 片段索引供 Kiro 自读；
          开启行内评论时同时算出「本次变更行集合」（零上下文 diff，与评审输入同源）
       5. 隔离（必须在 diff 算完之后、启动 Kiro 之前）：一次遍历移除业务库工作树中任意深度的

@@ -141,14 +141,18 @@ Flow 在多代码源流水线里给每个代码源的内置变量加数字下标
   照抄即可，不需要再改。`CI_COMMIT_REF_NAME` 那行刻意仍是无条件 `export`：不带下标的取值在多代码源下可能是集成包那个
   代码源的分支，必须显式压掉。
 
-## 6. 连通性验证（云托管执行器必做）
+## 6. 连通性验证（云托管执行器：评估 / PoC 路径）
+云托管执行器上 kiro-cli 由官方安装脚本 `curl | bash` 现装：脚本只装 **latest**、没有版本开关，sha256 也只对在线 manifest 校验。
+latest 不在 `KIRO_TESTED_VERSIONS`（当前 2.21.1）名单内时，评审会被版本门**拒绝**并回写「评审未完成」（第 8 节第 5 项、第 10 节），
+只能临时用 `KIRO_ACK_UNTESTED_VERSION=<准确版本>` 放行。所以这条路径只用于评估 / PoC；**生产按第 7 节预装固定版本**
+（ADR-0004 要求的「固定版本 + 校验」只有那条路径能满足）。
 前提：先在该验证流水线的「变量和缓存」中配置 `KIRO_API_KEY`（私密变量）——
 headless 调用必须依赖它认证，未配置时 chat 命令会因认证失败而报错。
 最小验证流水线命令：
     curl -fsSL https://cli.kiro.dev/install | bash
     export PATH="$HOME/.local/bin:$PATH"
     set -e                                   # 缺参数必须让这一步标红，不能只在日志里留一行提示
-    kiro-cli --version                       # 需 ≥ 2.21
+    kiro-cli --version                       # 需在 KIRO_TESTED_VERSIONS 名单内（当前 2.21.1），否则评审被版本门拒绝
     # 三个参数各查一次，缺任一就退出：合成一条 grep 时任一命中即通过，而 `--agent` 又会被
     # `--agent-engine` 那一行命中，于是缺 --agent 也照样"通过"。
     # --agent 用与评审脚本相同的正则（前后必须是空白或行首尾）；help 一并收 stderr（脚本也是 2>&1）。
@@ -171,10 +175,11 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 同时验证执行器具备 timeout 命令（GNU coreutils）：`command -v timeout`；
 计划开启行内评论的话再验 `command -v sha1sum || command -v shasum`。
 
-## 7. 自建执行器（网络受限/生产推荐）
+## 7. 自建执行器（生产唯一支持的路径；网络受限时也走这里）
 1. ECS/物理机按 Flow 文档接入为自有构建集群。
-2. 预装：git、curl、jq（≥1.6）、coreutils（`timeout`、`sha1sum`）、kiro-cli 固定版本
-   （建议 2.21.1——探测 P1-15 与真实验收都在这个版本上做，`KIRO_TESTED_VERSIONS` 亦为它；`kiro-cli --version` 验证；固定版本可规避 curl|bash 供应链漂移）。
+2. 预装：git、curl、jq（≥1.6）、coreutils（`timeout`、`sha1sum`）、kiro-cli **固定为 `KIRO_TESTED_VERSIONS` 名单内的版本**
+   （当前 2.21.1——探测 P1-15 与全部真实验收都在这个版本上做；`kiro-cli --version` 验证；名单外版本会被版本门拒绝，见第 8 节第 5 项）。
+   预装固定版本同时规避 curl|bash 的供应链漂移——ADR-0004 要求的「固定版本 + 校验」只有这条路径能满足。
 3. 代理：流水线变量配置 HTTP_PROXY / HTTPS_PROXY / NO_PROXY
    （NO_PROXY 含 openapi-rdc.aliyuncs.com 与内网地址）。
 4. 流水线任务指定运行在该构建集群。
@@ -224,10 +229,11 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    `*_PROXY` 的变量（这行只打名字、不打取值）。同一份名单也用于 `chat --help`、`--version` 与 `settings` 那几次 kiro-cli 调用。
    紧接着核对两行：「受信 agent 自检通过：allowedPaths 值比对…」（第 3 步把安装文件按值核对过——三处 allowedPaths 逐字等于
    本次 checkout 与 chunks 的物理路径、`allowedTools=[]`、`includeMcpJson/includePowers=false`、三处 `deniedPaths` 含
-   `**/.git/**`），以及「kiro-cli 版本 X：在 P1-15 探测过的版本名单内」。若是「警告：本次 kiro-cli 版本 X 未经 P1-15 探测…」，
-   评审照常完成但汇总评论会带同一句 notice——读取边界依赖 kiro-cli「先解析符号链接与 `../` 再比对 allowedPaths」这一实测行为，
-   新版本要按 `scripts/probe/README.md`「升级 kiro-cli 之后」跑一次探测、把版本加进 `scripts/kiro-review.sh` 的
-   `KIRO_TESTED_VERSIONS`（生产的兜底不变：符号链接在隔离步骤里全部删除）。
+   `**/.git/**`），以及「kiro-cli 版本 X：在 P1-15 探测过的版本名单内」。若是「kiro-cli 版本 X 未经 P1-15 探测…拒绝评审」或
+   「版本号无法解析」，评审**没有跑**、MR 上是失败评论（2026-09-10 起的版本门）——读取边界依赖 kiro-cli「先解析符号链接与 `../`
+   再比对 allowedPaths」这一实测行为，新版本要先按 `scripts/probe/README.md`「升级 kiro-cli 之后」跑一次探测、把版本加进
+   `scripts/kiro-review.sh` 的 `KIRO_TESTED_VERSIONS`；确需先在该版本上跑，临时设流水线变量 `KIRO_ACK_UNTESTED_VERSION=<与实际
+   版本逐字相同>`（汇总评论会带醒目 notice，探测通过后删掉；不匹配或版本解析不出一律拒绝）。生产的兜底不变：符号链接在隔离步骤里全部删除。
    **注意 `tools` 里的工具短名（read/grep/glob）不会以报错的形式暴露问题**：实测 kiro-cli 对未知名字
    静默接受，所以升级 CLI 后短名若改名，评审不会报错，只会表现为评审员读不到文件、
    结论变泛化。核对方式只有两种：看评审报告是否真的引用了 diff 之外的上下文文件（第 11 项），
@@ -421,6 +427,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 | 评论说「受信 agent 未生效」 | 评审输出缺 `contract` 字段 → agent 没加载。查日志有没有「已安装受信 custom agent：codeup-reviewer-<随机串>」；确认 `kiro/agent-codeup-reviewer.json` 未被改动；确认业务库里的 `.kiro/` 已被移除（业务库放一份同名 agent 会顶替受信 agent，脚本已在隔离步骤删除，日志有「隔离：已移除…」一行） |
 | 报错 INLINE_COMMENT 不是 0 或 1 | 该开关只接受 `0`/`1`，其它取值一律拒绝运行（静默按 0 跑会让开关看起来生效了）。修正流水线变量 |
 | 汇总评论每次都新建一条 | ① 未配置 CODEUP_BOT_USERNAME（日志会打出新建评论的作者用户名，照抄配上即可）；② 日志出现「达到异常保护阈值」告警——评论列表接口按官方文档**不分页**、一次返回全部，这条告警只是防服务端有未文档化的返回上限；评论确实很多时把 `CODEUP_COMMENT_PAGE_HINT` 调高即可。先排除 ①，再看告警 |
+| 评论说「kiro-cli 版本 X 未经 P1-15 探测…拒绝评审」或「版本号无法解析」 | 版本门（2026-09-10 起）：执行器上的 kiro-cli 不在 `KIRO_TESTED_VERSIONS` 名单内，或 `--version` 解析不出版本号。云托管执行器 `curl \| bash` 装的是 latest，Kiro 发新版后就会这样；读取边界（符号链接 / `../` 是否先解析再比对 allowedPaths）只在名单内版本上实测过，不放行未验证版本。处置：生产执行器预装名单内版本（第 7 节）；确需在新版本上跑，先按 `scripts/probe/README.md`「升级 kiro-cli 之后」探测、把版本加进名单；临时放行只能设 `KIRO_ACK_UNTESTED_VERSION=<与实际版本逐字相同>`（汇总带醒目 notice，探测通过后删掉）。确认值与实际版本不一致、或版本解析不出，一律拒绝 |
 | 汇总评论的「历次评审」表只剩本次一行 | 说明脚本没能从上一条评论里读回历史：多为那条评论在 Codeup 网页上被人手工编辑过（隐藏的历史标记被改坏、被删掉、或出现了两份）。脚本对历史采取「读不回就当没有」的策略——**不是少几行，而是整段历史丢失，重写后只剩本次这一行**（之前各次的提交、结论与计数不可恢复）。评审本身不受影响，`run:N` 计数取自评审标记、仍会继续递增。另：该表最多保留最近 20 次，更早的记录会正常滚掉（避免评论撑到长度上限） |
 | 页脚的「重新评审」提示写的操作在本档位做不到 | 页脚与降级提示里那句话取自 `REVIEW_RERUN_HINT`（第 11.2 节），默认是「重跑流水线可重新评审」——Flow 档位接不到 Codeup 的评论事件，所以默认**不**承诺 `/kiro review` 这类评论命令。若评论里出现了评论命令的说法，是该变量被配成了 AWS 档位的取值，改回默认即可；本档位要重审请在 Flow 里手动重跑该次运行，或向源分支再推一次提交 |
 | 开了 INLINE_COMMENT=1 但没有行内评论 | 见下方「行内评论未出现的排查顺序」 |
@@ -503,6 +510,7 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 ### 11.2.1 测试/高级变量（生产流水线不要设）
 这些变量脚本确实会读，但它们是给本仓库的测试与排障用的。**生产流水线里一个都不要配**——
 表里写清了配错的后果，因为「评论没发出去」「评审员拿的是别的提示词」这类症状从评论上看不出来。
+| `KIRO_ACK_UNTESTED_VERSION` | 空 | kiro-cli 版本不在脚本 `KIRO_TESTED_VERSIONS` 名单内时**拒绝评审**并回写「评审未完成」（Kiro 不启动、不烧额度） | 设成与实际版本**逐字相同**的版本号（如 `2.22.0`）→ 仅该版本临时放行，汇总评论带醒目 notice；与实际版本不一致仍拒绝 | 只收版本号形状（数字与点），别的取值拒绝运行；版本解析不出时任何取值都不放行；探测通过、版本进名单后删掉。不是布尔开关 | Flow |
 
 | 变量 | 默认 | 作用 | 配错/误配的后果 |
 |---|---|---|---|

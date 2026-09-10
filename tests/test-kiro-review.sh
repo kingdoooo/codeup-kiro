@@ -597,7 +597,8 @@ assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-la
 run_case failheader MOCK_KIRO_FAIL=1
 assert_contains "$OUT" "# Kiro 代码评审 · ⚠️ 评审未完成" "失败评论：标题与成功评论同一产品名"
 # 15-fix4 #3：kiro-cli 非零退出 + 未探测版本 → 失败评论带版本告警（这条路径上 MR 只剩失败评论，告警不能丢；对 5462175 必须失败）
-run_case failnotice MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9
+# CodeX 2026-09-09 复审 P1-2 之后名单外版本默认拒绝，要走到 Kiro 失败这一步得先 break-glass 放行
+run_case failnotice MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "失败 + 未探测版本：非零退出"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "评审未完成" "失败 + 未探测版本：是失败评论"
@@ -1865,17 +1866,45 @@ assert_eq "$([[ -e "$MD/args" || -e "$MD/calls" ]] && echo recorded || echo none
 # Kiro 进程环境里不再有 KIRO_ENV_PASSTHROUGH/KIRO_MOCK_DIR 这类测试专用变量——替身通道完全走 HOME
 assert_eq "$(grep -c -x -- 'KIRO_MOCK_DIR' "$tmp/case-ok/home/.kiro-mock/env")" "0" "成功路径：Kiro 进程环境里没有测试专用的 KIRO_MOCK_DIR"
 
-# ---- kiro-cli 版本 vs KIRO_TESTED_VERSIONS（15-fix2 #24）：不在名单里不失败，但日志与汇总评论都要有 notice ----
+# ---- kiro-cli 版本 vs KIRO_TESTED_VERSIONS（CodeX 2026-09-09 复审 P1-2，推翻 15-fix2 #24 的「名单外只 notice」）----
+# 名单外 → **拒绝评审**（失败评论写明版本与 break-glass 变量，Kiro 不启动）；只有 KIRO_ACK_UNTESTED_VERSION 与实际版本**逐字相等**
+# 才放行（汇总带醒目 notice）；版本解析不出一律拒绝、不接受任何确认值；确认值只收版本号形状。
 run_case oldver MOCK_KIRO_VERSION=9.9.9
-assert_rc "$RC" 0 "kiro-cli 版本不在名单：评审照常完成（不失败）"
-assert_contains "$OUT" "未经 P1-15 探测" "kiro-cli 版本不在名单：日志警告"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "P1-2：版本不在名单且未确认 → 拒绝评审（非零退出）"
+assert_not_contains "$OUT" "开始 Kiro 评审" "P1-2：拒绝发生在 Kiro 启动之前（不在未验证版本上烧额度）"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "未经 P1-15 探测" "kiro-cli 版本不在名单：汇总评论带 notice"
-assert_contains "$comment" "9.9.9" "kiro-cli 版本不在名单：notice 写出实际版本"
-assert_contains "$comment" "2.21.1" "kiro-cli 版本不在名单：notice 写出已探测版本"
+assert_contains "$comment" "评审未完成" "P1-2：拒绝时回写失败评论（I10）"
+assert_contains "$comment" "9.9.9 未经 P1-15 探测" "P1-2：失败评论写出实际版本"
+assert_contains "$comment" "2.21.1" "P1-2：失败评论写出已探测版本"
+assert_contains "$comment" "KIRO_ACK_UNTESTED_VERSION=9.9.9" "P1-2：失败评论告诉运维怎样 break-glass（变量名 + 准确版本）"
+run_case oldver_ack MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
+assert_rc "$RC" 0 "P1-2 break-glass：确认值 == 实际版本 → 放行、评审完成"
+assert_contains "$OUT" "未经 P1-15 探测" "P1-2 break-glass：日志有警告"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "注意：本次 kiro-cli 版本 9.9.9 未经 P1-15 探测" "P1-2 break-glass：汇总评论带 notice"
+assert_contains "$comment" "KIRO_ACK_UNTESTED_VERSION=9.9.9 显式放行" "P1-2 break-glass：notice 点名是哪个变量放行的"
+assert_contains "$comment" "2.21.1" "P1-2 break-glass：notice 写出已探测版本"
+run_case oldver_ackmis MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.8
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "P1-2：确认值 ≠ 实际版本 → 仍拒绝（确认绑定准确版本，不是永久放行的开关）"
+assert_not_contains "$OUT" "开始 Kiro 评审" "P1-2：确认值不匹配时 Kiro 不启动"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "KIRO_ACK_UNTESTED_VERSION=9.9.8 与实际版本不一致" "P1-2：失败评论写出不匹配的确认值"
+assert_contains "$comment" "9.9.9" "P1-2：失败评论写出实际版本"
 run_case nover MOCK_KIRO_VERSION=
-assert_rc "$RC" 0 "kiro-cli 版本取不到：评审照常完成"
-assert_contains "$(posted_comment "$OUT")" "未知" "kiro-cli 版本取不到：notice 写「未知」"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "P1-2：版本解析不出 → 拒绝评审"
+assert_contains "$(posted_comment "$OUT")" "版本号无法解析" "P1-2：失败评论说明版本无法解析"
+run_case nover_ack MOCK_KIRO_VERSION= KIRO_ACK_UNTESTED_VERSION=2.21.1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "P1-2：版本解析不出时任何确认值都不放行"
+assert_contains "$(posted_comment "$OUT")" "版本号无法解析" "P1-2：解析不出 + 确认值：仍是「无法解析」那条拒绝"
+run_case ackbad MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION='9.9.9; rm -rf /'
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "P1-2：确认值不是版本号形状 → 第 1.6 步拒绝运行"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "KIRO_ACK_UNTESTED_VERSION 不合法" "P1-2：取值校验的失败评论点名变量"
+assert_not_contains "$comment" "rm -rf" "P1-2：非法取值原文不进评论"
+run_case ack_listed MOCK_KIRO_VERSION=2.21.1 KIRO_ACK_UNTESTED_VERSION=9.9.9
+assert_rc "$RC" 0 "P1-2：名单内版本照常运行，残留的确认值不影响"
+assert_contains "$OUT" "在 P1-15 探测过的版本名单内" "P1-2：名单内版本仍打名单内日志"
+assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "P1-2：名单内版本无 notice（残留确认值也不出 notice）"
 # 15-fix3 #8：版本打到 stderr 的 CLI 也要取得到（否则每条评论永久带「版本未知」notice 且无法清除）
 run_case verstderr MOCK_KIRO_VERSION_STDERR=1
 assert_rc "$RC" 0 "kiro-cli --version 打到 stderr：评审照常完成"
@@ -1904,7 +1933,7 @@ assert_contains "$comment" "127" "kiro-cli --version 退出 127：失败评论�
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "kiro-cli --version 退出 127：Kiro chat 未被启动（不烧额度）"
 assert_eq "$(call_count "$MD/calls" settings)" "0" "kiro-cli --version 退出 127：settings 也未调用（在能力检查处就停）"
 # 15-fix3 #3：降级路径（结构化解析失败）同样要带版本 notice——原来只在结构化分支并入
-run_case degnotice MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
+run_case degnotice MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9   # P1-2 之后名单外要 break-glass 才走到降级路径
 assert_rc "$RC" 0 "降级 + 版本不在名单：退出码 0"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "结构化解析失败" "降级 + 版本不在名单：是降级评论"
@@ -1916,7 +1945,7 @@ assert_not_contains "$(posted_comment "$out")" "未经 P1-15 探测" "成功路�
 # 纯删除 MR + INLINE_COMMENT=1 让第 4.5 步产生 INLINE_NOTICE，再让评审员不守契约走降级。对 5462175 必须失败（那里降级评论继承 ALL_NOTICE）。
 tweak_pure_delete() { git reset -q --hard origin/main; git rm -q src/app.py; git commit -qm "delete app"; git push -qf origin feature/x; }
 # CODEUP_BOT_USERNAME：身份未知时 INLINE_COMMENT=1 会被第 1.6 步降为 0（P0-3），这里要的是第 4.5 步真的跑出 INLINE_NOTICE，所以给身份
-CASE_TWEAK=tweak_pure_delete run_case degnoinline INLINE_COMMENT=1 CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9
+CASE_TWEAK=tweak_pure_delete run_case degnoinline INLINE_COMMENT=1 CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
 assert_rc "$RC" 0 "降级 + 纯删除 MR：退出码 0"
 assert_contains "$OUT" "全部问题都归入" "降级 + 纯删除 MR：日志里有分桶提示（INLINE_NOTICE 确实产生了）"
 comment=$(posted_comment "$OUT")
