@@ -75,7 +75,7 @@ stages:
 #   DIFF_SIZE_LIMIT    可选，默认 307200（300KB）。**只是提示词预算**：不限制原始 diff 总量、磁盘、变更文件数与
 #                      预处理时间（超限时脚本仍把整份 diff 落盘、逐文件生成 chunk），KIRO_TIMEOUT 也不包住这段预处理；
 #                      并发 = 1 下一个极端 MR 会占住整条流水线，务必给任务配超时（setup-guide 第 4 节第 5 步）。
-#                      硬上限（文件数 / 原始字节 / 单 chunk / 预处理墙钟）是 Phase 2 backlog（issue 19）
+#                      硬上限（文件数 / 原始字节 / 单 chunk / 预处理墙钟）是 Phase 2 backlog（docs/roadmap/diff-preprocess-resource-caps.md）
 #   KIRO_TIMEOUT       可选，默认 900（秒）
 #   KIRO_CLI_SHA256    可选，默认空；**生产必配**。kiro-cli 入口文件（command -v kiro-cli 解析符号链接后）的 64 位 SHA-256，
 #                      取值在构建执行器镜像时记录（setup-guide 第 7 节）。脚本在第一次执行 kiro-cli 之前核对，不一致拒绝评审。
