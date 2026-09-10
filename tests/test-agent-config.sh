@@ -663,4 +663,26 @@ assert_eq "$rc" "0" "复审⑤：带额外相对形状的定义自检通过（�
 assert_eq "$(jq -c --argjson req "$KIRO_AGENT_REQUIRED_DENY_JQ" '(.toolsSettings.read.deniedPaths | map(select(startswith("**/")))) as $d | (($req - $d) == []) and (($d - $req) == [])' "$A")" "true" \
   "复审⑤：KIRO_AGENT_REQUIRED_DENY_JQ 与 kiro/agent 定义里的 **/ 形状逐条一致（同源）"
 
+# ---- CodeX 2026-09-10 复审 P1：kiro-cli 二进制摘要钉死（不执行 kiro-cli）----
+# 每个用例在子 shell 里改 PATH 并 hash -r：`PATH=… 函数` 的临时赋值不会刷掉 bash 的命令哈希，command -v 仍会命中本机真实的 kiro-cli
+shabin=$(mktemp -d); mkdir -p "$shabin/real/deep" "$shabin/bin" "$shabin/empty"
+printf '#!/usr/bin/env bash\necho fake\n' > "$shabin/real/deep/kiro-cli-real"; chmod +x "$shabin/real/deep/kiro-cli-real"
+ln -s ../real/deep/kiro-cli-real "$shabin/real/hop"          # 相对符号链接（第一跳）
+ln -s "$shabin/real/hop" "$shabin/bin/kiro-cli"               # 绝对符号链接（第二跳）——macOS 装法就是 ~/.local/bin/kiro-cli → Kiro CLI.app 内部
+want=$( (command -v sha256sum >/dev/null 2>&1 && sha256sum "$shabin/real/deep/kiro-cli-real" || shasum -a 256 "$shabin/real/deep/kiro-cli-real") | cut -d' ' -f1)
+real_p=$(cd "$shabin/real/deep" && pwd -P)/kiro-cli-real
+# PATH 只带系统目录：本机 ~/.local/bin 里有真实的 kiro-cli，链接断了时 command -v 会跳过不可执行的假链接落到它身上（那是生产要的行为，但会让这里测不到「算不出」）
+sha_probe() { # <PATH 前缀目录> <期望摘要> → "rc|实际摘要|入口文件"
+  ( PATH="$1:/usr/bin:/bin"; hash -r; rc=0; kiro_cli_sha256_check "$2" || rc=$?; printf '%s|%s|%s' "$rc" "$KIRO_CLI_SHA256_ACTUAL" "$KIRO_CLI_BIN" )
+}
+assert_eq "$( PATH="$shabin/bin:/usr/bin:/bin"; hash -r; kiro_cli_resolve )" "$real_p" "sha 钉死：两跳符号链接（相对 + 绝对）解析到入口文件的物理路径"
+assert_eq "$(sha_probe "$shabin/bin" "$want")" "0|${want}|${real_p}" "sha 钉死：摘要一致 → rc 0，KIRO_CLI_SHA256_ACTUAL / KIRO_CLI_BIN 暴露实际值"
+assert_eq "$(sha_probe "$shabin/bin" "$(printf '0%.0s' $(seq 1 64))" | cut -d'|' -f1)" "1" "sha 钉死：摘要不一致 → rc 1"
+printf '#!/usr/bin/env bash\necho tampered\n' > "$shabin/real/deep/kiro-cli-real"
+assert_eq "$(sha_probe "$shabin/bin" "$want" | cut -d'|' -f1)" "1" "sha 钉死：入口文件内容改动 → 原摘要不再一致（rc 1）"
+assert_eq "$(sha_probe "$shabin/empty" "$want" | cut -d'|' -f1)" "2" "sha 钉死：PATH 里没有 kiro-cli → rc 2（算不出，不是「不一致」）"
+rm -f "$shabin/real/deep/kiro-cli-real"
+assert_eq "$(sha_probe "$shabin/bin" "$want" | cut -d'|' -f1)" "2" "sha 钉死：符号链接断了 → rc 2"
+rm -rf "$shabin"
+
 report

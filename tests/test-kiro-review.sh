@@ -1905,6 +1905,28 @@ run_case ack_listed MOCK_KIRO_VERSION=2.21.1 KIRO_ACK_UNTESTED_VERSION=9.9.9
 assert_rc "$RC" 0 "P1-2：名单内版本照常运行，残留的确认值不影响"
 assert_contains "$OUT" "在 P1-15 探测过的版本名单内" "P1-2：名单内版本仍打名单内日志"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "P1-2：名单内版本无 notice（残留确认值也不出 notice）"
+
+# ---- CodeX 2026-09-10 复审 P1：KIRO_CLI_SHA256 钉死 kiro-cli 入口文件摘要，在第一次执行 kiro-cli 之前核对 ----
+mock_sha=$( (command -v sha256sum >/dev/null 2>&1 && sha256sum "$ROOT/tests/mockbin/kiro-cli" || shasum -a 256 "$ROOT/tests/mockbin/kiro-cli") | cut -d' ' -f1)
+run_case shaok KIRO_CLI_SHA256="$mock_sha"
+assert_rc "$RC" 0 "sha 钉死：摘要一致 → 评审照常完成"
+assert_contains "$OUT" "kiro-cli 二进制摘要核对通过" "sha 钉死：日志有核对通过（含入口文件路径）"
+run_case shaupper KIRO_CLI_SHA256="$(printf '%s' "$mock_sha" | tr 'a-f' 'A-F')"
+assert_rc "$RC" 0 "sha 钉死：大写十六进制归一后一致 → 照常完成"
+run_case shabad KIRO_CLI_SHA256="$(printf '0%.0s' $(seq 1 64))"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "sha 钉死：摘要不一致 → 拒绝评审（非零退出）"
+assert_eq "$([[ -e "$CASE/home/.kiro-mock/calls" ]] && echo called || echo not-called)" "not-called" "sha 钉死：不一致时 kiro-cli 一次都没被执行（chat --help / settings / --version 都在核对之后）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "kiro-cli 二进制摘要与 KIRO_CLI_SHA256 不一致" "sha 钉死：失败评论说明不一致"
+assert_contains "$comment" "$mock_sha" "sha 钉死：失败评论写出实际摘要（运维据此核对）"
+run_case shamal KIRO_CLI_SHA256="deadbeef; rm -rf /"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "sha 钉死：取值不是 64 位十六进制 → 第 1.6 步拒绝运行"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "KIRO_CLI_SHA256 不合法" "sha 钉死：取值校验的失败评论点名变量"
+assert_not_contains "$comment" "rm -rf" "sha 钉死：非法取值原文不进评论"
+run_case shaunset
+assert_rc "$RC" 0 "sha 钉死：未配置 → 照常完成（不核对）"
+assert_contains "$OUT" "未配置 KIRO_CLI_SHA256" "sha 钉死：未配置时日志明说没核对（生产按第 7 节配置）"
 # 15-fix3 #8：版本打到 stderr 的 CLI 也要取得到（否则每条评论永久带「版本未知」notice 且无法清除）
 run_case verstderr MOCK_KIRO_VERSION_STDERR=1
 assert_rc "$RC" 0 "kiro-cli --version 打到 stderr：评审照常完成"

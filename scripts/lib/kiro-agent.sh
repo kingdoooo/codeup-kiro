@@ -252,6 +252,42 @@ kiro_cli_version() {
   return 0
 }
 
+# --- kiro-cli 二进制摘要钉死（CodeX 2026-09-10 复审 P1：版本字符串不是完整性边界——任何打印 2.21.1 的二进制都过得了版本门）---
+# 三个函数都**不执行 kiro-cli**：核对要发生在第一次执行它之前（kiro-review.sh 第 2.1 步，早于第 3 步的 chat --help / settings / --version）。
+# 只钉 `command -v kiro-cli` 解析符号链接后的**入口文件**（macOS 装的是指向 Kiro CLI.app 内部的符号链接；Linux 安装脚本装到 ~/.local/bin）；
+# 入口文件再拉起的别的文件不在核对范围内，文档写明。
+# kiro_cli_resolve → stdout 入口文件的物理路径；rc 1 = PATH 里没有 kiro-cli / 符号链接断了 / 链太长
+kiro_cli_resolve() {
+  local p t n=0
+  p=$(command -v kiro-cli) || return 1
+  while [[ -L "$p" && $n -lt 40 ]]; do
+    t=$(readlink "$p") || return 1
+    [[ "$t" == /* ]] || t="$(cd "$(dirname "$p")" && pwd -P)/$t"
+    p="$t"; n=$((n + 1))
+  done
+  [[ -f "$p" && ! -L "$p" ]] || return 1
+  printf '%s/%s' "$(cd "$(dirname "$p")" && pwd -P)" "$(basename "$p")"   # 物理路径（消掉相对链接带进来的 ..）
+}
+# kiro_cli_sha256 <文件> → stdout 64 位十六进制；rc 2 = 执行器既没有 sha256sum 也没有 shasum；rc 1 = 文件读不了
+kiro_cli_sha256() {
+  local out
+  if command -v sha256sum >/dev/null 2>&1; then out=$(sha256sum "$1" 2>/dev/null) || return 1
+  elif command -v shasum >/dev/null 2>&1; then out=$(shasum -a 256 "$1" 2>/dev/null) || return 1
+  else return 2; fi
+  printf '%s' "${out%% *}"
+}
+# kiro_cli_sha256_check <期望的 64 位小写十六进制> → 全局 KIRO_CLI_BIN / KIRO_CLI_SHA256_ACTUAL；rc 0 = 一致；rc 1 = 不一致；rc 2 = 算不出
+KIRO_CLI_BIN=""; KIRO_CLI_SHA256_ACTUAL=""
+kiro_cli_sha256_check() {
+  local want="$1" have
+  KIRO_CLI_BIN=""; KIRO_CLI_SHA256_ACTUAL=""
+  KIRO_CLI_BIN=$(kiro_cli_resolve) || return 2
+  have=$(kiro_cli_sha256 "$KIRO_CLI_BIN") || return 2
+  [[ "$have" =~ ^[0-9a-f]{64}$ ]] || return 2
+  KIRO_CLI_SHA256_ACTUAL="$have"
+  [[ "$have" == "$want" ]]
+}
+
 # ── kiro_env_allowlist ──────────────────────────────────────────────────────────────────────────
 # Kiro 子进程环境的许可清单（票 15，spec §4.2 修订；15-fix #11/#12；15-fix2 #12 #13 #14 #17）：填充数组 KIRO_ENV_ALLOW，
 # 每个元素是 `VAR=value`，供 `env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli …` 使用（用数组而不是按行输出：取值里若有换行，

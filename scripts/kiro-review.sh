@@ -82,6 +82,10 @@ KIRO_TESTED_VERSIONS="2.21.1"
 # break-glass（CodeX 2026-09-09 复审 P1-2）：名单外版本默认**拒绝评审**；这个流水线变量的取值必须**逐字等于**实际 kiro-cli 版本才放行
 # （汇总带醒目 notice）。刻意不做布尔开关——那种变量会永久留在环境里放行以后所有未知版本。只收版本号形状（第 1.6 步校验）；空 = 默认。
 KIRO_ACK_UNTESTED_VERSION="${KIRO_ACK_UNTESTED_VERSION:-}"
+# 二进制摘要钉死（CodeX 2026-09-10 复审 P1）：版本门只挡语义漂移，任何打印 2.21.1 的二进制都过得了它；ADR-0004 要求的「固定版本 + sha256」
+# 在这里落地——取值 = 运维构建执行器镜像时记录的 kiro-cli 入口文件 SHA-256（setup-guide 第 7 节），脚本在**第一次执行 kiro-cli 之前**核对，
+# 不一致拒绝评审。空 = 不核对（只留日志）：云托管 curl|bash 路径本就没有固定二进制可钉；生产必配。
+KIRO_CLI_SHA256="${KIRO_CLI_SHA256:-}"
 # Kiro 引擎钉死为 v2，写在脚本里而不是 agent 配置里（ADR-0004）：实测 kiro-cli 2.21 headless 的默认
 # 引擎 v1 与预览版 v3 都不阻断工作区 AGENTS.md 注入，只有 v2 配合 chat.disableInheritingDefaultResources
 # 才阻断。故意不读环境变量——引擎不是可配置项，避免被流水线变量或工作区设置改掉。
@@ -941,6 +945,12 @@ unset _v
 if [[ -n "$KIRO_ACK_UNTESTED_VERSION" && ! "$KIRO_ACK_UNTESTED_VERSION" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
   die_review "KIRO_ACK_UNTESTED_VERSION 不合法：只能是准确的 kiro-cli 版本号（如 2.21.1），不接受别的形状。请修正或删除该流水线变量"
 fi
+# KIRO_CLI_SHA256 只收 64 位十六进制（大小写归一为小写再比）：别的形状拒绝运行、取值不回显（CodeX 2026-09-10 复审 P1）
+if [[ -n "$KIRO_CLI_SHA256" ]]; then
+  KIRO_CLI_SHA256=$(printf '%s' "$KIRO_CLI_SHA256" | tr 'A-F' 'a-f')
+  [[ "$KIRO_CLI_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || die_review "KIRO_CLI_SHA256 不合法：只能是 kiro-cli 入口文件的 64 位十六进制 SHA-256（setup-guide 第 7 节给出取法）。请修正或删除该流水线变量"
+fi
 # KIRO_ENV_PASSTHROUGH 只收变量名：非法名字（写成 NAME=value、带空格/连字符）与凭证形状的名字（规则表 KIRO_ENV_CRED_RULES，
 # AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 显式放行）一律拒绝运行——静默忽略会让运维以为透传生效了。这份拒绝清单是防运维手滑、
 # 不是安全边界（受信 agent 没有 shell / env 工具）。原因文案只有一处（kiro_env_allowlist 的 KIRO_ENV_ALLOW_ERROR：MR 评论按条目序号 +
@@ -956,6 +966,23 @@ if ! command -v kiro-cli >/dev/null; then
     || die_review "kiro-cli 安装失败。网络受限时请使用自建执行器预装固定版本，或配置 HTTP_PROXY/HTTPS_PROXY（见 pipeline/setup-guide.md）"
   command -v kiro-cli >/dev/null || export PATH="$HOME/.local/bin:$PATH"
   command -v kiro-cli >/dev/null || die_review "安装后仍找不到 kiro-cli，请检查安装日志中的 PATH 提示"
+fi
+
+# --- 2.1 kiro-cli 二进制摘要钉死（CodeX 2026-09-10 复审 P1）---
+# 版本字符串只挡语义漂移：被替换 / 重新构建 / 包装过的二进制只要打印 2.21.1 就走名单内路径。ADR-0004 要求的「固定版本 + sha256」在这里落地：
+# **在第一次执行 kiro-cli 之前**（第 3 步的 chat --help / settings / --version 都在后面）核对 `command -v kiro-cli` 解析符号链接后那个入口文件的
+# SHA-256 是否等于运维在构建执行器镜像时记录的 KIRO_CLI_SHA256（setup-guide 第 7 节）。未配置 = 不核对、只留日志（云托管 curl|bash 路径本就
+# 没有固定二进制可钉；生产必配）。只钉入口文件：它再拉起的别的文件不在核对范围内。变异 M-cx-p12b 守住「不一致就拒绝」那一行。
+if [[ -n "$KIRO_CLI_SHA256" ]]; then
+  _shrc=0; kiro_cli_sha256_check "$KIRO_CLI_SHA256" || _shrc=$?
+  case "$_shrc" in
+    0) log "kiro-cli 二进制摘要核对通过：${KIRO_CLI_BIN}（sha256 ${KIRO_CLI_SHA256_ACTUAL:0:12}…）" ;;
+    1) die_review "kiro-cli 二进制摘要与 KIRO_CLI_SHA256 不一致，拒绝评审（未执行 kiro-cli）：入口文件 ${KIRO_CLI_BIN} 的 sha256 是 ${KIRO_CLI_SHA256_ACTUAL}，期望 ${KIRO_CLI_SHA256}。执行器上的 kiro-cli 被替换或升级过——请核对执行器镜像（setup-guide 第 7 节），确属有意升级再按第 7 节重新记录并改该变量" ;;
+    *) die_review "kiro-cli 二进制摘要算不出（PATH 里找不到 kiro-cli 入口文件 / 符号链接断了 / 执行器缺 sha256sum 与 shasum），而 KIRO_CLI_SHA256 已配置，拒绝评审。请在执行器安装 coreutils 或 perl，并核对 kiro-cli 安装" ;;
+  esac
+  unset _shrc
+else
+  log "未配置 KIRO_CLI_SHA256：不核对 kiro-cli 二进制摘要（版本门只挡版本语义漂移；生产请按 setup-guide 第 7 节钉死入口文件 sha256）"
 fi
 
 # --- 3. 安装受信 agent + kiro-cli 能力检查（放在 MR 定位之后：失败用 die_review 回写评论，而不是只让流水线标红）---

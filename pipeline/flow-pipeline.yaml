@@ -77,6 +77,9 @@ stages:
 #                      并发 = 1 下一个极端 MR 会占住整条流水线，务必给任务配超时（setup-guide 第 4 节第 5 步）。
 #                      硬上限（文件数 / 原始字节 / 单 chunk / 预处理墙钟）是 Phase 2 backlog（issue 19）
 #   KIRO_TIMEOUT       可选，默认 900（秒）
+#   KIRO_CLI_SHA256    可选，默认空；**生产必配**。kiro-cli 入口文件（command -v kiro-cli 解析符号链接后）的 64 位 SHA-256，
+#                      取值在构建执行器镜像时记录（setup-guide 第 7 节）。脚本在第一次执行 kiro-cli 之前核对，不一致拒绝评审。
+#                      版本门只挡版本语义漂移，这一项才是 ADR-0004 要求的二进制完整性钉死；未配置时只留日志、不核对
 #   KIRO_ACK_UNTESTED_VERSION 可选，默认空。执行器上的 kiro-cli 版本不在脚本 KIRO_TESTED_VERSIONS 名单内时脚本
 #                      **拒绝评审**并回写「评审未完成」（读取边界依赖实测过的版本；云托管执行器 curl|bash 装的是
 #                      latest，升级后就会这样）。确需在该版本上运行，把它设成与实际版本逐字相同的版本号（如 2.22.0）

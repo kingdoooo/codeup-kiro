@@ -438,6 +438,15 @@ run_case m-cx-p12-control "$ROOT" MOCK_KIRO_VERSION=9.9.9
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-cx-p12 对照：原实现拒绝"
 assert_not_contains "$OUT" "开始 Kiro 评审" "M-cx-p12 对照：原实现不启动 Kiro"
 
+# --- M-cx-p12b（CodeX 2026-09-10 复审 P1）：二进制摘要不一致换成 log → 被替换的 kiro-cli 照跑 ---
+pkg=$(make_mutant m-cx-p12b-sha-gate 's/^    1) die_review "kiro-cli 二进制摘要与 KIRO_CLI_SHA256 不一致/    1) log "kiro-cli 二进制摘要与 KIRO_CLI_SHA256 不一致/')
+run_case m-cx-p12b "$pkg" KIRO_CLI_SHA256="$(printf '0%.0s' $(seq 1 64))"
+assert_rc "$RC" 0 "M-cx-p12b：摘要不一致也照跑——端到端「摘要不一致 → 拒绝评审」断言会失败"
+assert_contains "$OUT" "开始 Kiro 评审" "M-cx-p12b：kiro-cli 在摘要不一致的情况下被执行了"
+run_case m-cx-p12b-control "$ROOT" KIRO_CLI_SHA256="$(printf '0%.0s' $(seq 1 64))"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-cx-p12b 对照：原实现拒绝"
+assert_eq "$([[ -e "$CASE/home/.kiro-mock/calls" ]] && echo called || echo not-called)" "not-called" "M-cx-p12b 对照：原实现一次都不执行 kiro-cli"
+
 # --- M5w：被拒的凭证形状名字不再掩码 → 完整名字进失败评论（15-fix3 #6）---
 pkg=$(make_mutant m5w-cred-mask 's/cred+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")（命中 ${rule}）")/cred+=("第 ${idx} 项 ${tok}（命中 ${rule}）")/' scripts/lib/kiro-agent.sh)
 run_case m5w "$pkg" KIRO_ENV_PASSTHROUGH="$(fake_token svc)"
