@@ -129,9 +129,11 @@ PRIOR_HISTORY_FILE=""
 # 本次发布随机串（CodeX 2026-09-09 P1-3 复审）：review_render_comment_head 把它写成评论头第 4 行 `<!-- kiro-review-post:<nonce> -->`，
 # 汇总新建 POST 的「响应丢失但评论已创建」探针只认带**本次**随机串的评论——sha + run 不是本次独有的（第 1.5 步列表查询失败时 REVIEW_RUN
 # 回落到 1，MR 上可能已有同作者、同 sha、run:1 的旧评论；同提交并发重跑亦然），把旧评论当成功会停止重试并报告成功，而本次报告没发出去。
-# 放在定位 MR 之前：此后任何 die_review 渲染的失败评论也带它。生成失败就留空（评论头只有三行、探针不作数、回到既有重试策略），不中断评审。
-REVIEW_POST_NONCE=$(review_new_nonce)
-[[ "$REVIEW_POST_NONCE" =~ ^[0-9a-f]{16}$ ]] || { echo "[kiro-review] 警告：生成本次发布随机串失败（得到：${REVIEW_POST_NONCE}），汇总 POST 的「响应丢失但评论已创建」探针本轮不作数" >&2; REVIEW_POST_NONCE=""; }
+# 放在定位 MR 之前：此后任何 die_review 渲染的失败评论也带它。只用强随机（review_new_nonce_strict，CodeX 2026-09-09 复审 P2）：这里要的是
+# 跨运行唯一，不能像契约标记那样回退到 PID + 秒级时间戳（同秒启动的两个容器 PID 可能相同）。取不到就留空（评论头只有三行、探针不作数、
+# 回到既有重试策略），不中断评审。
+REVIEW_POST_NONCE=$(review_new_nonce_strict) \
+  || { echo "[kiro-review] 警告：取不到强随机数（/dev/urandom 不可读），本次不写发布随机串，汇总 POST 的「响应丢失但评论已创建」探针本轮不作数（不用 PID + 时间戳回退：跨运行唯一性不够）" >&2; REVIEW_POST_NONCE=""; }
 
 # 发布汇总评论：有旧评论就原地更新（评论 biz_id 不变），更新失败则退回新建。
 # 成功 / 降级 / 失败三种评论都走这里——失败评论若单独新建，一次失败就会在 MR 上留下第二条汇总，

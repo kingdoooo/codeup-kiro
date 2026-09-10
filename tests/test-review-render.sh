@@ -1360,6 +1360,13 @@ for spec in '^~~~python$|~~~' '^````text$|````' '^~~~~~txt$|~~~~~'; do
 done
 TRUNC_SRC="$GOLDEN_FULL"
 
+# ---- CodeX 2026-09-09 复审 P2：本次发布随机串只用强随机（review_new_nonce_strict），取不到就留空、不回退 PID + 秒级时间戳 ----
+assert_eq "$([[ "$(review_new_nonce_strict)" =~ ^[0-9a-f]{16}$ ]] && echo hex16)" "hex16" "P2 强随机串：默认 /dev/urandom → 16 位十六进制"
+assert_eq "$(review_new_nonce_strict /dev/zero)" "0000000000000000" "P2 强随机串：按设备字节输出（/dev/zero 正控 → 16 个 0，证明读的是设备不是回退）"
+rc=0; out=$(review_new_nonce_strict "$tmp/no-such-device") || rc=$?
+assert_eq "${rc}/${out}" "1/" "P2 强随机串：设备不可读 → rc 1 且无输出（没有 PID + 时间戳回退）"
+assert_eq "$([[ "$(review_new_nonce)" =~ ^[0-9a-f]{16}$ ]] && echo hex16)" "hex16" "P2 对照：契约标记的 review_new_nonce 不变、仍出 16 位十六进制"
+
 # ---- CodeX 2026-09-09 P1-3 复审：评论头第 4 行 = 本次发布随机串（REVIEW_POST_NONCE 非空时），汇总 POST 探针据此认「本次」 ----
 hist_empty=$(mktemp); printf '[]\n' > "$hist_empty"
 head4=$(REVIEW_POST_NONCE=0123456789abcdef review_render_comment_head "# T" abc1234 2 "$hist_empty")

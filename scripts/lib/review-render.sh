@@ -291,6 +291,19 @@ review_new_nonce() {
     || printf '%08x%08x' "$$" "$(date +%s)"
 }
 
+# 强随机版（CodeX 2026-09-09 复审 P2）：只读随机设备（默认 /dev/urandom），读不到 / 形态不对就 rc 1 且不输出——**没有 PID + 秒级时间戳的回退**。
+# 给本次发布随机串（REVIEW_POST_NONCE）用：它要的是**跨运行唯一**（汇总 POST 探针据此区分「本次建的」与旧评论 / 并发另一次运行建的），
+# 两个同秒启动的容器 PID 可能相同，低熵回退会让探针把别的运行建的评论当成本次的。取不到就留空 → 探针不作数、回到既有重试策略
+# （fail-safe），比低熵放行安全。契约标记的 review_new_nonce 保留回退：它只要求「攻击者不能提前提交进仓库」，低熵回退够用。
+# 用法：review_new_nonce_strict [<随机设备路径>] → stdout 16 位十六进制；rc 1 = 取不到
+review_new_nonce_strict() {
+  local dev="${1:-/dev/urandom}" n
+  [[ -r "$dev" ]] || return 1
+  n=$(od -An -tx1 -N8 "$dev" 2>/dev/null | tr -d ' \n') || return 1
+  [[ "$n" =~ ^[0-9a-f]{16}$ ]] || return 1
+  printf '%s' "$n"
+}
+
 # 用法：review_marker_start <nonce> / review_marker_end <nonce>
 review_marker_start() { printf '<<<KIRO_REVIEW_JSON:%s>>>' "$1"; }
 review_marker_end()   { printf '<<<END_KIRO_REVIEW_JSON:%s>>>' "$1"; }
