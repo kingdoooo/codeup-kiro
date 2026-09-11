@@ -32,7 +32,11 @@ sources:
     type: codeup
     name: 集成包仓库（受信脚本来源）
     endpoint: https://codeup.aliyun.com/<organization-id>/<integration-repo>.git
-    branch: main                        # 固定分支；生产建议固定 tag 并按版本升级
+    # Flow 的 sources 只有 branch 字段、没有 tag 字段（2026-09-11 核对官方 YAML 语法文档），所以「集成包固定到 tag」
+    # 只能用两种形态之一，见 setup-guide §2：① 这里指向一个受保护的发布分支（如 release），由人按版本快进到已验收的 tag；
+    # ② 每次运行经 OpenAPI CreatePipelineRun 的 runningBranchs 显式指定 tag（tag 可以作运行 ref）。
+    # 自动触发（MR 新建 / 推送）走的是这里的 branch，所以生产必须让这个分支只能由发布流程推动。
+    branch: main
     certificate:
       type: serviceConnection
       serviceConnection: "<service-connection-id>"
@@ -46,6 +50,12 @@ stages:
         runsOn:                          # PoC 用公共构建集群；生产建议固定镜像 digest（见 setup-guide §7）
           group: public/cn-beijing
           container: build-steps-public-registry.cn-beijing.cr.aliyuncs.com/build-steps/alinux3:latest
+        # 任务超时（必配，setup-guide §4 第 5 步）：Flow 的默认值是 240 分钟，远大于评审需要的量级。
+        # 取值 = KIRO_TIMEOUT + 10 分钟（默认 900 秒 → 25）。KIRO_TIMEOUT 只包住 Kiro 调用，diff 预处理阶段
+        # 目前没有自己的墙钟上限（硬上限是 Phase 2，见 docs/roadmap/diff-preprocess-resource-caps.md），
+        # 并发 = 1 又是整条流水线级别，所以一个极端 MR 会占住后续所有 MR 的评审——这个超时是当前唯一的兜底。
+        # 改 KIRO_TIMEOUT 时必须同步改这里。范围 1~1440 分钟。
+        timeoutMinutes: 25
         steps:
           review_step:
             step: Command
