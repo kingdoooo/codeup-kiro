@@ -78,7 +78,11 @@ KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 # 探测 P1-15（T8：符号链接与 ../ 越界都是先解析再比对 allowedPaths）实测过的 kiro-cli 版本（空格分隔）。读取边界依赖 kiro-cli
 # 的路径解析行为；本次版本不在名单里时**拒绝评审**（CodeX 2026-09-09 复审 P1-2，推翻 15-fix2 #24 的「只 notice」），除非
 # KIRO_ACK_UNTESTED_VERSION 逐字等于实际版本（见下）。升级 kiro-cli 后：跑 scripts/probe/probe-kiro-allowlist.sh（至少 T8），通过后把版本加进这里。
-KIRO_TESTED_VERSIONS="2.21.1"
+# 2.21.1：2026-09-06 / 09-07 探测（15-fix2 / 15-fix4），Phase 1 全部真实验收都在它上面做。
+# 2.21.3：2026-09-11 用 scripts/probe/probe-kiro-allowlist.sh 重跑，十二个门禁用例 + T5 正控全 PASS
+#         （summary.json: any_fail=false、gate_missing=[]）——真实 Flow 的云托管执行器 curl|bash 装的就是它。
+#         探测跑在 darwin/arm64、执行器是 linux/amd64（历次探测都有这个差，靠真机验收补齐）。
+KIRO_TESTED_VERSIONS="2.21.1 2.21.3"
 # break-glass（CodeX 2026-09-09 复审 P1-2）：名单外版本默认**拒绝评审**；这个流水线变量的取值必须**逐字等于**实际 kiro-cli 版本才放行
 # （汇总带醒目 notice）。刻意不做布尔开关——那种变量会永久留在环境里放行以后所有未知版本。只收版本号形状（第 1.6 步校验）；空 = 默认。
 KIRO_ACK_UNTESTED_VERSION="${KIRO_ACK_UNTESTED_VERSION:-}"

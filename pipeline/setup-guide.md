@@ -73,9 +73,21 @@ Codeup 无第三方 App/Bot 平台身份能力，专用成员账号是最接近�
 执行器上业务库之外的文件读不到。评论仅供参考、不设合并卡点，最终合并决策始终在人工评审。
 
 ## 2. 部署集成包（信任边界）
-**必须**将本集成包放入独立代码库（如 codeup-kiro），流水线以第二代码源引入固定分支/tag。
+**必须**将本集成包放入独立代码库（如 codeup-kiro），流水线以第二代码源引入。
 **严禁**把 scripts/ 拷贝进业务代码库执行——MR 源分支可被提交者任意修改，
 执行业务仓库中的脚本等于把流水线密钥交给任意 MR 提交者。
+
+**怎么把集成包钉到一个版本**：Flow 的 `sources` 只有 `branch` 字段，**没有 `tag` 字段**
+（2026-09-11 核对官方《流水线源 sources》语法文档）。所以「固定到 tag」只有两种落地形态：
+
+1. **发布分支（自动触发路径唯一可用的形态）**：集成包代码源指向一个专用分支（如 `release`），
+   在 Codeup 上把它设为受保护分支、只允许发布流程快进到已验收的 tag。MR 新建 / 推送的自动触发
+   走的就是这个 `branch`，所以**集成包的可信度等于「谁能推动这个分支」**——跟着开发主干走等于
+   「谁能推 main 谁就能改评审脚本」。
+2. **运行时指定 tag**：经 OpenAPI `CreatePipelineRun` 的 `runningBranchs` 给集成包代码源显式传 tag 名
+   （tag 可以作运行 ref）。这条只覆盖你自己触发的运行，覆盖不了 webhook 自动触发，所以只适合灰度与验收。
+
+两种形态都要把「集成包当前指向哪个版本」写进发布记录，和执行器镜像 digest、`KIRO_CLI_SHA256`（第 7 节）一起。
 
 ## 3. 创建流水线
 1. Flow 控制台 → 新建流水线 → 空模板。
@@ -102,7 +114,9 @@ Codeup 无第三方 App/Bot 平台身份能力，专用成员账号是最接近�
    代价：粒度是**整条流水线**（Flow 不提供按 MR 串行），所以同一业务库的多个 MR 评审会排队；
    单次运行实测 98–432 秒，日常量级可接受。MR 很多时可为不同分支组各建一条评审流水线分摊。
    脚本层的乐观锁/草稿归属属 Phase 2（spec I6），Phase 1 靠这个开关规避。
-5. **必做：给评审任务配流水线任务超时**（任务设置里的超时，建议 `KIRO_TIMEOUT` + 10 分钟，默认值下即 25 分钟）。
+5. **必做：给评审任务配任务超时**——YAML 里是 `stages.review_stage.jobs.kiro_review.timeoutMinutes`
+   （UI 上是任务编辑面板里的「超时」）。**Flow 的默认值是 240 分钟**，不是「没有超时」，但对评审来说等于没有兜底；
+   取值 = `KIRO_TIMEOUT` + 10 分钟，默认值下即 `timeoutMinutes: 25`（可配范围 1~1440）。`flow-pipeline.yaml` 已带这一行。
    `KIRO_TIMEOUT` 只包住 Kiro 调用；前面的 diff 预处理（超过 `DIFF_SIZE_LIMIT` 时整份 diff 落盘、逐文件生成 chunk）目前**没有**
    自己的上限——`DIFF_SIZE_LIMIT` 只是提示词预算，不限制原始 diff 总量、磁盘、变更文件数与预处理时间（第 11.2 节该行）。
    并发 = 1 的粒度是整条流水线，一个极端 MR（几万个变更文件、或 `.gitattributes` 把巨大二进制标成 `-diff` 迫使 `--text` 展开）
@@ -149,7 +163,7 @@ Flow 在多代码源流水线里给每个代码源的内置变量加数字下标
 
 ## 6. 连通性验证（云托管执行器：评估 / PoC 路径）
 云托管执行器上 kiro-cli 由官方安装脚本 `curl | bash` 现装：脚本只装 **latest**、没有版本开关，sha256 也只对在线 manifest 校验。
-latest 不在 `KIRO_TESTED_VERSIONS`（当前 2.21.1）名单内时，评审会被版本门**拒绝**并回写「评审未完成」（第 8 节第 5 项、第 10 节），
+latest 不在 `KIRO_TESTED_VERSIONS`（当前 `2.21.1 2.21.3`）名单内时，评审会被版本门**拒绝**并回写「评审未完成」（第 8 节第 5 项、第 10 节），
 只能临时用 `KIRO_ACK_UNTESTED_VERSION=<准确版本>` 放行。所以这条路径只用于评估 / PoC；**生产按第 7 节预装固定版本**
 （ADR-0004 要求的「固定版本 + 校验」只有那条路径能满足）。
 前提：先在该验证流水线的「变量和缓存」中配置 `KIRO_API_KEY`（私密变量）——
@@ -158,7 +172,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
     curl -fsSL https://cli.kiro.dev/install | bash
     export PATH="$HOME/.local/bin:$PATH"
     set -e                                   # 缺参数必须让这一步标红，不能只在日志里留一行提示
-    kiro-cli --version                       # 需在 KIRO_TESTED_VERSIONS 名单内（当前 2.21.1），否则评审被版本门拒绝
+    kiro-cli --version                       # 需在 KIRO_TESTED_VERSIONS 名单内（当前 2.21.1 / 2.21.3），否则评审被版本门拒绝
     # 三个参数各查一次，缺任一就退出：合成一条 grep 时任一命中即通过，而 `--agent` 又会被
     # `--agent-engine` 那一行命中，于是缺 --agent 也照样"通过"。
     # --agent 用与评审脚本相同的正则（前后必须是空白或行首尾）；help 一并收 stderr（脚本也是 2>&1）。
@@ -184,7 +198,8 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 ## 7. 自建执行器（生产唯一支持的路径；网络受限时也走这里）
 1. ECS/物理机按 Flow 文档接入为自有构建集群。
 2. 预装：git、curl、jq（≥1.6）、coreutils（`timeout`、`sha1sum`）、kiro-cli **固定为 `KIRO_TESTED_VERSIONS` 名单内的版本**
-   （当前 2.21.1——探测 P1-15 与全部真实验收都在这个版本上做；`kiro-cli --version` 验证；名单外版本会被版本门拒绝，见第 8 节第 5 项）。
+   （当前 `2.21.1 2.21.3`：2.21.1 上做了 Phase 1 全部真实验收，2.21.3 于 2026-09-11 过了 P1-15 十二个门禁用例；
+   `kiro-cli --version` 验证；名单外版本会被版本门拒绝，见第 8 节第 5 项）。
    预装固定版本同时规避 curl|bash 的供应链漂移——ADR-0004 要求的「固定版本 + 校验」只有这条路径能满足。
    **钉死二进制摘要（生产必做）**：版本门只比较 `kiro-cli --version` 的字符串，任何打印 2.21.1 的二进制都过得了它。构建镜像时记录
    kiro-cli **入口文件**（`command -v kiro-cli` 解析符号链接后的那个文件）的 SHA-256：
@@ -206,7 +221,23 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
      互相覆盖 agent 文件。正常运行不留痕；被强杀（SIGKILL / 容器被回收）的运行会留下一个 `codeup-reviewer-<随机串>.json`，可放心手动清理。
 
    因此建议用**评审专用的执行器或专用系统账号**跑本流水线；若必须与人共用，请事先告知使用者第一点（全局设置会被改）。
-6. **脚本会改动业务库工作树**（第 12 节隔离步骤）：在 diff 算好之后、Kiro 启动之前，删除工作树里任意深度的
+6. **固定执行器镜像 digest**（`runsOn.container`；用公共构建集群时同样适用）。YAML 里给的是
+   `…/build-steps/alinux3:latest`，`latest` 会漂——jq / coreutils / glibc 版本换掉时评审行为跟着变，而 MR 上看不出来。
+   取 digest **不需要 `docker pull`**（拉 alinux3 在小内存机器上会被 OOM 杀掉），直接问 registry 就行：
+
+       REG=build-steps-public-registry.cn-beijing.cr.aliyuncs.com
+       REPO=build-steps/alinux3
+       # 401 响应头的 www-authenticate 里带 realm 与 service，anonymous token 直接换
+       TOK=$(curl -sS "https://dockerauth.cn-beijing.aliyuncs.com/auth?service=registry.aliyuncs.com:cn-beijing:china:cri-k0htzo2ptm0ry60a&scope=repository:${REPO}:pull" | jq -r .token)
+       curl -sSI -H "Authorization: Bearer $TOK" \
+         -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+         "https://${REG}/v2/${REPO}/manifests/latest" | grep -i docker-content-digest
+
+   把 `:latest` 换成 `@sha256:<digest>` 写进 YAML，并把 digest 记进发布记录（与 `KIRO_CLI_SHA256`、集成包版本一起）。
+   2026-09-11 实测值：镜像索引 `sha256:d3ee1269d9063837166210945f75a354211f02be0066745619bbada62a50c076`，
+   其中 linux/amd64 = `sha256:876efc938a207d8d1d0bc1c3305a1d849995ea34a769ef28715f8414dbae7bf1`
+   （`service` 里的实例 id 会随注册表实例变，按 401 响应头里的 `www-authenticate` 抄）。
+7. **脚本会改动业务库工作树**（第 12 节隔离步骤）：在 diff 算好之后、Kiro 启动之前，删除工作树里任意深度的
    `AGENTS.md`、`.kiro`（任何类型、不分大小写）、**全部符号链接**与根 `lsp.json`（任意深度的 `.git` 目录内部不动）。本流水线只有评审这一个任务；
    若要在**同一工作区**追加别的任务（构建、测试、打包），必须先重新 checkout，否则那些任务拿到的是被改过的工作树。
 
@@ -299,8 +330,9 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
     若两行只剩一行、或行内评论出现重复，就是并发跑了——见第 10 节同名排查项。
 19. **kiro-cli 二进制摘要（生产必须）**：日志出现「kiro-cli 二进制摘要核对通过：<入口文件路径>（sha256 …）」。
     出现「未配置 KIRO_CLI_SHA256：不核对 kiro-cli 二进制摘要」= 没钉死，评估 / PoC 可接受、生产不行（第 7 节）。
-20. **流水线任务超时已配置**（第 4 节第 5 步）：UI 上核对任务设置里的超时 = `KIRO_TIMEOUT` + 10 分钟（默认 25 分钟）；
-    这是 diff 预处理阶段当前唯一的墙钟保护，日志里看不出来。改 `KIRO_TIMEOUT` 时必须同步改它。
+20. **任务超时已配置**（第 4 节第 5 步）：核对 YAML 里评审任务的 `timeoutMinutes` = `KIRO_TIMEOUT` + 10 分钟
+    （默认 25）。这是 diff 预处理阶段当前唯一的墙钟保护，日志里看不出来；不写这一行会落到 Flow 的默认 240 分钟。
+    改 `KIRO_TIMEOUT` 时必须同步改它。
 
 ## 9. 端到端验收
 全部在**业务测试库**上做，严禁用真实凭证或真实业务分支。第 2 项（原地更新）与 9.2 节的行内评论项

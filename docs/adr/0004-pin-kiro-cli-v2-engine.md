@@ -21,7 +21,8 @@ Kiro CLI 3.0 目前是 early access：随 2.x 稳定版一起安装，需 `--v3`
   两者刻意不同，见 `scripts/probe/README.md`。这条只是记录 CLI 的行为事实，v2 引擎的决策不变。
 
 - **修订（2026-09-10，CodeX 复审 P1-2）**：版本门从「名单外只 notice」（15-fix2 #24）改为**默认拒绝**。`scripts/kiro-review.sh` 的
-  `KIRO_TESTED_VERSIONS`（当前 2.21.1——探测 P1-15 与全部真实验收所用版本；上文正文写的 2.21.0 是决策当时的版本）之外的 kiro-cli
+  `KIRO_TESTED_VERSIONS`（当前 `2.21.1 2.21.3`——2.21.1 是探测 P1-15 与 Phase 1 全部真实验收所用版本，2.21.3 于 2026-09-11
+  重跑 P1-15 十二个门禁用例全 PASS 后加入，它也是云托管执行器 `curl | bash` 当时装到的 latest；上文正文写的 2.21.0 是决策当时的版本）之外的 kiro-cli
   版本拒绝评审并回写失败评论，Kiro 不启动；只有流水线变量 `KIRO_ACK_UNTESTED_VERSION` 与实际版本**逐字相等**才放行（汇总带醒目
   notice），刻意不做布尔开关（会永久留在环境里放行以后所有未知版本）；版本解析不出一律拒绝。原因：官方安装脚本只装 latest、没有版本
   开关、sha256 只对在线 manifest，Kiro 3.x 的权限模型是 breaking change，「新版本仍保持已探测版本的路径解析语义」不能当默认假设；本 ADR
