@@ -612,6 +612,16 @@ assert_eq "$(_kiro_cli_version_pick 'kiro-cli   2.21')" "2.21" "版本提取：�
 assert_eq "$(_kiro_cli_version_pick 'kiro-cli version 2.21.1')" "" "版本提取：kiro-cli 与数字之间夹了别的词 → 不认（形态未知就当未知，宁可 notice）"
 assert_eq "$(_kiro_cli_version_pick 'mykiro-cli 9.9.9 kiro-cli 2.21.1')" "2.21.1" "版本提取：程序名前面粘着字母的不算"
 assert_eq "$(_kiro_cli_version_pick '')" "" "版本提取：空输入 → 空"
+# 整个 token 必须是数字点串（CodeX 2026-09-11 复审 P1）：原先只锚定前缀，带后缀的版本被截成名单里那个已探测版本，
+# 一个未探测的预发布版本就能冒用它走过版本门，KIRO_ACK_UNTESTED_VERSION 的「逐字等于实际版本」也一起被打穿。
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.3-rc.1')" "" "版本提取：预发布后缀 -rc.1 → 空（不截成 2.21.3）"
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.3evil')" "" "版本提取：紧跟字母 → 空"
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli 9.9.9-rc.1')" "" "版本提取：break-glass 场景的 9.9.9-rc.1 → 空（ACK=9.9.9 不该放行它）"
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.3+build7')" "" "版本提取：构建元数据后缀 → 空"
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.3_beta')" "" "版本提取：下划线后缀 → 空"
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.3.')" "" "版本提取：结尾多一个点 → 空"
+assert_eq "$(_kiro_cli_version_pick $'kiro-cli 2.21.3\n其它行')" "2.21.3" "版本提取：版本后面就是行尾 → 仍取到（收尾是空白或行尾锚，不是「非数字点」）"
+assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.3  ')" "2.21.3" "版本提取：版本后面是空白 → 仍取到"
 # 真跑一次替身：stderr 先打升级提示 → 取已装版本；stderr 也打版本 → 回退到 stderr；退出码非零 → 返回 1 且带退出码
 mkdir -p "$tmp/vh/.kiro-mock"; mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_WARN=1
 TB=""; command -v timeout >/dev/null && TB=timeout; [[ -z "$TB" ]] && command -v gtimeout >/dev/null && TB=gtimeout

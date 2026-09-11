@@ -74,6 +74,66 @@ review_diff_attr_scan() {
   return 0
 }
 
+# --- git 自身判定的二进制变更扫描（CodeX 2026-09-11 复审 P1）---
+# review_diff_attr_scan 只覆盖「树内 .gitattributes 把文件标成 -diff」这一条路。**git 的二进制判定并不依赖属性**：
+# 前 8000 字节里有一个 NUL 就够（`git help diff` 的 --text 一节）。于是 MR 作者连 .gitattributes 都不用碰——
+# 在注释里塞一个 NUL 字节、同时改可执行代码，`git diff` 就只输出「Binary files a/… and b/… differ」、numstat 是 `-  -`：
+# 改动既不进评审输入也进不了变更行集合，而文件照样能被 bash 执行（2026-09-11 复现：`printf '#!/bin/bash\n# note:\000 x\necho NEW\n'`
+# 改动后 diff 全无、bash 正常输出 NEW）。这和 2026-09-09 那条 P0 是同一个 fail-open，只是触发器不同。
+#
+# 判定分两类，因为处置不同：
+#   textlike  git 说是二进制、但内容压倒性可读（掺了几个 NUL 的源码）→ 对整轮强制 --text，改动照常进评审
+#   opaque    真二进制（图片、压缩包、UTF-16）→ 展示原始字节没有意义，**明确写进汇总说这些文件的改动未被评审**，
+#             不能让它们静默消失在「评审完成」里
+# 判据是「控制字节占比」：删掉 \t \n \r、可打印 ASCII 与全部高位字节（≥0x80，中文源码要算可读）之后剩下的就是
+# 0x00-0x08 / 0x0B / 0x0C / 0x0E-0x1F / 0x7F 这 30 个码位。均匀随机数据落在 30/256 ≈ 117‰ 附近（实测 PNG 129‰、
+# gzip 114‰），掺 NUL 的源码在 27‰ 附近（实测 1 NUL/37 字节的 shell、200 NUL/7409 字节的中文 py 都是 26–27‰）。
+# 阈值取 50‰（5%），两边各有一倍以上余量。攻击者当然可以把 NUL 撒密到越过阈值——那时该文件被判 opaque，
+# 于是**在汇总里被点名「未评审」**，拿不到静默隐藏，fail-open 已经关掉。
+# 判据算在该文件的**单文件 --text patch** 上（两侧内容都在里面），而不是去 cat-file 取 blob：路径可能含换行/Tab，
+# `:(top,literal)` pathspec 是本文件既有的 NUL 安全做法，cat-file --batch 的行协议不是。
+# 只统计数目、不把文件名带出（文件名不受信，票 06/07/09 同一理由）。
+REVIEW_DIFF_BIN_TEXTLIKE=0; REVIEW_DIFF_BIN_OPAQUE=0
+REVIEW_DIFF_BIN_CTL_PERMILLE_MAX="${REVIEW_DIFF_BIN_CTL_PERMILLE_MAX:-50}"   # 控制字节 ≤ 50‰ 判 textlike
+REVIEW_DIFF_BIN_SAMPLE_BYTES="${REVIEW_DIFF_BIN_SAMPLE_BYTES:-8000}"        # 与 git 自己的判定窗口同宽
+# 单文件 --text patch 的控制字节千分比 → stdout 整数；rc 1 = git 失败
+_diff_ctl_permille() {
+  local base="$1" head="$2" path="$3" patch win ctl
+  # 显式 --text：本函数要的是「如果按文本比会看到什么」，不能受 REVIEW_DIFF_FORCE_TEXT 影响（它可能已被属性扫描置 1）
+  patch=$(git -c core.quotePath=false -c diff.external= -c diff.noprefix=false -c diff.mnemonicPrefix=false \
+            -c diff.relative=false -c color.ui=never \
+            diff --no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --text \
+            --no-renames "$base" "$head" -- ":(top,literal)${path}" \
+          | head -c "$REVIEW_DIFF_BIN_SAMPLE_BYTES") || return 1
+  win=$(printf '%s' "$patch" | wc -c | tr -d ' ')
+  [[ "$win" =~ ^[0-9]+$ && "$win" -gt 0 ]] || { printf '0'; return 0; }   # 空 patch（只改模式）没有可疑内容
+  ctl=$(printf '%s' "$patch" | LC_ALL=C tr -d '\11\12\15\40-\176\200-\377' | wc -c | tr -d ' ')
+  [[ "$ctl" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' $(( ctl * 1000 / win ))
+}
+# review_diff_binary_scan <base> <head> → 设置 REVIEW_DIFF_BIN_TEXTLIKE / REVIEW_DIFF_BIN_OPAQUE；rc 0；git 失败 rc 1
+# 须在业务仓库内调用（与随后的 git diff 同一套配置）。
+review_diff_binary_scan() {
+  local base="$1" head="$2" ns add rem path n_text=0 n_opaque=0 permille
+  ns=$(mktemp) || return 1
+  # 显式不带 --text：要的是 git 的原生判定（`-  -` = 它认为这是二进制）
+  if ! git -c core.quotePath=false -c diff.external= -c diff.relative=false -c color.ui=never \
+        diff --no-color --no-ext-diff --no-textconv --no-renames --numstat -z "$base" "$head" > "$ns"; then
+    rm -f "$ns"; return 1
+  fi
+  # -z 的 numstat 形态：<added> TAB <removed> TAB <path> NUL（--no-renames 下没有额外的双路径记录）
+  while IFS= read -r -d '' rec; do
+    add=${rec%%$'\t'*}; rem=${rec#*$'\t'}; rem=${rem%%$'\t'*}; path=${rec#*$'\t'}; path=${path#*$'\t'}
+    [[ "$add" == "-" && "$rem" == "-" ]] || continue
+    [[ -n "$path" ]] || continue
+    permille=$(_diff_ctl_permille "$base" "$head" "$path") || { rm -f "$ns"; return 1; }
+    if [[ "$permille" -le "$REVIEW_DIFF_BIN_CTL_PERMILLE_MAX" ]]; then n_text=$((n_text + 1)); else n_opaque=$((n_opaque + 1)); fi
+  done < "$ns"
+  rm -f "$ns"
+  REVIEW_DIFF_BIN_TEXTLIKE=$n_text; REVIEW_DIFF_BIN_OPAQUE=$n_opaque
+  return 0
+}
+
 # $1=文件路径 $2=该文件的 diff chunk 文件；输出优先级 0-3
 _diff_priority() {
   local path="$1" chunk_file="$2"

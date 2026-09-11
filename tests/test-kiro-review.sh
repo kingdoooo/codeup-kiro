@@ -2034,6 +2034,67 @@ assert_rc "$RC" 0 "hostile .gitattributes + 真二进制：评审正常完成"
 assert_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "hostile .gitattributes + 真二进制：文本改动在评审输入里"
 assert_contains "$(cat "$MD/stdin")" "+++ b/blob.bin" "hostile .gitattributes + 真二进制：二进制文件按文本列出（有 +++ 头）"
 assert_not_contains "$(cat "$MD/stdin")" "Binary files" "hostile .gitattributes + 真二进制：没有 Binary files 行"
+# ---- CodeX 2026-09-11 P1：一个 NUL 字节就能把改动藏起来，不需要动 .gitattributes ----
+# git 的二进制判定不看属性：前 8000 字节里有一个 NUL 就够。所以 MR 作者在注释里塞一个 NUL、同时改可执行代码，
+# 属性扫描全是 unspecified、不触发，而 diff 只剩「Binary files … differ」、numstat 是 `-  -`——
+# 改动不进评审输入、变更行集合为空，评审照常报「完成」。这是与上面那条 P0 同一个 fail-open 的另一个触发器。
+tweak_nul_hidden() {
+  # 必须改**目标分支上已有**的文件：新文件的 diff 头是 `Binary files /dev/null and b/… differ`，
+  # 断言「不含 a/<路径>」对未修实现也会通过（2026-09-11 被 M-cx-nul 变异抓出来的弱断言）。
+  printf 'import os\n# note:\000 harmless\nSECRET_KEY = "FAKE-TEST-KEY-0000"\ndef main():\n    pass\n' > src/app.py
+  git add -A && git commit -qm "hide changes via NUL byte"
+}
+CASE_TWEAK=tweak_nul_hidden run_case nulhidden
+assert_rc "$RC" 0 "NUL 隐藏：评审正常完成"
+assert_eq "$(printf '%s' "$OUT" | LC_ALL=C grep -c '全部为文本比较，不强制 --text' || true)" "1" "NUL 隐藏：属性扫描确实没触发（旧判据看不见这个 MR）"
+assert_contains "$OUT" "个改动文件 git 判为二进制但内容可读 → 整轮强制 --text" "NUL 隐藏：新扫描把它判成 textlike 并强制文本"
+assert_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "NUL 隐藏：被藏起来的改动仍进了评审输入"
+assert_not_contains "$(cat "$MD/stdin")" "Binary files" "NUL 隐藏：评审输入里一行 Binary files 都没有"
+assert_contains "$(posted_comment "$OUT")" "被 Git 判为二进制（内容里有 NUL 字节），但内容压倒性可读" "NUL 隐藏：汇总带说明（I10，阿里云侧看不到日志）"
+assert_not_contains "$OUT" "没能从 diff 里算出任何可定位的新增/修改行" "NUL 隐藏：变更行集合非空"
+# 真二进制：不强制文本（否则每个改图片的 MR 都要把原始字节喂给模型），但**必须在汇总里说这些改动没被评审**
+tweak_real_binary() {
+  python3 -c "import os,zlib; open('asset.bin','wb').write(zlib.compress(os.urandom(20000)))"
+  git add -A && git commit -qm "add real binary"
+}
+CASE_TWEAK=tweak_real_binary run_case realbinary
+assert_rc "$RC" 0 "真二进制：评审正常完成"
+assert_contains "$OUT" "个改动文件是二进制内容，其改动未被评审（已写进汇总）" "真二进制：日志点名未覆盖的数目"
+assert_not_contains "$OUT" "整轮强制 --text" "真二进制：不强制文本（不把原始字节喂给模型）"
+assert_contains "$(posted_comment "$OUT")" "它们的改动没有被本次评审覆盖" "真二进制：汇总明确写出未覆盖，不能静默算作评审完成"
+assert_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "真二进制：同一轮里的文本改动照常进评审输入"
+# 正控：普通文本 MR 两类都是 0，不出任何二进制相关说明（不误报）
+run_case nobinary
+assert_rc "$RC" 0 "无二进制：评审正常完成"
+assert_contains "$OUT" "git 判定为二进制的改动文件：0 个" "无二进制：扫描报 0 个"
+assert_not_contains "$(posted_comment "$OUT")" "Git 判为二进制" "无二进制：汇总里没有二进制说明"
+assert_not_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "无二进制：汇总里没有未覆盖说明"
+
+# ---- CodeX 2026-09-11 P2：摘要门核对的入口必须就是后面真正执行的那个入口 ----
+# 摘要门在业务库 cwd 下用 `command -v kiro-cli` 解析入口，而四次调用原先都是裸命令 `kiro-cli`、且在 $WORK/cwd 里跑：
+# PATH 里有相对目录时两次解析落到不同文件上，日志照样打「摘要核对通过」。修复后第 2.2 步一次解析成绝对路径，四处共用。
+if command -v timeout >/dev/null || command -v gtimeout >/dev/null; then
+  relcase="$tmp/relpath"; mkdir -p "$relcase/relbin"
+  # relbin/kiro-cli 是替身的副本；PATH 里放**相对**目录名 relbin，换 cwd 后它就解析不到了
+  cp "$ROOT/tests/mockbin/kiro-cli" "$relcase/relbin/kiro-cli"; chmod +x "$relcase/relbin/kiro-cli"
+  relout=$( cd "$relcase" && PATH="relbin:$PATH" bash -c '
+      set -uo pipefail
+      source "$1"
+      KIRO_CLI_CMD=$(command -v kiro-cli) || exit 9
+      case "$KIRO_CLI_CMD" in
+        /*) ;;
+        *) KIRO_CLI_CMD=$(cd "$(dirname "$KIRO_CLI_CMD")" && pwd -P)/$(basename "$KIRO_CLI_CMD") || exit 9 ;;
+      esac
+      printf "%s" "$KIRO_CLI_CMD"' _ "$ROOT/scripts/lib/kiro-agent.sh" )
+  assert_eq "${relout:0:1}" "/" "相对 PATH：第 2.2 步把 command -v 的相对路径转成绝对路径"
+  assert_contains "$relout" "relbin/kiro-cli" "相对 PATH：绝对化之后指向的还是 PATH 里那一份（不换成别的目录）"
+  # 正控：不做绝对化时，换到另一个 cwd 就解析不到这一份了——证明上面两条断言测得到东西
+  relbare=$( cd "$relcase" && PATH="relbin:$PATH" bash -c 'cd "$2" && command -v kiro-cli || true' _ x "$tmp" )
+  assert_eq "$([[ "$relbare" == *"$relcase"* ]] && echo same || echo different)" "different" "相对 PATH 正控: 裸命令换 cwd 后解析到的不是被核对的那一份"
+else
+  echo "INFO: 本机无 timeout/gtimeout，跳过相对 PATH 用例" >&2
+fi
+
 # 执行器侧 color.ui=always：评审输入与变更行集合都不得带 ANSI（否则变更行解析器一行都对不上、全部问题变未定位）
 tweak_color_always() { git config color.ui always; }
 CASE_TWEAK=tweak_color_always run_case colorui

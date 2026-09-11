@@ -232,16 +232,25 @@ kiro_agent_selfcheck() {
 # 执行器第 3 步与探测脚本（summary.json 的 kiro_cli 字段——人工抄进 KIRO_TESTED_VERSIONS 的来源）都调这一个函数。
 KIRO_CLI_VERSION=""
 KIRO_CLI_VERSION_ERROR=""
-# 按程序名锚定取版本：程序名前面不能粘着标识符字符（mykiro-cli 9.9.9 不算），后面只能是空白 + 数字点串；取第一个匹配
+# 按程序名锚定取版本：程序名前面不能粘着标识符字符（mykiro-cli 9.9.9 不算），后面只能是空白 + 数字点串；取第一个匹配。
+# **整个 token 都必须是数字点串**（CodeX 2026-09-11 复审 P1）：原先只锚定前缀，于是 `kiro-cli 2.21.3-rc.1`、
+# `kiro-cli 2.21.3evil`、`2.21.3+build7`、`2.21.3_beta` 全被截成 `2.21.3`，一个未探测的预发布版本就能冒用名单里的
+# 已探测版本走过版本门；`KIRO_ACK_UNTESTED_VERSION=9.9.9` 也能放行实际是 `9.9.9-rc.1` 的 CLI，把「逐字等于实际版本」
+# 这个明写的契约打穿（2026-09-11 复现，三种形态都放行且真的跑到了 chat）。
+# 与既有取舍一致：`kiro-cli version 2.21.1`（中间夹词）本就判「形态未知 → 当未知」，带后缀同属未知形态，
+# 一律返回空 → 上层按「版本号无法解析」**拒绝评审**（连 break-glass 也不放行未知版本）。
+# 后随字符只允许空白或行尾：用 `[[:space:]]|$` 收尾，别写成 `[^0-9.]`——那样 `2.21.3-rc` 仍会匹配到 `2.21.3` 加一个 `-`。
 _kiro_cli_version_pick() {
-  if [[ "$1" =~ (^|[^A-Za-z0-9_-])kiro-cli[[:space:]]+([0-9]+(\.[0-9]+)+) ]]; then printf '%s' "${BASH_REMATCH[2]}"; fi
+  if [[ "$1" =~ (^|[^A-Za-z0-9_-])kiro-cli[[:space:]]+([0-9]+(\.[0-9]+)+)([[:space:]]|$) ]]; then printf '%s' "${BASH_REMATCH[2]}"; fi
   return 0
 }
 kiro_cli_version() {
   local tbin="$1" cwd="$2" secs="${3:-60}" out err errf rc=0
   KIRO_CLI_VERSION=""; KIRO_CLI_VERSION_ERROR=""
   errf=$(mktemp) || { KIRO_CLI_VERSION_ERROR="无法创建临时文件"; return 1; }
-  out=$(cd "$cwd" && "$tbin" "$secs" env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli --version 2>"$errf") || rc=$?
+  # 入口用 KIRO_CLI_CMD（kiro-review.sh 第 2.2 步解析出的绝对路径，与摘要门核对的是同一个入口——CodeX 2026-09-11 复审 P2）；
+  # 探测脚本不设它，回落裸命令、行为不变。
+  out=$(cd "$cwd" && "$tbin" "$secs" env -i "${KIRO_ENV_ALLOW[@]}" "${KIRO_CLI_CMD:-kiro-cli}" --version 2>"$errf") || rc=$?
   err=$(cat "$errf" 2>/dev/null || true); rm -f "$errf"
   if [[ "$rc" -ne 0 ]]; then
     KIRO_CLI_VERSION_ERROR="kiro-cli --version 失败（退出码 ${rc}$([[ "$rc" == "124" ]] && printf '，超时 %ss' "$secs")）；stderr 尾部：$(printf '%s\n' "$err" | tail -n 3 | tr '\n' ' ')"

@@ -81,7 +81,11 @@ KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 # 2.21.1：2026-09-06 / 09-07 探测（15-fix2 / 15-fix4），Phase 1 全部真实验收都在它上面做。
 # 2.21.3：2026-09-11 用 scripts/probe/probe-kiro-allowlist.sh 重跑，十二个门禁用例 + T5 正控全 PASS
 #         （summary.json: any_fail=false、gate_missing=[]）——真实 Flow 的云托管执行器 curl|bash 装的就是它。
-#         探测跑在 darwin/arm64、执行器是 linux/amd64（历次探测都有这个差，靠真机验收补齐）。
+#         **两个平台各跑过一次**：darwin/arm64（本机）与 linux/amd64（真实 Flow 执行器，alinux3 容器里跑探测脚本，
+#         入口 /root/.local/bin/kiro-cli，退出码 0）。越界读取与拒绝优先级这些**负向**用例是在执行器同平台上实测的，
+#         不是从「评审能跑通」推出来的（CodeX 2026-09-11 复审指出旧措辞把证据范围说大了）。
+#         2.21.1 只在 darwin/arm64 上探测过：它的 Linux 侧读取边界没有同等证据，自建执行器若预装 2.21.1，
+#         应在自己的镜像上重跑一次探测。
 KIRO_TESTED_VERSIONS="2.21.1 2.21.3"
 # break-glass（CodeX 2026-09-09 复审 P1-2）：名单外版本默认**拒绝评审**；这个流水线变量的取值必须**逐字等于**实际 kiro-cli 版本才放行
 # （汇总带醒目 notice）。刻意不做布尔开关——那种变量会永久留在环境里放行以后所有未知版本。只收版本号形状（第 1.6 步校验）；空 = 默认。
@@ -989,6 +993,24 @@ else
   log "未配置 KIRO_CLI_SHA256：不核对 kiro-cli 二进制摘要（版本门只挡版本语义漂移；生产请按 setup-guide 第 7 节钉死入口文件 sha256）"
 fi
 
+# --- 2.2 把「核对过的那个入口」绑定到后面四次真正的执行（CodeX 2026-09-11 复审 P2）---
+# 摘要门核对的是 `command -v kiro-cli` 在**当前 cwd（业务库）**下解析出来的入口，而后面四次调用写的都是裸命令
+# `kiro-cli`、且都在 `$KIRO_CWD`（空目录）里跑——PATH 里只要有一个相对目录，两次解析就可能落到不同文件上：
+# 核对了 `relative-bin/kiro-cli`、执行的是另一个目录下摘要不同的那份，日志照样打「摘要核对通过」（2026-09-11 复现）。
+# 当前 Flow 执行器的 PATH 是绝对路径，不受影响；但「校验 A、执行 B」本身就让 KIRO_CLI_SHA256 的绑定不成立。
+# 固定成一次解析：取 `command -v` 的**绝对路径**（不解引用符号链接——macOS 装的是指向 Kiro CLI.app 内部的链接，
+# 直接执行解引用后的路径会改变 argv[0] 与 bundle 内的相对查找；摘要仍按解引用后的入口文件算，KIRO_CLI_BIN 不变），
+# 四处调用都用它。剩余窗口是「核对之后、执行之前有人重指向那个符号链接」——比 PATH 重解析窄得多，且需要执行器上的写权限。
+KIRO_CLI_CMD=$(command -v kiro-cli) || die_review "PATH 里找不到 kiro-cli（安装步骤之后仍然找不到）"
+case "$KIRO_CLI_CMD" in
+  /*) ;;
+  *) # command -v 给了相对路径（PATH 里有相对目录）：换 cwd 后它就失效，正是本条要修的形态
+     KIRO_CLI_CMD=$(cd "$(dirname "$KIRO_CLI_CMD")" && pwd -P)/$(basename "$KIRO_CLI_CMD") \
+       || die_review "无法把 kiro-cli 的路径转成绝对路径（PATH 里含相对目录？）" ;;
+esac
+[[ -x "$KIRO_CLI_CMD" ]] || die_review "kiro-cli 入口不可执行：${KIRO_CLI_CMD}"
+log "kiro-cli 入口（后续四次调用都用这一个绝对路径）：${KIRO_CLI_CMD}"
+
 # --- 3. 安装受信 agent + kiro-cli 能力检查（放在 MR 定位之后：失败用 die_review 回写评论，而不是只让流水线标红）---
 # agent 定义里的 prompt 是相对 file:// 引用（kiro 相对 agent 文件所在目录解析），复制到 ~/.kiro/agents/
 # 后会失效；kiro_install_agent 在安装时把它改写为集成包内提示词文件的绝对路径。
@@ -1028,7 +1050,7 @@ log "受信 agent 许可路径：$(jq -r '.toolsSettings.read.allowedPaths | joi
 env_allowlist_or_die
 # 所有 kiro-cli 子命令都在 $KIRO_CWD（空目录）下执行，绝不在业务库工作树里（15-fix4 #1）
 log "Kiro 运行目录：${KIRO_CWD}（空目录；业务库 ${WS_P} 只在 allowedPaths 里，模型按绝对路径读取）"
-KIRO_CHAT_HELP=$(cd "$KIRO_CWD" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli chat --help 2>&1 || true)
+KIRO_CHAT_HELP=$(cd "$KIRO_CWD" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" chat --help 2>&1 || true)
 grep -q -- '--agent-engine' <<<"$KIRO_CHAT_HELP" \
   || die_review "kiro-cli chat 不支持 --agent-engine，无法钉死 ${KIRO_ENGINE} 引擎（ADR-0004：默认引擎不阻断 AGENTS.md 注入），拒绝运行。请升级 kiro-cli（≥ 2.21）"
 grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
@@ -1088,6 +1110,26 @@ if (( REVIEW_DIFF_ATTR_UNSET + REVIEW_DIFF_ATTR_DRIVER > 0 )); then
 else
   log "变更文件的 Git diff 属性：全部为文本比较，不强制 --text"
 fi
+# --- 4.0b git 自身判定为二进制的变更（CodeX 2026-09-11 复审 P1）---
+# 上面那一步只挡属性这条路。注释里一个 NUL 字节就足以让 git 把改动打成「Binary files … differ」，属性全是 unspecified、
+# 扫描不触发——改动不进评审输入、变更行集合为空，而评审照常报「完成」。这里按内容分两类处置（判据见 diff-compress.sh）：
+#   textlike（掺 NUL 的源码）→ 与属性那条路同一个杠杆：整轮强制 --text，改动照常进评审
+#   opaque（真二进制）      → 强制展示原始字节没有意义，但**必须写进汇总说这些文件的改动没被评审**，不能静默消失
+# 强制 --text 会把同一轮里真二进制文件也按原始字节展开，可能撑破 DIFF_SIZE_LIMIT 走 chunk 路径（预处理仍无硬上限，
+# 见 docs/roadmap/diff-preprocess-resource-caps.md）——这个代价只在「本轮确有 textlike 文件」时付，且流水线任务超时
+# （setup-guide 第 4 节第 5 步）是它的墙钟兜底。
+review_diff_binary_scan "$BASE" HEAD || die_review "检查 git 判定为二进制的变更失败（git diff --numstat）"
+if (( REVIEW_DIFF_BIN_TEXTLIKE > 0 )); then
+  REVIEW_DIFF_FORCE_TEXT=1
+  DIFF_NOTICE="${DIFF_NOTICE:+${DIFF_NOTICE} }注意：${REVIEW_DIFF_BIN_TEXTLIKE} 个改动文件被 Git 判为二进制（内容里有 NUL 字节），但内容压倒性可读——很可能是掺了 NUL 的源码。为防止改动被藏进「Binary files differ」，本次已对全部改动强制按文本比较（真正的二进制文件会按原始字节列出）。"
+  log "警告：${REVIEW_DIFF_BIN_TEXTLIKE} 个改动文件 git 判为二进制但内容可读 → 整轮强制 --text"
+fi
+if (( REVIEW_DIFF_BIN_OPAQUE > 0 )); then
+  DIFF_NOTICE="${DIFF_NOTICE:+${DIFF_NOTICE} }注意：${REVIEW_DIFF_BIN_OPAQUE} 个改动文件是二进制内容，**它们的改动没有被本次评审覆盖**（Git 不产生可读差异）。若其中有本应按源码评审的文件，请人工核对该文件，或把它改成不含 NUL 字节的文本形态后重跑。"
+  log "警告：${REVIEW_DIFF_BIN_OPAQUE} 个改动文件是二进制内容，其改动未被评审（已写进汇总）"
+fi
+(( REVIEW_DIFF_BIN_TEXTLIKE + REVIEW_DIFF_BIN_OPAQUE > 0 )) \
+  || log "git 判定为二进制的改动文件：0 个"
 truncated=0
 build_review_input "$BASE" "HEAD" "$WORK/review.diff" "$WORK/omitted.txt" "$WORK/chunks" || truncated=$?
 [[ "$truncated" == "0" || "$truncated" == "10" ]] || die_review "diff 压缩失败（rc=${truncated}）"
@@ -1157,7 +1199,7 @@ unset _iso_agents _iso_kiro _iso_links _iso_lsp
 # 执行环境：禁止 Kiro 继承工作区默认资源（AGENTS.md/README.md 等），只对 v2 引擎有效（ADR-0004）。
 # 它依赖上面对 .kiro/ 的删除（见 ①），本身只覆盖「AGENTS.md 没删干净 / 藏在别处」这一种漏网情形。
 # 写入的是执行器 $HOME 的全局设置且刻意不回滚（spec I1）：常驻执行器上它保持为 true 只会更严格。
-( cd "$KIRO_CWD" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli settings chat.disableInheritingDefaultResources true ) || die_review "隔离失败：无法设置 kiro-cli chat.disableInheritingDefaultResources=true"
+( cd "$KIRO_CWD" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" settings chat.disableInheritingDefaultResources true ) || die_review "隔离失败：无法设置 kiro-cli chat.disableInheritingDefaultResources=true"
 log "隔离：已设置 chat.disableInheritingDefaultResources=true"
 
 # --- 5.6 行内评论的版本对预采样（票 17-fix3 ⑥；只在 INLINE_COMMENT=1 时打这一次接口）---
@@ -1228,7 +1270,7 @@ LC_ALL=C grep -qF -- "<<<KIRO_REVIEW_JSON:${REVIEW_NONCE}>>>" "$WORK/kiro-stdin.
 unset _p _i _s _n
 kiro_rc=0
 # 在 $KIRO_CWD（空目录）下运行（15-fix4 #1）；业务库路径只在 allowedPaths 与提示词里
-( cd "$KIRO_CWD" && "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli chat --no-interactive \
+( cd "$KIRO_CWD" && "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" chat --no-interactive \
   --agent-engine "$KIRO_ENGINE" --output-format stream-json \
   --agent "$AGENT_NAME" ) \
   < "$WORK/kiro-stdin.txt" > "$WORK/stream.jsonl" 2> "$WORK/kiro-stderr.log" || kiro_rc=$?
