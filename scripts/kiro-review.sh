@@ -86,7 +86,10 @@ KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 #         不是从「评审能跑通」推出来的（CodeX 2026-09-11 复审指出旧措辞把证据范围说大了）。
 #         2.21.1 只在 darwin/arm64 上探测过：它的 Linux 侧读取边界没有同等证据，自建执行器若预装 2.21.1，
 #         应在自己的镜像上重跑一次探测。
-KIRO_TESTED_VERSIONS="2.21.1 2.21.3"
+# 2.21.4：2026-09-13 探测（十二个门禁用例 + T5 正控全 PASS，any_fail=false、gate_missing=[]），darwin/arm64。
+#         起因是 Kiro 在 09-12 发了 2.21.4，云托管执行器的 curl|bash 立刻装到它，摘要门与版本门双双拒绝——
+#         这就是设计里说的「新版一到就停摆」，按 setup-guide 第 7 节的四步（探测 → 名单 → 重新记录摘要 → 改变量）恢复。
+KIRO_TESTED_VERSIONS="2.21.1 2.21.3 2.21.4"
 # break-glass（CodeX 2026-09-09 复审 P1-2）：名单外版本默认**拒绝评审**；这个流水线变量的取值必须**逐字等于**实际 kiro-cli 版本才放行
 # （汇总带醒目 notice）。刻意不做布尔开关——那种变量会永久留在环境里放行以后所有未知版本。只收版本号形状（第 1.6 步校验）；空 = 默认。
 KIRO_ACK_UNTESTED_VERSION="${KIRO_ACK_UNTESTED_VERSION:-}"

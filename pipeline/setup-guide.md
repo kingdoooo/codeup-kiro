@@ -163,16 +163,21 @@ Flow 在多代码源流水线里给每个代码源的内置变量加数字下标
 
 ## 6. 连通性验证（云托管执行器：评估 / PoC 路径）
 云托管执行器上 kiro-cli 由官方安装脚本 `curl | bash` 现装：脚本只装 **latest**、没有版本开关，sha256 也只对在线 manifest 校验。
-latest 不在 `KIRO_TESTED_VERSIONS`（当前 `2.21.1 2.21.3`）名单内时，评审会被版本门**拒绝**并回写「评审未完成」（第 8 节第 5 项、第 10 节），
+latest 不在 `KIRO_TESTED_VERSIONS`（当前 `2.21.1 2.21.3 2.21.4`）名单内时，评审会被版本门**拒绝**并回写「评审未完成」（第 8 节第 5 项、第 10 节），
 只能临时用 `KIRO_ACK_UNTESTED_VERSION=<准确版本>` 放行。所以这条路径只用于评估 / PoC；**生产按第 7 节预装固定版本**
 （ADR-0004 要求的「固定版本 + 校验」只有那条路径能满足）。
+**这条路径的停摆是可预期的、且已经真实发生过一次**：2026-09-12 Kiro 发布 2.21.4，云托管执行器下一次运行的
+`curl | bash` 立刻装到它，于是**摘要门与版本门同时拒绝**（先报摘要不一致，因为它在版本门之前）——MR 上是
+「评审未完成」，Kiro 一次都没跑。恢复方式就是第 7 节那四步：探测新版本 → 加进 `KIRO_TESTED_VERSIONS` →
+重新记录入口文件 sha256 → 改流水线变量。生产不要依赖这条路径。
+
 前提：先在该验证流水线的「变量和缓存」中配置 `KIRO_API_KEY`（私密变量）——
 headless 调用必须依赖它认证，未配置时 chat 命令会因认证失败而报错。
 最小验证流水线命令：
     curl -fsSL https://cli.kiro.dev/install | bash
     export PATH="$HOME/.local/bin:$PATH"
     set -e                                   # 缺参数必须让这一步标红，不能只在日志里留一行提示
-    kiro-cli --version                       # 需在 KIRO_TESTED_VERSIONS 名单内（当前 2.21.1 / 2.21.3），否则评审被版本门拒绝
+    kiro-cli --version                       # 需在 KIRO_TESTED_VERSIONS 名单内（当前 2.21.1 / 2.21.3 / 2.21.4），否则评审被版本门拒绝
     # 三个参数各查一次，缺任一就退出：合成一条 grep 时任一命中即通过，而 `--agent` 又会被
     # `--agent-engine` 那一行命中，于是缺 --agent 也照样"通过"。
     # --agent 用与评审脚本相同的正则（前后必须是空白或行首尾）；help 一并收 stderr（脚本也是 2>&1）。
@@ -198,8 +203,8 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 ## 7. 自建执行器（生产唯一支持的路径；网络受限时也走这里）
 1. ECS/物理机按 Flow 文档接入为自有构建集群。
 2. 预装：git、curl、jq（≥1.6）、coreutils（`timeout`、`sha1sum`）、kiro-cli **固定为 `KIRO_TESTED_VERSIONS` 名单内的版本**
-   （当前 `2.21.1 2.21.3`：2.21.1 上做了 Phase 1 全部真实验收，2.21.3 于 2026-09-11 过了 P1-15 十二个门禁用例，
-   且**在 linux/amd64 与 darwin/arm64 各跑过一次**；`kiro-cli --version` 验证；名单外版本会被版本门拒绝，见第 8 节第 5 项）。
+   （当前 `2.21.1 2.21.3 2.21.4`：2.21.1 上做了 Phase 1 全部真实验收；2.21.3 于 2026-09-11 过了 P1-15 十二个门禁用例，
+   且**在 linux/amd64 与 darwin/arm64 各跑过一次**；2.21.4 于 2026-09-13 过了同一套门禁，darwin/arm64；`kiro-cli --version` 验证；名单外版本会被版本门拒绝，见第 8 节第 5 项）。
    **探测结论只对「探测所用的平台 + 版本」成立**：越界读取、deny 优先于 allow 这些负向用例依赖 kiro-cli 的路径解析
    行为，换平台（glibc/musl、amd64/arm64）或换版本都要重跑 `scripts/probe/probe-kiro-allowlist.sh`。
    2.21.1 目前只有 darwin/arm64 的证据，自建执行器若预装它，请在自己的镜像里重跑一次探测。
