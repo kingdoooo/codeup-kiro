@@ -133,6 +133,17 @@ all_notice() {
   for n in "${REVIEW_NOTICE:-}" "${DIFF_NOTICE:-}" "${INLINE_NOTICE:-}"; do [[ -n "$n" ]] && out="${out}${out:+ }${n}"; done
   printf '%s' "$out"
 }
+# 降级 / 失败评论该带的那一份：REVIEW_NOTICE + DIFF_NOTICE，**不含** INLINE_NOTICE
+# （CodeX 2026-09-12 复审 P1）。原先这两条路径只传 REVIEW_NOTICE，于是模型一旦没输出合法契约：
+# 日志说「N 个改动文件是二进制内容，其改动未被评审（已写进汇总）」，而 MR 上的降级评论既没有这条说明、
+# 又写着「评审已完成」，退出码还是 0——「二进制改动没进模型」这个静默覆盖缺口在降级路径上重新打开
+# （2026-09-12 复现：真二进制 + MOCK_KIRO_NO_MARKER=1 → rc 0、日志有、评论无）。
+# INLINE_NOTICE 仍然排除：它只讲问题分桶（「全部问题都归入未定位」），对没有问题清单的评论没有意义（15-fix4 #3）。
+degrade_notice() {
+  local out="" n
+  for n in "${REVIEW_NOTICE:-}" "${DIFF_NOTICE:-}"; do [[ -n "$n" ]] && out="${out}${out:+ }${n}"; done
+  printf '%s' "$out"
+}
 
 # 定位到 MR 后的失败：best-effort 回写"评审未完成"评论再退出
 MR_LOCATED=0
@@ -223,7 +234,7 @@ die_review() {
       --src "${SOURCE_BRANCH:-?}" --dst "${TARGET_BRANCH:-?}" \
       --ts "$(date '+%Y-%m-%d %H:%M:%S')" --diff-note "${DIFF_NOTE:-（本次未生成 diff）}" \
       --run "$REVIEW_RUN" "${hist_args[@]+"${hist_args[@]}"}" \
-      --notice "$REVIEW_NOTICE" \
+      --notice "$(degrade_notice)" \
       --log-hint "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。" > "$f" \
       || log "警告：失败评论渲染异常（rc≠0），改用最小失败评论"
     # 渲染器在参数不合规时（例如 --ts 为空、--history 不可读）以 rc 2 提前返回，$f 就是 0 字节。
@@ -1382,7 +1393,7 @@ if [[ -n "$DEGRADE_REASON" ]]; then
   _log_fffd "$WORK/raw.md" "降级贴出的评审员原文"   # 票 18 ⑬：契约没解析出来时上面那次数的是空文件，这条路径要自己数一次
   # 降级评论只带 REVIEW_NOTICE（版本 / 环境类）：INLINE_NOTICE 是关于分桶的提示，放进一份没有问题清单的评论里没有意义（15-fix4 #3 / A7）。
   # --notice "" 是已验证的 no-op（解析器接受空值、渲染器按 [[ -n ]] 判断），不需要一次性数组与空数组守卫。
-  review_render_degraded --text "$WORK/raw.md" --reason "${DEGRADE_REASON}${DEGRADE_DETAIL:+（${DEGRADE_DETAIL}）}" --notice "$REVIEW_NOTICE" "${render_args[@]}" \
+  review_render_degraded --text "$WORK/raw.md" --reason "${DEGRADE_REASON}${DEGRADE_DETAIL:+（${DEGRADE_DETAIL}）}" --notice "$(degrade_notice)" "${render_args[@]}" \
     > "$WORK/comment.md" || die_review "降级评论渲染失败"
 else
   dropped=$(jq -r '.dropped_findings' "$WORK/validated.json")

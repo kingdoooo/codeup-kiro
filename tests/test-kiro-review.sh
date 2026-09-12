@@ -2063,6 +2063,21 @@ assert_contains "$OUT" "个改动文件是二进制内容，其改动未被评�
 assert_not_contains "$OUT" "整轮强制 --text" "真二进制：不强制文本（不把原始字节喂给模型）"
 assert_contains "$(posted_comment "$OUT")" "它们的改动没有被本次评审覆盖" "真二进制：汇总明确写出未覆盖，不能静默算作评审完成"
 assert_contains "$(cat "$MD/stdin")" "+SECRET_KEY" "真二进制：同一轮里的文本改动照常进评审输入"
+# 组合路径（CodeX 2026-09-12 复审 P1）：真二进制 + 模型没输出合法契约 → 走降级评论。
+# 修复前降级 / 失败评论只传 REVIEW_NOTICE，于是日志说「其改动未被评审（已写进汇总）」、
+# 评论却既没有这条说明又写着「评审已完成」、退出码还是 0——静默覆盖缺口在降级路径上重新打开（已复现）。
+CASE_TWEAK=tweak_real_binary run_case realbindegrade MOCK_KIRO_NO_MARKER=1
+assert_rc "$RC" 0 "真二进制 + 契约降级：退出码 0（降级不是失败）"
+assert_contains "$OUT" "其改动未被评审（已写进汇总）" "真二进制 + 契约降级：日志有 opaque 警告"
+assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "真二进制 + 契约降级：**降级评论也必须带未覆盖说明**"
+assert_contains "$(posted_comment "$OUT")" "评审已完成" "真二进制 + 契约降级：评论仍是降级形态（这正是缺口危险的地方：写着已完成）"
+# 同一组合走失败路径（kiro-cli 非零退出）：失败评论同样要带
+CASE_TWEAK=tweak_real_binary run_case realbinfail MOCK_KIRO_FAIL=1
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "真二进制 + 评审失败：退出码非零"
+assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "真二进制 + 评审失败：失败评论也带未覆盖说明"
+# 行内档的 notice 仍**不**进降级评论（15-fix4 #3 的归属不变）
+assert_not_contains "$(posted_comment "$OUT")" "全部问题都归入未定位" "真二进制 + 评审失败：分桶类 notice 不进失败评论"
+
 # 正控：普通文本 MR 两类都是 0，不出任何二进制相关说明（不误报）
 run_case nobinary
 assert_rc "$RC" 0 "无二进制：评审正常完成"

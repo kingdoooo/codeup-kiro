@@ -96,18 +96,36 @@ review_diff_attr_scan() {
 REVIEW_DIFF_BIN_TEXTLIKE=0; REVIEW_DIFF_BIN_OPAQUE=0
 REVIEW_DIFF_BIN_CTL_PERMILLE_MAX="${REVIEW_DIFF_BIN_CTL_PERMILLE_MAX:-50}"   # 控制字节 ≤ 50‰ 判 textlike
 REVIEW_DIFF_BIN_SAMPLE_BYTES="${REVIEW_DIFF_BIN_SAMPLE_BYTES:-8000}"        # 与 git 自己的判定窗口同宽
-# 单文件 --text patch 的控制字节千分比 → stdout 整数；rc 1 = git 失败
+# 单文件 --text patch 的控制字节千分比 → stdout 整数；rc 1 = git 真的失败
+# **样本必须落盘、不能进 bash 变量**（CodeX 2026-09-12 复审 P1，两条独立缺陷，都已复现）：
+#   ① 命令替换 `$(…)` **丢弃 NUL 字节**——而 NUL 正是这里要数的那个字节。32 KiB 全零文件因此算出 0‰、
+#      被判 textlike、整轮强制 --text，32768 个原始 NUL 直接进模型 stdin，正好违背「真二进制不展开」的设计目标。
+#   ② `git … | head -c N` 在 patch 超过管道缓冲区时让 git 收到 SIGPIPE、退出码 141，而脚本是 `set -o pipefail`：
+#      整条管道 141 → 旧写法的 `|| return 1` 把它当成 git 失败 → 第 4.0b 步 die_review → **一个普通大图片就能让
+#      整次评审失败**（128 KiB 全零文件复现：git rc=141、scan rc=1、评审 rc=1）。
+# 做法：git 的退出码单独写进文件（它不写管道，不会跟着被 SIGPIPE 打断），样本经 head 截断后落盘，
+# 计数用 tr/wc 直接读文件——tr 与 wc 都能正确处理 NUL。git 的 141 是**预期**的（截断是我们主动的），
+# 别的非零才是真错误，仍然 return 1。
 _diff_ctl_permille() {
-  local base="$1" head="$2" path="$3" patch win ctl
+  local base="$1" head="$2" path="$3" sample rcf win ctl rc_git
+  sample=$(mktemp) || return 1
+  rcf=$(mktemp) || { rm -f "$sample"; return 1; }
   # 显式 --text：本函数要的是「如果按文本比会看到什么」，不能受 REVIEW_DIFF_FORCE_TEXT 影响（它可能已被属性扫描置 1）
-  patch=$(git -c core.quotePath=false -c diff.external= -c diff.noprefix=false -c diff.mnemonicPrefix=false \
-            -c diff.relative=false -c color.ui=never \
-            diff --no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --text \
-            --no-renames "$base" "$head" -- ":(top,literal)${path}" \
-          | head -c "$REVIEW_DIFF_BIN_SAMPLE_BYTES") || return 1
-  win=$(printf '%s' "$patch" | wc -c | tr -d ' ')
-  [[ "$win" =~ ^[0-9]+$ && "$win" -gt 0 ]] || { printf '0'; return 0; }   # 空 patch（只改模式）没有可疑内容
-  ctl=$(printf '%s' "$patch" | LC_ALL=C tr -d '\11\12\15\40-\176\200-\377' | wc -c | tr -d ' ')
+  { git -c core.quotePath=false -c diff.external= -c diff.noprefix=false -c diff.mnemonicPrefix=false \
+        -c diff.relative=false -c color.ui=never \
+        diff --no-color --no-ext-diff --no-textconv --src-prefix=a/ --dst-prefix=b/ --text \
+        --no-renames "$base" "$head" -- ":(top,literal)${path}"
+    printf '%s' "$?" > "$rcf"
+  } 2>/dev/null | head -c "$REVIEW_DIFF_BIN_SAMPLE_BYTES" > "$sample" || true
+  rc_git=$(cat "$rcf" 2>/dev/null || true); rm -f "$rcf"
+  case "$rc_git" in
+    0|141) ;;                                     # 0 = patch 读完；141 = 我们主动截断，git 收 SIGPIPE（预期）
+    *) rm -f "$sample"; return 1 ;;               # 别的非零：git 真的失败了
+  esac
+  win=$(wc -c < "$sample" | tr -d ' ')
+  if ! [[ "$win" =~ ^[0-9]+$ ]] || [[ "$win" -le 0 ]]; then rm -f "$sample"; printf '0'; return 0; fi   # 空 patch（只改模式）没有可疑内容
+  ctl=$(LC_ALL=C tr -d '\11\12\15\40-\176\200-\377' < "$sample" | wc -c | tr -d ' ')
+  rm -f "$sample"
   [[ "$ctl" =~ ^[0-9]+$ ]] || return 1
   printf '%s' $(( ctl * 1000 / win ))
 }

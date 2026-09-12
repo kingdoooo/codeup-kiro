@@ -186,8 +186,29 @@ assert_not_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-
 MUT_TWEAK=tweak_realbin_m run_case m-cx-nul2-control "$ROOT"
 assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-nul2 对照：原实现在汇总里声明了未覆盖"
 
+# --- M-cx-nul3（CodeX 2026-09-12 复审 P1）：采样器把样本放回 bash 变量 → 命令替换吞掉 NUL → 全零文件被判 textlike ---
+# 观测：32 KiB 全零文件不再进 opaque 桶、汇总没有「未覆盖」说明，而是整轮强制 --text 把原始字节送进模型 stdin。
+pkg=$(make_mutant m-cx-nul3-sampler-nul 's#^  win=\$(wc -c < "\$sample" | tr -d . .)$#  LC_ALL=C tr -d "\\000" < "$sample" > "$sample.x" \&\& mv "$sample.x" "$sample"; win=$(wc -c < "$sample" | tr -d " ")#' scripts/lib/diff-compress.sh)
+tweak_zeros_m() { python3 -c "open('zeros.bin','wb').write(b'\x00'*32768)"; git add -A && git commit -qm zeros; }
+MUT_TWEAK=tweak_zeros_m run_case m-cx-nul3 "$pkg"
+assert_rc "$RC" 0 "M-cx-nul3：变异体仍能跑完"
+assert_not_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-nul3：全零文件没进 opaque 桶——端到端「32 KiB 全零判 opaque」断言会失败"
+assert_contains "$OUT" "整轮强制 --text" "M-cx-nul3：反而被判 textlike、把原始字节送进模型"
+MUT_TWEAK=tweak_zeros_m run_case m-cx-nul3-control "$ROOT"
+assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-nul3 对照：原实现判 opaque 并在汇总里点名"
+assert_not_contains "$OUT" "整轮强制 --text" "M-cx-nul3 对照：原实现不强制文本"
+
+# --- M-cx-deg（CodeX 2026-09-12 复审 P1）：降级 / 失败评论退回只传 REVIEW_NOTICE → 二进制未覆盖说明丢在降级路径上 ---
+pkg=$(make_mutant m-cx-deg-notice 's|--notice "$(degrade_notice)"|--notice "$REVIEW_NOTICE"|g')
+MUT_TWEAK=tweak_realbin_m run_case m-cx-deg "$pkg" MOCK_KIRO_NO_MARKER=1
+assert_rc "$RC" 0 "M-cx-deg：变异体仍以 0 退出（静默）"
+assert_contains "$OUT" "其改动未被评审（已写进汇总）" "M-cx-deg：日志照旧声称已写进汇总"
+assert_not_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-deg：降级评论丢了未覆盖说明——端到端组合用例会失败"
+MUT_TWEAK=tweak_realbin_m run_case m-cx-deg-control "$ROOT" MOCK_KIRO_NO_MARKER=1
+assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-deg 对照：原实现的降级评论带未覆盖说明"
+
 # --- M-cx-ver（CodeX 2026-09-11 复审 P1）：版本取法退回只锚定前缀 → 带后缀的预发布版本冒用名单里的已探测版本 ---
-pkg=$(make_mutant m-cx-ver-prefix 's|kiro-cli\[\[:space:\]\]+(\[0-9\]+(\\\.\[0-9\]+)+)(\[\[:space:\]\]\|\$)|kiro-cli[[:space:]]+([0-9]+(\\.[0-9]+)+)|' scripts/lib/kiro-agent.sh)
+pkg=$(make_mutant m-cx-ver-prefix 's|\^\[\[:space:\]\]\*kiro-cli\[\[:space:\]\]+(\[0-9\]+(\\\.\[0-9\]+)+)\[\[:space:\]\]\*\$|kiro-cli[[:space:]]+([0-9]+(\\.[0-9]+)+)|' scripts/lib/kiro-agent.sh)
 run_case m-cx-ver "$pkg" MOCK_KIRO_VERSION=2.21.3-rc.1
 assert_rc "$RC" 0 "M-cx-ver：2.21.3-rc.1 被截成 2.21.3、当名单内放行——端到端「未知形态一律拒绝」断言会失败"
 assert_contains "$OUT" "在 P1-15 探测过的版本名单内" "M-cx-ver：日志把未探测的预发布版本当成已探测版本"
@@ -449,14 +470,14 @@ assert_eq "$([[ -f "$CASE/work/src/x/.KIRO" ]] && echo kept || echo gone)" "kept
 assert_eq "$([[ -d "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "gone" "M5u：src/.Kiro/ 目录仍被删（变异只动了类型）"
 
 # --- M5v：降级评论不再接 --notice → 版本 notice 只在日志、评论里没有（15-fix3 #3）---
-pkg=$(make_mutant m5v-degraded-notice '/review_render_degraded --text/s/ --notice "\$REVIEW_NOTICE"//')
+pkg=$(make_mutant m5v-degraded-notice '/review_render_degraded --text/s/ --notice "\$(degrade_notice)"//')
 run_case m5v "$pkg" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
 assert_rc "$RC" 0 "M5v：变异体仍能跑完"
 assert_contains "$OUT" "未经 P1-15 探测" "M5v：日志仍有警告"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5v：降级评论丢了 notice——端到端「降级评论也带版本 notice」断言会失败"
 
 # --- M5ad：die_review 不再给失败评论传 --notice → kiro-cli 非零退出 + 未探测版本时失败评论没有版本告警（15-fix4 #3）---
-pkg=$(make_mutant m5ad-failure-notice '/^      --notice "\$REVIEW_NOTICE" \\$/d')
+pkg=$(make_mutant m5ad-failure-notice '/^      --notice "\$(degrade_notice)" \\$/d')
 run_case m5ad "$pkg" MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5ad：仍是失败"
 assert_contains "$OUT" "未经 P1-15 探测" "M5ad：日志仍有警告"

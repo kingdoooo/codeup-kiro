@@ -610,7 +610,9 @@ assert_eq "$(_kiro_cli_version_pick $'warn: A new version (2.30.0) of kiro-cli i
 assert_eq "$(_kiro_cli_version_pick 'A new version (2.30.0) of kiro-cli is available')" "" "版本提取：只有升级提示、没有「kiro-cli <版本>」→ 空"
 assert_eq "$(_kiro_cli_version_pick 'kiro-cli   2.21')" "2.21" "版本提取：多个空白、两段版本号"
 assert_eq "$(_kiro_cli_version_pick 'kiro-cli version 2.21.1')" "" "版本提取：kiro-cli 与数字之间夹了别的词 → 不认（形态未知就当未知，宁可 notice）"
-assert_eq "$(_kiro_cli_version_pick 'mykiro-cli 9.9.9 kiro-cli 2.21.1')" "2.21.1" "版本提取：程序名前面粘着字母的不算"
+# 整行锚定之后：这一行里除了 `kiro-cli <版本>` 还有别的字 → 整行都不认（CodeX 2026-09-12 复审 P2 把判据从
+# 「token 前后」收紧到「整行」，比原先更保守，与「形态未知就当未知」一致）
+assert_eq "$(_kiro_cli_version_pick 'mykiro-cli 9.9.9 kiro-cli 2.21.1')" "" "版本提取：整行里还有别的字 → 不认（含程序名前面粘着字母的情形）"
 assert_eq "$(_kiro_cli_version_pick '')" "" "版本提取：空输入 → 空"
 # 整个 token 必须是数字点串（CodeX 2026-09-11 复审 P1）：原先只锚定前缀，带后缀的版本被截成名单里那个已探测版本，
 # 一个未探测的预发布版本就能冒用它走过版本门，KIRO_ACK_UNTESTED_VERSION 的「逐字等于实际版本」也一起被打穿。
@@ -622,6 +624,15 @@ assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.3_beta')" "" "版本提取：
 assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.3.')" "" "版本提取：结尾多一个点 → 空"
 assert_eq "$(_kiro_cli_version_pick $'kiro-cli 2.21.3\n其它行')" "2.21.3" "版本提取：版本后面就是行尾 → 仍取到（收尾是空白或行尾锚，不是「非数字点」）"
 assert_eq "$(_kiro_cli_version_pick 'kiro-cli 2.21.3  ')" "2.21.3" "版本提取：版本后面是空白 → 仍取到"
+# 升级提示写成自然文案时不得冒用（CodeX 2026-09-12 复审 P2）：修复前从整段输出取第一个匹配 → 返回 2.21.3，
+# 而实际装的是 9.9.9（未探测），于是未探测版本走过了版本门。整行锚定之后取到的是真正的已装版本。
+assert_eq "$(_kiro_cli_version_pick $'warning: a new kiro-cli 2.21.3 is available\nkiro-cli 9.9.9')" "9.9.9" \
+  "版本提取：升级提示里的「kiro-cli 2.21.3」不算，取整行匹配的已装版本 9.9.9"
+assert_eq "$(_kiro_cli_version_pick $'kiro-cli 2.21.1\nkiro-cli 9.9.9')" "" \
+  "版本提取：两行给出不同版本 → 当未知（不在候选里猜一个）"
+assert_eq "$(_kiro_cli_version_pick $'kiro-cli 2.21.1\nkiro-cli 2.21.1')" "2.21.1" \
+  "版本提取：多行但版本一致 → 取该版本"
+assert_eq "$(_kiro_cli_version_pick $'  kiro-cli 2.21.1  \n')" "2.21.1" "版本提取：整行首尾空白允许"
 # 真跑一次替身：stderr 先打升级提示 → 取已装版本；stderr 也打版本 → 回退到 stderr；退出码非零 → 返回 1 且带退出码
 mkdir -p "$tmp/vh/.kiro-mock"; mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_WARN=1
 TB=""; command -v timeout >/dev/null && TB=timeout; [[ -z "$TB" ]] && command -v gtimeout >/dev/null && TB=gtimeout

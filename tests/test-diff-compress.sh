@@ -467,6 +467,43 @@ rc=0; review_diff_binary_scan "$BASE8" "$HEAD8" || rc=$?
 assert_rc "$rc" 0 "bin-scan 纯二进制: 返回 0"
 assert_eq "${REVIEW_DIFF_BIN_TEXTLIKE}/${REVIEW_DIFF_BIN_OPAQUE}" "0/1" "bin-scan 纯二进制: textlike 0（不强制文本）、opaque 1（写进汇总说未覆盖）"
 
+# --- 采样器的两条边界（CodeX 2026-09-12 复审 P1，都在修复前复现过）---
+# ① 旧写法 `patch=$(git … | head -c N)` 的命令替换**丢弃 NUL 字节**——而 NUL 正是要数的那个字节：
+#    32 KiB 全零文件算出 0‰、被判 textlike、整轮强制 --text，32768 个原始 NUL 直接进模型。
+# ② `head -c` 读满就退出 → git 收 SIGPIPE → pipefail 下整条管道 141 → 旧写法当成 git 失败 →
+#    第 4.0b 步 die_review，**一个普通大图片就能让整次评审失败**。
+cd "$tmp" && git init -q repo10 && cd repo10
+git config user.email t@t && git config user.name t
+printf 'seed\n' > seed.txt
+git add -A && git commit -qm base10
+BASE10=$(git rev-parse HEAD)
+python3 -c "open('z32.bin','wb').write(b'\x00'*32768)"
+python3 -c "open('z128.bin','wb').write(b'\x00'*131072)"
+printf '#!/bin/bash\n# n:\000 x\necho new\n' > nul10.sh
+git add -A && git commit -qm hostile10
+HEAD10=$(git rev-parse HEAD)
+z32=$(_diff_ctl_permille "$BASE10" "$HEAD10" z32.bin)
+z128=$(_diff_ctl_permille "$BASE10" "$HEAD10" z128.bin)
+nul10=$(_diff_ctl_permille "$BASE10" "$HEAD10" nul10.sh)
+assert_eq "$([[ "$z32" -gt "$REVIEW_DIFF_BIN_CTL_PERMILLE_MAX" ]] && echo opaque || echo textlike)" "opaque" \
+  "采样器 NUL：32 KiB 全零判 opaque（千分比 ${z32}）——命令替换吞掉 NUL 时这里是 0‰、会误判 textlike"
+assert_eq "$([[ "$z128" -gt "$REVIEW_DIFF_BIN_CTL_PERMILLE_MAX" ]] && echo opaque || echo textlike)" "opaque" \
+  "采样器 NUL：128 KiB 全零判 opaque（千分比 ${z128}）"
+assert_eq "$([[ "$nul10" -le "$REVIEW_DIFF_BIN_CTL_PERMILLE_MAX" ]] && echo textlike || echo opaque)" "textlike" \
+  "采样器：只掺一个 NUL 的小脚本仍判 textlike（千分比 ${nul10}）"
+# 128 KiB 超过管道缓冲区：采样与扫描都不得因 SIGPIPE 报失败
+rc=0; _diff_ctl_permille "$BASE10" "$HEAD10" z128.bin >/dev/null || rc=$?
+assert_rc "$rc" 0 "采样器 SIGPIPE：128 KiB 文件（head 提前退出、git 收 141）不算 git 失败"
+REVIEW_DIFF_BIN_TEXTLIKE=9; REVIEW_DIFF_BIN_OPAQUE=9
+rc=0; review_diff_binary_scan "$BASE10" "$HEAD10" || rc=$?
+assert_rc "$rc" 0 "bin-scan 大文件：扫描返回 0（不再被 pipefail 击穿）"
+assert_eq "${REVIEW_DIFF_BIN_TEXTLIKE}/${REVIEW_DIFF_BIN_OPAQUE}" "1/2" "bin-scan 大文件：一个 textlike（nul10.sh）+ 两个 opaque（两个全零文件）"
+# 正控：git 真的失败（base 不存在）时仍 return 1，别把「预期的 141」和「真错误」混成一类
+rc=0; _diff_ctl_permille deadbeefdeadbeefdeadbeefdeadbeefdeadbeef "$HEAD10" z32.bin >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "采样器正控：git 真错误（base 不存在）仍返回 1"
+rc=0; review_diff_binary_scan deadbeefdeadbeefdeadbeefdeadbeefdeadbeef "$HEAD10" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "bin-scan 正控：git 真错误时返回 1（调用方据此 die_review）"
+
 # 文件名含 Tab/换行时扫描仍正确（-z 全程 NUL 分隔）
 cd "$tmp" && git init -q repo9 && cd repo9
 git config user.email t@t && git config user.name t

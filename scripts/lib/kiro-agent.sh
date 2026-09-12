@@ -240,8 +240,21 @@ KIRO_CLI_VERSION_ERROR=""
 # 与既有取舍一致：`kiro-cli version 2.21.1`（中间夹词）本就判「形态未知 → 当未知」，带后缀同属未知形态，
 # 一律返回空 → 上层按「版本号无法解析」**拒绝评审**（连 break-glass 也不放行未知版本）。
 # 后随字符只允许空白或行尾：用 `[[:space:]]|$` 收尾，别写成 `[^0-9.]`——那样 `2.21.3-rc` 仍会匹配到 `2.21.3` 加一个 `-`。
+# **按行匹配、整行必须就是 `kiro-cli <版本>`**（CodeX 2026-09-12 复审 P2）：只约束 token 尾部还不够——
+# 从整段输出里取第一个匹配，升级提示只要写成自然文案就能冒用名单内版本。复现：
+#   _kiro_cli_version_pick $'warning: a new kiro-cli 2.21.3 is available\nkiro-cli 9.9.9'  →  2.21.3
+# 实际装的是 9.9.9（未探测），却拿到了名单内的 2.21.3。现在两条规则：
+#   · 只认「首尾空白 + kiro-cli + 空白 + 数字点串 + 首尾空白」的整行；行里还有别的字就是未知形态；
+#   · 命中 0 行、或命中多行且版本号不一致 → 一律当未知（返回空）。宁可让上层按「版本号无法解析」拒绝，
+#     也不在两个候选里猜一个——猜错的方向恰好是「把可用版本当成已装版本」。
 _kiro_cli_version_pick() {
-  if [[ "$1" =~ (^|[^A-Za-z0-9_-])kiro-cli[[:space:]]+([0-9]+(\.[0-9]+)+)([[:space:]]|$) ]]; then printf '%s' "${BASH_REMATCH[2]}"; fi
+  local line seen="" n=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*kiro-cli[[:space:]]+([0-9]+(\.[0-9]+)+)[[:space:]]*$ ]] || continue
+    if [[ "$n" == "0" ]]; then seen="${BASH_REMATCH[1]}"; n=1
+    elif [[ "$seen" != "${BASH_REMATCH[1]}" ]]; then n=2; fi
+  done <<< "${1-}"
+  [[ "$n" == "1" ]] && printf '%s' "$seen"
   return 0
 }
 kiro_cli_version() {
