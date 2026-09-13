@@ -53,6 +53,31 @@ rc=0; err=$(env -i PATH="$tmp/nokiro" HOME="$tmp/home" bash "$PROBE" 2>&1) || rc
 assert_eq "$rc" "5" "缺 kiro-cli：退出码 5（环境准备失败，不是门禁 FAIL 的 1）"
 assert_contains "$err" "缺少 kiro-cli" "缺 kiro-cli：报错点名"
 
+# --- 身份（平台 + 版本）确定不了 → 退出码 5（CodeX 2026-09-13 复审 P1）---
+# 探测的产物是「这个元组通过了门禁」这一条发布证据。没有元组的 rc 0 是一份不能绑定到任何东西的「通过」，
+# 只看退出码的人 / 自动化会拿它当有效证据。所以身份要在跑任何**耗额度**用例之前就确定，缺了按「环境准备失败」退 5。
+# 假 kiro-cli 报的是 `kiro-cli 0.0.0-fake`——整行锚定之后解析不出唯一版本，正好用来测这条。
+rc=0; err=$(env PATH="$tmp/fakebin:$PATH" HOME="$tmp/home" PROBE_KEEP_DIR="$tmp/keep-noident" bash "$PROBE" 2>&1) || rc=$?
+assert_eq "$rc" "5" "版本号解析不出（kiro-cli 0.0.0-fake）：退出码 5（环境准备失败），不是跑完再警告"
+assert_contains "$err" "版本号解析不出" "版本未知：报错点名"
+assert_not_contains "$err" "全部 PASS" "版本未知：绝不打「全部 PASS」"
+assert_not_contains "$err" "走主方案" "版本未知：绝不打「走主方案」"
+assert_eq "$([[ -e "$tmp/calls" ]] && echo called || echo none)" "none" "版本未知：零次 kiro-cli chat 调用（没烧额度）"
+# 版本能解析时不该被这条挡住（正控：换一个报合法版本的假 kiro-cli，就会走到后面的环境准备而不是「版本未知」）
+mkdir -p "$tmp/fakebin2"
+cat > "$tmp/fakebin2/kiro-cli" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  whoami) echo "Logged in with fake"; exit 0 ;;
+  --version) echo "kiro-cli 9.9.9"; exit 0 ;;
+  *) echo "chat $*" >> "${FAKE_KIRO_CALLS:-/dev/null}"; exit 0 ;;
+esac
+SH
+chmod +x "$tmp/fakebin2/kiro-cli"
+rc=0; err=$(env PATH="$tmp/fakebin2:$PATH" HOME="$tmp/home2" PROBE_KEEP_DIR="$tmp/keep-ident" bash "$PROBE" 2>&1) || rc=$?
+assert_not_contains "$err" "版本号解析不出" "正控：版本合法时不再报「版本未知」"
+assert_contains "$err" "本次探测身份：" "正控：版本合法时打出「平台:版本」身份行"
+
 # ============ 票 18 ④：参考 YAML 里 MR_TARGET_BRANCH 用 `:=`（envs 注入不被覆盖）============
 # 这段是**静态**断言（不跑 Flow）：YAML 的 run 块是一段 shell，抽出来做语法检查与两条语义检查。
 YAML="$ROOT/pipeline/flow-pipeline.yaml"

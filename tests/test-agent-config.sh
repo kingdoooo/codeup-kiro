@@ -655,13 +655,30 @@ pk=$(kiro_platform_key); pk_rc=$?
 assert_rc "$pk_rc" 0 "平台键：本机取得到"
 assert_eq "$([[ "$pk" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] && echo ok)" "ok" "平台键形态是 <os>/<arch> 且已小写：${pk}"
 assert_eq "$pk" "$(printf '%s/%s' "$(uname -s | tr 'A-Z' 'a-z')" "$(uname -m | tr 'A-Z' 'a-z')")" "平台键 = 小写 uname -s / uname -m（不做跨 OS 归一映射）"
-# uname 跑不起来 / 输出形状不认时必须 rc 1（调用方据此拒绝运行），不能猜一个
-mkdir -p "$tmp/baduname"; printf '#!/bin/sh\nexit 1\n' > "$tmp/baduname/uname"; chmod +x "$tmp/baduname/uname"
-assert_eq "$(PATH="$tmp/baduname:$PATH" bash -c 'source "$1"; kiro_platform_key >/dev/null 2>&1; echo $?' _ "$LIB")" "1" \
-  "平台键：uname 退出非零 → 返回 1（调用方拒绝运行）"
-mkdir -p "$tmp/junkuname"; printf '#!/bin/sh\necho "Linux (x86_64) [weird]"\n' > "$tmp/junkuname/uname"; chmod +x "$tmp/junkuname/uname"
-assert_eq "$(PATH="$tmp/junkuname:$PATH" bash -c 'source "$1"; kiro_platform_key >/dev/null 2>&1; echo $?' _ "$LIB")" "1" \
-  "平台键：uname 输出含空白 / 括号等不认的字符 → 返回 1（形态未知就当未知）"
+# 形状判定（_kiro_platform_key_from）：不认的形态一律 rc 1，调用方据此拒绝运行，不猜一个
+assert_eq "$(_kiro_platform_key_from Linux x86_64)" "linux/x86_64" "平台键判定：大小写归一"
+assert_eq "$(_kiro_platform_key_from Darwin arm64)" "darwin/arm64" "平台键判定：darwin/arm64"
+for bad in 'Linux (x86_64)|x86_64' 'Linux|x86 64' 'Linux|' '|x86_64' 'Li nux|x86_64' 'Linux|x86_64/extra' 'Linux;rm|x86_64'; do
+  os=${bad%%|*}; ar=${bad#*|}
+  assert_eq "$(_kiro_platform_key_from "$os" "$ar" >/dev/null 2>&1; echo $?)" "1" \
+    "平台键判定：不认的形态 [${os}]/[${ar}] → 返回 1"
+done
+# **取值必须不看调用者 PATH**（CodeX 2026-09-13 复审 P1）：主脚本从第 4 步起 cwd 是不受信的业务仓库，
+# PATH 里有相对目录时 MR 提交一个 relbin/uname 就能把平台伪造成任意名单内元组。kiro_platform_key 用 command -p，
+# 所以敌对 PATH（相对**或**绝对）下取到的都必须还是真实平台。
+real_plat=$(kiro_platform_key)
+mkdir -p "$tmp/evilbin"
+printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux ;; esac\n' > "$tmp/evilbin/uname"
+printf '#!/bin/sh\ncat\n' > "$tmp/evilbin/tr"   # 假 tr：不做小写转换（用来证明连转换这一步也没走普通 PATH）
+chmod +x "$tmp/evilbin/uname" "$tmp/evilbin/tr"
+assert_eq "$(PATH="$tmp/evilbin:$PATH" bash -c 'source "$1"; kiro_platform_key' _ "$LIB")" "$real_plat" \
+  "平台键：PATH 前面放了假 uname / 假 tr（绝对目录）仍取到真实平台 ${real_plat}"
+assert_eq "$(cd "$tmp" && PATH="evilbin:$PATH" bash -c 'source "$1"; kiro_platform_key' _ "$LIB")" "$real_plat" \
+  "平台键：PATH 前面放了**相对**目录里的假 uname 仍取到真实平台（command -p 不看调用者 PATH）"
+# 正控：不走 command -p 的写法确实会被伪造——证明上面两条不是空转
+# 假 uname 被用上（Linux/x86_64 而不是本机的 darwin/arm64），假 tr 也被用上（没有小写化）——两个工具都被顶替了
+assert_eq "$(cd "$tmp" && PATH="evilbin:$PATH" bash -c 'echo "$(uname -s | tr "A-Z" "a-z")/$(uname -m | tr "A-Z" "a-z")"')" "Linux/x86_64" \
+  "平台键正控：裸 uname/tr 在敌对 PATH 下确实被顶替（假 uname 报 Linux/x86_64、假 tr 连小写化都没做）"
 # 真跑一次替身：stderr 先打升级提示 → 取已装版本；stderr 也打版本 → 回退到 stderr；退出码非零 → 返回 1 且带退出码
 mkdir -p "$tmp/vh/.kiro-mock"; mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_WARN=1
 TB=""; command -v timeout >/dev/null && TB=timeout; [[ -z "$TB" ]] && command -v gtimeout >/dev/null && TB=gtimeout

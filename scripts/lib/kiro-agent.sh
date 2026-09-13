@@ -241,18 +241,31 @@ KIRO_CLI_VERSION_ERROR=""
 # rc 1 = uname 不可用 / 输出不是预期形状 → 调用方必须**拒绝运行**（与「版本号解析不出就拒绝」同一取舍）。
 # **不含 libc 变体（glibc/musl）与发行版**：那一维靠运维固定执行器镜像 digest 来控（setup-guide 第 7 节第 6 项），
 # 不进这个键——把 glibc 小版本编进键，等于每次基础镜像打补丁都让评审停摆，那是另一个可用性坑。
-kiro_platform_key() {
+# **uname 与 tr 都走 `command -p`**（CodeX 2026-09-13 复审 P1）：主脚本从第 4 步起 cwd 就是**不受信的业务仓库**，
+# 而平台键是安全判定的输入。PATH 里只要有一个相对目录（或空条目 = 当前目录），MR 作者提交一个 relbin/uname 就能把平台
+# 伪造成任意名单内的元组，整个平台门被绕过（2026-09-13 端到端复现：假 uname 报 Linux/x86_64 → 日志「在名单内」、Kiro 启动、
+# 汇总无 notice）。`command -p` 用 POSIX 规定的默认 PATH 找标准工具，不看调用者的 PATH——小写转换那一步同样要保护，
+# 否则换成伪造的 tr 一样能改结果。（另有一道更宽的门：kiro-review.sh 第 1.7 步拒绝 PATH 里的相对条目。）
+# 纯判定部分单独一个函数：`command -p` 连 shell 函数与别名都绕过（这正是它的价值），所以「uname 输出形状不认」
+# 这条分支没法靠打桩 uname 去测。拆出来之后：判定逻辑可单测，取值逻辑靠「敌对 PATH 下仍拿到真实平台」来断言。
+# 用法：_kiro_platform_key_from <os> <arch> → stdout 归一后的键；rc 1 = 形状不认
+_kiro_platform_key_from() {
   local os arch
-  os=$(uname -s 2>/dev/null) || return 1
-  arch=$(uname -m 2>/dev/null) || return 1
-  os=$(printf '%s' "$os" | tr 'A-Z' 'a-z'); arch=$(printf '%s' "$arch" | tr 'A-Z' 'a-z')
+  os=$(printf '%s' "${1-}" | command -p tr 'A-Z' 'a-z') || return 1
+  arch=$(printf '%s' "${2-}" | command -p tr 'A-Z' 'a-z') || return 1
   [[ "$os" =~ ^[a-z0-9_.-]+$ && "$arch" =~ ^[a-z0-9_.-]+$ ]] || return 1
   printf '%s/%s' "$os" "$arch"
+}
+kiro_platform_key() {
+  local os arch
+  os=$(command -p uname -s 2>/dev/null) || return 1
+  arch=$(command -p uname -m 2>/dev/null) || return 1
+  _kiro_platform_key_from "$os" "$arch"
 }
 # 按程序名锚定取版本：程序名前面不能粘着标识符字符（mykiro-cli 9.9.9 不算），后面只能是空白 + 数字点串；取第一个匹配。
 # **整个 token 都必须是数字点串**（CodeX 2026-09-11 复审 P1）：原先只锚定前缀，于是 `kiro-cli 2.21.3-rc.1`、
 # `kiro-cli 2.21.3evil`、`2.21.3+build7`、`2.21.3_beta` 全被截成 `2.21.3`，一个未探测的预发布版本就能冒用名单里的
-# 已探测版本走过版本门；`KIRO_ACK_UNTESTED_VERSION=9.9.9` 也能放行实际是 `9.9.9-rc.1` 的 CLI，把「逐字等于实际版本」
+# 已探测版本走过版本门；当时的 `KIRO_ACK_UNTESTED_VERSION=9.9.9`（现已废弃，改为绑元组的 KIRO_ACK_UNTESTED_TARGET）也能放行实际是 `9.9.9-rc.1` 的 CLI，把「逐字等于实际版本」
 # 这个明写的契约打穿（2026-09-11 复现，三种形态都放行且真的跑到了 chat）。
 # 与既有取舍一致：`kiro-cli version 2.21.1`（中间夹词）本就判「形态未知 → 当未知」，带后缀同属未知形态，
 # 一律返回空 → 上层按「版本号无法解析」**拒绝评审**（连 break-glass 也不放行未知版本）。

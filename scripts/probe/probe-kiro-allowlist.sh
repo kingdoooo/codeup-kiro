@@ -42,7 +42,7 @@
 #   2 = 参数错（PROBE_CASES 含未知用例名；零调用）
 #   3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过 kiro_agent_selfcheck）——探测本身不可信，不是 allowedPaths 的结论
 #   4 = 门禁用例未全部运行（PROBE_CASES 子集），已跑的全 PASS，不作发布判定
-#   5 = 环境准备失败（缺 kiro-cli/jq/timeout、未登录、主方案探测 agent 装不上、前置夹具不成立）
+#   5 = 环境准备失败（缺 kiro-cli/jq/timeout、未登录、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
 # PROBE_CASES="T1 T2 T4"（空格分隔）只跑子集；默认 = 门禁十二个 + T5 正控（13 次调用）；T6/T7 是 INFO、结论已写在文件头，
 #   要跑得显式列出（15-fix2 #9）。每个用例一次调用（约 0.3 credit、15–55 s）。
 set -euo pipefail
@@ -163,7 +163,18 @@ echo "[probe] env -i 许可清单变量：$(tr '\n' ' ' < "$KEEP/env-allowlist-n
 # 运行目录用 $KIRO_CWD（空目录）而不是 $WORK（票 18 ⑫）：生产的四处 kiro-cli 调用都在空目录下跑，--version 也是其中一处；
 # $WORK 里有 agent 定义与夹具，cwd 相对发现面（.kiro/settings/cli.json 之类）与生产不一致时，探到的行为就不是生产的行为。
 kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" || { echo "${KIRO_CLI_VERSION_ERROR}（环境准备失败，退出码 5）" >&2; exit 5; }
-echo "[probe] kiro-cli 版本：${KIRO_CLI_VERSION:-未知（--version 输出里没有「kiro-cli <版本>」形态）}" >&2
+# **身份（平台 + 版本）必须在跑任何耗额度用例之前就确定**（CodeX 2026-09-13 复审 P1）：
+# 探测的产物是「这个元组通过了门禁」这一条发布证据，没有元组的 rc 0 是一份不能绑定到任何东西的「通过」——
+# 自动化或只看退出码的人会拿它当有效证据。原先平台失败被 `|| true` 吞掉、版本为空也不中止（kiro_cli_version 在
+# 「命令跑通但版本解析不出」时返回 0），最后只在结尾打一行警告、照样以 0 退出。改成三项缺一即「环境准备失败」退 5，
+# 于是 summary.json 里 target="" 在**成功**运行中成为不可达状态。
+PROBE_PLATFORM=$(kiro_platform_key) \
+  || { echo "[probe] 无法确定平台键（uname 不可用或输出形状不认）——探测结论要绑定「平台 + 版本」，平台未知就不是有效证据（环境准备失败，退出码 5）" >&2; exit 5; }
+[[ -n "$KIRO_CLI_VERSION" ]] \
+  || { echo "[probe] kiro-cli 版本号解析不出（--version 输出里没有唯一的一行「kiro-cli X.Y.Z」）——同上，版本未知就不是有效证据（环境准备失败，退出码 5）" >&2; exit 5; }
+PROBE_TARGET="${PROBE_PLATFORM}:${KIRO_CLI_VERSION}"
+[[ -n "$PROBE_TARGET" ]] || { echo "[probe] 元组为空（内部错误，环境准备失败，退出码 5）" >&2; exit 5; }
+echo "[probe] 本次探测身份：${PROBE_TARGET}（平台键 ${PROBE_PLATFORM}，kiro-cli ${KIRO_CLI_VERSION}）" >&2
 
 # ---------- 运行与判定 ----------
 # run_case <名> <trust|notrust> <fullenv|allowenv> <提示词>：事件流 $KEEP/<名>.jsonl，stderr $KEEP/<名>.err；返回 kiro 退出码
@@ -399,8 +410,6 @@ GATE_MISSING=""; for c in $GATE_CASES; do [[ "$RAN" == *" $c "* ]] || GATE_MISSI
 # platform / target 两个字段（CodeX 2026-09-13 复审 P1）：探测结论只对「平台 + 版本」成立，所以人工要抄进
 # KIRO_TESTED_TARGETS 的**就是** target 这一个字符串，不再让人自己拼——拼错的方向恰好是「把别的平台的证据当成本平台的」。
 # 平台键由 kiro_platform_key 算（与门禁同一份实现）；算不出就留空，此时 target 也留空、下面的提示行会说清。
-PROBE_PLATFORM=$(kiro_platform_key 2>/dev/null || true)
-PROBE_TARGET=""; [[ -n "$PROBE_PLATFORM" && -n "$KIRO_CLI_VERSION" ]] && PROBE_TARGET="${PROBE_PLATFORM}:${KIRO_CLI_VERSION}"
 jq -n --arg ts "$TS" --arg ver "$KIRO_CLI_VERSION" --arg keep "$KEEP" --arg ran "${RAN# }" --arg missing "$GATE_MISSING" \
       --arg plat "$PROBE_PLATFORM" --arg target "$PROBE_TARGET" \
       --argjson fail "$PROBE_FAIL" --argjson inc "$PROBE_INCONCLUSIVE" \
@@ -418,9 +427,6 @@ fi
 if [[ -n "$GATE_MISSING" ]]; then
   echo "[probe] 结论：子集运行（门禁用例缺 ${GATE_MISSING}），已跑的全部 PASS，**不作发布判定**（退出码 4）。" >&2; exit 4
 fi
-if [[ -n "$PROBE_TARGET" ]]; then
-  echo "[probe] 本次探测的平台 + 版本：${PROBE_TARGET}——把这个元组原样加进 scripts/kiro-review.sh 的 KIRO_TESTED_TARGETS。" >&2
-else
-  echo "[probe] 警告：平台键或版本号取不到，无法给出要加进 KIRO_TESTED_TARGETS 的元组（平台=[${PROBE_PLATFORM}] 版本=[${KIRO_CLI_VERSION}]）。" >&2
-fi
+# 到这里 PROBE_TARGET 一定非空（环境准备阶段已经 fail-closed 过）
+echo "[probe] 本次探测的平台 + 版本：${PROBE_TARGET}——把这个元组原样加进 scripts/kiro-review.sh 的 KIRO_TESTED_TARGETS。" >&2
 echo "[probe] 结论：十二个门禁用例全部实际运行且全部 PASS——票 15 走主方案（退出码 0）。" >&2

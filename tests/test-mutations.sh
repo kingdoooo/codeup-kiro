@@ -12,6 +12,7 @@ if ! command -v timeout >/dev/null && ! command -v gtimeout >/dev/null; then
   exit 0
 fi
 ROOT=$(cd .. && pwd)
+HOST_PLAT=$(bash -c 'source "$1"; kiro_platform_key' _ "$ROOT/scripts/lib/kiro-agent.sh")   # 平台键：break-glass 现在绑「平台:版本」元组
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # fixture 模板（票 18 ⑨）：本文件的第一个用例在这里建一次业务库模板，之后每个用例从它 `cp -R` 派生
 # （每用例仍是独立目录树；派生时 work 的 origin 会改指向副本的 origin.git，见 tests/fixture-repo.sh）
@@ -186,21 +187,38 @@ assert_not_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-
 MUT_TWEAK=tweak_realbin_m run_case m-cx-nul2-control "$ROOT"
 assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-nul2 对照：原实现在汇总里声明了未覆盖"
 
-# --- M-cx-plat（CodeX 2026-09-13 复审 P1）：门禁退回「只比版本」→ 只在别的平台探测过的版本照样被判名单内 ---
-# 观测：替身 uname 报 linux/mips64（名单里没有这个平台），而版本在名单里；变异体照跑并打「名单内」日志。
-pkg=$(make_mutant m-cx-plat-version-only 's#\[\[ " \$KIRO_TESTED_TARGETS " == \*" \$KIRO_CLI_TARGET "\* \]\]#[[ " $KIRO_TESTED_TARGETS " == *":$KIRO_CLI_VERSION "* ]]#')
-mkdir -p "$tmp/otherplat_m"
-printf '#!/bin/sh\ncase "$1" in\n  -s) echo Linux ;;\n  -m) echo mips64 ;;\n  *) echo Linux ;;\nesac\n' > "$tmp/otherplat_m/uname"
-chmod +x "$tmp/otherplat_m/uname"
-MPLAT_VER=$(listed_version_for_host)
-run_case m-cx-plat "$pkg" PATH="$tmp/otherplat_m:$PATH" MOCK_KIRO_VERSION="$MPLAT_VER"
-assert_rc "$RC" 0 "M-cx-plat：变异体在没探测过的平台上照跑——端到端「同版本换平台 → 拒绝」断言会失败"
-assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "M-cx-plat：日志把别的平台的证据当成本平台的"
+# --- M-cx-plat（CodeX 2026-09-13 复审 P1）：门禁退回「只比版本」→ 只在别的平台探测过的版本被当成本平台已验证 ---
+# 平台维度没法靠打桩 uname 来测（kiro_platform_key 走 command -p，不看调用者 PATH——那是本轮 P1 的修复），
+# 所以反过来：把名单改成**只含别的平台**的同一个版本，看门禁是否还拒绝。
+# 基线（未变异，只改名单）：本机元组不在名单里 → 必须拒绝。
+pkg=$(make_mutant m-cx-plat-list 's#^KIRO_TESTED_TARGETS=".*"$#KIRO_TESTED_TARGETS="otheros/otherarch:9.9.9"#')
+run_case m-cx-plat-base "$pkg" MOCK_KIRO_VERSION=9.9.9
+assert_nonzero "$RC" "M-cx-plat 基线：名单里只有别的平台的同一个版本 → 拒绝"
+assert_contains "$(posted_comment "$OUT")" "同一个版本换平台不算已验证" "M-cx-plat 基线：失败评论解释平台维度"
+assert_not_contains "$OUT" "开始 Kiro 评审" "M-cx-plat 基线：Kiro 不启动"
+# 再把门禁改成只比版本 → 别的平台的证据被当成本平台的，评审照跑
+mutate_more "$pkg" 's#\[\[ " \$KIRO_TESTED_TARGETS " == \*" \$KIRO_CLI_TARGET "\* \]\]#[[ " $KIRO_TESTED_TARGETS " == *":$KIRO_CLI_VERSION "* ]]#'
+run_case m-cx-plat "$pkg" MOCK_KIRO_VERSION=9.9.9
+assert_rc "$RC" 0 "M-cx-plat：门禁只比版本 → 别的平台的证据被当成本平台的，评审照跑"
+assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "M-cx-plat：日志声称在名单内"
 assert_contains "$OUT" "开始 Kiro 评审" "M-cx-plat：Kiro 在未验证的平台上被启动了"
-run_case m-cx-plat-control "$ROOT" PATH="$tmp/otherplat_m:$PATH" MOCK_KIRO_VERSION="$MPLAT_VER"
-assert_nonzero "$RC" "M-cx-plat 对照：原实现按元组拒绝"
-assert_contains "$(posted_comment "$OUT")" "linux/mips64:${MPLAT_VER}" "M-cx-plat 对照：失败评论点名本次元组"
-assert_not_contains "$OUT" "开始 Kiro 评审" "M-cx-plat 对照：原实现不启动 Kiro"
+
+# --- M-cx-path（CodeX 2026-09-13 复审 P1 的另一半）：删掉第 1.7 步的相对 PATH 拒绝 → 业务库里的假 uname 生效 ---
+# 双变异：① 删掉 PATH 门；② 把平台键的 command -p 退回裸命令（两道防线，单独杀掉任一道都还挡得住——这正是纵深该有的样子）。
+pkg=$(make_mutant m-cx-path-gate 's#^\[\[ -z "\$_bad_path_entries" \]\] \\$#[[ -z "" ]] \\#')
+mutate_more "$pkg" 's#os=$(command -p uname -s 2>/dev/null) || return 1#os=$(uname -s 2>/dev/null) || return 1#; s#arch=$(command -p uname -m 2>/dev/null) || return 1#arch=$(uname -m 2>/dev/null) || return 1#' scripts/lib/kiro-agent.sh
+tweak_evil_uname_m() {
+  mkdir -p relbin
+  printf '#!/bin/sh\ncase "$1" in -s) echo otheros ;; -m) echo otherarch ;; *) echo otheros ;; esac\n' > relbin/uname
+  chmod +x relbin/uname
+  git add -A && git commit -qm "add relbin/uname"
+}
+MUT_TWEAK=tweak_evil_uname_m run_case m-cx-path "$pkg" PATH="relbin:$PATH" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="otheros/otherarch:9.9.9"
+assert_rc "$RC" 0 "M-cx-path：两道防线都杀掉后，业务库里的假 uname 决定了平台键（这里用 ACK 放行以证明它真的被当成 otheros/otherarch）"
+assert_contains "$(posted_comment "$OUT")" "otheros/otherarch:9.9.9" "M-cx-path：伪造的平台进了评论——端到端「相对 PATH 拒绝」与「command -p」两条断言会失败"
+MUT_TWEAK=tweak_evil_uname_m run_case m-cx-path-control "$ROOT" PATH="relbin:$PATH" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="otheros/otherarch:9.9.9"
+assert_nonzero "$RC" "M-cx-path 对照：原实现在第 1.7 步就拒绝了相对 PATH"
+assert_contains "$(posted_comment "$OUT")" "PATH 里有相对条目" "M-cx-path 对照：失败评论说的是 PATH"
 
 # --- M-cx-nul3（CodeX 2026-09-12 复审 P1）：采样器把样本放回 bash 变量 → 命令替换吞掉 NUL → 全零文件被判 textlike ---
 # 观测：32 KiB 全零文件不再进 opaque 桶、汇总没有「未覆盖」说明，而是整轮强制 --text 把原始字节送进模型 stdin。
@@ -464,7 +482,7 @@ assert_contains "$OUT" "liveSecret123" "M5r：像令牌的 token 原文进了输
 
 # --- M5s：去掉 kiro-cli 版本 notice → 版本不在名单也没有任何提示（15-fix2 #24）---
 pkg=$(make_mutant m5s-version-notice '/REVIEW_NOTICE="注意：本次组合/d')
-run_case m5s "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9   # P1-2 之后名单外要 break-glass 放行才走到 notice
+run_case m5s "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"   # P1-2 之后名单外要 break-glass 放行才走到 notice
 assert_rc "$RC" 0 "M5s：变异体仍能跑完"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5s：汇总评论没有版本 notice——端到端「版本不在名单：汇总评论带 notice」断言会失败"
 
@@ -487,14 +505,14 @@ assert_eq "$([[ -d "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "gone" 
 
 # --- M5v：降级评论不再接 --notice → 版本 notice 只在日志、评论里没有（15-fix3 #3）---
 pkg=$(make_mutant m5v-degraded-notice '/review_render_degraded --text/s/ --notice "\$(degrade_notice)"//')
-run_case m5v "$pkg" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
+run_case m5v "$pkg" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"
 assert_rc "$RC" 0 "M5v：变异体仍能跑完"
 assert_contains "$OUT" "未经 P1-15 探测" "M5v：日志仍有警告"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5v：降级评论丢了 notice——端到端「降级评论也带版本 notice」断言会失败"
 
 # --- M5ad：die_review 不再给失败评论传 --notice → kiro-cli 非零退出 + 未探测版本时失败评论没有版本告警（15-fix4 #3）---
 pkg=$(make_mutant m5ad-failure-notice '/^      --notice "\$(degrade_notice)" \\$/d')
-run_case m5ad "$pkg" MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
+run_case m5ad "$pkg" MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5ad：仍是失败"
 assert_contains "$OUT" "未经 P1-15 探测" "M5ad：日志仍有警告"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5ad：失败评论丢了版本告警——端到端「失败评论带版本告警引用块」断言会失败"

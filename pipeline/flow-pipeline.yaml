@@ -90,10 +90,13 @@ stages:
 #   KIRO_CLI_SHA256    可选，默认空；**生产必配**。kiro-cli 入口文件（command -v kiro-cli 解析符号链接后）的 64 位 SHA-256，
 #                      取值在构建执行器镜像时记录（setup-guide 第 7 节）。脚本在第一次执行 kiro-cli 之前核对，不一致拒绝评审。
 #                      版本门只挡版本语义漂移，这一项才是 ADR-0004 要求的二进制完整性钉死；未配置时只留日志、不核对
-#   KIRO_ACK_UNTESTED_VERSION 可选，默认空。执行器上的 kiro-cli 版本不在脚本 KIRO_TESTED_TARGETS 名单内时脚本
-#                      **拒绝评审**并回写「评审未完成」（读取边界依赖实测过的版本；云托管执行器 curl|bash 装的是
-#                      latest，升级后就会这样）。确需在该版本上运行，把它设成与实际版本逐字相同的版本号（如 2.22.0）
-#                      临时放行，汇总评论带醒目 notice；探测通过、版本进名单后删掉。不是布尔开关，不匹配仍拒绝
+#   KIRO_ACK_UNTESTED_TARGET 可选，默认空。执行器上的「<os>/<arch>:<kiro-cli 版本>」不在脚本 KIRO_TESTED_TARGETS
+#                      名单内时脚本**拒绝评审**并回写「评审未完成」（读取边界依赖在该平台该版本上实测的行为；
+#                      云托管执行器 curl|bash 装的是 latest，Kiro 升级后就会这样）。确需在该组合上运行，把它设成与
+#                      本次组合逐字相同的元组（如 linux/x86_64:2.22.0）临时放行，汇总评论带醒目 notice；
+#                      探测通过、组合进名单后删掉。不是布尔开关，不匹配仍拒绝。
+#                      旧的 KIRO_ACK_UNTESTED_VERSION（只绑版本）**已废弃**：设了会直接拒绝运行——它设过一次就会在
+#                      执行器换平台后继续放行同一个版本
 #   MAX_COMMENT_BYTES  可选，默认 60000（字节）
 #   CODEUP_BOT_USERNAME 可选但强烈建议，机器人账号在 Codeup 上的用户名。
 #                      未配置且令牌身份接口不可用时：汇总评论每次新建（不原地更新）；INLINE_COMMENT=1 也整轮

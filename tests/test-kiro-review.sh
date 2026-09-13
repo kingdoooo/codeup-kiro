@@ -603,7 +603,7 @@ run_case failheader MOCK_KIRO_FAIL=1
 assert_contains "$OUT" "# Kiro 代码评审 · ⚠️ 评审未完成" "失败评论：标题与成功评论同一产品名"
 # 15-fix4 #3：kiro-cli 非零退出 + 未探测版本 → 失败评论带版本告警（这条路径上 MR 只剩失败评论，告警不能丢；对 5462175 必须失败）
 # CodeX 2026-09-09 复审 P1-2 之后名单外版本默认拒绝，要走到 Kiro 失败这一步得先 break-glass 放行
-run_case failnotice MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
+run_case failnotice MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "失败 + 未探测版本：非零退出"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "评审未完成" "失败 + 未探测版本：是失败评论"
@@ -1872,7 +1872,7 @@ assert_eq "$([[ -e "$MD/args" || -e "$MD/calls" ]] && echo recorded || echo none
 assert_eq "$(grep -c -x -- 'KIRO_MOCK_DIR' "$tmp/case-ok/home/.kiro-mock/env")" "0" "成功路径：Kiro 进程环境里没有测试专用的 KIRO_MOCK_DIR"
 
 # ---- kiro-cli 版本 vs KIRO_TESTED_TARGETS（CodeX 2026-09-09 复审 P1-2，推翻 15-fix2 #24 的「名单外只 notice」）----
-# 名单外 → **拒绝评审**（失败评论写明版本与 break-glass 变量，Kiro 不启动）；只有 KIRO_ACK_UNTESTED_VERSION 与实际版本**逐字相等**
+# 名单外 → **拒绝评审**（失败评论写明元组与 break-glass 变量，Kiro 不启动）；只有 KIRO_ACK_UNTESTED_TARGET 与本次元组**逐字相等**
 # 才放行（汇总带醒目 notice）；版本解析不出一律拒绝、不接受任何确认值；确认值只收版本号形状。
 run_case oldver MOCK_KIRO_VERSION=9.9.9
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "P1-2：版本不在名单且未确认 → 拒绝评审（非零退出）"
@@ -1881,56 +1881,100 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" "评审未完成" "P1-2：拒绝时回写失败评论（I10）"
 assert_contains "$comment" "${HOST_PLAT}:9.9.9" "P1-2：失败评论写出本次的平台 + 版本元组"
 assert_contains "$comment" "$LISTED_TARGET" "P1-2：失败评论写出已探测的平台 + 版本名单（含本平台条目）"
-assert_contains "$comment" "KIRO_ACK_UNTESTED_VERSION=9.9.9" "P1-2：失败评论告诉运维怎样 break-glass（变量名 + 准确版本）"
-run_case oldver_ack MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
+assert_contains "$comment" "KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"" "P1-2：失败评论告诉运维怎样 break-glass（变量名 + 准确版本）"
+run_case oldver_ack MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"
 assert_rc "$RC" 0 "P1-2 break-glass：确认值 == 实际版本 → 放行、评审完成"
 assert_contains "$OUT" "未经 P1-15 探测" "P1-2 break-glass：日志有警告"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "注意：本次组合 ${HOST_PLAT}:9.9.9（平台 + kiro-cli 版本）未经 P1-15 探测" "P1-2 break-glass：汇总评论带 notice（点名元组）"
-assert_contains "$comment" "KIRO_ACK_UNTESTED_VERSION=9.9.9 显式放行" "P1-2 break-glass：notice 点名是哪个变量放行的"
+assert_contains "$comment" "KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9" 显式放行" "P1-2 break-glass：notice 点名是哪个变量放行的"
 assert_contains "$comment" "$LISTED_TARGET" "P1-2 break-glass：notice 写出已探测的平台 + 版本名单"
-run_case oldver_ackmis MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.8
+run_case oldver_ackmis MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.8"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "P1-2：确认值 ≠ 实际版本 → 仍拒绝（确认绑定准确版本，不是永久放行的开关）"
 assert_not_contains "$OUT" "开始 Kiro 评审" "P1-2：确认值不匹配时 Kiro 不启动"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "KIRO_ACK_UNTESTED_VERSION=9.9.8 与实际版本不一致" "P1-2：失败评论写出不匹配的确认值"
+assert_contains "$comment" "KIRO_ACK_UNTESTED_TARGET=${HOST_PLAT}:9.9.8 与本次组合不一致" "P1-2：失败评论写出不匹配的确认值"
 assert_contains "$comment" "9.9.9" "P1-2：失败评论写出实际版本"
 run_case nover MOCK_KIRO_VERSION=
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "P1-2：版本解析不出 → 拒绝评审"
 assert_contains "$(posted_comment "$OUT")" "版本号无法解析" "P1-2：失败评论说明版本无法解析"
-run_case nover_ack MOCK_KIRO_VERSION= KIRO_ACK_UNTESTED_VERSION="$LISTED_VER"
+run_case nover_ack MOCK_KIRO_VERSION= KIRO_ACK_UNTESTED_TARGET="$LISTED_TARGET"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "P1-2：版本解析不出时任何确认值都不放行"
 assert_contains "$(posted_comment "$OUT")" "版本号无法解析" "P1-2：解析不出 + 确认值：仍是「无法解析」那条拒绝"
-run_case ackbad MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION='9.9.9; rm -rf /'
+run_case ackbad MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET='linux/x86_64:9.9.9; rm -rf /'
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "P1-2：确认值不是版本号形状 → 第 1.6 步拒绝运行"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "KIRO_ACK_UNTESTED_VERSION 不合法" "P1-2：取值校验的失败评论点名变量"
+assert_contains "$comment" "KIRO_ACK_UNTESTED_TARGET 不合法" "P1-2：取值校验的失败评论点名变量"
 assert_not_contains "$comment" "rm -rf" "P1-2：非法取值原文不进评论"
-run_case ack_listed MOCK_KIRO_VERSION="$LISTED_VER" KIRO_ACK_UNTESTED_VERSION=9.9.9
+run_case ack_listed MOCK_KIRO_VERSION="$LISTED_VER" KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"
 assert_rc "$RC" 0 "P1-2：名单内版本照常运行，残留的确认值不影响"
 assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "P1-2：名单内版本仍打名单内日志"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "P1-2：名单内版本无 notice（残留确认值也不出 notice）"
 # ---- CodeX 2026-09-13 复审 P1：名单的单位是「平台 + 版本」，同一个版本换平台不算已验证 ----
-# 修复前门禁只比版本号，于是「只在 darwin/arm64 探测过的 2.21.4」在 linux/amd64 上照样被判名单内、既不拒也不 notice。
-mkdir -p "$tmp/otherplat"
-{ printf '#!/bin/sh\ncase "$1" in\n  -s) echo Linux ;;\n  -m) echo mips64 ;;\n  *) echo Linux ;;\nesac\n'; } > "$tmp/otherplat/uname"
-chmod +x "$tmp/otherplat/uname"
-run_case otherplat PATH="$tmp/otherplat:$PATH" MOCK_KIRO_VERSION="$LISTED_VER"
-assert_nonzero "$RC" "平台门：名单里有这个版本、但没有 linux/mips64 这个平台 → 拒绝评审"
-assert_not_contains "$OUT" "开始 Kiro 评审" "平台门：拒绝发生在 Kiro 启动之前"
+# 名单外的组合会被拒绝，失败评论要点名本次元组（上面的 oldver 用例已覆盖「版本不在名单」；这里断言元组形态）。
+# **平台维度没法靠打桩 uname 在 e2e 里模拟**——kiro_platform_key 走 command -p，连相对/绝对 PATH 里的假 uname 都不看
+# （这正是本轮 P1 的修复）。平台分量真的参与比较，由变异 M-cx-plat 用「把名单改成只含别的平台」来守。
+
+# ---- CodeX 2026-09-13 复审 P1（另一半）：PATH 有相对条目 → 第 1.7 步拒绝运行 ----
+# 业务库是不受信数据，而脚本要在它的目录下跑 git / jq / uname 等外部工具。相对 PATH 条目让 MR 作者提交同名可执行文件
+# 就能顶替其中任何一个。逐个工具去 command -p 打不完，所以整类在第 1.7 步一次拒绝。
+tweak_evil_uname() {
+  mkdir -p relbin
+  printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux ;; esac\n' > relbin/uname
+  chmod +x relbin/uname
+  git add -A && git commit -qm "add relbin/uname"
+}
+CASE_TWEAK=tweak_evil_uname run_case relpath PATH="relbin:$PATH"
+assert_nonzero "$RC" "相对 PATH：第 1.7 步拒绝运行"
 comment=$(posted_comment "$OUT")
-assert_contains "$comment" "linux/mips64:${LISTED_VER}" "平台门：失败评论点名本次的「平台:版本」元组"
-assert_contains "$comment" "同一个版本换平台不算已验证" "平台门：失败评论解释为什么换平台要重新探测"
-assert_contains "$comment" "$LISTED_TARGET" "平台门：失败评论写出已探测的名单"
-# break-glass 仍按版本给（它是人工确认，不要求写平台），放行后 notice 里带完整元组
-run_case otherplat_ack PATH="$tmp/otherplat:$PATH" MOCK_KIRO_VERSION="$LISTED_VER" KIRO_ACK_UNTESTED_VERSION="$LISTED_VER"
-assert_rc "$RC" 0 "平台门 break-glass：确认值 == 实际版本 → 放行"
-assert_contains "$(posted_comment "$OUT")" "linux/mips64:${LISTED_VER}（平台 + kiro-cli 版本）未经 P1-15 探测" "平台门 break-glass：notice 说的是元组未探测"
-# uname 不可用 → 拒绝（平台未知不放行）
-mkdir -p "$tmp/nouname2"; printf '#!/bin/sh\nexit 1\n' > "$tmp/nouname2/uname"; chmod +x "$tmp/nouname2/uname"
-run_case nouname PATH="$tmp/nouname2:$PATH"
-assert_nonzero "$RC" "平台门：uname 跑不起来 → 拒绝评审（平台未知不放行）"
-assert_contains "$(posted_comment "$OUT")" "无法确定执行器平台" "平台门：失败评论说平台确定不了"
+assert_contains "$comment" "PATH 里有相对条目" "相对 PATH：失败评论说清是 PATH 的问题"
+assert_contains "$comment" "relbin" "相对 PATH：失败评论点出可疑条目"
+assert_not_contains "$OUT" "开始 Kiro 评审" "相对 PATH：拒绝发生在 Kiro 启动之前"
+# 空条目（`::` 与首尾的 `:`，POSIX 里都等于当前目录）同样拒绝
+run_case emptypath PATH=":$PATH"
+assert_nonzero "$RC" "PATH 首部空条目：同样拒绝"
+assert_contains "$(posted_comment "$OUT")" "<空条目=当前目录>" "PATH 空条目：失败评论点明空条目"
+run_case emptypath2 PATH="$PATH::/usr/bin"
+assert_nonzero "$RC" "PATH 中间空条目：同样拒绝"
+# 正控：全绝对路径的 PATH 里放一个假 uname，第 1.7 步不拦（它只管相对条目），而平台键仍取真实平台 → 照常评审
+tweak_evil_uname_abs() { :; }
+mkdir -p "$tmp/evilabs"
+printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux ;; esac\n' > "$tmp/evilabs/uname"
+chmod +x "$tmp/evilabs/uname"
+run_case evilabs PATH="$tmp/evilabs:$PATH"
+assert_rc "$RC" 0 "绝对 PATH 里的假 uname：第 1.7 步不拦（只管相对条目），评审照常完成"
+assert_contains "$OUT" "kiro-cli ${LISTED_TARGET}：在 P1-15 探测过的平台 + 版本名单内" "绝对 PATH 里的假 uname：平台键仍是真实平台（command -p 不看 PATH）"
+# 断言要收窄到**门禁行本身**：日志里本来就会打印整个名单（里面确实有 linux/x86_64:2.21.3/4），
+# 所以不能笼统地断言「输出里没有 linux/x86_64」。
+assert_not_contains "$OUT" "kiro-cli linux/x86_64:" "绝对 PATH 里的假 uname：门禁行里的平台不是伪造的那个"
+
+# ---- CodeX 2026-09-13 复审 P2：break-glass 绑定完整元组 ----
+# 旧的 KIRO_ACK_UNTESTED_VERSION 只绑版本，设过一次就会在换平台后继续放行同一个版本——与当初拒绝布尔开关同一个理由。
+run_case ackold MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
+assert_nonzero "$RC" "旧 ACK 变量：已废弃 → 拒绝运行（不再作为宽授权入口）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "KIRO_ACK_UNTESTED_VERSION 已废弃" "旧 ACK 变量：失败评论点名它废弃了"
+assert_contains "$comment" "KIRO_ACK_UNTESTED_TARGET" "旧 ACK 变量：失败评论给出要改用的新变量"
+assert_not_contains "$OUT" "开始 Kiro 评审" "旧 ACK 变量：Kiro 不启动"
+run_case ackold_listed MOCK_KIRO_VERSION="$LISTED_VER" KIRO_ACK_UNTESTED_VERSION="$LISTED_VER"
+assert_nonzero "$RC" "旧 ACK 变量：即使本次组合在名单内也拒绝（设了废弃变量本身就是配置错误，不能静默忽略）"
+# 新变量：逐字等于本次元组才放行
+run_case acktgt MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"
+assert_rc "$RC" 0 "新 ACK 变量：逐字等于本次元组 → 放行"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "KIRO_ACK_UNTESTED_TARGET=${HOST_PLAT}:9.9.9 显式放行" "新 ACK 变量：notice 点名是哪个变量放行的"
+# 版本对但平台不对 → 仍拒绝（这正是旧变量的漏洞：换平台后继续放行）
+run_case acktgt_wrongplat MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="linux/mips64:9.9.9"
+assert_nonzero "$RC" "新 ACK 变量：版本对但平台不对 → 仍拒绝（旧变量在这里会放行）"
+assert_contains "$(posted_comment "$OUT")" "与本次组合不一致" "新 ACK 变量：失败评论说与本次组合不一致"
+assert_contains "$(posted_comment "$OUT")" "请核对后改成 ${HOST_PLAT}:9.9.9" "新 ACK 变量：失败评论给出该填的准确元组"
+# 形状校验
+run_case acktgtbad MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET='9.9.9'
+assert_nonzero "$RC" "新 ACK 变量：只写版本号（缺平台）→ 形状不合法，拒绝运行"
+assert_contains "$(posted_comment "$OUT")" "KIRO_ACK_UNTESTED_TARGET 不合法" "新 ACK 变量：形状校验点名变量"
+run_case acktgtbad2 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET='linux/x86_64:9.9.9; rm -rf /'
+assert_nonzero "$RC" "新 ACK 变量：带命令注入形状 → 拒绝运行"
+assert_not_contains "$(posted_comment "$OUT")" "rm -rf" "新 ACK 变量：非法取值原文不进评论"
 
 # ---- CodeX 2026-09-10 复审 P1：KIRO_CLI_SHA256 钉死 kiro-cli 入口文件摘要，在第一次执行 kiro-cli 之前核对 ----
 mock_sha=$( (command -v sha256sum >/dev/null 2>&1 && sha256sum "$ROOT/tests/mockbin/kiro-cli" || shasum -a 256 "$ROOT/tests/mockbin/kiro-cli") | cut -d' ' -f1)
@@ -1981,7 +2025,7 @@ assert_contains "$comment" "127" "kiro-cli --version 退出 127：失败评论�
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "kiro-cli --version 退出 127：Kiro chat 未被启动（不烧额度）"
 assert_eq "$(call_count "$MD/calls" settings)" "0" "kiro-cli --version 退出 127：settings 也未调用（在能力检查处就停）"
 # 15-fix3 #3：降级路径（结构化解析失败）同样要带版本 notice——原来只在结构化分支并入
-run_case degnotice MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9   # P1-2 之后名单外要 break-glass 才走到降级路径
+run_case degnotice MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"   # P1-2 之后名单外要 break-glass 才走到降级路径
 assert_rc "$RC" 0 "降级 + 版本不在名单：退出码 0"
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "结构化解析失败" "降级 + 版本不在名单：是降级评论"
@@ -1993,7 +2037,7 @@ assert_not_contains "$(posted_comment "$out")" "未经 P1-15 探测" "成功路�
 # 纯删除 MR + INLINE_COMMENT=1 让第 4.5 步产生 INLINE_NOTICE，再让评审员不守契约走降级。对 5462175 必须失败（那里降级评论继承 ALL_NOTICE）。
 tweak_pure_delete() { git reset -q --hard origin/main; git rm -q src/app.py; git commit -qm "delete app"; git push -qf origin feature/x; }
 # CODEUP_BOT_USERNAME：身份未知时 INLINE_COMMENT=1 会被第 1.6 步降为 0（P0-3），这里要的是第 4.5 步真的跑出 INLINE_NOTICE，所以给身份
-CASE_TWEAK=tweak_pure_delete run_case degnoinline INLINE_COMMENT=1 CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9
+CASE_TWEAK=tweak_pure_delete run_case degnoinline INLINE_COMMENT=1 CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"
 assert_rc "$RC" 0 "降级 + 纯删除 MR：退出码 0"
 assert_contains "$OUT" "全部问题都归入" "降级 + 纯删除 MR：日志里有分桶提示（INLINE_NOTICE 确实产生了）"
 comment=$(posted_comment "$OUT")

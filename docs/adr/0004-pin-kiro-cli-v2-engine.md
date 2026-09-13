@@ -25,7 +25,7 @@ Kiro CLI 3.0 目前是 early access：随 2.x 稳定版一起安装，需 `--v3`
   平台 + 版本成立」写进了文档、门禁却只比版本号，于是只在 darwin 上探测过的版本在 Linux 上照样被判名单内。
   当前名单见 `scripts/kiro-review.sh`；平台键由 `kiro_platform_key` 算，门禁与探测脚本共用同一实现，
   **不含** libc 变体与发行版——那一维靠固定执行器镜像 digest 控。上文正文写的 2.21.0 是决策当时的版本）之外的 kiro-cli
-  版本拒绝评审并回写失败评论，Kiro 不启动；只有流水线变量 `KIRO_ACK_UNTESTED_VERSION` 与实际版本**逐字相等**才放行（汇总带醒目
+  组合拒绝评审并回写失败评论，Kiro 不启动；只有流水线变量 `KIRO_ACK_UNTESTED_TARGET` 与本次 `<os>/<arch>:<版本>`**逐字相等**才放行（汇总带醒目
   notice），刻意不做布尔开关（会永久留在环境里放行以后所有未知版本）；版本解析不出一律拒绝。原因：官方安装脚本只装 latest、没有版本
   开关、sha256 只对在线 manifest，Kiro 3.x 的权限模型是 breaking change，「新版本仍保持已探测版本的路径解析语义」不能当默认假设；本 ADR
   要求的「固定版本 + 校验」只有 setup-guide 第 7 节的预装执行器能满足，第 6 节 curl|bash 路径降为评估 / PoC。这是运维可见的行为变化。
