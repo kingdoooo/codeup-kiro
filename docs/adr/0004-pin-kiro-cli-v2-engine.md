@@ -21,8 +21,10 @@ Kiro CLI 3.0 目前是 early access：随 2.x 稳定版一起安装，需 `--v3`
   两者刻意不同，见 `scripts/probe/README.md`。这条只是记录 CLI 的行为事实，v2 引擎的决策不变。
 
 - **修订（2026-09-10，CodeX 复审 P1-2）**：版本门从「名单外只 notice」（15-fix2 #24）改为**默认拒绝**。`scripts/kiro-review.sh` 的
-  `KIRO_TESTED_VERSIONS`（当前 `2.21.1 2.21.3`——2.21.1 是探测 P1-15 与 Phase 1 全部真实验收所用版本，2.21.3 于 2026-09-11
-  重跑 P1-15 十二个门禁用例全 PASS 后加入，它也是云托管执行器 `curl | bash` 当时装到的 latest；上文正文写的 2.21.0 是决策当时的版本）之外的 kiro-cli
+  `KIRO_TESTED_TARGETS`（2026-09-13 起改成**平台 + 版本**元组，形如 `<os>/<arch>:<版本>`——CodeX 复审指出「探测结论只对
+  平台 + 版本成立」写进了文档、门禁却只比版本号，于是只在 darwin 上探测过的版本在 Linux 上照样被判名单内。
+  当前名单见 `scripts/kiro-review.sh`；平台键由 `kiro_platform_key` 算，门禁与探测脚本共用同一实现，
+  **不含** libc 变体与发行版——那一维靠固定执行器镜像 digest 控。上文正文写的 2.21.0 是决策当时的版本）之外的 kiro-cli
   版本拒绝评审并回写失败评论，Kiro 不启动；只有流水线变量 `KIRO_ACK_UNTESTED_VERSION` 与实际版本**逐字相等**才放行（汇总带醒目
   notice），刻意不做布尔开关（会永久留在环境里放行以后所有未知版本）；版本解析不出一律拒绝。原因：官方安装脚本只装 latest、没有版本
   开关、sha256 只对在线 manifest，Kiro 3.x 的权限模型是 breaking change，「新版本仍保持已探测版本的路径解析语义」不能当默认假设；本 ADR

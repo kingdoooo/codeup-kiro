@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 测试替身：模拟 kiro-cli 的几种用法，并把观察到的东西写进 $HOME/.kiro-mock/ 下固定名字的文件。
-#   kiro-cli --version          → 打印 "kiro-cli <版本>"（默认 2.21.1；MOCK_KIRO_VERSION 可换，测 KIRO_TESTED_VERSIONS 的 notice；
+#   kiro-cli --version          → 打印 "kiro-cli <版本>"（默认 2.21.1；MOCK_KIRO_VERSION 可换，测 KIRO_TESTED_TARGETS 的 notice；
 #                                 MOCK_KIRO_VERSION_STDERR=1 打到 stderr；MOCK_KIRO_VERSION_WARN=1 stderr 先打带 2.30.0 的升级提示；
-#                                 MOCK_KIRO_VERSION_RC=<n> 以退出码 n 失败）
+#                                 MOCK_KIRO_VERSION_RC=<n> 以退出码 n 失败；
+#                                 MOCK_KIRO_VERSION_CONFLICT=1 stdout 两行不同版本 + stderr 一行干净版本）
 #   kiro-cli chat --help        → 打印支持的参数名（含 --agent、--agent-engine、--output-format）；环境变量名 → env-help
 #   kiro-cli settings KEY VALUE → 追加 "KEY VALUE" 到 settings；环境变量名 → env-settings
 #   kiro-cli chat ...           → 记录参数(args)与 stdin(stdin)；扫描启动时**业务库**（agent 定义 allowedPaths[0]）里残留的
@@ -86,6 +87,13 @@ if [[ "${1:-}" == "--version" ]]; then
   # `2>&1 | head -1` 会取到可用版本 2.30.0 而不是已装版本（15-fix4 #7）
   if [[ "${MOCK_KIRO_VERSION_WARN:-0}" == "1" ]]; then echo "warn: A new version (2.30.0) of kiro-cli is available (installed ${MOCK_KIRO_VERSION-2.21.1}). Run kiro-cli update." >&2; fi
   # MOCK_KIRO_VERSION_STDERR=1：版本打到 stderr（有的 CLI 这么干）——脚本 stdout 取不到时要回退看 stderr，否则每条评论永久带「版本未知」notice
+  # MOCK_KIRO_VERSION_CONFLICT=1：stdout **两行不同版本**（自相冲突）+ stderr 一行干净版本。用来守「stdout 冲突时
+  # 不得被 stderr 的回退路径洗成名单内版本」（CodeX 2026-09-13 复审 P2）。
+  if [[ "${MOCK_KIRO_VERSION_CONFLICT:-0}" == "1" ]]; then
+    echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}"; echo "kiro-cli 9.9.9"
+    echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}" >&2
+    exit 0
+  fi
   if [[ "${MOCK_KIRO_VERSION_STDERR:-0}" == "1" ]]; then echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}" >&2; else echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}"; fi
   exit 0
 fi

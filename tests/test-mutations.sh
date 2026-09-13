@@ -186,6 +186,22 @@ assert_not_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-
 MUT_TWEAK=tweak_realbin_m run_case m-cx-nul2-control "$ROOT"
 assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-nul2 对照：原实现在汇总里声明了未覆盖"
 
+# --- M-cx-plat（CodeX 2026-09-13 复审 P1）：门禁退回「只比版本」→ 只在别的平台探测过的版本照样被判名单内 ---
+# 观测：替身 uname 报 linux/mips64（名单里没有这个平台），而版本在名单里；变异体照跑并打「名单内」日志。
+pkg=$(make_mutant m-cx-plat-version-only 's#\[\[ " \$KIRO_TESTED_TARGETS " == \*" \$KIRO_CLI_TARGET "\* \]\]#[[ " $KIRO_TESTED_TARGETS " == *":$KIRO_CLI_VERSION "* ]]#')
+mkdir -p "$tmp/otherplat_m"
+printf '#!/bin/sh\ncase "$1" in\n  -s) echo Linux ;;\n  -m) echo mips64 ;;\n  *) echo Linux ;;\nesac\n' > "$tmp/otherplat_m/uname"
+chmod +x "$tmp/otherplat_m/uname"
+MPLAT_VER=$(listed_version_for_host)
+run_case m-cx-plat "$pkg" PATH="$tmp/otherplat_m:$PATH" MOCK_KIRO_VERSION="$MPLAT_VER"
+assert_rc "$RC" 0 "M-cx-plat：变异体在没探测过的平台上照跑——端到端「同版本换平台 → 拒绝」断言会失败"
+assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "M-cx-plat：日志把别的平台的证据当成本平台的"
+assert_contains "$OUT" "开始 Kiro 评审" "M-cx-plat：Kiro 在未验证的平台上被启动了"
+run_case m-cx-plat-control "$ROOT" PATH="$tmp/otherplat_m:$PATH" MOCK_KIRO_VERSION="$MPLAT_VER"
+assert_nonzero "$RC" "M-cx-plat 对照：原实现按元组拒绝"
+assert_contains "$(posted_comment "$OUT")" "linux/mips64:${MPLAT_VER}" "M-cx-plat 对照：失败评论点名本次元组"
+assert_not_contains "$OUT" "开始 Kiro 评审" "M-cx-plat 对照：原实现不启动 Kiro"
+
 # --- M-cx-nul3（CodeX 2026-09-12 复审 P1）：采样器把样本放回 bash 变量 → 命令替换吞掉 NUL → 全零文件被判 textlike ---
 # 观测：32 KiB 全零文件不再进 opaque 桶、汇总没有「未覆盖」说明，而是整轮强制 --text 把原始字节送进模型 stdin。
 pkg=$(make_mutant m-cx-nul3-sampler-nul 's#^  win=\$(wc -c < "\$sample" | tr -d . .)$#  LC_ALL=C tr -d "\\000" < "$sample" > "$sample.x" \&\& mv "$sample.x" "$sample"; win=$(wc -c < "$sample" | tr -d " ")#' scripts/lib/diff-compress.sh)
@@ -209,11 +225,11 @@ assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-d
 
 # --- M-cx-ver（CodeX 2026-09-11 复审 P1）：版本取法退回只锚定前缀 → 带后缀的预发布版本冒用名单里的已探测版本 ---
 pkg=$(make_mutant m-cx-ver-prefix 's|\^\[\[:space:\]\]\*kiro-cli\[\[:space:\]\]+(\[0-9\]+(\\\.\[0-9\]+)+)\[\[:space:\]\]\*\$|kiro-cli[[:space:]]+([0-9]+(\\.[0-9]+)+)|' scripts/lib/kiro-agent.sh)
-run_case m-cx-ver "$pkg" MOCK_KIRO_VERSION=2.21.3-rc.1
-assert_rc "$RC" 0 "M-cx-ver：2.21.3-rc.1 被截成 2.21.3、当名单内放行——端到端「未知形态一律拒绝」断言会失败"
-assert_contains "$OUT" "在 P1-15 探测过的版本名单内" "M-cx-ver：日志把未探测的预发布版本当成已探测版本"
+run_case m-cx-ver "$pkg" MOCK_KIRO_VERSION="$(listed_version_for_host)-rc.1"
+assert_rc "$RC" 0 "M-cx-ver：<名单内版本>-rc.1 被截成名单内版本放行——端到端「未知形态一律拒绝」断言会失败"
+assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "M-cx-ver：日志把未探测的预发布版本当成已探测版本"
 assert_contains "$OUT" "开始 Kiro 评审" "M-cx-ver：Kiro 在未探测的预发布版本上被启动了"
-run_case m-cx-ver-control "$ROOT" MOCK_KIRO_VERSION=2.21.3-rc.1
+run_case m-cx-ver-control "$ROOT" MOCK_KIRO_VERSION="$(listed_version_for_host)-rc.1"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-cx-ver 对照：原实现按「版本号无法解析」拒绝"
 assert_contains "$(posted_comment "$OUT")" "版本号无法解析" "M-cx-ver 对照：失败评论说版本无法解析"
 assert_not_contains "$OUT" "开始 Kiro 评审" "M-cx-ver 对照：原实现不启动 Kiro"
@@ -447,7 +463,7 @@ run_case m5r "$pkg" KIRO_ENV_PASSTHROUGH="ghp-liveSecret123"
 assert_contains "$OUT" "liveSecret123" "M5r：像令牌的 token 原文进了输出——端到端「原文不进日志也不进评论」断言会失败"
 
 # --- M5s：去掉 kiro-cli 版本 notice → 版本不在名单也没有任何提示（15-fix2 #24）---
-pkg=$(make_mutant m5s-version-notice '/REVIEW_NOTICE="注意：本次 kiro-cli 版本/d')
+pkg=$(make_mutant m5s-version-notice '/REVIEW_NOTICE="注意：本次组合/d')
 run_case m5s "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_VERSION=9.9.9   # P1-2 之后名单外要 break-glass 放行才走到 notice
 assert_rc "$RC" 0 "M5s：变异体仍能跑完"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5s：汇总评论没有版本 notice——端到端「版本不在名单：汇总评论带 notice」断言会失败"
@@ -484,7 +500,7 @@ assert_contains "$OUT" "未经 P1-15 探测" "M5ad：日志仍有警告"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5ad：失败评论丢了版本告警——端到端「失败评论带版本告警引用块」断言会失败"
 
 # --- M-cx-p12（CodeX 2026-09-09 复审 P1-2）：版本门的拒绝换成 log → 名单外版本不确认也照跑，安全边界跑在未验证的 kiro-cli 上 ---
-pkg=$(make_mutant m-cx-p12-version-gate 's/^  die_review "kiro-cli 版本 \${KIRO_CLI_VERSION} 未经 P1-15 探测/  log "kiro-cli 版本 ${KIRO_CLI_VERSION} 未经 P1-15 探测/')
+pkg=$(make_mutant m-cx-p12-version-gate 's/^  die_review "本次组合 \${KIRO_CLI_TARGET}（平台 + kiro-cli 版本）未经 P1-15 探测/  log "本次组合 ${KIRO_CLI_TARGET}（平台 + kiro-cli 版本）未经 P1-15 探测/')
 run_case m-cx-p12 "$pkg" MOCK_KIRO_VERSION=9.9.9
 assert_rc "$RC" 0 "M-cx-p12：变异体不拒绝、评审照跑——端到端「版本不在名单且未确认 → 拒绝评审」断言会失败"
 assert_contains "$OUT" "开始 Kiro 评审" "M-cx-p12：Kiro 真的在未验证版本上被启动了（额度烧在未验证的读取边界上）"
@@ -518,7 +534,7 @@ pkg=$(make_mutant m5x2-version-merged 's|^kiro_cli_version "\$TIMEOUT_BIN" "\$KI
 run_case m5x2 "$pkg" MOCK_KIRO_VERSION_WARN=1
 # P1-2 之后名单外拒绝：把 2.30.0 当成本次版本的变异体在装着 2.21.1 的机器上被版本门拒绝（端到端「取到的是已装版本 2.21.1、评审照常完成」断言会失败）
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5x2：升级提示里的 2.30.0 被当成本次版本 → 名单外、被拒绝"
-assert_contains "$OUT" "2.30.0 未经 P1-15 探测" "M5x2：拒绝原因点名的是 2.30.0 而不是已装的 2.21.1"
+assert_contains "$OUT" ":2.30.0（平台 + kiro-cli 版本）未经 P1-15 探测" "M5x2：拒绝原因点名的是 2.30.0 而不是已装版本"
 # --- M5x3：--version 退出码不再判 → 跑不起来的 CLI 只留软 notice、继续去 chat（15-fix4 #7）---
 pkg=$(make_mutant m5x3-version-rc 's|^kiro_cli_version "\$TIMEOUT_BIN" "\$KIRO_CWD" \|\| die_review .*$|kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" \|\| true|')
 run_case m5x3 "$pkg" MOCK_KIRO_VERSION_RC=127

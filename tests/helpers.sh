@@ -124,10 +124,27 @@ TEST_BOT_USERNAME='aliyun:kingdooo_hvFXC'
 #         args stdin settings cwdscan calls helpcwd env env-help env-settings allowscan nonce   替身的记录文件（固定名字）
 # 拿不到该目录时替身**非零退出（97）并报错**：漏配要变成红测试，而不是「记不了 args 于是『Kiro 未启动』恒真」。
 mock_dir_of_home() { printf '%s/.kiro-mock' "$1"; }
+# 本机平台在 KIRO_TESTED_TARGETS 里对应的第一个版本（CodeX 2026-09-13 复审 P1 之后名单是「平台 + 版本」元组）。
+# 用例里「名单内版本」不能再硬写 2.21.1——那个元组只对 darwin/arm64 成立，在 Linux 上跑套件会整片变成「名单外」。
+# 从 kiro-review.sh 的常量里现取，名单一变测试跟着变；取不到就留空（调用方会看到版本门拒绝，症状明确）。
+listed_version_for_host() {
+  local plat lib="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/lib/kiro-agent.sh"
+  plat=$(bash -c 'source "$1"; kiro_platform_key' _ "$lib" 2>/dev/null) || return 0
+  [[ -n "$plat" ]] || return 0
+  sed -n 's/^KIRO_TESTED_TARGETS="\(.*\)"$/\1/p' "${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/kiro-review.sh" \
+    | tr ' ' '\n' | grep "^${plat}:" | head -1 | sed "s#^${plat}:##"
+}
 mock_config_write() { # <HOME 目录> [MOCK_X=值 ...]（非 MOCK_ 开头的参数忽略，便于把 run_case 的 "$@" 原样传进来）
   local dir; dir=$(mock_dir_of_home "$1"); shift
-  local a
+  local a has_ver=0 dflt
   mkdir -p "$dir"; : > "$dir/mock.env"
+  for a in "$@"; do [[ "$a" == MOCK_KIRO_VERSION=* ]] && has_ver=1; done
+  # 调用方没显式给版本时，写一个**本平台名单内**的版本进去（默认「名单内、无 notice」的语义与以前一致，
+  # 但不再依赖跑套件的机器恰好是 darwin/arm64）
+  if [[ "$has_ver" == "0" ]]; then
+    dflt=$(listed_version_for_host)
+    [[ -n "$dflt" ]] && printf 'MOCK_KIRO_VERSION=%s\n' "$dflt" >> "$dir/mock.env"
+  fi
   for a in "$@"; do [[ "$a" == MOCK_* ]] && printf '%s\n' "$a" >> "$dir/mock.env"; done
   return 0
 }

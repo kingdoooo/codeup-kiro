@@ -159,7 +159,7 @@ kiro_env_allowlist || { echo "KIRO_ENV_PASSTHROUGH 不合法：${KIRO_ENV_ALLOW_
 kiro_env_allowlist_names > "$KEEP/env-allowlist-names.txt"      # 按数组元素取名字，不按行切（取值含换行时不泄半个取值）
 echo "[probe] env -i 许可清单变量：$(tr '\n' ' ' < "$KEEP/env-allowlist-names.txt")" >&2
 # kiro-cli 版本：与执行器第 3 步同一函数（kiro_cli_version：stdout / stderr 分开、按程序名锚定、同一 env -i 许可清单，15-fix4 #7 / A6）——
-# summary.json 的 kiro_cli 字段正是人工抄进 KIRO_TESTED_VERSIONS 的来源，`2>/dev/null | head -1` 会把版本打到 stderr 的 CLI 记成空串。
+# summary.json 的 kiro_cli 字段正是人工抄进 KIRO_TESTED_TARGETS 的来源，`2>/dev/null | head -1` 会把版本打到 stderr 的 CLI 记成空串。
 # 运行目录用 $KIRO_CWD（空目录）而不是 $WORK（票 18 ⑫）：生产的四处 kiro-cli 调用都在空目录下跑，--version 也是其中一处；
 # $WORK 里有 agent 定义与夹具，cwd 相对发现面（.kiro/settings/cli.json 之类）与生产不一致时，探到的行为就不是生产的行为。
 kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" || { echo "${KIRO_CLI_VERSION_ERROR}（环境准备失败，退出码 5）" >&2; exit 5; }
@@ -396,9 +396,16 @@ fi
 
 # ---------- 汇总 ----------
 GATE_MISSING=""; for c in $GATE_CASES; do [[ "$RAN" == *" $c "* ]] || GATE_MISSING+="$c "; done
+# platform / target 两个字段（CodeX 2026-09-13 复审 P1）：探测结论只对「平台 + 版本」成立，所以人工要抄进
+# KIRO_TESTED_TARGETS 的**就是** target 这一个字符串，不再让人自己拼——拼错的方向恰好是「把别的平台的证据当成本平台的」。
+# 平台键由 kiro_platform_key 算（与门禁同一份实现）；算不出就留空，此时 target 也留空、下面的提示行会说清。
+PROBE_PLATFORM=$(kiro_platform_key 2>/dev/null || true)
+PROBE_TARGET=""; [[ -n "$PROBE_PLATFORM" && -n "$KIRO_CLI_VERSION" ]] && PROBE_TARGET="${PROBE_PLATFORM}:${KIRO_CLI_VERSION}"
 jq -n --arg ts "$TS" --arg ver "$KIRO_CLI_VERSION" --arg keep "$KEEP" --arg ran "${RAN# }" --arg missing "$GATE_MISSING" \
+      --arg plat "$PROBE_PLATFORM" --arg target "$PROBE_TARGET" \
       --argjson fail "$PROBE_FAIL" --argjson inc "$PROBE_INCONCLUSIVE" \
-      '{probe: "P1-15", ts: $ts, kiro_cli: $ver, raw_dir: $keep, ran: ($ran | split(" ") | map(select(. != ""))),
+      '{probe: "P1-15", ts: $ts, kiro_cli: $ver, platform: $plat, target: $target, raw_dir: $keep,
+        ran: ($ran | split(" ") | map(select(. != ""))),
         gate_missing: ($missing | split(" ") | map(select(. != ""))), any_fail: ($fail == 1), any_inconclusive: ($inc == 1)}' \
   > "$KEEP/summary.json"
 echo "[probe] 完成。实际运行：${RAN# }。原始输出目录：${KEEP}（每用例 .jsonl / .err，agent-installed.json，env-allowlist-names.txt，summary.json）" >&2
@@ -410,5 +417,10 @@ if [[ "$PROBE_INCONCLUSIVE" == "1" ]]; then
 fi
 if [[ -n "$GATE_MISSING" ]]; then
   echo "[probe] 结论：子集运行（门禁用例缺 ${GATE_MISSING}），已跑的全部 PASS，**不作发布判定**（退出码 4）。" >&2; exit 4
+fi
+if [[ -n "$PROBE_TARGET" ]]; then
+  echo "[probe] 本次探测的平台 + 版本：${PROBE_TARGET}——把这个元组原样加进 scripts/kiro-review.sh 的 KIRO_TESTED_TARGETS。" >&2
+else
+  echo "[probe] 警告：平台键或版本号取不到，无法给出要加进 KIRO_TESTED_TARGETS 的元组（平台=[${PROBE_PLATFORM}] 版本=[${KIRO_CLI_VERSION}]）。" >&2
 fi
 echo "[probe] 结论：十二个门禁用例全部实际运行且全部 PASS——票 15 走主方案（退出码 0）。" >&2

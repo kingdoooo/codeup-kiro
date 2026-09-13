@@ -226,12 +226,29 @@ kiro_agent_selfcheck() {
 # 结果：KIRO_CLI_VERSION（取不到为空）；返回 0 = --version 跑通（版本取不到只是 notice，不是失败）；返回 1 = --version 退出码非零，
 #   KIRO_CLI_VERSION_ERROR 带退出码与 stderr 尾部（调用方 die_review；--version 都跑不起来的 CLI 不该再在 chat 上烧掉整个 KIRO_TIMEOUT）。
 # 取法：stdout 与 stderr **分开捕获**。`2>&1 | head -1` 取到的是先 flush 的那个流的第一行：stderr 无缓冲、stdout 进管道是块缓冲，
-#   升级提示「A new version (2.30.0) …」先到 → 报告并据以判定的是**可用**版本而不是已装版本；等 2.30.0 进 KIRO_TESTED_VERSIONS，
+#   升级提示「A new version (2.30.0) …」先到 → 报告并据以判定的是**可用**版本而不是已装版本；等 2.30.0 进 KIRO_TESTED_TARGETS，
 #   装着未探测 2.21.x 的机器反而不再告警。先在 stdout 里按程序名锚定 `kiro-cli<空白>X.Y[.Z…]`，取不到再看 stderr（有的 CLI 把版本
 #   打到 stderr，15-fix3 #8）；两个流里都没有这个形态就当未知（宁可 notice，不猜）。
-# 执行器第 3 步与探测脚本（summary.json 的 kiro_cli 字段——人工抄进 KIRO_TESTED_VERSIONS 的来源）都调这一个函数。
+# 执行器第 3 步与探测脚本（summary.json 的 kiro_cli / platform 两个字段——人工抄进 KIRO_TESTED_TARGETS 的来源）都调这一个函数。
 KIRO_CLI_VERSION=""
 KIRO_CLI_VERSION_ERROR=""
+# ── kiro_platform_key ───────────────────────────────────────────────────────────────────────────
+# 探测结论只对「探测所用的平台 + 版本」成立——读取边界靠 kiro-cli 的路径解析行为，而那是按平台编译的。
+# 上一轮把这条写进了文档，门禁却仍然只比版本号，于是「只在 darwin/arm64 探测过的 2.21.4」在 linux/amd64 上
+# 照样被判成名单内（CodeX 2026-09-13 复审 P1）。这个函数给出门禁与探测**共用**的平台键，两边算法只有一份。
+# 形态：`<os>/<arch>`，取 `uname -s` / `uname -m` 原样小写——**刻意不做跨 OS 的归一映射**
+# （aarch64 与 arm64 是不同 OS 的叫法，硬映射成一个会把两个平台合并；名单条目照探测脚本打印的原样抄即可）。
+# rc 1 = uname 不可用 / 输出不是预期形状 → 调用方必须**拒绝运行**（与「版本号解析不出就拒绝」同一取舍）。
+# **不含 libc 变体（glibc/musl）与发行版**：那一维靠运维固定执行器镜像 digest 来控（setup-guide 第 7 节第 6 项），
+# 不进这个键——把 glibc 小版本编进键，等于每次基础镜像打补丁都让评审停摆，那是另一个可用性坑。
+kiro_platform_key() {
+  local os arch
+  os=$(uname -s 2>/dev/null) || return 1
+  arch=$(uname -m 2>/dev/null) || return 1
+  os=$(printf '%s' "$os" | tr 'A-Z' 'a-z'); arch=$(printf '%s' "$arch" | tr 'A-Z' 'a-z')
+  [[ "$os" =~ ^[a-z0-9_.-]+$ && "$arch" =~ ^[a-z0-9_.-]+$ ]] || return 1
+  printf '%s/%s' "$os" "$arch"
+}
 # 按程序名锚定取版本：程序名前面不能粘着标识符字符（mykiro-cli 9.9.9 不算），后面只能是空白 + 数字点串；取第一个匹配。
 # **整个 token 都必须是数字点串**（CodeX 2026-09-11 复审 P1）：原先只锚定前缀，于是 `kiro-cli 2.21.3-rc.1`、
 # `kiro-cli 2.21.3evil`、`2.21.3+build7`、`2.21.3_beta` 全被截成 `2.21.3`，一个未探测的预发布版本就能冒用名单里的
@@ -245,8 +262,13 @@ KIRO_CLI_VERSION_ERROR=""
 #   _kiro_cli_version_pick $'warning: a new kiro-cli 2.21.3 is available\nkiro-cli 9.9.9'  →  2.21.3
 # 实际装的是 9.9.9（未探测），却拿到了名单内的 2.21.3。现在两条规则：
 #   · 只认「首尾空白 + kiro-cli + 空白 + 数字点串 + 首尾空白」的整行；行里还有别的字就是未知形态；
-#   · 命中 0 行、或命中多行且版本号不一致 → 一律当未知（返回空）。宁可让上层按「版本号无法解析」拒绝，
+#   · 命中 0 行、或命中多行且版本号不一致 → 一律当未知。宁可让上层按「版本号无法解析」拒绝，
 #     也不在两个候选里猜一个——猜错的方向恰好是「把可用版本当成已装版本」。
+# **「没有候选」与「候选冲突」必须分开**（CodeX 2026-09-13 复审 P2）：两者都返回空的话，调用方看到空就无条件
+# 去查 stderr，于是「stdout 两行版本冲突 + stderr 一行干净版本」最终仍能拿到名单内版本——刚加的
+# 「多行不一致一律未知」契约被回退路径绕过（2026-09-13 复现：stdout 2.21.4/9.9.9 冲突、stderr 2.21.4 → 得到 2.21.4）。
+# 用退出码区分：0 = 唯一候选（stdout 是版本号）；1 = 没有候选（调用方**可以**回退到另一个流）；
+# 2 = 候选冲突（调用方**不得**回退，直接当未知）。
 _kiro_cli_version_pick() {
   local line seen="" n=0
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -254,8 +276,11 @@ _kiro_cli_version_pick() {
     if [[ "$n" == "0" ]]; then seen="${BASH_REMATCH[1]}"; n=1
     elif [[ "$seen" != "${BASH_REMATCH[1]}" ]]; then n=2; fi
   done <<< "${1-}"
-  [[ "$n" == "1" ]] && printf '%s' "$seen"
-  return 0
+  case "$n" in
+    1) printf '%s' "$seen"; return 0 ;;
+    2) return 2 ;;
+    *) return 1 ;;
+  esac
 }
 kiro_cli_version() {
   local tbin="$1" cwd="$2" secs="${3:-60}" out err errf rc=0
@@ -269,8 +294,16 @@ kiro_cli_version() {
     KIRO_CLI_VERSION_ERROR="kiro-cli --version 失败（退出码 ${rc}$([[ "$rc" == "124" ]] && printf '，超时 %ss' "$secs")）；stderr 尾部：$(printf '%s\n' "$err" | tail -n 3 | tr '\n' ' ')"
     return 1
   fi
-  KIRO_CLI_VERSION=$(_kiro_cli_version_pick "$out")
-  [[ -n "$KIRO_CLI_VERSION" ]] || KIRO_CLI_VERSION=$(_kiro_cli_version_pick "$err")
+  # 只有「stdout 里一条候选都没有」（rc 1）才回退去看 stderr；stdout 自相冲突（rc 2）直接当未知，
+  # 不给回退路径把冲突洗掉的机会（CodeX 2026-09-13 复审 P2）。两个流都不给出唯一版本 → KIRO_CLI_VERSION 留空，
+  # 上层按「版本号无法解析」拒绝评审（连 break-glass 也不放行未知版本）。
+  local prc=0
+  KIRO_CLI_VERSION=$(_kiro_cli_version_pick "$out") || prc=$?
+  if [[ "$prc" == "1" ]]; then
+    prc=0
+    KIRO_CLI_VERSION=$(_kiro_cli_version_pick "$err") || prc=$?
+  fi
+  [[ "$prc" == "0" ]] || KIRO_CLI_VERSION=""
   return 0
 }
 

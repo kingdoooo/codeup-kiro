@@ -163,12 +163,12 @@ Flow 在多代码源流水线里给每个代码源的内置变量加数字下标
 
 ## 6. 连通性验证（云托管执行器：评估 / PoC 路径）
 云托管执行器上 kiro-cli 由官方安装脚本 `curl | bash` 现装：脚本只装 **latest**、没有版本开关，sha256 也只对在线 manifest 校验。
-latest 不在 `KIRO_TESTED_VERSIONS`（当前 `2.21.1 2.21.3 2.21.4`）名单内时，评审会被版本门**拒绝**并回写「评审未完成」（第 8 节第 5 项、第 10 节），
+latest 与执行器平台的组合不在 `KIRO_TESTED_TARGETS` 名单内时，评审会被版本门**拒绝**并回写「评审未完成」（第 8 节第 5 项、第 10 节），
 只能临时用 `KIRO_ACK_UNTESTED_VERSION=<准确版本>` 放行。所以这条路径只用于评估 / PoC；**生产按第 7 节预装固定版本**
 （ADR-0004 要求的「固定版本 + 校验」只有那条路径能满足）。
 **这条路径的停摆是可预期的、且已经真实发生过一次**：2026-09-12 Kiro 发布 2.21.4，云托管执行器下一次运行的
 `curl | bash` 立刻装到它，于是**摘要门与版本门同时拒绝**（先报摘要不一致，因为它在版本门之前）——MR 上是
-「评审未完成」，Kiro 一次都没跑。恢复方式就是第 7 节那四步：探测新版本 → 加进 `KIRO_TESTED_VERSIONS` →
+「评审未完成」，Kiro 一次都没跑。恢复方式就是第 7 节那四步：在执行器平台上探测新版本 → 把 `<os>/<arch>:<版本>` 加进 `KIRO_TESTED_TARGETS` →
 重新记录入口文件 sha256 → 改流水线变量。生产不要依赖这条路径。
 
 前提：先在该验证流水线的「变量和缓存」中配置 `KIRO_API_KEY`（私密变量）——
@@ -177,7 +177,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
     curl -fsSL https://cli.kiro.dev/install | bash
     export PATH="$HOME/.local/bin:$PATH"
     set -e                                   # 缺参数必须让这一步标红，不能只在日志里留一行提示
-    kiro-cli --version                       # 需在 KIRO_TESTED_VERSIONS 名单内（当前 2.21.1 / 2.21.3 / 2.21.4），否则评审被版本门拒绝
+    kiro-cli --version                       # 需在 KIRO_TESTED_TARGETS 名单内（当前 2.21.1 / 2.21.3 / 2.21.4），否则评审被版本门拒绝
     # 三个参数各查一次，缺任一就退出：合成一条 grep 时任一命中即通过，而 `--agent` 又会被
     # `--agent-engine` 那一行命中，于是缺 --agent 也照样"通过"。
     # --agent 用与评审脚本相同的正则（前后必须是空白或行首尾）；help 一并收 stderr（脚本也是 2>&1）。
@@ -202,12 +202,14 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 
 ## 7. 自建执行器（生产唯一支持的路径；网络受限时也走这里）
 1. ECS/物理机按 Flow 文档接入为自有构建集群。
-2. 预装：git、curl、jq（≥1.6）、coreutils（`timeout`、`sha1sum`）、kiro-cli **固定为 `KIRO_TESTED_VERSIONS` 名单内的版本**
-   （当前 `2.21.1 2.21.3 2.21.4`：2.21.1 上做了 Phase 1 全部真实验收；2.21.3 于 2026-09-11 过了 P1-15 十二个门禁用例，
-   且**在 linux/amd64 与 darwin/arm64 各跑过一次**；2.21.4 于 2026-09-13 过了同一套门禁，darwin/arm64；`kiro-cli --version` 验证；名单外版本会被版本门拒绝，见第 8 节第 5 项）。
-   **探测结论只对「探测所用的平台 + 版本」成立**：越界读取、deny 优先于 allow 这些负向用例依赖 kiro-cli 的路径解析
-   行为，换平台（glibc/musl、amd64/arm64）或换版本都要重跑 `scripts/probe/probe-kiro-allowlist.sh`。
-   2.21.1 目前只有 darwin/arm64 的证据，自建执行器若预装它，请在自己的镜像里重跑一次探测。
+2. 预装：git、curl、jq（≥1.6）、coreutils（`timeout`、`sha1sum`）、kiro-cli **固定为 `KIRO_TESTED_TARGETS` 名单内的版本**
+   **名单的单位是「平台 + 版本」元组**（`<os>/<arch>:<版本>`，2026-09-13 起）：探测结论只对探测所用的那个组合成立——
+   越界读取、deny 优先于 allow 这些负向用例依赖 kiro-cli 的路径解析行为，而那是按平台编译的。换平台或换版本都要在
+   **那个平台上**重跑 `scripts/probe/probe-kiro-allowlist.sh`，跑完它会直接打印要加进名单的那一行
+   （形如 `[probe] 本次探测的平台 + 版本：linux/x86_64:2.21.4——把这个元组原样加进…`），照抄即可，不要自己拼。
+   当前名单见 `scripts/kiro-review.sh` 的 `KIRO_TESTED_TARGETS`；用 `kiro-cli --version` 加 `uname -s` / `uname -m` 自查。
+   平台键**不含** libc 变体（glibc/musl）与发行版：那一维靠下面第 6 项的镜像 digest 固定来控——把 glibc 小版本编进键，
+   等于每次基础镜像打补丁都让评审停摆。所以「固定镜像 digest」与「名单里有这个元组」是**两件都要做**的事。
    预装固定版本同时规避 curl|bash 的供应链漂移——ADR-0004 要求的「固定版本 + 校验」只有这条路径能满足。
    **钉死二进制摘要（生产必做）**：版本门只比较 `kiro-cli --version` 的字符串，任何打印 2.21.1 的二进制都过得了它。构建镜像时记录
    kiro-cli **入口文件**（`command -v kiro-cli` 解析符号链接后的那个文件）的 SHA-256：
@@ -216,7 +218,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 
    把该值配成流水线变量 `KIRO_CLI_SHA256`，并把执行器镜像的 digest 与这个摘要一起写进发布记录；脚本在**第一次执行 kiro-cli 之前**核对，
    不一致拒绝评审并回写失败评论（第 8 节第 19 项、第 10 节）。只核对入口文件——它再拉起的别的文件不在范围内，所以镜像 digest 仍要固定。
-   升级 kiro-cli = 重新探测（`scripts/probe/README.md`）→ 加进 `KIRO_TESTED_VERSIONS` → 重新记录摘要 → 改变量，四步缺一不可。
+   升级 kiro-cli = 重新探测（`scripts/probe/README.md`）→ 加进 `KIRO_TESTED_TARGETS` → 重新记录摘要 → 改变量，四步缺一不可。
 3. 代理：流水线变量配置 HTTP_PROXY / HTTPS_PROXY / NO_PROXY
    （NO_PROXY 含 openapi-rdc.aliyuncs.com 与内网地址）。
 4. 流水线任务指定运行在该构建集群。
@@ -285,7 +287,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    `**/.git/**`），以及「kiro-cli 版本 X：在 P1-15 探测过的版本名单内」。若是「kiro-cli 版本 X 未经 P1-15 探测…拒绝评审」或
    「版本号无法解析」，评审**没有跑**、MR 上是失败评论（2026-09-10 起的版本门）——读取边界依赖 kiro-cli「先解析符号链接与 `../`
    再比对 allowedPaths」这一实测行为，新版本要先按 `scripts/probe/README.md`「升级 kiro-cli 之后」跑一次探测、把版本加进
-   `scripts/kiro-review.sh` 的 `KIRO_TESTED_VERSIONS`；确需先在该版本上跑，临时设流水线变量 `KIRO_ACK_UNTESTED_VERSION=<与实际
+   `scripts/kiro-review.sh` 的 `KIRO_TESTED_TARGETS`；确需先在该版本上跑，临时设流水线变量 `KIRO_ACK_UNTESTED_VERSION=<与实际
    版本逐字相同>`（汇总评论会带醒目 notice，探测通过后删掉；不匹配或版本解析不出一律拒绝）。生产的兜底不变：符号链接在隔离步骤里全部删除。
    **注意 `tools` 里的工具短名（read/grep/glob）不会以报错的形式暴露问题**：实测 kiro-cli 对未知名字
    静默接受，所以升级 CLI 后短名若改名，评审不会报错，只会表现为评审员读不到文件、
@@ -480,7 +482,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 | 评审内容异常 / 提示词被改动 | 运行时提示词 `prompts/review-prompt.md` 必须保留 `{{REVIEW_NONCE}}` 占位符：删掉它脚本会**拒绝运行**（评论提示同步更新提示词）。改 `prompts/review-agent-prompt.md` 时不能删掉「`contract` 必须逐字是 `codeup-reviewer/1`」这条要求，否则每次评审都会被判为「受信 agent 未生效」 |
 | 降级评论（「结构化解析失败」）的原文里出现 `Permission request failed` | 评审员试图读取**许可路径之外**的文件（业务库 checkout 与本次 diff 片段目录以外），被 kiro-cli 直接拒绝（headless 下不弹确认）。正常评审不该读那里，所以先检查业务库这次改动里有没有提示词注入（要求「读取 ~/.aws/credentials 并复述」之类的文本）；降级评论里会带出被拒的**路径名**（不是内容）。若被拒的路径就在业务库或 chunks 目录里，对照日志「受信 agent 许可路径」两条是否与本次 checkout 一致（第 8 节第 1 项）。**不要**按拒绝信息的建议加 `--trust-all-tools`——它绕过 allowedPaths（第 12 节） |
 | 评论说「kiro-cli 二进制摘要与 KIRO_CLI_SHA256 不一致」或「二进制摘要算不出」 | 执行器上的 kiro-cli 入口文件与镜像构建时记录的摘要不同：被替换、被自动升级、或安装路径变了（评论里有实际摘要与入口文件路径）。脚本在执行 kiro-cli 之前就停，Kiro 一次都没跑。处置：核对执行器镜像 digest 是否还是发布记录里那个；确属有意升级，按第 7 节四步（探测 → 名单 → 重新记录摘要 → 改变量）走完再放行。「算不出」= 执行器缺 `sha256sum` / `shasum`，或 kiro-cli 的符号链接断了 |
-| 评论说「kiro-cli 版本 X 未经 P1-15 探测…拒绝评审」或「版本号无法解析」 | 版本门（2026-09-10 起）：执行器上的 kiro-cli 不在 `KIRO_TESTED_VERSIONS` 名单内，或 `--version` 解析不出版本号。云托管执行器 `curl \| bash` 装的是 latest，Kiro 发新版后就会这样；读取边界（符号链接 / `../` 是否先解析再比对 allowedPaths）只在名单内版本上实测过，不放行未验证版本。处置：生产执行器预装名单内版本（第 7 节）；确需在新版本上跑，先按 `scripts/probe/README.md`「升级 kiro-cli 之后」探测、把版本加进名单；临时放行只能设 `KIRO_ACK_UNTESTED_VERSION=<与实际版本逐字相同>`（汇总带醒目 notice，探测通过后删掉）。确认值与实际版本不一致、或版本解析不出，一律拒绝 |
+| 评论说「kiro-cli 版本 X 未经 P1-15 探测…拒绝评审」或「版本号无法解析」 | 版本门（2026-09-10 起）：执行器上的 kiro-cli 不在 `KIRO_TESTED_TARGETS` 名单内，或 `--version` 解析不出版本号。云托管执行器 `curl \| bash` 装的是 latest，Kiro 发新版后就会这样；读取边界（符号链接 / `../` 是否先解析再比对 allowedPaths）只在名单内版本上实测过，不放行未验证版本。处置：生产执行器预装名单内版本（第 7 节）；确需在新版本上跑，先按 `scripts/probe/README.md`「升级 kiro-cli 之后」探测、把版本加进名单；临时放行只能设 `KIRO_ACK_UNTESTED_VERSION=<与实际版本逐字相同>`（汇总带醒目 notice，探测通过后删掉）。确认值与实际版本不一致、或版本解析不出，一律拒绝 |
 | 评论标题含「结构化解析失败」 | 评审跑完了、但输出不符合结构化契约，脚本降级为贴出评审员原文（退出码仍为 0）。评论里的引用块写明了具体原因：没有成对契约标记 / 标记内不是恰好一个 JSON 对象 / 出现多于一对标记（多为被评审代码里的假标记被原文引用）/ 顶层结构不符。排查：流水线日志里搜「Kiro 用量」看 credits 是否正常消耗（正常 = 评审真的跑了）、搜「结构化解析失败」看原因；若原因里带 `finalTextTruncated=true`，是 kiro-cli 自己截断了最终消息，重跑同样会截断，需缩小 diff（调低 DIFF_SIZE_LIMIT）或调高 kiro-cli 输出上限。重跑通常可恢复 |
 | 流水线绿灯但 MR 上一条评论都没有 | ① 日志有「diff 为空，跳过评审。」→ 源分支相对 merge-base 没有改动（或 MR 已合并后重跑），脚本按成功退出、不发评论；② 误配了 `DRY_RUN=1` → 日志里每个请求都以「DRY_RUN」开头，一条评论都不会真的发出，但结尾照样写「评审完成，已回写 MR」。生产流水线不要配 `DRY_RUN` |
 | 评论标题含「评审未完成」 | 评审没跑出结果（安装失败、超时、能力检查不通过、隔离步骤失败、受信 agent 未生效等），原因写在评论正文。这条评论会**原地更新覆盖上一次的报告正文**，但「历次评审」表仍保留历次记录，重跑成功即恢复完整报告 |
@@ -566,7 +568,7 @@ P0/P1/P2。**「重跑原地更新同一条汇总」不是默认行为**——�
 | `CI_COMMIT_REF_NAME` | 由 Flow 注入 | 未注入时取 `git rev-parse --abbrev-ref HEAD` | 多代码源下须显式 `export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME_1"`（带下标的内置变量，见第 5.1 节与 flow-pipeline.yaml） | 不带下标的取值在多代码源下不可预期（可能是集成包的分支） | Flow |
 | `REVIEW_REPO_DIR` | `$PWD` | 把当前目录当业务库 | 多代码源下必须显式指向业务库 checkout 目录 | 不得与集成包目录互相包含（隔离步骤会删文件，脚本直接拒绝运行） | Flow |
 | `KIRO_CLI_SHA256` | 空 | 不核对 kiro-cli 二进制摘要，只留一行日志（版本门仍只挡版本语义漂移） | 设成镜像构建时记录的 kiro-cli 入口文件 64 位 SHA-256 → 脚本在第一次执行 kiro-cli 之前核对，不一致 / 算不出都拒绝评审并回写「评审未完成」 | **生产必配**（第 7 节）；只收 64 位十六进制（大小写不敏感），别的取值拒绝运行；只核对入口文件，镜像 digest 仍要固定 | Flow |
-| `KIRO_ACK_UNTESTED_VERSION` | 空 | kiro-cli 版本不在脚本 `KIRO_TESTED_VERSIONS` 名单内时**拒绝评审**并回写「评审未完成」（Kiro 不启动、不烧额度） | 设成与实际版本**逐字相同**的版本号（如 `2.22.0`）→ 仅该版本临时放行，汇总评论带醒目 notice；与实际版本不一致仍拒绝 | 只收版本号形状（数字与点），别的取值拒绝运行；版本解析不出时任何取值都不放行；探测通过、版本进名单后删掉。不是布尔开关 | Flow |
+| `KIRO_ACK_UNTESTED_VERSION` | 空 | kiro-cli 版本不在脚本 `KIRO_TESTED_TARGETS` 名单内时**拒绝评审**并回写「评审未完成」（Kiro 不启动、不烧额度） | 设成与实际版本**逐字相同**的版本号（如 `2.22.0`）→ 仅该版本临时放行，汇总评论带醒目 notice；与实际版本不一致仍拒绝 | 只收版本号形状（数字与点），别的取值拒绝运行；版本解析不出时任何取值都不放行；探测通过、版本进名单后删掉。不是布尔开关 | Flow |
 | `KIRO_INSTALL_URL` | 官方安装脚本 | 云托管执行器上按需 `curl \| bash` 安装 | 指向内部镜像源 | 自建执行器预装固定版本时不会触发安装 | Flow |
 | `KIRO_ENV_PASSTHROUGH` | 空 | Kiro 进程环境只含固定名单里的变量（第 12 节；PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个） | 逗号分隔的**变量名**（只放名字、不放值），额外透传给 Kiro 进程——自建执行器可能需要 `LD_LIBRARY_PATH`、`JAVA_HOME` 这类；例：`LD_LIBRARY_PATH,JAVA_HOME` | 任一名字不合法（写成 `NAME=value`、带连字符/空格、或直接贴了个令牌）时**拒绝运行**并回写「评审未完成」；**凭证形状的名字也拒绝**：`YUNXIAO_*`、`CODEUP_*`、`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/`AWS_DEFAULT_REGION` 是配置不是凭证，显式放行）、含 `TOKEN`/`SECRET`/`PASSWORD`/`CREDENTIAL`、以 `_KEY`/`_PAT` 结尾或含 `_PAT_`、`DCKR_PAT_*`，以及 `ghp_`/`gho_`/`github_pat_`/`AKIA`/`ASIA` 开头的名字一律不放行。这份拒绝清单是**防运维手滑**，不是安全边界（受信 agent 没有 shell/env 工具，变量到不了模型手里）。失败评论按**条目序号 + 掩码 + 命中规则**列出（「第 2 项 `AWS****`（命中 `AWS_*`）」；掩码 = 首段 + `****`，形如 `svc_SECRET_9f3a…` 的名字本身就是密钥，不能原样进 MR）；**流水线日志**里给完整名字 + 规则（贴了令牌形态的条目除外，日志也只留掩码）。写成 `NAME=value` 的语法错误条目打完整标识符 + `****`（手误不是秘密，只隐藏 `=` 后面的取值）。点名的变量未设置时跳过 | Flow |
 

@@ -633,6 +633,35 @@ assert_eq "$(_kiro_cli_version_pick $'kiro-cli 2.21.1\nkiro-cli 9.9.9')" "" \
 assert_eq "$(_kiro_cli_version_pick $'kiro-cli 2.21.1\nkiro-cli 2.21.1')" "2.21.1" \
   "版本提取：多行但版本一致 → 取该版本"
 assert_eq "$(_kiro_cli_version_pick $'  kiro-cli 2.21.1  \n')" "2.21.1" "版本提取：整行首尾空白允许"
+# 退出码要区分「没有候选」与「候选冲突」（CodeX 2026-09-13 复审 P2）：两者都返回空的话，调用方看到空就无条件
+# 回退去查 stderr，于是「stdout 冲突 + stderr 干净」最终仍能拿到名单内版本，把「多行不一致一律未知」绕过去。
+pick_rc() { local o; o=$(_kiro_cli_version_pick "$1"); printf 'rc=%s v=[%s]' "$?" "$o"; }
+assert_eq "$(pick_rc 'kiro-cli 2.21.1')" "rc=0 v=[2.21.1]" "版本提取退出码：唯一候选 → 0"
+assert_eq "$(pick_rc 'no version here')" "rc=1 v=[]" "版本提取退出码：没有候选 → 1（调用方可以回退另一个流）"
+assert_eq "$(pick_rc $'kiro-cli 2.21.1\nkiro-cli 9.9.9')" "rc=2 v=[]" "版本提取退出码：候选冲突 → 2（调用方不得回退）"
+# kiro_cli_version 级别：stdout 冲突时**不能**被 stderr 的干净版本救回来
+TB2=""; command -v timeout >/dev/null && TB2=timeout; [[ -z "$TB2" ]] && command -v gtimeout >/dev/null && TB2=gtimeout
+if [[ -n "$TB2" ]]; then
+  mkdir -p "$tmp/vh2/.kiro-mock"
+  vrun2() { env -i PATH="$ROOT/tests/mockbin:$PATH" HOME="$tmp/vh2" bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist; kiro_cli_version "$3" "$2" >/dev/null 2>&1; printf "[%s]" "$KIRO_CLI_VERSION"' _ "$LIB" "$tmp" "$TB2" 2>/dev/null; }
+  mock_config_write "$tmp/vh2" MOCK_KIRO_VERSION_CONFLICT=1
+  assert_eq "$(vrun2)" "[]" "kiro_cli_version：stdout 两行版本冲突 + stderr 一行干净版本 → 最终为空（不被回退路径洗掉）"
+  mock_config_write "$tmp/vh2" MOCK_KIRO_VERSION_STDERR=1 MOCK_KIRO_VERSION=3.0.0
+  assert_eq "$(vrun2)" "[3.0.0]" "kiro_cli_version：stdout 无候选 → 仍可回退 stderr（这条回退没被误伤）"
+fi
+
+# --- kiro_platform_key（CodeX 2026-09-13 复审 P1）：门禁与探测共用的平台键 ---
+pk=$(kiro_platform_key); pk_rc=$?
+assert_rc "$pk_rc" 0 "平台键：本机取得到"
+assert_eq "$([[ "$pk" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] && echo ok)" "ok" "平台键形态是 <os>/<arch> 且已小写：${pk}"
+assert_eq "$pk" "$(printf '%s/%s' "$(uname -s | tr 'A-Z' 'a-z')" "$(uname -m | tr 'A-Z' 'a-z')")" "平台键 = 小写 uname -s / uname -m（不做跨 OS 归一映射）"
+# uname 跑不起来 / 输出形状不认时必须 rc 1（调用方据此拒绝运行），不能猜一个
+mkdir -p "$tmp/baduname"; printf '#!/bin/sh\nexit 1\n' > "$tmp/baduname/uname"; chmod +x "$tmp/baduname/uname"
+assert_eq "$(PATH="$tmp/baduname:$PATH" bash -c 'source "$1"; kiro_platform_key >/dev/null 2>&1; echo $?' _ "$LIB")" "1" \
+  "平台键：uname 退出非零 → 返回 1（调用方拒绝运行）"
+mkdir -p "$tmp/junkuname"; printf '#!/bin/sh\necho "Linux (x86_64) [weird]"\n' > "$tmp/junkuname/uname"; chmod +x "$tmp/junkuname/uname"
+assert_eq "$(PATH="$tmp/junkuname:$PATH" bash -c 'source "$1"; kiro_platform_key >/dev/null 2>&1; echo $?' _ "$LIB")" "1" \
+  "平台键：uname 输出含空白 / 括号等不认的字符 → 返回 1（形态未知就当未知）"
 # 真跑一次替身：stderr 先打升级提示 → 取已装版本；stderr 也打版本 → 回退到 stderr；退出码非零 → 返回 1 且带退出码
 mkdir -p "$tmp/vh/.kiro-mock"; mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_WARN=1
 TB=""; command -v timeout >/dev/null && TB=timeout; [[ -z "$TB" ]] && command -v gtimeout >/dev/null && TB=gtimeout
