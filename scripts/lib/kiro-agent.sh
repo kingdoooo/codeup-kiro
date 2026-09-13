@@ -245,7 +245,7 @@ KIRO_CLI_VERSION_ERROR=""
 # 而平台键是安全判定的输入。PATH 里只要有一个相对目录（或空条目 = 当前目录），MR 作者提交一个 relbin/uname 就能把平台
 # 伪造成任意名单内的元组，整个平台门被绕过（2026-09-13 端到端复现：假 uname 报 Linux/x86_64 → 日志「在名单内」、Kiro 启动、
 # 汇总无 notice）。`command -p` 用 POSIX 规定的默认 PATH 找标准工具，不看调用者的 PATH——小写转换那一步同样要保护，
-# 否则换成伪造的 tr 一样能改结果。（另有一道更宽的门：kiro-review.sh 第 1.7 步拒绝 PATH 里的相对条目。）
+# 否则换成伪造的 tr 一样能改结果。（另有一道更宽的门：scripts/lib/path-gate.sh 的 review_path_gate_or_die 在**第一个外部命令之前**拒绝空条目、相对条目与解析到业务库内的条目。）
 # 纯判定部分单独一个函数：`command -p` 连 shell 函数与别名都绕过（这正是它的价值），所以「uname 输出形状不认」
 # 这条分支没法靠打桩 uname 去测。拆出来之后：判定逻辑可单测，取值逻辑靠「敌对 PATH 下仍拿到真实平台」来断言。
 # 用法：_kiro_platform_key_from <os> <arch> → stdout 归一后的键；rc 1 = 形状不认

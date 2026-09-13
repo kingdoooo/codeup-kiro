@@ -203,22 +203,40 @@ assert_rc "$RC" 0 "M-cx-plat：门禁只比版本 → 别的平台的证据被�
 assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "M-cx-plat：日志声称在名单内"
 assert_contains "$OUT" "开始 Kiro 评审" "M-cx-plat：Kiro 在未验证的平台上被启动了"
 
-# --- M-cx-path（CodeX 2026-09-13 复审 P1 的另一半）：删掉第 1.7 步的相对 PATH 拒绝 → 业务库里的假 uname 生效 ---
-# 双变异：① 删掉 PATH 门；② 把平台键的 command -p 退回裸命令（两道防线，单独杀掉任一道都还挡得住——这正是纵深该有的样子）。
-pkg=$(make_mutant m-cx-path-gate 's#^\[\[ -z "\$_bad_path_entries" \]\] \\$#[[ -z "" ]] \\#')
+# --- M-cx-path（CodeX 2026-09-13 第三轮复审 P0）：第 0 步的 PATH 门被拆掉 → 业务库里的假 git 真的会被执行 ---
+# 双变异：① PATH 门恒不报可疑；② 平台键的 command -p 退回裸命令。两道都杀掉，业务库里的假工具才生效——
+# 单独杀任一道都还挡得住（PATH 门拦住相对条目；command -p 让平台键不看 PATH），这正是纵深该有的样子。
+pkg=$(make_mutant m-cx-path-gate 's#^  if \[\[ -n "\$bad" \]\]; then$#  if [[ -n "" ]]; then#' scripts/lib/path-gate.sh)
 mutate_more "$pkg" 's#os=$(command -p uname -s 2>/dev/null) || return 1#os=$(uname -s 2>/dev/null) || return 1#; s#arch=$(command -p uname -m 2>/dev/null) || return 1#arch=$(uname -m 2>/dev/null) || return 1#' scripts/lib/kiro-agent.sh
-tweak_evil_uname_m() {
+FAKE_GIT_LOG_M="$tmp/fakegit-m.log"; export FAKE_GIT_LOG="$FAKE_GIT_LOG_M"
+tweak_evil_path_m() {
   mkdir -p relbin
   printf '#!/bin/sh\ncase "$1" in -s) echo otheros ;; -m) echo otherarch ;; *) echo otheros ;; esac\n' > relbin/uname
-  chmod +x relbin/uname
-  git add -A && git commit -qm "add relbin/uname"
+  printf '#!/bin/sh\necho FAKE_GIT >> "$FAKE_GIT_LOG"\nexec /usr/bin/git "$@"\n' > relbin/git
+  chmod +x relbin/uname relbin/git
+  /usr/bin/git add -A && /usr/bin/git commit -qm "add relbin"
 }
-MUT_TWEAK=tweak_evil_uname_m run_case m-cx-path "$pkg" PATH="relbin:$PATH" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="otheros/otherarch:9.9.9"
-assert_rc "$RC" 0 "M-cx-path：两道防线都杀掉后，业务库里的假 uname 决定了平台键（这里用 ACK 放行以证明它真的被当成 otheros/otherarch）"
-assert_contains "$(posted_comment "$OUT")" "otheros/otherarch:9.9.9" "M-cx-path：伪造的平台进了评论——端到端「相对 PATH 拒绝」与「command -p」两条断言会失败"
-MUT_TWEAK=tweak_evil_uname_m run_case m-cx-path-control "$ROOT" PATH="relbin:$PATH" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="otheros/otherarch:9.9.9"
-assert_nonzero "$RC" "M-cx-path 对照：原实现在第 1.7 步就拒绝了相对 PATH"
-assert_contains "$(posted_comment "$OUT")" "PATH 里有相对条目" "M-cx-path 对照：失败评论说的是 PATH"
+: > "$FAKE_GIT_LOG_M"
+MUT_TWEAK=tweak_evil_path_m run_case m-cx-path "$pkg" PATH="relbin:$PATH" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="otheros/otherarch:9.9.9"
+assert_rc "$RC" 0 "M-cx-path：两道防线都杀掉后评审照跑（假 uname 决定了平台键，用 ACK 放行以证明它真的被当成 otheros/otherarch）"
+assert_contains "$(posted_comment "$OUT")" "otheros/otherarch:9.9.9" "M-cx-path：伪造的平台进了评论"
+assert_eq "$([[ "$(grep -c FAKE_GIT "$FAKE_GIT_LOG_M" 2>/dev/null || true)" -gt 0 ]] && echo executed || echo never)" "executed" \
+  "M-cx-path：业务库里的假 git 真的被执行了——端到端「假 git 一次都没跑」断言会失败"
+: > "$FAKE_GIT_LOG_M"
+MUT_TWEAK=tweak_evil_path_m run_case m-cx-path-control "$ROOT" PATH="relbin:$PATH" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="otheros/otherarch:9.9.9"
+assert_nonzero "$RC" "M-cx-path 对照：原实现在第 0 步就拒绝了"
+assert_contains "$OUT" "PATH 不可信" "M-cx-path 对照：报错说的是 PATH"
+assert_eq "$(grep -c FAKE_GIT "$FAKE_GIT_LOG_M" 2>/dev/null || true)" "0" "M-cx-path 对照：原实现下假 git 一次都没跑"
+unset FAKE_GIT_LOG
+
+# --- M-cx-path2（同一轮 P1）：PATH 分割退回 `printf | tr` → 尾随空条目被命令替换吃掉，PATH="$PATH:" 放行 ---
+pkg=$(make_mutant m-cx-path2-split 's#^  rest="\${PATH}:"$#  rest=""; while IFS= read -r _e; do rest="${rest}${_e}:"; done <<< "$(printf "%s" "$PATH" | tr ":" "\\n")"#' scripts/lib/path-gate.sh)
+run_case m-cx-path2 "$pkg" PATH="$PATH:"
+assert_rc "$RC" 0 "M-cx-path2：命令替换吃掉尾随空条目 → 门放行——端到端「PATH 尾随冒号 → 拒绝」断言会失败"
+assert_not_contains "$OUT" "PATH 不可信" "M-cx-path2：门没有报可疑"
+run_case m-cx-path2-control "$ROOT" PATH="$PATH:"
+assert_nonzero "$RC" "M-cx-path2 对照：原实现（纯参数展开）拒绝尾随空条目"
+assert_contains "$OUT" "空条目=当前目录" "M-cx-path2 对照：点明空条目"
 
 # --- M-cx-nul3（CodeX 2026-09-12 复审 P1）：采样器把样本放回 bash 变量 → 命令替换吞掉 NUL → 全零文件被判 textlike ---
 # 观测：32 KiB 全零文件不再进 opaque 桶、汇总没有「未覆盖」说明，而是整轮强制 --text 把原始字节送进模型 stdin。

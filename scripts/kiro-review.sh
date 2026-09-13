@@ -14,7 +14,17 @@
 # 退出码：0=评审完成并回写；非 0=失败（不卡合并，仅流水线标红）。
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# **这一行只用 builtin**（CodeX 2026-09-13 第三轮复审 P0）：原先是 `$(cd "$(dirname …)")`，而 dirname 走 PATH——
+# 业务库里一个假 dirname 就能把 SCRIPT_DIR / PKG_ROOT 指到别处，等于换掉整个受信集成包，而这发生在任何检查之前。
+# `${BASH_SOURCE[0]%/*}` 在路径不含 `/` 时会原样留下文件名，那种情况按当前目录处理。
+_kr_self="${BASH_SOURCE[0]}"
+if [[ "$_kr_self" == */* ]]; then _kr_dir="${_kr_self%/*}"; else _kr_dir="."; fi
+SCRIPT_DIR="$(cd -P -- "$_kr_dir" && pwd -P)"
+unset _kr_self _kr_dir
+# --- 0. PATH 可信性门：必须在**第一个外部命令之前**（scripts/lib/path-gate.sh 里只有函数、只用 builtin）---
+# source 是 builtin，被 source 的文件顶层也不跑任何命令，所以这一步不依赖 PATH。
+source "${SCRIPT_DIR}/lib/path-gate.sh"
+review_path_gate_or_die "${REVIEW_REPO_DIR:-$PWD}"
 # -P 解析掉符号链接：两侧都用物理路径，下面的「REVIEW_REPO_DIR 不得指向集成包自身」比较才拦得住
 # `ln -s <集成包> /tmp/link; REVIEW_REPO_DIR=/tmp/link` 这种绕过（R10①）
 PKG_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
@@ -1004,23 +1014,6 @@ fi
 # 掩码 + 命中规则；完整名字只在流水线日志；取值从不出现）。
 env_allowlist_or_die() { kiro_env_allowlist || die_review "KIRO_ENV_PASSTHROUGH 不合法：${KIRO_ENV_ALLOW_ERROR}。请修正该流水线变量"; }
 env_allowlist_or_die
-
-# --- 1.7 PATH 里不得有相对条目（CodeX 2026-09-13 复审 P1 的通用一半）---
-# 本脚本从第 4 步起把 cwd 切到**不受信的业务仓库**，而它一路上要跑 git / jq / uname / tr / timeout / sha1sum 这些外部工具。
-# PATH 里只要有一个相对目录，或者一个**空条目**（`::` 或首尾的 `:`，POSIX 里都等于当前目录），MR 作者提交一个同名可执行文件
-# 就能顶替其中任何一个——伪造平台键只是其中最便宜的一种（2026-09-13 端到端复现），顶替 git 或 jq 后果更大。
-# 逐个工具去 `command -p` 是打不完的地鼠（每加一个外部调用就多一个洞），所以在这里一次性拒绝这种 PATH。
-# 平台键那一处**同时**用 `command -p`（纵深：这道门万一被绕过或以后被挪位置，平台判定仍不看调用者 PATH）。
-# 这是执行器配置错误，不是 MR 的错，所以文案指向运维；相对 PATH 在任何 CI 上都属于已知坏实践。
-_bad_path_entries=""
-while IFS= read -r _pe; do
-  [[ "$_pe" == /* ]] && continue
-  if [[ -z "$_pe" ]]; then _bad_path_entries="${_bad_path_entries}${_bad_path_entries:+, }<空条目=当前目录>"
-  else _bad_path_entries="${_bad_path_entries}${_bad_path_entries:+, }$(printf '%s' "$_pe" | cut -c1-40)"; fi
-done <<< "$(printf '%s' "${PATH-}" | tr ':' '\n')"
-[[ -z "$_bad_path_entries" ]] \
-  || die_review "执行器的 PATH 里有相对条目，拒绝评审：本脚本要在**不受信的业务仓库**目录下运行 git / jq / uname 等外部工具，PATH 含相对目录（或空条目，等于当前目录）时 MR 作者提交一个同名可执行文件就能顶替它们。请把 PATH 改成全部绝对路径。可疑条目：${_bad_path_entries}"
-unset _bad_path_entries _pe
 
 # --- 2. 安装/检测 kiro-cli（失败用 die_review：网络受限的执行器上这是最常见的失败，
 #        原来用 die 会让 MR 上什么都看不到、只有流水线标红，违反 I10）---

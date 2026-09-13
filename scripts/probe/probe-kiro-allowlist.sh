@@ -47,8 +47,17 @@
 #   要跑得显式列出（15-fix2 #9）。每个用例一次调用（约 0.3 credit、15–55 s）。
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PKG_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# SCRIPT_DIR 只用 builtin（假 dirname 能把 PKG_ROOT 指到别处），随后立刻过 PATH 可信性门——
+# 本脚本产出的是**发布证据**，不能跑在任意 PATH 上（CodeX 2026-09-13 第三轮复审 P0 第 4 条建议）。
+_pk_self="${BASH_SOURCE[0]}"
+if [[ "$_pk_self" == */* ]]; then _pk_dir="${_pk_self%/*}"; else _pk_dir="."; fi
+SCRIPT_DIR="$(cd -P -- "$_pk_dir" && pwd -P)"
+unset _pk_self _pk_dir
+PKG_ROOT="$(cd -P -- "${SCRIPT_DIR}/../.." && pwd -P)"
+source "${PKG_ROOT}/scripts/lib/path-gate.sh"
+# 探测不在业务库里跑（它自己建临时夹具），所以「业务库」这一维传本次的临时根都可以——
+# 但相对条目与空条目同样致命（探测也调 git / jq / od），所以门照跑。
+review_path_gate_or_die "$PWD"
 command -v kiro-cli >/dev/null || { echo "缺少 kiro-cli（环境准备失败，退出码 5）" >&2; exit 5; }
 command -v jq >/dev/null || { echo "缺少 jq（环境准备失败，退出码 5）" >&2; exit 5; }
 TIMEOUT_BIN=""; command -v timeout >/dev/null && TIMEOUT_BIN=timeout
@@ -409,7 +418,8 @@ fi
 GATE_MISSING=""; for c in $GATE_CASES; do [[ "$RAN" == *" $c "* ]] || GATE_MISSING+="$c "; done
 # platform / target 两个字段（CodeX 2026-09-13 复审 P1）：探测结论只对「平台 + 版本」成立，所以人工要抄进
 # KIRO_TESTED_TARGETS 的**就是** target 这一个字符串，不再让人自己拼——拼错的方向恰好是「把别的平台的证据当成本平台的」。
-# 平台键由 kiro_platform_key 算（与门禁同一份实现）；算不出就留空，此时 target 也留空、下面的提示行会说清。
+# 平台键由 kiro_platform_key 算（与门禁同一份实现）。到汇总这一步 PROBE_PLATFORM / PROBE_TARGET **一定非空**——
+# 环境准备阶段已经 fail-closed 过（缺任一即退 5）。别把 `|| true` 加回来：那会让「rc 0 但没有可绑定身份」重新可能。
 jq -n --arg ts "$TS" --arg ver "$KIRO_CLI_VERSION" --arg keep "$KEEP" --arg ran "${RAN# }" --arg missing "$GATE_MISSING" \
       --arg plat "$PROBE_PLATFORM" --arg target "$PROBE_TARGET" \
       --argjson fail "$PROBE_FAIL" --argjson inc "$PROBE_INCONCLUSIVE" \

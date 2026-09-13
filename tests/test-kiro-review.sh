@@ -1915,38 +1915,54 @@ assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "P1-2：名
 # **平台维度没法靠打桩 uname 在 e2e 里模拟**——kiro_platform_key 走 command -p，连相对/绝对 PATH 里的假 uname 都不看
 # （这正是本轮 P1 的修复）。平台分量真的参与比较，由变异 M-cx-plat 用「把名单改成只含别的平台」来守。
 
-# ---- CodeX 2026-09-13 复审 P1（另一半）：PATH 有相对条目 → 第 1.7 步拒绝运行 ----
-# 业务库是不受信数据，而脚本要在它的目录下跑 git / jq / uname 等外部工具。相对 PATH 条目让 MR 作者提交同名可执行文件
-# 就能顶替其中任何一个。逐个工具去 command -p 打不完，所以整类在第 1.7 步一次拒绝。
-tweak_evil_uname() {
-  mkdir -p relbin
-  printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux ;; esac\n' > relbin/uname
-  chmod +x relbin/uname
-  git add -A && git commit -qm "add relbin/uname"
+# ---- CodeX 2026-09-13 第三轮复审 P0/P1：PATH 可信性门（第 0 步，第一个外部命令之前）----
+# 三条缺陷都由复现驱动：① 门在第 1.7 步，而 git / jq / cut / mktemp / dirname 早就跑过了；
+# ② 只要求以 `/` 开头 → `<业务库>/bin` 照样通过，MR 提交 bin/git 就能被执行；
+# ③ 门自己用 PATH 上的 tr / cut → 假 tr 可以谎报 PATH 的分割结果。
+# 现在门在脚本最前面、只用 builtin，并且拒绝「解析到业务库内」的绝对条目。
+# 失败只标红不回写评论：回写要跑 curl / jq，而这道门的前提就是「PATH 上的工具不可信」。
+tweak_repo_bin_git() {
+  mkdir -p bin
+  printf '#!/bin/sh\necho FAKE_GIT >> "$FAKE_GIT_LOG"\nexec /usr/bin/git "$@"\n' > bin/git
+  chmod +x bin/git
+  /usr/bin/git add -A && /usr/bin/git commit -qm "add bin/git"
 }
-CASE_TWEAK=tweak_evil_uname run_case relpath PATH="relbin:$PATH"
-assert_nonzero "$RC" "相对 PATH：第 1.7 步拒绝运行"
-comment=$(posted_comment "$OUT")
-assert_contains "$comment" "PATH 里有相对条目" "相对 PATH：失败评论说清是 PATH 的问题"
-assert_contains "$comment" "relbin" "相对 PATH：失败评论点出可疑条目"
-assert_not_contains "$OUT" "开始 Kiro 评审" "相对 PATH：拒绝发生在 Kiro 启动之前"
-# 空条目（`::` 与首尾的 `:`，POSIX 里都等于当前目录）同样拒绝
-run_case emptypath PATH=":$PATH"
-assert_nonzero "$RC" "PATH 首部空条目：同样拒绝"
-assert_contains "$(posted_comment "$OUT")" "<空条目=当前目录>" "PATH 空条目：失败评论点明空条目"
-run_case emptypath2 PATH="$PATH::/usr/bin"
-assert_nonzero "$RC" "PATH 中间空条目：同样拒绝"
-# 正控：全绝对路径的 PATH 里放一个假 uname，第 1.7 步不拦（它只管相对条目），而平台键仍取真实平台 → 照常评审
-tweak_evil_uname_abs() { :; }
-mkdir -p "$tmp/evilabs"
-printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux ;; esac\n' > "$tmp/evilabs/uname"
-chmod +x "$tmp/evilabs/uname"
-run_case evilabs PATH="$tmp/evilabs:$PATH"
-assert_rc "$RC" 0 "绝对 PATH 里的假 uname：第 1.7 步不拦（只管相对条目），评审照常完成"
-assert_contains "$OUT" "kiro-cli ${LISTED_TARGET}：在 P1-15 探测过的平台 + 版本名单内" "绝对 PATH 里的假 uname：平台键仍是真实平台（command -p 不看 PATH）"
-# 断言要收窄到**门禁行本身**：日志里本来就会打印整个名单（里面确实有 linux/x86_64:2.21.3/4），
-# 所以不能笼统地断言「输出里没有 linux/x86_64」。
-assert_not_contains "$OUT" "kiro-cli linux/x86_64:" "绝对 PATH 里的假 uname：门禁行里的平台不是伪造的那个"
+FAKE_GIT_LOG="$tmp/fakegit.log"; export FAKE_GIT_LOG; : > "$FAKE_GIT_LOG"
+# run_case 的工作目录是 $tmp/case-<用例名>/work，所以这里能提前拼出「业务库内的绝对 PATH 条目」
+CASE_TWEAK=tweak_repo_bin_git run_case repobin PATH="$tmp/case-repobin/work/bin:$PATH"
+assert_nonzero "$RC" "PATH 有指向业务库内的绝对条目 → 拒绝运行"
+assert_contains "$OUT" "PATH 不可信" "业务库内的 PATH 条目：报错说 PATH 不可信"
+assert_contains "$OUT" "解析到业务库内" "业务库内的 PATH 条目：报错点明它落在业务库里"
+assert_eq "$(grep -c FAKE_GIT "$FAKE_GIT_LOG" 2>/dev/null || true)" "0" "业务库内的 PATH 条目：假 git 一次都没被执行（门在第一个外部命令之前）"
+assert_not_contains "$OUT" "开始 Kiro 评审" "业务库内的 PATH 条目：Kiro 不启动"
+# 相对条目：即使业务库里同时放了假 tr（想让门自己看不见相对条目）也拒绝——门不用 tr
+tweak_evil_tr() {
+  mkdir -p relbin
+  printf '#!/bin/sh\necho /usr/bin\n' > relbin/tr
+  printf '#!/bin/sh\necho FAKE_GIT >> "$FAKE_GIT_LOG"\nexec /usr/bin/git "$@"\n' > relbin/git
+  chmod +x relbin/tr relbin/git
+  /usr/bin/git add -A && /usr/bin/git commit -qm "add relbin/tr+git"
+}
+: > "$FAKE_GIT_LOG"
+CASE_TWEAK=tweak_evil_tr run_case relbintr PATH="relbin:$PATH"
+assert_nonzero "$RC" "相对 PATH + 假 tr → 仍然拒绝（门只用 builtin，不经 tr）"
+assert_contains "$OUT" "（相对路径）" "相对 PATH + 假 tr：报错点明相对条目"
+assert_eq "$(grep -c FAKE_GIT "$FAKE_GIT_LOG" 2>/dev/null || true)" "0" "相对 PATH + 假 tr：假 git 一次都没被执行"
+# 空条目四种形态（v1.5.0 的门漏掉了尾随那个——命令替换吃掉了尾随换行）
+run_case pathtrail PATH="$PATH:"
+assert_nonzero "$RC" "PATH 尾随冒号（尾部空条目）→ 拒绝"
+assert_contains "$OUT" "空条目=当前目录" "PATH 尾随冒号：报错点明空条目"
+run_case pathlead PATH=":$PATH"
+assert_nonzero "$RC" "PATH 首部冒号 → 拒绝"
+run_case pathmid PATH="$PATH::/usr/bin"
+assert_nonzero "$RC" "PATH 中间双冒号 → 拒绝"
+# 正控：干净的绝对 PATH 照常评审；PATH 里有不存在的绝对条目只跳过、不拦
+run_case pathok
+assert_rc "$RC" 0 "干净 PATH：评审照常完成（门不误伤）"
+assert_not_contains "$OUT" "PATH 不可信" "干净 PATH：不出 PATH 报错"
+run_case pathmissing PATH="$PATH:/no/such/dir/$$"
+assert_rc "$RC" 0 "PATH 含不存在的绝对条目：只跳过并计数，不拦（真实执行器上很常见）"
+assert_contains "$OUT" "个不存在或进不去的绝对条目" "PATH 含不存在的绝对条目：日志说明跳过了几个"
 
 # ---- CodeX 2026-09-13 复审 P2：break-glass 绑定完整元组 ----
 # 旧的 KIRO_ACK_UNTESTED_VERSION 只绑版本，设过一次就会在换平台后继续放行同一个版本——与当初拒绝布尔开关同一个理由。

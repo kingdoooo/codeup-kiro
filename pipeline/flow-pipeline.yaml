@@ -71,8 +71,11 @@ stages:
                 # 内置变量的取值（多代码源下那个取值可能是空的）。CI_COMMIT_REF_NAME 那行**刻意仍是无条件覆盖**：
                 # 不带下标的取值可能是集成包那个代码源的分支，必须显式压掉。
                 : "${MR_TARGET_BRANCH:=$CI_COMMIT_TARGET_REF_NAME_1}"; export MR_TARGET_BRANCH
-                # business_repo 与 integration_repo 是兄弟目录，故用 ../ 定位集成包脚本
-                bash "$PROJECT_DIR/../integration_repo/scripts/kiro-review.sh"
+                # business_repo 与 integration_repo 是兄弟目录，故用 ../ 定位集成包脚本。
+                # **解释器用绝对路径**（CodeX 2026-09-13 第三轮复审）：裸 `bash` 也走 PATH，而脚本启动之前的 PATH
+                # 不是脚本能管的——评审脚本自己的 PATH 门只能保证「它自己调外部工具时 PATH 可信」。
+                # alinux3 与常见 Linux 发行版都有 /bin/bash；换别的镜像时改成该镜像里 bash 的绝对路径。
+                /bin/bash "$PROJECT_DIR/../integration_repo/scripts/kiro-review.sh"
 
 # UI 中需配置的变量（变量和缓存 → 字符变量）。
 # 每个开关「关闭时 / 开启时各是什么行为、前提是什么」的完整矩阵见 setup-guide 第 11 节；
