@@ -7,7 +7,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 errdir=$(mktemp -d); trap 'rm -rf "$errdir"' EXIT
-DIAG_RE='unexpected EOF|command substitution|syntax error|unbound variable|write error'   # write error = 测试里 `渲染函数 | head -1` 之类让生产函数吃 EPIPE（CodeX 2026-09-09 复审 P2）
+DIAG_RE='unexpected EOF|command substitution|syntax error|unbound variable|write error|readonly variable'   # write error = 测试里 `渲染函数 | head -1` 之类让生产函数吃 EPIPE（CodeX 2026-09-09 复审 P2）
+# readonly variable（第五轮复审自查补）：`readonly PATH` 之后 `command -p` 的内部 PATH 赋值会失败，bash 只在 stderr 打这一行
+# 就**改用调用者的 PATH** 去找命令（退出码仍是 0）——一道安全判定被降级成一行警告，而全套 4000+ 断言当时全绿。
+# 这类「bash 抱怨了但退出码正常」的行必须让整套失败。
 # 已跑完的那些 stderr 里有没有 bash 解析诊断：命中就打出来并返回 1。**每个退出点之前都要跑一次**——
 # 原先只在全绿之后跑，某个套件先失败时 fail-fast 直接退出、这个块永远不打，而解析错误最常与失败同时出现。
 diag_check() {

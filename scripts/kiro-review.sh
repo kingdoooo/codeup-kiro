@@ -14,6 +14,37 @@
 # 退出码：0=评审完成并回写；非 0=失败（不卡合并，仅流水线标红）。
 set -euo pipefail
 
+# --- 0.0 启动环境门：必须在**第一条命令之前**，比第 0 步的 PATH 门还早（CodeX 2026-09-13 第四轮复审 P0；完整理由见 scripts/lib/path-gate.sh 顶部）---
+# 非交互 bash 在读到本文件第一行**之前**就会 source `$BASH_ENV`（相对路径按 cwd 解析，而 cwd 是业务库），
+# 并从环境导入 exported functions。后者能顶替下面几行依赖的 `cd`/`pwd`，也能顶替 `source`，甚至直接定义一个
+# 空的 `review_path_gate_or_die` 把 PATH 门变成空转（三种形态本机全部复现）——「只用 builtin」挡不住这个：
+# 默认模式下函数查找先于 builtin 查找。所以这段检查必须在这里，而且不能放进被 source 的库里。
+# `CDPATH=''`：`cd` 的相对参数会走 CDPATH，`CDPATH=<别处>` 能让下面那次 `cd -P -- "$_kr_dir"` 落到别处；赋值语句不可被顶替。
+# 这段是**纵深不是边界**：环境里导出一个名叫 `builtin` 的函数就能让 `builtin declare -F` 返回空（实测）。
+# 真正的收口在启动方——参考 YAML 用 `/bin/bash -p`（privileged 模式下 bash 不处理 BASH_ENV/ENV、不导入函数）。
+# 它仍然必要：`-p` 只管当前进程，而第 2 步 `curl … | bash` 拉起的**子** shell 不是 privileged 的，
+# 所以这里还要把 BASH_ENV/ENV 从环境里删掉——`BASH_FUNC_*` 删不掉（它们不是 shell 变量），那一半在第 0.1 步。
+CDPATH=''
+# 这一行必须在本脚本定义/source 任何函数之前：列表非空 = 函数是从环境继承来的。
+# `|| _kr_fns=""`：`declare -F` 在没有任何函数时按 bash 版本可能以 1 退出，`set -e` 下会直接把脚本带走。
+_kr_fns="$(builtin declare -F)" || _kr_fns=""
+if [[ -n "$_kr_fns" || -n "${BASH_ENV-}" || -n "${ENV-}" ]]; then
+  # 这条拒绝**只报状态、不报取值**（CodeX 2026-09-13 第五轮复审 P0）：BASH_ENV/ENV 的取值与继承函数的名字都来自
+  # 不受信的启动环境，原样打出来等于给流水线日志开一个绕过全套掩码规则的早期出口（复现：BASH_ENV=ghp_… 时
+  # 令牌整串进日志），而且它们能带换行与终端控制字符（日志注入）。要查取值请在执行器上自己看环境。
+  # 文案也不再说「未执行任何外部命令」：**本脚本正文**还没跑任何外部命令，但启动阶段可能已经跑过——
+  # 不带 `-p` 时 BASH_ENV 指的那个文件正是在读到本脚本第一行之前被 source 的。
+  _kr_why=""
+  [[ -z "$_kr_fns" ]]        || _kr_why="${_kr_why}从环境继承的 shell 函数；"
+  [[ -z "${BASH_ENV-}" ]]    || _kr_why="${_kr_why}BASH_ENV 已设置；"
+  [[ -z "${ENV-}" ]]         || _kr_why="${_kr_why}ENV 已设置；"
+  builtin echo "[kiro-review] 错误：启动环境不可信，拒绝运行。检测到：${_kr_why}本脚本正文就此停止，但**启动阶段可能已经执行过不受信代码**（非交互 bash 会在读到本脚本第一行之前 source \$BASH_ENV，并从环境导入 exported functions——后者还能顶替本脚本用到的 builtin）。请让启动方用 \`/bin/bash -p\` 启动本脚本，并保证 BASH_ENV / ENV / 导出的 shell 函数不来自业务仓库（setup-guide 第 7 节）。取值与函数名刻意不打印：它们是不受信输入，原样进日志既是泄露面也是日志注入面" >&2
+  builtin exit 1
+fi
+# 连 CDPATH 一起删掉：赋值只挡住本进程，删掉才不会传给 `curl … | bash` 那类子 shell。
+# **注意这里删不掉 `BASH_FUNC_*`**：`-p` 下 bash 根本不把它们变成 shell 变量（名字里带 `%%`，也不是合法变量名），
+# 它们只在 environ 里，所以子进程照样能重新导入 → 见第 0.1 步。
+unset -v _kr_fns _kr_why BASH_ENV ENV CDPATH
 # **这一行只用 builtin**（CodeX 2026-09-13 第三轮复审 P0）：原先是 `$(cd "$(dirname …)")`，而 dirname 走 PATH——
 # 业务库里一个假 dirname 就能把 SCRIPT_DIR / PKG_ROOT 指到别处，等于换掉整个受信集成包，而这发生在任何检查之前。
 # `${BASH_SOURCE[0]%/*}` 在路径不含 `/` 时会原样留下文件名，那种情况按当前目录处理。
@@ -25,6 +56,19 @@ unset _kr_self _kr_dir
 # source 是 builtin，被 source 的文件顶层也不跑任何命令，所以这一步不依赖 PATH。
 source "${SCRIPT_DIR}/lib/path-gate.sh"
 review_path_gate_or_die "${REVIEW_REPO_DIR:-$PWD}"
+# --- 0.1 environ 里残留的 `BASH_FUNC_*`（CodeX 2026-09-13 第五轮复审 P1）---
+# `-p` 只让**本进程**忽略导入的函数，原始的 `BASH_FUNC_x%%=() {…}` 变量还留在 environ 里；任何普通 bash 子进程
+# （第 2 步 `curl … | bash` 的右边）会把它们重新导入，安装脚本一调 uname / mkdir / chmod 这类名字就落进载荷。
+# 本机 bash 3.2 与 docker bash:5.2 实测一致：privileged 父进程 `declare -F` 为空、子进程 `type -t pwd` 是 function。
+# 第 0.0 步挡的是「本进程已经导入了函数」，这一步挡的是「本进程没导入、但子进程会导入」——两件不同的事。
+# 这一步要跑 env / grep（外部命令），所以必须排在 PATH 门**之后**：门刚保证了这两个名字解析到可信文件。
+# 只报个数、不报名字（第五轮 P0 同一条规则）。`|| true`：grep -c 没命中时以 1 退出，pipefail 下会带走脚本。
+_kr_env_fns=$(env | LC_ALL=C grep -c '^BASH_FUNC_' || true)
+if [[ "$_kr_env_fns" != "0" ]]; then
+  echo "[kiro-review] 错误：启动环境不可信，拒绝运行：environ 里还有 ${_kr_env_fns} 个 \`BASH_FUNC_*\` 形式的导出 shell 函数。本进程即使以 \`-p\` 启动（不导入它们）也不够——脚本第 2 步 \`curl … | bash\` 那种普通 bash 子进程会把它们重新导入，安装脚本调任何同名命令就等于执行不受信代码。请让启动方不要向本脚本导出 shell 函数（setup-guide 第 7 节）；函数名不打印（不受信输入）" >&2
+  exit 1
+fi
+unset _kr_env_fns
 # -P 解析掉符号链接：两侧都用物理路径，下面的「REVIEW_REPO_DIR 不得指向集成包自身」比较才拦得住
 # `ln -s <集成包> /tmp/link; REVIEW_REPO_DIR=/tmp/link` 这种绕过（R10①）
 PKG_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
@@ -1019,11 +1063,60 @@ env_allowlist_or_die
 #        原来用 die 会让 MR 上什么都看不到、只有流水线标红，违反 I10）---
 if ! command -v kiro-cli >/dev/null; then
   log "kiro-cli 不存在，尝试安装（云托管执行器场景）……"
-  curl -fsSL --connect-timeout 10 --max-time 300 "$KIRO_INSTALL_URL" | bash \
+  # 安装器**不继承当前环境**（CodeX 2026-09-13 第五轮复审 P1）。两个理由：
+  #   ① `env -i` 把 `BASH_FUNC_*` 一并挡在外面。第 0.1 步已经拒绝了带 `BASH_FUNC_*` 的启动环境，这里是第二道——
+  #      门是时点判断，而这条管道是全脚本唯一一处「把 stdin 交给一个新的 bash」的地方，值得自己把环境收干净。
+  #   ② 在线安装脚本没有任何理由拿到 KIRO_API_KEY / YUNXIAO_TOKEN：固定名单（KIRO_ENV_FIXED_NAMES，与四次
+  #      kiro-cli 调用同一份）**再去掉 KIRO_API_KEY**，剩下的只有 PATH/HOME/locale/代理/证书/XDG 这些它真需要的。
+  # 右边用 `${BASH:-/bin/bash}` 而不是裸 `bash`：`-p` 必须显式带上（BASH 由 bash 自己在启动时写入，不取环境里的旧值）。
+  # 将来官方安装脚本需要别的变量时，把变量名加进 KIRO_ENV_FIXED_NAMES（或在这里显式补一个），
+  # **不要**改回继承整个环境——那会把 `BASH_FUNC_*` 与凭证一起交出去。这条路径本来只用于评估 / PoC
+  # （生产按 setup-guide 第 7 节预装固定版本），失败时会 die_review 回写「评审未完成」，不会静默。
+  # ⓪ **curl 之前**先确认 HOME 不在业务库内（CodeX 2026-09-13 第六轮复审 P0）。curl 会读 `$HOME/.curlrc`、
+  #    安装器会写 `$HOME/.local/bin`，两者都发生在下面那次 PATH 重新过门**之前**——HOME 指进业务库时，业务库里
+  #    一个 `.curlrc`（`url = "file://<业务库>/evil.sh"`）就能让 curl 先把业务库脚本打到 stdout，与受信安装脚本
+  #    一起被右侧 bash 执行（本机 curl 8.7 复现 marker=EVIL_RAN；env -i / -p 都在 curl 左侧之后，挡不住）。
+  review_dir_not_in_repo_or_die "$HOME" "$REVIEW_REPO_DIR" \
+    "安装 kiro-cli 前（curl 读 \$HOME/.curlrc、安装器写 \$HOME/.local/bin，都在 PATH 重新过门之前，所以 HOME 必须先确认不在业务库内）"
+  # 安装器与 curl **都不继承当前环境**（第五轮 P1 + 第六轮 P0）。理由：
+  #   ① `env -i` 把 `BASH_FUNC_*` 一并挡在外面（第 0.1 步已拒绝带 `BASH_FUNC_*` 的启动环境，这里是第二道）。
+  #   ② 在线安装脚本 / curl 没有任何理由拿到 KIRO_API_KEY / YUNXIAO_TOKEN / CODEUP_*：固定名单（KIRO_ENV_FIXED_NAMES，
+  #      与四次 kiro-cli 调用同一份）**再去掉 KIRO_API_KEY**，剩下的只有 PATH/HOME/locale/代理/证书/XDG 这些它们真需要的。
+  #      **curl 也套 env -i**（不只右侧 bash）：否则一个恶意 `.curlrc` 能借 curl 左侧继承的凭证环境做 upload/额外请求，
+  #      绕开「右侧不传凭证」的设计目标（第六轮 P0）。
+  #   ③ `curl -q` 必须是**第一个选项**：禁用默认配置文件加载（`$HOME/.curlrc`；`.netrc` 只有显式 `--netrc` 才读，这里没用），与 ⓪ 的 HOME 检查互为纵深
+  #      （HOME 检查挡业务库里的 `.curlrc`，`-q` 连合法 HOME 里别的进程写的 `.curlrc` 也不读）。
+  # 右边用 `${BASH:-/bin/bash}` 而不是裸 `bash`：`-p` 必须显式带上（BASH 由 bash 自己在启动时写入，不取环境里的旧值）。
+  # 将来官方安装脚本需要别的变量时，把变量名加进 KIRO_ENV_FIXED_NAMES（或在这里显式补一个），
+  # **不要**改回继承整个环境。这条路径本来只用于评估 / PoC（生产按 setup-guide 第 7 节预装固定版本），失败会 die_review。
+  _kr_inst_env=()
+  for _v in "${KIRO_ENV_FIXED_NAMES[@]}"; do
+    [[ "$_v" != KIRO_API_KEY ]] || continue
+    [[ -n "${!_v:-}" ]] || continue
+    _kr_inst_env+=("${_v}=${!_v}")
+  done
+  env -i "${_kr_inst_env[@]}" curl -q -fsSL --connect-timeout 10 --max-time 300 "$KIRO_INSTALL_URL" \
+    | env -i "${_kr_inst_env[@]}" "${BASH:-/bin/bash}" -p \
     || die_review "kiro-cli 安装失败。网络受限时请使用自建执行器预装固定版本，或配置 HTTP_PROXY/HTTPS_PROXY（见 pipeline/setup-guide.md）"
-  command -v kiro-cli >/dev/null || export PATH="$HOME/.local/bin:$PATH"
+  unset _v _kr_inst_env
+  if ! command -v kiro-cli >/dev/null; then
+    # 第 0 步的门只保证**调用它那一刻**的 PATH（CodeX 2026-09-13 第四轮复审 P1）：这里往 PATH 最前面插了一个
+    # 由 HOME 拼出来的目录，所以要**先重新过门、再让 command -v 去搜它**。HOME 是相对路径（PATH 里出现相对条目
+    # = 当前目录 = 业务库）、HOME 指向或落在业务库内、HOME 经符号链接指进业务库，三种形态都在这里被拦住。
+    export PATH="$HOME/.local/bin:$PATH"
+    review_path_gate_or_die "$REVIEW_REPO_DIR" "PATH 在安装 kiro-cli 之后被改写，kiro-cli 尚未执行"
+  fi
   command -v kiro-cli >/dev/null || die_review "安装后仍找不到 kiro-cli，请检查安装日志中的 PATH 提示"
 fi
+# 到这里 PATH 的改写全部结束、且刚刚重新过过门。
+# **刻意不写 `readonly PATH`**（第四轮复审建议过，第五轮自查时撤回）：`readonly PATH` 会**悄悄废掉 `command -p`**。
+# bash 实现 `command -p` 的办法是临时把 PATH 换成 POSIX 默认值，PATH 只读时那次赋值失败——bash 只在 stderr 打一行
+# 「PATH: readonly variable」，然后**用调用者的 PATH 去找那个命令**（本机实测：`readonly PATH` 下
+# `command -p uname -s` 执行的是 PATH 里的假 uname，退出码还是 0）。而 scripts/lib/kiro-agent.sh 的 kiro_platform_key
+# 正是靠 `command -p uname` / `command -p tr` 不看调用者 PATH 来挡住「假 uname 伪造平台键」（2026-09-13 第二轮复审 P1），
+# 平台键又是版本门的输入。也就是说冻 PATH 换来的是把一道安全判定降级成 stderr 上的一行警告。
+# 「门之后不许再改 PATH」这条不变量改由 tests/test-kiro-review.sh 的静态守卫看着：
+# 全脚本只有一处 `export PATH=`，且它的下一行就是重新过门。
 
 # --- 2.1 kiro-cli 二进制摘要钉死（CodeX 2026-09-10 复审 P1）---
 # 版本字符串只挡语义漂移：被替换 / 重新构建 / 包装过的二进制只要打印 2.21.1 就走名单内路径。ADR-0004 要求的「固定版本 + sha256」在这里落地：

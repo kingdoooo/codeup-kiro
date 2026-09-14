@@ -59,8 +59,11 @@ run_case() {
   if [[ -z "${NO_MOCK_DIR:-}" ]]; then mock_config_write "$CASE/home" "$@"; fi
   NO_MOCK_DIR=""
   RC=0
+  # CASE_LAUNCH：显式的解释器 + 参数（默认走 shebang）。启动环境那组用例要用 `/bin/bash -p` 跑同一个夹具——
+  # 参考 YAML 用的就是 `-p`，而「载荷跑没跑」这个可观测差异只有换启动方式才看得见。刻意**不加引号**（要分词）。
   OUT=$(cd "$CASE/work" && env HOME="$CASE/home" REVIEW_REPO_DIR="$CASE/work" \
-        "$@" "$ROOT/scripts/kiro-review.sh" 2>&1) || RC=$?
+        "$@" ${CASE_LAUNCH:-} "$ROOT/scripts/kiro-review.sh" 2>&1) || RC=$?
+  CASE_LAUNCH=""
 }
 # 某个 kiro-cli 子命令被调用了几次。calls 文件在「脚本还没调过任何 kiro-cli 子命令」时
 # 根本不存在（例如变量校验在安装/能力检查之前就失败了），所以缺文件按 0 处理。
@@ -1963,6 +1966,227 @@ assert_not_contains "$OUT" "PATH 不可信" "干净 PATH：不出 PATH 报错"
 run_case pathmissing PATH="$PATH:/no/such/dir/$$"
 assert_rc "$RC" 0 "PATH 含不存在的绝对条目：只跳过并计数，不拦（真实执行器上很常见）"
 assert_contains "$OUT" "个不存在或进不去的绝对条目" "PATH 含不存在的绝对条目：日志说明跳过了几个"
+# 业务库里**还不存在**的目录不能走「不存在 → 跳过」（第四轮复审 P1 ①）：门是时点判断，目录在门之后出现
+# （并发运行、外部重新 checkout、符号链接改指向）就立刻是有效 PATH 入口。判据本身在 tests/test-path-gate.sh。
+run_case pathfuture PATH="$tmp/case-pathfuture/work/future-bin:$PATH"
+assert_nonzero "$RC" "PATH 指向业务库里还不存在的目录 → 拒绝（不走「不存在就跳过」）"
+assert_contains "$OUT" "解析到业务库内" "业务库里不存在的目录：报错点明它落在业务库里"
+assert_not_contains "$OUT" "开始 Kiro 评审" "业务库里不存在的目录：Kiro 不启动"
+# REVIEW_REPO_DIR 解析成 `/`（第四轮复审 P1 ④）：旧实现下 `"$phys" == "$repo"/*` 是 `//*`，逐条放行——
+# 业务库里的假 jq 会在「不是 git 仓库」那条校验之前就被执行。现在第 0 步直接拒绝。
+run_case reporoot REVIEW_REPO_DIR=/
+assert_nonzero "$RC" "REVIEW_REPO_DIR=/ → 第 0 步拒绝"
+assert_contains "$OUT" "解析成根目录" "REVIEW_REPO_DIR=/：报错点明根目录"
+assert_not_contains "$OUT" "不是 git 仓库" "REVIEW_REPO_DIR=/：在跑到「不是 git 仓库」那条校验之前就拒绝了（那之前已经跑过外部命令）"
+run_case repogone REVIEW_REPO_DIR="$tmp/no-such-repo-$$"
+assert_nonzero "$RC" "REVIEW_REPO_DIR 不存在 → 第 0 步拒绝（旧实现回退原字符串，带着一道失效的门继续跑）"
+assert_contains "$OUT" "业务仓库目录解析不出物理路径" "REVIEW_REPO_DIR 不存在：报错点明业务库目录解析不出来"
+
+# ---- CodeX 2026-09-13 第四轮复审 P0：启动环境（BASH_ENV / 从环境导入的 shell 函数）----
+# 非交互 bash 在读到脚本第一行**之前**就 source `$BASH_ENV`（相对路径按 cwd 解析 = 业务库），并从环境导入
+# exported functions。脚本层挡不住「BASH_ENV 载荷已经跑了」——那是启动方的事（参考 YAML 用 `/bin/bash -p`）；
+# 脚本层能做也必须做的是：**发现就拒绝继续评审**，并把 BASH_ENV/ENV 从环境里删掉（第 2 步 `curl … | bash`
+# 拉起的子 shell 不是 privileged 的）。导入的函数则能在**被调用之前**拦住，因为检查就在第一条命令处。
+LAUNCH_MARKER="$tmp/launch-payload.log"; export LAUNCH_MARKER
+tweak_bash_env_payload() {
+  printf 'command echo BASH_ENV_PAYLOAD_RAN >> "$LAUNCH_MARKER"\n' > payload.sh
+  /usr/bin/git add -A && /usr/bin/git commit -qm "add payload.sh"
+}
+: > "$LAUNCH_MARKER"
+CASE_TWEAK=tweak_bash_env_payload run_case bashenv BASH_ENV=./payload.sh
+assert_nonzero "$RC" "BASH_ENV 非空 → 拒绝运行"
+assert_contains "$OUT" "启动环境不可信" "BASH_ENV：报错点明启动环境"
+assert_contains "$OUT" "/bin/bash -p" "BASH_ENV：报错给出启动方该怎么改"
+assert_not_contains "$OUT" "开始 Kiro 评审" "BASH_ENV：Kiro 不启动"
+assert_eq "$(grep -c BASH_ENV_PAYLOAD_RAN "$LAUNCH_MARKER" 2>/dev/null || true)" "1" \
+  "BASH_ENV：载荷在脚本第一行之前就跑了——脚本层挡不住，这正是启动方必须用 -p 的原因"
+# 同一个夹具改用 `/bin/bash -p` 启动：privileged 模式下 bash 不处理 BASH_ENV，载荷一次都不跑；
+# 而脚本仍然拒绝评审（BASH_ENV 还在环境里 = 启动环境已被污染，外层 shell 那次可能已经执行过它）
+: > "$LAUNCH_MARKER"
+CASE_LAUNCH="/bin/bash -p" CASE_TWEAK=tweak_bash_env_payload run_case bashenvp BASH_ENV=./payload.sh
+assert_eq "$(grep -c BASH_ENV_PAYLOAD_RAN "$LAUNCH_MARKER" 2>/dev/null || true)" "0" \
+  "BASH_ENV + /bin/bash -p：载荷一次都没跑（-p 不处理 BASH_ENV）"
+assert_nonzero "$RC" "BASH_ENV + /bin/bash -p：仍然拒绝评审（环境里还有 BASH_ENV 就说明启动环境被污染过）"
+assert_contains "$OUT" "启动环境不可信" "BASH_ENV + /bin/bash -p：报的还是启动环境那条"
+# 从环境导入的 shell 函数：顶替 `pwd`（脚本第 22 行左右 `SCRIPT_DIR="$(cd -P -- … && pwd -P)"` 会调它）。
+# 函数导出用的环境变量名各版本 bash 不同（shellshock 之后是 BASH_FUNC_x%%），问 bash 自己要，别写死。
+FN_VAR=$(bash -c 'zzprobe() { :; }; export -f zzprobe; env' \
+         | LC_ALL=C awk -F= '!f && /zzprobe/ && $0 ~ /=\(\) \{/ {print $1; f=1}')
+assert_contains "$FN_VAR" "zzprobe" "元测试：问出了本机 bash 导出函数用的环境变量名（问不出来，下面几条就是空转）"
+FN_PAYLOAD='() { command echo FAKE_PWD_RAN >> "$LAUNCH_MARKER"; builtin pwd "$@"; }'
+# 拒绝路径**不许打印取值与函数名**（第五轮复审 P0）：它们来自不受信的启动环境，原样进流水线日志
+# 既绕过全套掩码规则（BASH_ENV 里放个令牌就整串进日志），也能带换行与终端控制字符做日志注入。
+# 令牌形状的泄露 canary：前缀用变量拼，源文件里没有 `ghp_` + 连片字母数字的字面量（不触发密钥扫描器——
+# 这是公开客户仓库）；运行期仍是完整 ghp_ 形状，泄露断言照测。
+_ghp=ghp; BASHENV_LEAK="${_ghp}_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+run_case bashenvsecret BASH_ENV="$BASHENV_LEAK"
+assert_nonzero "$RC" "BASH_ENV 取值是令牌形状：仍然拒绝"
+assert_contains "$OUT" "BASH_ENV 已设置" "P0：只报状态「BASH_ENV 已设置」"
+assert_not_contains "$OUT" "$BASHENV_LEAK" "P0：BASH_ENV 的取值一个字都不进日志"
+assert_not_contains "$OUT" "${_ghp}_" "P0：连令牌前缀都不进日志"
+run_case envsecret ENV='AKIAIOSFODNN7EXAMPLE'
+assert_nonzero "$RC" "ENV 取值是令牌形状：仍然拒绝"
+assert_contains "$OUT" "ENV 已设置" "P0：只报状态「ENV 已设置」"
+assert_not_contains "$OUT" "AKIAIOSFODNN7EXAMPLE" "P0：ENV 的取值一个字都不进日志"
+run_case fnsecret "${FN_VAR/zzprobe/svc_SECRET_9f3a}=() { :; }"
+assert_nonzero "$RC" "继承函数的名字是凭证形状：仍然拒绝"
+assert_contains "$OUT" "从环境继承的 shell 函数" "P0：只报状态「从环境继承的 shell 函数」"
+assert_not_contains "$OUT" "svc_SECRET_9f3a" "P0：函数名不进日志（名字本身也能承载敏感形态）"
+assert_not_contains "$OUT" "未执行任何外部命令" "P0：不再声称「未执行任何外部命令」——不带 -p 时 BASH_ENV 早就跑过了"
+assert_contains "$OUT" "启动阶段可能已经执行过不受信代码" "P0：文案如实说明启动阶段可能已经执行过代码"
+: > "$LAUNCH_MARKER"
+env "${FN_VAR/zzprobe/pwd}=$FN_PAYLOAD" bash -c 'pwd -P >/dev/null'
+assert_eq "$(grep -c FAKE_PWD_RAN "$LAUNCH_MARKER" 2>/dev/null || true)" "1" \
+  "元测试：本机 bash 真的会把环境里的 pwd 函数导入并优先于 builtin（否则下面那条断言测不到东西）"
+: > "$LAUNCH_MARKER"
+run_case fnimport "${FN_VAR/zzprobe/pwd}=$FN_PAYLOAD"
+assert_nonzero "$RC" "环境里导入了假 pwd → 拒绝运行"
+assert_contains "$OUT" "启动环境不可信" "导入函数：报错点明启动环境"
+assert_eq "$(grep -c FAKE_PWD_RAN "$LAUNCH_MARKER" 2>/dev/null || true)" "0" \
+  "导入函数：假 pwd 一次都没被调用（检查在第一条命令处，早于 SCRIPT_DIR 那次 pwd）"
+assert_not_contains "$OUT" "开始 Kiro 评审" "导入函数：Kiro 不启动"
+# 同一形态改用 `-p` 启动：本进程不会导入这个函数（第 0.0 步的 declare -F 是空的），但 `BASH_FUNC_pwd%%`
+# 还在 environ 里——第 0.1 步就是为这个形态存在的（第五轮复审 P1）。断言它拒绝、且假 pwd 一次没跑。
+: > "$LAUNCH_MARKER"
+CASE_LAUNCH="/bin/bash -p" run_case fnimportp "${FN_VAR/zzprobe/pwd}=$FN_PAYLOAD"
+assert_nonzero "$RC" "导入函数 + /bin/bash -p：第 0.1 步按 environ 里的 BASH_FUNC_* 拒绝（-p 只是本进程不导入）"
+assert_contains "$OUT" "environ 里还有 1 个" "导入函数 + -p：报错给出个数"
+assert_contains "$OUT" "BASH_FUNC_" "导入函数 + -p：报错点明是 BASH_FUNC_* 形式的导出函数"
+assert_not_contains "$OUT" "BASH_FUNC_pwd" "导入函数 + -p：不打印具体函数名（P0 同一条规则）"
+assert_eq "$(grep -c FAKE_PWD_RAN "$LAUNCH_MARKER" 2>/dev/null || true)" "0" "导入函数 + -p：假 pwd 一次都没跑"
+assert_not_contains "$OUT" "开始 Kiro 评审" "导入函数 + -p：Kiro 不启动"
+# 正控：`-p` 本身不影响正常路径（干净环境下照常评审完成）
+CASE_LAUNCH="/bin/bash -p" run_case privok
+assert_rc "$RC" 0 "/bin/bash -p 启动、环境干净：评审照常完成（-p 不影响正常路径）"
+assert_contains "$OUT" "开始 Kiro 评审" "/bin/bash -p：Kiro 正常启动"
+# 参考 YAML 的启动行必须带 -p（这是上面那些「-p 之后就不成立」的形态在生产上的唯一保证）
+assert_eq "$(LC_ALL=C grep -c '^                /bin/bash -p "\$PROJECT_DIR/\.\./integration_repo/scripts/kiro-review\.sh"$' "$ROOT/pipeline/flow-pipeline.yaml")" "1" \
+  "参考 YAML 用 /bin/bash -p 绝对路径启动脚本"
+# 静态守卫（第四轮复审 P1）：门是**时点**判断，所以「脚本里每一次改写 PATH 都紧跟一次重新过门，之后 PATH 冻住」
+# 这条不变量得有人守——e2e 造不出「kiro-cli 不存在」那条安装分支（mockbin 里一直有 kiro-cli）。
+_kr_src="$ROOT/scripts/kiro-review.sh"
+assert_eq "$(LC_ALL=C grep -c '^ *export PATH=' "$_kr_src")" "1" "脚本里只有一处改写 PATH（多一处就得多一次重新过门）"
+_p_write=$(LC_ALL=C grep -n '^ *export PATH=' "$_kr_src" | LC_ALL=C awk -F: '{print $1}')
+_p_gate=$(LC_ALL=C grep -n '^ *review_path_gate_or_die ' "$_kr_src" | LC_ALL=C awk -F: '!f && $1 > '"$_p_write"' {print $1; f=1}')
+assert_eq "$([[ -n "$_p_gate" && "$_p_gate" -eq $((_p_write + 1)) ]] && echo adjacent)" "adjacent" \
+  "改写 PATH 的下一行就是重新过门（中间不能夹任何用得到 PATH 的命令）"
+# **不许出现 `readonly PATH`**（第四轮建议过、第五轮自查撤回）：它会悄悄废掉 `command -p`——
+# bash 靠「临时把 PATH 换成 POSIX 默认值」实现 `command -p`，PATH 只读时那次赋值失败，bash 只在 stderr 打一行
+# 「PATH: readonly variable」就**改用调用者的 PATH** 去找命令（退出码仍是 0）。kiro_platform_key 正是靠
+# `command -p uname` 挡假 uname 的，等于把一道安全判定降级成一行警告。下面的 unamefake 用例守行为，这条守形态。
+# 匹配任何把 PATH 标成只读的写法（第六轮复审：不止 `readonly PATH`，还有 `declare -r PATH` / `typeset -r PATH`），
+# 免得将来有人换个写法以为绕过了这条规则。行首关键字，注释里解释原因的那几行不会命中。
+assert_eq "$(LC_ALL=C grep -cE '^[[:space:]]*(readonly|(declare|typeset)[[:space:]]+-[A-Za-z]*r[A-Za-z]*)[[:space:]]+PATH' "$_kr_src" || true)" "0" \
+  "脚本里没有把 PATH 标成只读的语句（readonly / declare -r / typeset -r 都算——它会让 command -p 回退到调用者的 PATH）"
+unset _kr_src _p_write _p_gate
+
+# `command -p` 必须真的不看调用者的 PATH（2026-09-13 第二轮复审 P1 的行为覆盖；第五轮补）：
+# PATH 里放一个**绝对、且不在业务库内**的假 uname——它合法地通过 PATH 门，所以只有 `command -p` 能挡它。
+# 挡不住时平台键会变成 otheros/otherarch，落到名单外 → 评审被版本门拒绝，下面两条断言就会失败。
+mkdir -p "$tmp/fakeuname"
+printf '#!/bin/sh\ncase "$1" in -s) echo otheros ;; -m) echo otherarch ;; *) echo otheros ;; esac\n' > "$tmp/fakeuname/uname"
+chmod +x "$tmp/fakeuname/uname"
+run_case unamefake PATH="$tmp/fakeuname:$PATH"
+assert_rc "$RC" 0 "假 uname 在绝对且不在业务库内的 PATH 条目里：平台键仍取真实平台，评审照常完成"
+assert_contains "$OUT" "kiro-cli ${HOST_PLAT}:" "假 uname：日志里的平台键是真实平台（command -p 没看调用者的 PATH）"
+assert_not_contains "$OUT" "otheros/otherarch" "假 uname：伪造的平台键一处都没出现"
+
+# ---- 第 2 步安装分支（CodeX 2026-09-13 第五轮复审 P1）：这是全脚本唯一一处「把 stdin 交给一个新的 bash」----
+# 之前这条分支端到端零覆盖（mockbin 里一直有 kiro-cli）。这里用一个**不含 kiro-cli** 的 PATH（只放脚本真需要的
+# 工具的符号链接 + /usr/bin:/bin——本机 $HOME/.local/bin 里就有真 kiro-cli，不能直接用宿主 PATH）
+# 加上 `KIRO_INSTALL_URL=file://…` 让真 curl 去取一份本地「安装脚本」，于是安装分支真的被走一遍。
+mkdir -p "$tmp/tools"
+for _t in git jq curl timeout gtimeout sha256sum shasum awk sed grep tr cut od mktemp env date base64 python3 uname mkdir chmod cp cat rm ln find sort head wc printf; do
+  _p=$(command -v "$_t" 2>/dev/null) || continue
+  ln -sf "$_p" "$tmp/tools/$_t"
+done
+unset _t _p
+[[ ! -e "$tmp/tools/kiro-cli" ]] || { echo "FAIL: 夹具错误，安装分支的 PATH 里不该有 kiro-cli" >&2; exit 1; }
+PATH_NO_KIRO="$tmp/tools:/usr/bin:/bin"
+# 安装器：把自己的环境与 `$-`（privileged 标志）落盘，然后把替身装进 $HOME/.local/bin
+make_installer() {  # $1=用例目录
+  mkdir -p "$1/tools"
+  cat > "$1/tools/installer.sh" <<INST
+env > "$1/installer-env.txt"
+printf '%s\n' "\$-" > "$1/installer-dash.txt"
+mkdir -p "\$HOME/.local/bin"
+# 装一个**转发到替身**的小壳，而不是 cp 替身本身：替身要按自己的位置找 tests/helpers.sh
+# （\$MOCK_DIR/../helpers.sh），复制到别处会 fail-closed 退 97
+printf '#!/usr/bin/env bash\nexec "%s" "\$@"\n' "$ROOT/tests/mockbin/kiro-cli" > "\$HOME/.local/bin/kiro-cli"
+chmod +x "\$HOME/.local/bin/kiro-cli"
+INST
+}
+CASE_INST="$tmp/case-instenv"; make_installer "$CASE_INST"
+run_case instenv PATH="$PATH_NO_KIRO" KIRO_INSTALL_URL="file://$CASE_INST/tools/installer.sh"
+assert_rc "$RC" 0 "安装分支：PATH 里没有 kiro-cli → 走安装，装完评审照常完成"
+assert_contains "$OUT" "kiro-cli 不存在，尝试安装" "安装分支：日志说明走了安装路径"
+inst_env=$(cat "$CASE_INST/installer-env.txt" 2>/dev/null || true)
+assert_eq "$([[ -n "$inst_env" ]] && echo dumped)" "dumped" "安装分支：安装器真的跑起来了（落下了自己的环境）"
+# ① 安装器不继承 BASH_FUNC_*（`-p` 挡不住这一类：变量还在 environ 里，普通 bash 子进程会重新导入）
+assert_not_contains "$inst_env" "BASH_FUNC_" "安装分支：安装器环境里没有任何 BASH_FUNC_*"
+# ② 在线安装脚本拿不到凭证（固定名单去掉了 KIRO_API_KEY；云效那三个本来就不在名单里）
+assert_not_contains "$inst_env" "KIRO_API_KEY" "安装分支：安装器环境里没有 KIRO_API_KEY"
+assert_not_contains "$inst_env" "YUNXIAO_TOKEN" "安装分支：安装器环境里没有 YUNXIAO_TOKEN"
+assert_not_contains "$inst_env" "CODEUP_REPO_ID" "安装分支：安装器环境里没有 CODEUP_* 变量"
+assert_not_contains "$inst_env" "DRY_RUN" "安装分支：env -i 生效（连测试注入的 DRY_RUN 都不在）"
+# ③ 它真需要的还在
+assert_contains "$inst_env" "PATH=" "安装分支：PATH 传给了安装器"
+assert_contains "$inst_env" "HOME=" "安装分支：HOME 传给了安装器"
+# ④ 安装器自己是 privileged（`-p`）：BASH_ENV/ENV 与导入函数在它那一侧同样不生效
+assert_contains "$(cat "$CASE_INST/installer-dash.txt" 2>/dev/null || true)" "p" "安装分支：安装器以 bash -p 运行（\$- 里有 p）"
+# ⑤ curl 侧的加固（第六轮复审 P0）——curl 的环境与选项没法用真 curl + file:// 在这里行为验证（它就是取文件那一下），
+#    用**静态**断言：curl 也套在同一个 env -i 里（不只右侧 bash），且 `-q` 是第一个选项（禁用 $HOME/.curlrc 等默认配置）。
+_kr_src2="$ROOT/scripts/kiro-review.sh"
+assert_eq "$(LC_ALL=C grep -c '^ *env -i "\${_kr_inst_env\[@\]}" curl -q -fsSL ' "$_kr_src2")" "1" \
+  "安装分支：curl 也套 env -i（curl 左侧同样不带凭证/BASH_FUNC_*），且 -q 是第一个选项"
+assert_eq "$(LC_ALL=C grep -cE '^[[:space:]]*curl ' "$_kr_src2" || true)" "0" \
+  "安装分支：没有裸 curl（唯一那处 curl 前面必须有 env -i + -q）"
+unset _kr_src2
+# ⑥ **curl 之前**先确认 HOME 不在业务库内（第六轮复审 P0）。旧版这里等安装器跑完、PATH 改写后才拒绝，
+#    可 curl 已经用业务库的 HOME 读过 `$HOME/.curlrc`、安装器也已经跑过了。现在 HOME 在业务库内时**安装器根本不启动**。
+CASE_INST2="$tmp/case-instrepo"; make_installer "$CASE_INST2"
+run_case instrepo PATH="$PATH_NO_KIRO" KIRO_INSTALL_URL="file://$CASE_INST2/tools/installer.sh" \
+  HOME="$tmp/case-instrepo/work"
+assert_nonzero "$RC" "安装分支：HOME 落在业务库内 → curl 之前就拒绝"
+assert_contains "$OUT" "安装 kiro-cli 前" "安装分支：拒绝文案说明是 curl/安装器启动之前那道 HOME 检查"
+assert_contains "$OUT" "解析到业务库内" "安装分支：报错点明 HOME 落在业务库内"
+assert_eq "$([[ -e "$CASE_INST2/installer-env.txt" ]] && echo ran || echo not-ran)" "not-ran" \
+  "安装分支：HOME 在业务库内时安装器根本没启动（curl 之前就拒绝了）"
+assert_not_contains "$OUT" "开始 Kiro 评审" "安装分支：HOME 在业务库内时 Kiro 不启动"
+
+# ⑦ **P0 复现闭环**：HOME 在业务库内 + 业务库里提交一个恶意 `.curlrc`（url = file://<业务库>/evil.sh）。
+#    旧版会先让 curl 读到它、把业务库脚本打到 stdout 与安装脚本一起被右侧 bash 执行；现在 curl 之前那道 HOME 检查
+#    直接拒绝，evil.sh 一次都不跑。
+EVIL_MARK="$tmp/curlrc-evil.log"; export EVIL_MARK; : > "$EVIL_MARK"
+CASE_CURLRC="$tmp/case-curlrc"; make_installer "$CASE_CURLRC"
+tweak_curlrc_payload() {
+  printf 'command echo CURLRC_EVIL_RAN >> "%s"\n' "$EVIL_MARK" > evil.sh
+  printf 'url = "file://%s/evil.sh"\n' "$PWD" > .curlrc
+  /usr/bin/git add -A && /usr/bin/git commit -qm "add .curlrc + evil.sh"
+}
+CASE_TWEAK=tweak_curlrc_payload run_case curlrc PATH="$PATH_NO_KIRO" \
+  KIRO_INSTALL_URL="file://$CASE_CURLRC/tools/installer.sh" HOME="$tmp/case-curlrc/work"
+assert_nonzero "$RC" "P0 curlrc：HOME 在业务库内 → curl 之前拒绝"
+assert_contains "$OUT" "安装 kiro-cli 前" "P0 curlrc：报的是 curl 之前那道 HOME 检查"
+assert_eq "$(grep -c CURLRC_EVIL_RAN "$EVIL_MARK" 2>/dev/null || true)" "0" \
+  "P0 curlrc：业务库里的 .curlrc 载荷一次都没跑（curl 根本没启动）"
+assert_eq "$([[ -e "$CASE_CURLRC/installer-env.txt" ]] && echo ran || echo not-ran)" "not-ran" \
+  "P0 curlrc：安装器也没启动"
+# ⑧ `-q` 的独立行为覆盖：HOME 合法（在业务库外）但里面有个恶意 `.curlrc`——curl 之前那道 HOME 检查放行，
+#    这时挡住 `.curlrc` 的就只剩 `-q`。装完照常评审，evil 不跑。M-cx-curlq 变异（删 -q）证明这条断言有牙。
+LEGIT_HOME="$tmp/legit-home-curlrc"; mkdir -p "$LEGIT_HOME"
+: > "$EVIL_MARK"
+printf 'command echo CURLRC_EVIL_RAN >> "%s"\n' "$EVIL_MARK" > "$LEGIT_HOME/evil.sh"
+printf 'url = "file://%s/evil.sh"\n' "$LEGIT_HOME" > "$LEGIT_HOME/.curlrc"
+CASE_QLEGIT="$tmp/case-curlq"; make_installer "$CASE_QLEGIT"
+# 安装器要往 $HOME/.local/bin 写，而 mock 配置在 $CASE/home——所以这里 HOME 用一个既放 .curlrc 又能当 home 的干净目录，
+# 但 mock 配置目录仍需在该 HOME 下。把 mock 配置也建到 LEGIT_HOME，避免替身 fail-closed。
+mock_config_write "$LEGIT_HOME"
+NO_MOCK_DIR=1 CASE_TWEAK="" run_case curlq PATH="$PATH_NO_KIRO" \
+  KIRO_INSTALL_URL="file://$CASE_QLEGIT/tools/installer.sh" HOME="$LEGIT_HOME"
+assert_rc "$RC" 0 "curlq：HOME 合法（业务库外）+ 恶意 .curlrc → curl -q 忽略它，装完照常评审"
+assert_eq "$(grep -c CURLRC_EVIL_RAN "$EVIL_MARK" 2>/dev/null || true)" "0" \
+  "curlq：-q 让 curl 不读 \$HOME/.curlrc，evil 一次都没跑"
 
 # ---- CodeX 2026-09-13 复审 P2：break-glass 绑定完整元组 ----
 # 旧的 KIRO_ACK_UNTESTED_VERSION 只绑版本，设过一次就会在换平台后继续放行同一个版本——与当初拒绝布尔开关同一个理由。

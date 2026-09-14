@@ -201,4 +201,54 @@ mkdir -p "$tmp/nojq"; for f in "$tmp/nokiro"/*; do ln -sf "$(readlink "$f")" "$t
 rc=0; err=$(env -i PATH="$tmp/nojq" HOME="$tmp/home" bash "$PROBE" 2>&1) || rc=$?
 assert_eq "$rc" "5" "缺 jq：退出码 5"
 
+# --- 文档里的探测命令必须带 `-p`（CodeX 2026-09-13 第五轮复审 P1）---
+# 探测产出的是发布证据。裸 `bash` 会在读到脚本第一行之前 source $BASH_ENV 并导入环境里的函数——
+# 一边在威胁模型里写明这点、一边在操作说明里让人按不安全的方式跑，是自相矛盾（allowlist 探测自己的报错
+# 也要求 `bash -p`）。这条守卫防的是将来从 `bash -p` 漂回裸 `bash`。
+for _f in "$ROOT/scripts/probe/README.md" "$ROOT/pipeline/setup-guide.md"; do
+  assert_eq "$(LC_ALL=C grep -c 'bash scripts/probe/' "$_f" || true)" "0" \
+    "$(basename "$_f")：没有裸 bash 启动探测的命令（一律 bash -p）"
+done
+assert_eq "$(LC_ALL=C grep -c 'bash -p scripts/probe/probe-kiro-allowlist.sh' "$ROOT/scripts/probe/README.md" || true)" "2" \
+  "probe/README.md：allowlist 探测的两条命令都是 bash -p"
+assert_eq "$(LC_ALL=C grep -c 'bash -p scripts/probe/probe-kiro-allowlist.sh' "$ROOT/pipeline/setup-guide.md" || true)" "1" \
+  "setup-guide：升级流程里的 allowlist 探测命令是 bash -p"
+unset _f
+
+# --- 启动环境不可信 → 退出码 5（CodeX 2026-09-13 第四轮复审 P0）---
+# 探测产出的是发布证据：BASH_ENV / 从环境导入的函数都能在第一条命令之前执行不受信代码，也能顶替脚本用到的 builtin。
+: > "$tmp/probe-launch-payload.log"
+printf 'command echo PROBE_PAYLOAD_RAN >> "%s"\n' "$tmp/probe-launch-payload.log" > "$tmp/probe-payload.sh"
+rc=0; err=$(env -i PATH="$tmp/fakebin:$PATH" HOME="$tmp/home" BASH_ENV="$tmp/probe-payload.sh" bash "$PROBE" 2>&1) || rc=$?
+assert_eq "$rc" "5" "BASH_ENV 非空：退出码 5"
+assert_contains "$err" "启动环境不可信" "BASH_ENV：报错点明启动环境"
+assert_eq "$(grep -c PROBE_PAYLOAD_RAN "$tmp/probe-launch-payload.log" 2>/dev/null || true)" "1" \
+  "BASH_ENV：载荷在脚本第一行之前就跑了——所以启动方要用 bash -p，脚本层只能拒绝继续"
+: > "$tmp/probe-launch-payload.log"
+rc=0; err=$(env -i PATH="$tmp/fakebin:$PATH" HOME="$tmp/home" BASH_ENV="$tmp/probe-payload.sh" bash -p "$PROBE" 2>&1) || rc=$?
+assert_eq "$rc" "5" "BASH_ENV + bash -p：仍然拒绝（环境里还有 BASH_ENV 就说明启动环境被污染过）"
+assert_eq "$(grep -c PROBE_PAYLOAD_RAN "$tmp/probe-launch-payload.log" 2>/dev/null || true)" "0" \
+  "BASH_ENV + bash -p：载荷一次都没跑"
+FN_VAR_P=$(bash -c 'zzprobe() { :; }; export -f zzprobe; env' \
+           | LC_ALL=C awk -F= '!f && /zzprobe/ && $0 ~ /=\(\) \{/ {print $1; f=1}')
+assert_contains "$FN_VAR_P" "zzprobe" "元测试：问出了本机 bash 导出函数用的环境变量名"
+rc=0; err=$(env -i PATH="$tmp/fakebin:$PATH" HOME="$tmp/home" \
+            "${FN_VAR_P/zzprobe/pwd}=() { command echo FAKE >&2; builtin pwd \"\$@\"; }" bash "$PROBE" 2>&1) || rc=$?
+assert_eq "$rc" "5" "环境里导入了假 pwd：退出码 5"
+assert_contains "$err" "启动环境不可信" "导入函数：报错点明启动环境"
+# 同一形态改用 `bash -p`：本进程不导入函数，但 BASH_FUNC_* 还在 environ 里 → PATH 门之后那一步拒绝（第五轮 P1）
+rc=0; err=$(env -i PATH="$tmp/fakebin:$PATH" HOME="$tmp/home" \
+            "${FN_VAR_P/zzprobe/pwd}=() { command echo FAKE >&2; builtin pwd \"\$@\"; }" bash -p "$PROBE" 2>&1) || rc=$?
+assert_eq "$rc" "5" "bash -p + environ 里残留 BASH_FUNC_*：退出码 5"
+assert_contains "$err" "environ 里还有" "bash -p + BASH_FUNC_*：报错点明 environ 里的残留"
+assert_not_contains "$err" "BASH_FUNC_pwd" "bash -p + BASH_FUNC_*：不打印具体函数名"
+# 拒绝路径不打印取值（第五轮 P0）：探测与主脚本同一条规则
+# 令牌形状的 canary 用变量拼前缀，源文件里没有字面 `ghp_`+连片（不触发密钥扫描器——公开客户仓库）
+_ghp=ghp; PROBE_LEAK="${_ghp}_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+rc=0; err=$(env -i PATH="$tmp/fakebin:$PATH" HOME="$tmp/home" \
+            BASH_ENV="$PROBE_LEAK" bash "$PROBE" 2>&1) || rc=$?
+assert_eq "$rc" "5" "BASH_ENV 取值是令牌形状：退出码 5"
+assert_contains "$err" "BASH_ENV 已设置" "P0：只报状态"
+assert_not_contains "$err" "${_ghp}_" "P0：BASH_ENV 的取值不进日志"
+
 report

@@ -53,6 +53,16 @@
 
 - 本集成包必须作为独立受信代码源引入流水线，严禁拷入业务库执行
   （否则 MR 作者可改脚本窃取流水线密钥）。
+- **执行器的启动环境是运维要保证的前提**：脚本一路在业务库目录下调 git / jq / curl 等外部工具，
+  所以第 0 步先过一道 PATH 门（空条目、相对条目、解析后落在业务库内的条目一律拒绝运行，改写 PATH 之后重新过门）；
+  而 PATH 之外，非交互 bash 在读到脚本第一行之前就会 source `$BASH_ENV`、并从环境导入 exported functions
+  ——后者能顶替脚本里的 `cd`/`pwd`/`source`，所以参考 YAML 用 `/bin/bash -p` 启动（privileged 模式下两者都不生效），
+  脚本自己再做一次 best-effort 检查（只报状态、不打印取值与函数名）。`-p` 不等于环境干净：`BASH_FUNC_*` 变量会
+  留在 environ 里被普通 bash 子进程重新导入，所以 PATH 门之后还要拒绝带 `BASH_FUNC_*` 的环境，
+  且安装 kiro-cli 那条 `curl … | bash` **两侧都**用 `env -i` 最小环境（不含任何凭证）、curl 带 `-q`
+  （不读 `$HOME/.curlrc`），并在 curl 之前先确认 `$HOME` 不在业务库内（否则业务库里的 `.curlrc` 能把注入脚本
+  喂给安装管道）。
+  要求见 [pipeline/setup-guide.md](pipeline/setup-guide.md) 第 7 节第 3 项。
 - MR 源分支全部内容视为不受信数据：kiro-cli 从不在业务库里运行（四处调用都在一个空的临时目录下，业务库只在
   `allowedPaths` 里、模型按绝对路径读取），运行前再移除业务库中任意深度的 `AGENTS.md`、`.kiro`（任何类型、不分大小写）、
   全部符号链接与根目录 `lsp.json` 作为第二道；custom agent 关闭工作区

@@ -227,12 +227,48 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    - **解析后落在业务仓库内的绝对条目**——`<业务库>/bin` 是绝对路径，但里面的东西是 MR 作者写的
      （2026-09-13 复现：业务库里一个 `bin/git` 在评审完成前被执行 8 次，它能读到启动脚本继承来的
      `YUNXIAO_TOKEN` / `KIRO_API_KEY` 并外传）。符号链接按物理路径判定。
-   不存在 / 进不去的绝对条目只跳过并在日志计数（真实执行器上 `/opt/homebrew/sbin` 这类很常见，拒绝会误伤）。
+   判据是**最近一个能进去的祖先的物理路径**，不是字面前缀：`<业务库>/future-bin` 这种目录此刻还不存在的条目
+   也会被拒（门是时点判断，目录在门之后出现就立刻是有效 PATH 入口），`/tmp/link/bin`（`/tmp/link` → 业务库）
+   这种末段不存在、父目录指进业务库的写法同样被拒；反过来 `<业务库>/../tools/bin` 字面在业务库内、物理在
+   业务库外，**不**误伤。
+   其余不存在 / 进不去的绝对条目只跳过并在日志计数（真实执行器上 `/opt/homebrew/sbin` 这类很常见，拒绝会误伤）。
+   `REVIEW_REPO_DIR` 解析不出物理路径、或解析成 `/`，同样拒绝运行——那两种情况下「是否落在业务库内」这个
+   判断根本不成立（2026-09-13 第四轮复现：`REVIEW_REPO_DIR=/` 时每个条目都被放行，假 `jq` 在「不是 git 仓库」
+   那条校验之前就跑了）。
    这道门在**第一个外部命令之前**执行、只用 shell builtin（不用 tr/cut——否则 MR 提交一个假 `tr` 就能
    谎报 PATH 的分割结果），失败时**只让流水线标红、不回写 MR 评论**：回写要跑 curl 与 jq，而这道门的前提
-   正是「PATH 上的工具不可信」。
-   **门管不了的那一半**：Flow 用什么解释器启动脚本。裸 `bash` 也走 PATH，所以参考 YAML 用的是绝对路径
-   `/bin/bash`；脚本启动之前的 PATH 只能由运维保证。换镜像时把它改成该镜像里 bash 的绝对路径。
+   正是「PATH 上的工具不可信」。门只保证**它执行那一刻**的 PATH：脚本内部唯一一次改写 PATH（第 2 步安装完
+   kiro-cli 后往前面插 `$HOME/.local/bin`）之后会**立刻重新过门**，所以 `HOME` 是相对路径或指向业务库同样会被拒。
+
+   **同一条要求的另一半：启动环境（BASH_ENV / ENV / 导出的 shell 函数 / CDPATH）也不得来自业务仓库**，
+   参考 YAML 的启动方式必须保留 `-p`：`/bin/bash -p <脚本>`。
+   非交互 bash 在读到脚本第一行**之前**就会 source `$BASH_ENV`（相对路径按 cwd 解析，而任务 cwd 是业务库），
+   并从环境导入 exported functions。后者比 PATH 更彻底：默认模式下函数查找先于 builtin 查找，所以
+   `cd` / `pwd` / `source` / `declare` / `echo` / `exit` 都能被顶替，甚至可以直接导出一个空的
+   `review_path_gate_or_die` 把上面那道 PATH 门变成空转（三种形态 2026-09-13 第四轮全部复现）。
+   `-p`（privileged 模式）下 bash 不处理 BASH_ENV/ENV、不从环境导入函数（bash ≥4.4 还会忽略 CDPATH）。
+   脚本自己在第一条命令处还有一段 best-effort 检查：发现继承来的函数、或 BASH_ENV/ENV 非空就拒绝运行，
+   并把 BASH_ENV/ENV 从环境里删掉。这段检查是**纵深不是边界**：环境里导出一个名叫 `builtin` 的函数就能让它返回空。
+   这两条拒绝**只报状态、不报取值**（不打印 BASH_ENV/ENV 的取值，也不打印函数名）：它们是不受信输入，
+   原样进流水线日志既是泄露面（复现：`BASH_ENV=ghp_…` 时令牌整串进日志）也是日志注入面（可含换行与终端控制字符）。
+   要查具体取值请在执行器上自己看环境。
+   **`-p` 不等于环境干净**（2026-09-13 第五轮复现，本机 bash 3.2 与 docker bash:5.2 一致）：privileged 模式只是让
+   *本进程*不导入函数，原始的 `BASH_FUNC_x%%=() {…}` 变量**还留在 environ 里**，任何普通 bash 子进程都会把它们
+   重新导入（父进程 `declare -F` 为空、子进程 `type -t pwd` 是 function）。而 `BASH_FUNC_*` 不是合法变量名、
+   脚本 `unset` 不掉。所以：① PATH 门之后紧跟一步检查——`env` 里还有 `BASH_FUNC_*` 就拒绝运行（同样只报个数）；
+   ② 第 2 步的安装管道**两侧都套 `env -i <固定名单，去掉 KIRO_API_KEY>`**（不只右边 bash），并让 curl 带 `-q`：
+   `env -i … curl -q -fsSL … | env -i … /bin/bash -p`。在线安装脚本与 curl 都拿不到 `BASH_FUNC_*`、也拿不到 Kiro/云效的凭证。
+   ③ **安装前先确认 `$HOME` 不在业务库内**（curl 会读 `$HOME/.curlrc`、安装器会写 `$HOME/.local/bin`，都发生在
+   安装后那次 PATH 重新过门之前）：`$HOME` 指进业务库时，业务库里提交一个 `.curlrc`（`url = "file://<业务库>/evil.sh"`）
+   就能让 curl 先把业务库脚本打到 stdout、与受信安装脚本一起被右侧 bash 执行（本机 curl 8.7 复现）——所以 `$HOME`
+   落在业务库内时安装器**根本不启动**。`-q` 与这道 HOME 检查互为纵深：HOME 检查挡业务库里的 `.curlrc`，`-q` 连
+   合法 HOME 里别的进程写的 `.curlrc` 也不读。这条安装路径本来只用于评估 / PoC（生产按第 7 节预装固定版本）。
+   ⚠️ 如果本组织的执行器镜像**本来就**设了 `BASH_ENV`、或者向任务导出 shell 函数（有些镜像用它们加载 profile），
+   评审会以这两条拒绝失败；处理办法是在 `run:` 块里启动脚本之前 `unset BASH_ENV ENV` 并
+   `unset -f <函数名>`（或用 `env -u` 逐个去掉对应的 `BASH_FUNC_*`），不要改脚本。
+   **仍然只能由运维保证的那一半**：`run:` 块里 `export`/`:` 那几行跑在 Flow 的**外层** shell 里，它启动得
+   比这一行更早——外层 shell 的 BASH_ENV/ENV/函数导入不是脚本能管的。裸 `bash` 也走 PATH，所以参考 YAML
+   用的是绝对路径 `/bin/bash`；换镜像时把它改成该镜像里 bash 的绝对路径（`-p` 要一起带上）。
 4. 代理：流水线变量配置 HTTP_PROXY / HTTPS_PROXY / NO_PROXY
    （NO_PROXY 含 openapi-rdc.aliyuncs.com 与内网地址）。
 5. 流水线任务指定运行在该构建集群。
@@ -424,7 +460,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
      「已设置 chat.disableInheritingDefaultResources=true」，再确认引擎是 v2。
    - 验收后把 canary `AGENTS.md` 从目标分支移除。
 9. **正控（证明这类 canary 真的会失败）**：在一台装有 kiro-cli 的机器上跑
-   `KIRO_ENGINE=v2 PROBE_NO_ISOLATION=1 bash scripts/probe/probe-kiro-headless.sh`——
+   `KIRO_ENGINE=v2 PROBE_NO_ISOLATION=1 bash -p scripts/probe/probe-kiro-headless.sh`——
    该模式故意不设置 `chat.disableInheritingDefaultResources`，canary **应当出现**
    （探测输出 `P1-10 FAIL`）；再不带 `PROBE_NO_ISOLATION` 跑一次，应 `P1-10 PASS`。
    `KIRO_ENGINE=v2` 不能省：探测脚本不传该变量时用 CLI 默认引擎（实测表现为 v1），
@@ -439,7 +475,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
      两者才可比；真实 MR 的结论仍需第 8 项自己跑出来。
    注意：探测脚本会真实调用 Kiro（消耗 credit），细节见 `scripts/probe/README.md`。
 10. **拒绝路径 canary（敏感路径读不到）**：在装有 kiro-cli 的机器上跑
-    `KIRO_ENGINE=v2 PROBE_FORCE_READ=1 bash scripts/probe/probe-kiro-headless.sh`。
+    `KIRO_ENGINE=v2 PROBE_FORCE_READ=1 bash -p scripts/probe/probe-kiro-headless.sh`。
     该模式的提示词**只做一件事**：要求读取临时业务库 `.git/` 下的 canary 文件并原样输出其中的 token。
     canary 刻意放在 allowedPaths **之内**、只被 `**/.git/**` 两条 deny 挡住——放在 allow 之外的话，deny 规则删掉它
     照样被 allow 边界拒绝，这项就永远「PASS」、测不出 deny 的任何问题。
@@ -465,7 +501,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 11. **拒绝路径不影响正常评审**：默认模式（不带 `PROBE_FORCE_READ`）那一次仍应产出正常的评审 JSON，
     真实 MR 上那一次仍应给出正常的问题清单（不是整体失败）。
 12. **读取许可清单边界（allowedPaths；接入前必做一次，改动 agent 定义或升级 kiro-cli 后重做）**：
-    在装有 kiro-cli 的机器上跑 `bash scripts/probe/probe-kiro-allowlist.sh`（P1-15，默认十个用例、每个一次调用）。
+    在装有 kiro-cli 的机器上跑 `bash -p scripts/probe/probe-kiro-allowlist.sh`（P1-15，默认十个用例、每个一次调用）。
     它用**生产定义**（改名换中性提示词、同一安装函数写入路径、同一环境许可清单）验证七个**门禁**用例：allow 内 read /
     grep / glob 都正常（T1 / T1b / T1c——去掉 `--trust-tools` 后 grep/glob 不能落入权限申请）、allow 外且不在拒绝清单里的
     `$HOME` canary 被 CLI **拒绝而不是等待确认到超时**（T2）、deny 先于 allow（T3，读 `.git/logs/HEAD`，只被新加的

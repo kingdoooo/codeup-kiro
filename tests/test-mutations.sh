@@ -124,7 +124,11 @@ run_case() {
   # 替身只从 $HOME/.kiro-mock/ 取配置与写记录（与 test-kiro-review.sh 同一约定；不借道 KIRO_ENV_PASSTHROUGH）
   export REVIEW_REPO_DIR="$CASE/work"
   mock_config_write "$HOME" "$@"; MD="$HOME/.kiro-mock"
-  RC=0; OUT=$(env "$@" "$pkg/scripts/kiro-review.sh" 2>&1) || RC=$?
+  # MUT_LAUNCH：显式解释器 + 参数（默认走 shebang）。启动环境那组变异要用 `/bin/bash -p` 跑——
+  # 不带 `-p` 时导入的函数会被第 0.0 步逮住，测不到「-p 之后 environ 里仍残留 BASH_FUNC_*」那一层。
+  # 刻意不加引号（要分词）。
+  RC=0; OUT=$(env "$@" ${MUT_LAUNCH:-} "$pkg/scripts/kiro-review.sh" 2>&1) || RC=$?
+  MUT_LAUNCH=""
 }
 
 # posted_comment（从 DRY_RUN 输出里取回写的评论正文）在 tests/helpers.sh（票 18 ⑫：原先两个文件各一份）
@@ -249,6 +253,170 @@ assert_contains "$OUT" "整轮强制 --text" "M-cx-nul3：反而被判 textlike�
 MUT_TWEAK=tweak_zeros_m run_case m-cx-nul3-control "$ROOT"
 assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-nul3 对照：原实现判 opaque 并在汇总里点名"
 assert_not_contains "$OUT" "整轮强制 --text" "M-cx-nul3 对照：原实现不强制文本"
+
+# --- M-cx-launch（CodeX 2026-09-13 第四轮复审 P0）：启动环境门恒不报可疑 → 环境里导入的假 pwd 真的被调用 ---
+# 顶替 `pwd` 是因为脚本第 20 行左右 `SCRIPT_DIR="$(cd -P -- … && pwd -P)"` 会调它，而 SCRIPT_DIR 决定
+# 后面 source 哪一份 lib——顶替它等于换掉整个受信集成包，且发生在 PATH 门之前。
+FN_VAR_M=$(bash -c 'zzprobe() { :; }; export -f zzprobe; env' \
+           | LC_ALL=C awk -F= '!f && /zzprobe/ && $0 ~ /=\(\) \{/ {print $1; f=1}')
+[[ -n "$FN_VAR_M" ]] || { echo "FAIL: 问不出本机 bash 导出函数用的环境变量名，M-cx-launch 会空转" >&2; exit 1; }
+FN_MARKER_M="$tmp/fake-pwd.log"; export FN_MARKER_M; : > "$FN_MARKER_M"
+FN_PAYLOAD_M='() { command echo FAKE_PWD_RAN >> "$FN_MARKER_M"; builtin pwd "$@"; }'
+# 先单杀 ①（只拆第 0.0 步）看两道门各自买到了什么：第 0.1 步会拒绝评审，但它排在 PATH 门之后，
+# 而 `SCRIPT_DIR="$(cd -P -- … && pwd -P)"` 在它之前——所以载荷**已经在本进程里跑过一次**了。
+# 这就是「0.0 必须是第一条命令、不能挪到库里」的证据：0.1 能止损，但止不住进程内的顶替。
+pkg=$(make_mutant m-cx-launch-fns-only 's#^if \[\[ -n "\$_kr_fns" || -n "\${BASH_ENV-}" || -n "\${ENV-}" \]\]; then$#if [[ -n "" ]]; then#')
+: > "$FN_MARKER_M"
+run_case m-cx-launch-only "$pkg" "${FN_VAR_M/zzprobe/pwd}=$FN_PAYLOAD_M"
+assert_nonzero "$RC" "M-cx-launch 单杀 0.0：第 0.1 步接住，评审仍被拒绝（纵深）"
+assert_contains "$OUT" "environ 里还有" "M-cx-launch 单杀 0.0：拒绝理由变成 environ 里的 BASH_FUNC_*"
+assert_eq "$([[ "$(grep -c FAKE_PWD_RAN "$FN_MARKER_M" 2>/dev/null || true)" -gt 0 ]] && echo executed || echo never)" "executed" \
+  "M-cx-launch 单杀 0.0：假 pwd 已经在 SCRIPT_DIR 那一行跑过了——0.1 止损但止不住进程内顶替"
+: > "$FN_MARKER_M"
+# **双变异**（第五轮加了第 0.1 步之后必须这样）：① 第 0.0 步的启动环境门恒不报可疑；② 第 0.1 步的
+# environ 检查恒不报可疑。只杀 ①，environ 里的 `BASH_FUNC_pwd%%` 还会被 ② 逮住（这正是纵深该有的样子——
+# 单杀 ① 时本用例观察到的是「② 拒绝」，而不是「载荷执行」）。两道都杀，假 pwd 才在 SCRIPT_DIR 那一行落地。
+pkg=$(make_mutant m-cx-launch-fns 's#^if \[\[ -n "\$_kr_fns" || -n "\${BASH_ENV-}" || -n "\${ENV-}" \]\]; then$#if [[ -n "" ]]; then#')
+mutate_more "$pkg" 's#^if \[\[ "\$_kr_env_fns" != "0" \]\]; then$#if [[ "0" != "0" ]]; then#'
+run_case m-cx-launch "$pkg" "${FN_VAR_M/zzprobe/pwd}=$FN_PAYLOAD_M"
+assert_rc "$RC" 0 "M-cx-launch：启动环境门被拆掉后评审照跑"
+assert_eq "$([[ "$(grep -c FAKE_PWD_RAN "$FN_MARKER_M" 2>/dev/null || true)" -gt 0 ]] && echo executed || echo never)" "executed" \
+  "M-cx-launch：环境里导入的假 pwd 真的被调用了——端到端「假 pwd 一次都没跑」断言会失败"
+: > "$FN_MARKER_M"
+run_case m-cx-launch-control "$ROOT" "${FN_VAR_M/zzprobe/pwd}=$FN_PAYLOAD_M"
+assert_nonzero "$RC" "M-cx-launch 对照：原实现在第一条命令处就拒绝了"
+assert_contains "$OUT" "启动环境不可信" "M-cx-launch 对照：报错说的是启动环境"
+assert_eq "$(grep -c FAKE_PWD_RAN "$FN_MARKER_M" 2>/dev/null || true)" "0" "M-cx-launch 对照：原实现下假 pwd 一次都没跑"
+
+# --- M-cx-p0log（CodeX 2026-09-13 第五轮复审 P0）：拒绝文案退回打印取值 → 令牌形状的 BASH_ENV 整串进日志 ---
+# 令牌形状的泄露 canary：前缀用变量拼，源文件里没有 `ghp_` + 连片字母数字的字面量，不触发密钥扫描器
+# （这是公开客户仓库；假令牌也不该以 hard-coded token 的形态留在源码里）。运行期仍是完整的 ghp_ 形状。
+_ghp=ghp; P0LEAK="${_ghp}_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+pkg=$(make_mutant m-cx-p0log 's#取值与函数名刻意不打印：它们是不受信输入#BASH_ENV=[${BASH_ENV-}] 继承函数=[${_kr_fns}]#')
+run_case m-cx-p0log "$pkg" BASH_ENV="$P0LEAK"
+assert_nonzero "$RC" "M-cx-p0log：变异体照旧拒绝运行（只是文案变了）"
+assert_contains "$OUT" "$P0LEAK" \
+  "M-cx-p0log：取值原样进了日志——端到端「BASH_ENV 取值一个字都不进日志」断言会失败"
+run_case m-cx-p0log-control "$ROOT" BASH_ENV="$P0LEAK"
+assert_nonzero "$RC" "M-cx-p0log 对照：原实现同样拒绝"
+assert_not_contains "$OUT" "${_ghp}_" "M-cx-p0log 对照：原实现只报状态、不报取值"
+
+# --- M-cx-envfn（同一轮 P1）：`-p` 之后 environ 里仍残留 BASH_FUNC_*，`curl | bash` 的子 shell 会重新导入 ---
+# **双变异**（与 M-cx-path 同理，纵深就该这样）：① 拆掉第 0.1 步的 environ 检查；② 安装器退回裸 `bash`（不再 env -i）。
+# 只杀任一道都还挡得住——0.1 会拒绝，或者 env -i 让 BASH_FUNC_* 到不了安装器。两道都杀，载荷才在安装器里执行。
+pkg=$(make_mutant m-cx-envfn-gate 's#^if \[\[ "\$_kr_env_fns" != "0" \]\]; then$#if [[ "0" != "0" ]]; then#')
+mutate_more "$pkg" 's#| env -i "${_kr_inst_env\[@\]}" "${BASH:-/bin/bash}" -p#| bash#'
+FN_MARK_E="$tmp/installer-fn.log"; : > "$FN_MARK_E"
+# 安装器：调一次 `pwd`（同名导出函数就在这里落地），然后把替身装进 $HOME/.local/bin
+mk_installer_m() {  # $1=用例目录
+  mkdir -p "$1/tools"
+  cat > "$1/tools/installer.sh" <<INST
+pwd >/dev/null
+mkdir -p "\$HOME/.local/bin"
+printf '#!/usr/bin/env bash\nexec "%s" "\$@"\n' "$ROOT/tests/mockbin/kiro-cli" > "\$HOME/.local/bin/kiro-cli"
+chmod +x "\$HOME/.local/bin/kiro-cli"
+INST
+}
+mkdir -p "$tmp/tools-nokiro"
+for _t in git jq curl timeout gtimeout sha256sum shasum awk sed grep tr cut od mktemp env date base64 python3 uname mkdir chmod cp cat rm ln find sort head wc printf; do
+  _p=$(command -v "$_t" 2>/dev/null) || continue
+  ln -sf "$_p" "$tmp/tools-nokiro/$_t"
+done
+unset _t _p
+PATH_NO_KIRO_M="$tmp/tools-nokiro:/usr/bin:/bin"
+FN_VAR_E=$(bash -c 'zzprobe() { :; }; export -f zzprobe; env' \
+           | LC_ALL=C awk -F= '!f && /zzprobe/ && $0 ~ /=\(\) \{/ {print $1; f=1}')
+[[ -n "$FN_VAR_E" ]] || { echo "FAIL: 问不出本机 bash 导出函数用的环境变量名，M-cx-envfn 会空转" >&2; exit 1; }
+FN_PAYLOAD_E='() { command echo INSTALLER_IMPORTED_PWD >> '"$FN_MARK_E"'; builtin pwd "$@"; }'
+mk_installer_m "$tmp/case-m-cx-envfn"
+MUT_LAUNCH="/bin/bash -p" run_case m-cx-envfn "$pkg" PATH="$PATH_NO_KIRO_M" \
+  KIRO_INSTALL_URL="file://$tmp/case-m-cx-envfn/tools/installer.sh" "${FN_VAR_E/zzprobe/pwd}=$FN_PAYLOAD_E"
+assert_rc "$RC" 0 "M-cx-envfn：两道都杀掉后评审照跑"
+assert_eq "$([[ "$(grep -c INSTALLER_IMPORTED_PWD "$FN_MARK_E" 2>/dev/null || true)" -gt 0 ]] && echo executed || echo never)" "executed" \
+  "M-cx-envfn：安装器子 shell 重新导入了 environ 里的假 pwd 并执行了它——端到端「假 pwd 一次没跑」断言会失败"
+: > "$FN_MARK_E"
+mk_installer_m "$tmp/case-m-cx-envfn-control"
+MUT_LAUNCH="/bin/bash -p" run_case m-cx-envfn-control "$ROOT" PATH="$PATH_NO_KIRO_M" \
+  KIRO_INSTALL_URL="file://$tmp/case-m-cx-envfn-control/tools/installer.sh" "${FN_VAR_E/zzprobe/pwd}=$FN_PAYLOAD_E"
+assert_nonzero "$RC" "M-cx-envfn 对照：原实现在第 0.1 步就拒绝（environ 里有 BASH_FUNC_*）"
+assert_contains "$OUT" "environ 里还有" "M-cx-envfn 对照：报错点明 environ 里的残留"
+assert_eq "$(grep -c INSTALLER_IMPORTED_PWD "$FN_MARK_E" 2>/dev/null || true)" "0" "M-cx-envfn 对照：安装器根本没跑，载荷零执行"
+
+# --- M-cx-curlq（CodeX 2026-09-13 第六轮复审 P0）：curl 丢掉 `-q` → 读 $HOME/.curlrc → 业务库/HOME 里的 .curlrc 注入被执行 ---
+# HOME 合法（业务库外），curl 之前那道 HOME 检查放行——这时挡住恶意 `.curlrc` 的就只剩 `-q`。删掉它，curl 读 `.curlrc`，
+# 里面 `url = file://…/evil.sh` 那段被打到 stdout，与安装脚本一起被右侧 bash 执行。
+pkg=$(make_mutant m-cx-curlq 's#curl -q -fsSL#curl -fsSL#')
+CURLQ_MARK="$tmp/curlq-evil.log"; : > "$CURLQ_MARK"
+CURLQ_HOME="$tmp/curlq-home"; mkdir -p "$CURLQ_HOME"
+printf 'command echo CURLQ_EVIL_RAN >> "%s"\n' "$CURLQ_MARK" > "$CURLQ_HOME/evil.sh"
+printf 'url = "file://%s/evil.sh"\n' "$CURLQ_HOME" > "$CURLQ_HOME/.curlrc"
+mk_installer_m "$tmp/case-m-cx-curlq"
+mock_config_write "$CURLQ_HOME"
+run_case m-cx-curlq "$pkg" PATH="$PATH_NO_KIRO_M" \
+  KIRO_INSTALL_URL="file://$tmp/case-m-cx-curlq/tools/installer.sh" HOME="$CURLQ_HOME"
+assert_eq "$([[ "$(grep -c CURLQ_EVIL_RAN "$CURLQ_MARK" 2>/dev/null || true)" -gt 0 ]] && echo executed || echo never)" "executed" \
+  "M-cx-curlq：删掉 -q 后 curl 读了 \$HOME/.curlrc，注入被执行——端到端 curlq 断言会失败"
+: > "$CURLQ_MARK"
+mock_config_write "$CURLQ_HOME"
+run_case m-cx-curlq-control "$ROOT" PATH="$PATH_NO_KIRO_M" \
+  KIRO_INSTALL_URL="file://$tmp/case-m-cx-curlq/tools/installer.sh" HOME="$CURLQ_HOME"
+assert_eq "$(grep -c CURLQ_EVIL_RAN "$CURLQ_MARK" 2>/dev/null || true)" "0" "M-cx-curlq 对照：原实现带 -q，.curlrc 一次都没读"
+
+# --- M-cx-homedir（同一轮 P0）：删掉 curl 之前那道 HOME 检查 → HOME 在业务库内时**安装器照样启动** ---
+# 这道 HOME 检查独立于 `-q`（-q 只挡 .curlrc）：它的作用是「HOME 在业务库内时，curl / 安装器根本不启动」。
+# 所以变异的可观测差异是**安装器有没有跑**，而不是 .curlrc（.curlrc 那条链已由 M-cx-curlq 守）。
+# 安装器落一个 marker 文件；HOME 在业务库内时，原实现连安装器都不启动、marker 不出现。
+pkg=$(make_mutant m-cx-homedir 's#^  review_dir_not_in_repo_or_die "\$HOME" "\$REVIEW_REPO_DIR" \\$#  true \\#')
+HOMEDIR_MARK="$tmp/homedir-installer.log"
+mk_inst_marker() {  # $1=用例目录
+  mkdir -p "$1/tools"
+  cat > "$1/tools/installer.sh" <<INST
+command echo HOMEDIR_INSTALLER_RAN >> "$HOMEDIR_MARK"
+mkdir -p "\$HOME/.local/bin"
+printf '#!/usr/bin/env bash\nexec "%s" "\$@"\n' "$ROOT/tests/mockbin/kiro-cli" > "\$HOME/.local/bin/kiro-cli"
+chmod +x "\$HOME/.local/bin/kiro-cli"
+INST
+}
+: > "$HOMEDIR_MARK"; mk_inst_marker "$tmp/case-m-cx-homedir"
+run_case m-cx-homedir "$pkg" PATH="$PATH_NO_KIRO_M" \
+  KIRO_INSTALL_URL="file://$tmp/case-m-cx-homedir/tools/installer.sh" HOME="$tmp/case-m-cx-homedir/work"
+assert_eq "$([[ "$(grep -c HOMEDIR_INSTALLER_RAN "$HOMEDIR_MARK" 2>/dev/null || true)" -gt 0 ]] && echo ran || echo never)" "ran" \
+  "M-cx-homedir：删掉 curl 前的 HOME 检查后，HOME 在业务库内时安装器照样启动——端到端 instrepo/curlrc「安装器根本没启动」断言会失败"
+: > "$HOMEDIR_MARK"; mk_inst_marker "$tmp/case-m-cx-homedir-control"
+run_case m-cx-homedir-control "$ROOT" PATH="$PATH_NO_KIRO_M" \
+  KIRO_INSTALL_URL="file://$tmp/case-m-cx-homedir-control/tools/installer.sh" HOME="$tmp/case-m-cx-homedir-control/work"
+assert_nonzero "$RC" "M-cx-homedir 对照：原实现在 curl 之前就按 HOME 落在业务库内拒绝"
+assert_contains "$OUT" "安装 kiro-cli 前" "M-cx-homedir 对照：报的是 curl 之前那道 HOME 检查"
+assert_eq "$(grep -c HOMEDIR_INSTALLER_RAN "$HOMEDIR_MARK" 2>/dev/null || true)" "0" "M-cx-homedir 对照：安装器一次都没启动"
+
+# --- M-cx-gate-root（同一轮 P1 ④）：PATH 门不再显式拒绝 repo=/ → `//*` 匹配不上任何条目，逐条放行 ---
+pkg=$(make_mutant m-cx-gate-root 's#^  if \[\[ "\$repo" == "/" \]\]; then$#  if [[ "$repo" == "//////" ]]; then#' scripts/lib/path-gate.sh)
+# 这个用例的 PATH 只保留**存在**的条目：不存在的条目会一路向上解析到 `/`，而 repo=/ 时那正好撞上
+# 「phys 等于业务库」而被拒——那是祖先判据在替根目录检查干活，测不到本条变异。
+PATH_EXIST=""; _rest="$PATH:"
+while [[ "$_rest" == *:* ]]; do
+  _e="${_rest%%:*}"; _rest="${_rest#*:}"
+  [[ -n "$_e" && -d "$_e" ]] || continue
+  PATH_EXIST="${PATH_EXIST}${PATH_EXIST:+:}${_e}"
+done
+unset _rest _e
+run_case m-cx-gate-root "$pkg" REVIEW_REPO_DIR=/ PATH="$PATH_EXIST"
+assert_nonzero "$RC" "M-cx-gate-root：变异体最终仍会失败（但已经不是在第 0 步）"
+assert_not_contains "$OUT" "解析成根目录" "M-cx-gate-root：门没有拦住 repo=/——端到端 reporoot 断言会失败"
+assert_contains "$OUT" "不是 git 仓库" "M-cx-gate-root：一路跑到第 1.9 步的 git 仓库校验（这之前的外部命令已经在一道失效的门下执行过了；顺带说明 repo=/ 时第 1.9 步那两条互相包含比较同样因为 //* 匹配不上而拦不住）"
+run_case m-cx-gate-root-control "$ROOT" REVIEW_REPO_DIR=/ PATH="$PATH_EXIST"
+assert_contains "$OUT" "解析成根目录" "M-cx-gate-root 对照：原实现在第 0 步拒绝"
+assert_not_contains "$OUT" "不是 git 仓库" "M-cx-gate-root 对照：原实现没跑到 git 仓库校验"
+
+# --- M-cx-gate-anc（同一轮 P1 ①②）：条目解析不出来时不再向上找祖先 → 业务库里还不存在的目录被当成「拿不出可执行文件」---
+pkg=$(make_mutant m-cx-gate-anc 's#^      phys=""$#      phys=""; break#' scripts/lib/path-gate.sh)
+run_case m-cx-gate-anc "$pkg" PATH="$tmp/case-m-cx-gate-anc/work/future-bin:$PATH"
+assert_rc "$RC" 0 "M-cx-gate-anc：业务库里还不存在的 PATH 条目被放行，评审照跑——端到端 pathfuture 断言会失败"
+assert_not_contains "$OUT" "PATH 不可信" "M-cx-gate-anc：门没有报可疑"
+assert_contains "$OUT" "个不存在或进不去的绝对条目" "M-cx-gate-anc：反而只当成「跳过并计数」"
+run_case m-cx-gate-anc-control "$ROOT" PATH="$tmp/case-m-cx-gate-anc-control/work/future-bin:$PATH"
+assert_nonzero "$RC" "M-cx-gate-anc 对照：原实现按最近的能进去的祖先判断 → 拒绝"
+assert_contains "$OUT" "解析到业务库内" "M-cx-gate-anc 对照：点明落在业务库内"
 
 # --- M-cx-deg（CodeX 2026-09-12 复审 P1）：降级 / 失败评论退回只传 REVIEW_NOTICE → 二进制未覆盖说明丢在降级路径上 ---
 pkg=$(make_mutant m-cx-deg-notice 's|--notice "$(degrade_notice)"|--notice "$REVIEW_NOTICE"|g')

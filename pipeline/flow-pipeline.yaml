@@ -75,7 +75,15 @@ stages:
                 # **解释器用绝对路径**（CodeX 2026-09-13 第三轮复审）：裸 `bash` 也走 PATH，而脚本启动之前的 PATH
                 # 不是脚本能管的——评审脚本自己的 PATH 门只能保证「它自己调外部工具时 PATH 可信」。
                 # alinux3 与常见 Linux 发行版都有 /bin/bash；换别的镜像时改成该镜像里 bash 的绝对路径。
-                /bin/bash "$PROJECT_DIR/../integration_repo/scripts/kiro-review.sh"
+                # **`-p`（privileged 模式）是第四轮复审 P0 的收口**：非交互 bash 在读到脚本第一行之前就会
+                # source `$BASH_ENV`（相对路径按 cwd 解析，而 cwd 是业务库），并从环境导入 exported functions
+                # ——后者能顶替脚本里的 `cd`/`pwd`/`source`，甚至直接定义一个空的 `review_path_gate_or_die`
+                # 让 PATH 门变成空转。`-p` 下 bash 不处理 BASH_ENV/ENV、不从环境导入函数（本机实测）。
+                # 这一行前面的 `export`/`:` 都跑在 Flow 的**外层** shell 里，那个 shell 启动得更早：所以
+                # 「BASH_ENV / ENV / 导出的 shell 函数不得来自业务仓库」是执行器接入要求（setup-guide 第 7 节），
+                # 不是这一行能保证的。脚本自己还会在第一条命令处做一次 best-effort 检查并把 BASH_ENV/ENV 从
+                # 环境里删掉（第 2 步 `curl … | bash` 拉起的子 shell 不是 privileged 的，得靠这个）。
+                /bin/bash -p "$PROJECT_DIR/../integration_repo/scripts/kiro-review.sh"
 
 # UI 中需配置的变量（变量和缓存 → 字符变量）。
 # 每个开关「关闭时 / 开启时各是什么行为、前提是什么」的完整矩阵见 setup-guide 第 11 节；

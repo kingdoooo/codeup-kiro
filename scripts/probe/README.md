@@ -49,31 +49,31 @@
 export YUNXIAO_TOKEN_FILE=/path/to/token.txt        # 或 YUNXIAO_TOKEN
 export YUNXIAO_ORG_ID=... CODEUP_REPO_ID=... MR_LOCAL_ID=...
 export PROBE_FILE=src/app.py PROBE_LINE_NEW=17 PROBE_LINE_OLD=12   # PROBE_LINE_OLD 可选
-PROBE_I_KNOW_THIS_IS_A_TEST_MR=1 bash scripts/probe/probe-codeup-inline.sh
+PROBE_I_KNOW_THIS_IS_A_TEST_MR=1 bash -p scripts/probe/probe-codeup-inline.sh
 # 想在 UI 里看 <details> 渲染和通知行为：加 PROBE_KEEP=1，看完手工删除
 
 # 2) Flow 运行参数覆写
 export FLOW_PIPELINE_ID=... BUSINESS_REPO_URL=https://codeup.aliyun.com/<org>/<repo>.git
 export SOURCE_BRANCH=feature/x MR_LOCAL_ID=7 MR_TARGET_BRANCH=master
-bash scripts/probe/probe-flow-run.sh
+bash -p scripts/probe/probe-flow-run.sh
 # 然后到 Flow 运行日志核对 checkout 分支与「使用环境变量指定的 MR：#7」
 
 # 3) kiro-cli headless（生产用的 v2 引擎；不传 KIRO_ENGINE 则用 CLI 默认引擎，实测表现为 v1）
 export KIRO_API_KEY=...                              # 或本机已 kiro-cli login
-KIRO_ENGINE=v2 bash scripts/probe/probe-kiro-headless.sh
+KIRO_ENGINE=v2 bash -p scripts/probe/probe-kiro-headless.sh
 # 3b) 正控：故意不设置 chat.disableInheritingDefaultResources，AGENTS.md canary 应当出现（P1-10 FAIL）
-KIRO_ENGINE=v2 PROBE_NO_ISOLATION=1 bash scripts/probe/probe-kiro-headless.sh
+KIRO_ENGINE=v2 PROBE_NO_ISOLATION=1 bash -p scripts/probe/probe-kiro-headless.sh
 # 3c) 拒绝路径的确定性验证：提示词只要求读 ~/.kiro 下的 canary 文件、不做评审
 #     （默认模式下模型可能压根没去读，那时「canary 未出现」什么都证明不了）
-KIRO_ENGINE=v2 PROBE_FORCE_READ=1 bash scripts/probe/probe-kiro-headless.sh
+KIRO_ENGINE=v2 PROBE_FORCE_READ=1 bash -p scripts/probe/probe-kiro-headless.sh
 # 4) 对照 V3（时间盒）
-KIRO_ENGINE=v3 bash scripts/probe/probe-kiro-headless.sh
+KIRO_ENGINE=v3 bash -p scripts/probe/probe-kiro-headless.sh
 # 原始输出默认留在 /tmp/kiro-probe-<时间>，可用 PROBE_KEEP_DIR 指定目录
 
 # 5) 读取许可清单边界（P1-15；票 15 主方案的前提，改动 agent 定义 / kiro_install_agent / 许可清单函数后重跑）
-bash scripts/probe/probe-kiro-allowlist.sh
+bash -p scripts/probe/probe-kiro-allowlist.sh
 # 默认 = 八个门禁用例 + T5 正控（9 次调用）；T6/T7 是 INFO，要跑得显式列出
-# 只跑子集省额度：PROBE_CASES="T1 T2 T4" bash scripts/probe/probe-kiro-allowlist.sh
+# 只跑子集省额度：PROBE_CASES="T1 T2 T4" bash -p scripts/probe/probe-kiro-allowlist.sh
 #   用例名逐个校验（写错 → 退出码 2、零调用）；子集运行时结论打「不作发布判定」并以 4 退出，只有八个门禁用例全跑才打「走主方案」
 # 升级 kiro-cli 之后：跑一次（至少 T8a T8b）→ 全 PASS 后把 summary.json 里的 kiro_cli 版本号加进 scripts/kiro-review.sh 的 KIRO_TESTED_TARGETS，
 #   否则评审会被版本门**拒绝**（名单外默认拒绝，2026-09-10 起；临时放行只能设流水线变量 KIRO_ACK_UNTESTED_TARGET=<os>/<arch>:<版本>，汇总带醒目 notice）
@@ -127,7 +127,7 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
   2 = 参数错（PROBE_CASES 含未知用例名；零调用）
   3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过 kiro_agent_selfcheck）——探测本身不可信，不是 allowedPaths 的结论
   4 = 门禁用例未全部运行（PROBE_CASES 子集），已跑的全 PASS，不作发布判定
-  5 = 环境准备失败（缺 kiro-cli/jq/timeout、未登录、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
+  5 = 环境准备失败（启动环境不可信、缺 kiro-cli/jq/timeout、未登录、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
   ```
 
   「实际运行」的集合从 `PROBE_CASES ∩ 已知用例` 推导，不手工记账。

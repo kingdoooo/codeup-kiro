@@ -42,11 +42,27 @@
 #   2 = 参数错（PROBE_CASES 含未知用例名；零调用）
 #   3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过 kiro_agent_selfcheck）——探测本身不可信，不是 allowedPaths 的结论
 #   4 = 门禁用例未全部运行（PROBE_CASES 子集），已跑的全 PASS，不作发布判定
-#   5 = 环境准备失败（缺 kiro-cli/jq/timeout、未登录、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
+#   5 = 环境准备失败（启动环境不可信、缺 kiro-cli/jq/timeout、未登录、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
 # PROBE_CASES="T1 T2 T4"（空格分隔）只跑子集；默认 = 门禁十二个 + T5 正控（13 次调用）；T6/T7 是 INFO、结论已写在文件头，
 #   要跑得显式列出（15-fix2 #9）。每个用例一次调用（约 0.3 credit、15–55 s）。
 set -euo pipefail
 
+# 启动环境门：必须在**第一条命令之前**（CodeX 2026-09-13 第四轮复审 P0）。与 scripts/kiro-review.sh 那段同款、
+# 同样必须内联（被 source 的库救不了「假 source」与「假 review_path_gate_or_die」这两种形态）；
+# 完整理由与残留缺口见 scripts/lib/path-gate.sh 顶部「启动环境」一节。本脚本产出的是**发布证据**，
+# 更不能跑在一个已经被污染的启动环境里。
+CDPATH=''
+_pk_fns="$(builtin declare -F)" || _pk_fns=""   # 必须在定义/source 任何函数之前：非空 = 从环境继承来的
+if [[ -n "$_pk_fns" || -n "${BASH_ENV-}" || -n "${ENV-}" ]]; then
+  # 只报状态、不报取值（第五轮复审 P0：取值与函数名都是不受信输入，原样打印既是泄露面也是日志注入面）
+  _pk_why=""
+  [[ -z "$_pk_fns" ]]     || _pk_why="${_pk_why}从环境继承的 shell 函数；"
+  [[ -z "${BASH_ENV-}" ]] || _pk_why="${_pk_why}BASH_ENV 已设置；"
+  [[ -z "${ENV-}" ]]      || _pk_why="${_pk_why}ENV 已设置；"
+  builtin echo "[probe] 错误：启动环境不可信，拒绝运行（环境准备失败，退出码 5）。检测到：${_pk_why}本脚本正文就此停止，但**启动阶段可能已经执行过不受信代码**（非交互 bash 会在读到本脚本第一行之前 source \$BASH_ENV，并从环境导入 exported functions）。请用 \`bash -p\` 启动，并保证 BASH_ENV / ENV / 导出的 shell 函数干净。取值与函数名刻意不打印" >&2
+  builtin exit 5
+fi
+unset -v _pk_fns _pk_why BASH_ENV ENV CDPATH
 # SCRIPT_DIR 只用 builtin（假 dirname 能把 PKG_ROOT 指到别处），随后立刻过 PATH 可信性门——
 # 本脚本产出的是**发布证据**，不能跑在任意 PATH 上（CodeX 2026-09-13 第三轮复审 P0 第 4 条建议）。
 _pk_self="${BASH_SOURCE[0]}"
@@ -58,6 +74,14 @@ source "${PKG_ROOT}/scripts/lib/path-gate.sh"
 # 探测不在业务库里跑（它自己建临时夹具），所以「业务库」这一维传本次的临时根都可以——
 # 但相对条目与空条目同样致命（探测也调 git / jq / od），所以门照跑。
 review_path_gate_or_die "$PWD"
+# environ 里残留的 `BASH_FUNC_*`（第五轮复审 P1）：`-p` 只让本进程忽略导入的函数，原始变量还在 environ 里，
+# 任何普通 bash 子进程都会重新导入。要跑 env / grep，所以排在 PATH 门之后。只报个数、不报名字。
+_pk_env_fns=$(env | LC_ALL=C grep -c '^BASH_FUNC_' || true)
+if [[ "$_pk_env_fns" != "0" ]]; then
+  echo "[probe] 错误：启动环境不可信，拒绝运行（环境准备失败，退出码 5）：environ 里还有 ${_pk_env_fns} 个 \`BASH_FUNC_*\` 形式的导出 shell 函数——本进程即使以 \`-p\` 启动也不够，普通 bash 子进程会把它们重新导入。函数名不打印（不受信输入）" >&2
+  exit 5
+fi
+unset _pk_env_fns
 command -v kiro-cli >/dev/null || { echo "缺少 kiro-cli（环境准备失败，退出码 5）" >&2; exit 5; }
 command -v jq >/dev/null || { echo "缺少 jq（环境准备失败，退出码 5）" >&2; exit 5; }
 TIMEOUT_BIN=""; command -v timeout >/dev/null && TIMEOUT_BIN=timeout
