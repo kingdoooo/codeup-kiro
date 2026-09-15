@@ -7,8 +7,8 @@
   仅授予目标代码库「代码只读 + 合并请求读写」，设置轮换周期（如 90 天）。
 - 组织 ID：云效「组织管理后台 → 基本信息」；代码库数字 ID：库设置 → 基本信息。
 - **kiro-cli ≥ 2.21**：脚本固定以 `--agent-engine v2 --output-format stream-json --agent codeup-reviewer-<本次随机串>`
-  调用，启动前检查 `--agent-engine` / `--output-format` / `--agent` 三个参数，缺任一即拒绝运行
-  （原因见第 12 节）。执行器上 `kiro-cli --version` 自查。
+  调用，启动前检查三项能力：钉引擎的参数（`--agent-engine` **或** `--v2` 简写，两种拼法任一即可）、
+  `--output-format`、`--agent`，缺任一即拒绝运行（原因见第 12 节）。执行器上 `kiro-cli --version` 自查。
 - 执行器命令：`git`、`curl`、`jq`（≥1.6）、`timeout`/`gtimeout`（GNU coreutils，**强制依赖**）；
   开启行内评论还需 `sha1sum` 或 `shasum`（算行内评论隐藏标记里的指纹，缺了下次评审认不出自己的评论、会重复发，因此同为硬依赖）。
 - 成本预估：一次完整评审约 **0.4–1.5 credit**（取决于 diff 大小、评审员读了多少上下文文件，
@@ -186,23 +186,26 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
     set -e                                   # 缺参数必须让这一步标红，不能只在日志里留一行提示
     kiro-cli --version                       # 「平台 + 版本」元组需在 KIRO_TESTED_TARGETS 名单内，否则评审被版本门拒绝
     uname -s; uname -m                       # 名单的单位是 <os>/<arch>:<版本>，只看版本号不够；当前名单见 scripts/kiro-review.sh
-    # 三个参数各查一次，缺任一就退出：合成一条 grep 时任一命中即通过，而 `--agent` 又会被
+    # 三项能力各查一次，缺任一就退出：合成一条 grep 时任一命中即通过，而 `--agent` 又会被
     # `--agent-engine` 那一行命中，于是缺 --agent 也照样"通过"。
-    # --agent 用与评审脚本相同的正则（前后必须是空白或行首尾）；help 一并收 stderr（脚本也是 2>&1）。
+    # 钉引擎那一项与评审脚本同判据：`--agent-engine` 或 `--v2` 任一存在即可（2.21.4 里两种拼法并存，
+    # 帮助文本哪天只留简写也不该把整条流水线拦死）。--agent 用与评审脚本相同的正则（前后必须是空白或行首尾）；
+    # help 一并收 stderr（脚本也是 2>&1）。
     h=$(mktemp)                              # 不要用 /tmp 下的固定名：共享执行器上会互相覆盖
     kiro-cli chat --help > "$h" 2>&1
-    grep -q -- '--agent-engine'  "$h" || { echo "缺 --agent-engine，请升级 kiro-cli ≥ 2.21"; exit 1; }
+    grep -q -- '--agent-engine' "$h" || grep -qE -- '(^|[^[:alnum:]_-])--v2([^[:alnum:]_-]|$)' "$h" \
+      || { echo "既没有 --agent-engine 也没有 --v2，请升级 kiro-cli ≥ 2.21"; exit 1; }
     grep -q -- '--output-format' "$h" || { echo "缺 --output-format，请升级 kiro-cli ≥ 2.21"; exit 1; }
     grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' "$h" \
       || { echo "缺 --agent，请升级 kiro-cli"; exit 1; }
-    echo "三个参数齐备"
+    echo "三项能力齐备"
     KIRO_LOG_NO_COLOR=1 kiro-cli chat --no-interactive \
       --agent-engine v2 --output-format stream-json "回复 ok 两个字母即可"
 末一条命令输出逐行 JSON（最后一行 `runFinished`，其 `data.finalText` 含 ok）→ 可用。
 失败时先区分三类：
 - `curl | bash` 安装失败 → 网络不通 → 第 7 节自建执行器；
-- `chat --help` 里没有 `--agent-engine` / `--output-format` / `--agent` → 版本过旧，升级到 ≥ 2.21
-  （评审脚本对这三项做启动前检查，缺任一即拒绝运行并在 MR 上回写「评审未完成」）；
+- `chat --help` 里既没有 `--agent-engine` 也没有 `--v2`，或没有 `--output-format` / `--agent` → 版本过旧，
+  升级到 ≥ 2.21（评审脚本对这三项做启动前检查，缺任一即拒绝运行并在 MR 上回写「评审未完成」）；
 - 安装成功但 chat 失败 → 多为认证问题（KIRO_API_KEY 未配置/无效/订阅无 API Key 权限），
   与网络无关，回到第 1 节核对 Key。
 同时验证执行器具备 timeout 命令（GNU coreutils）：`command -v timeout`；
@@ -328,9 +331,9 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
    `contract` 字段，该要求只写在 agent 提示词里。缺失时脚本判定「受信 agent 未生效」，
    走失败评论而**不**把模型内容贴到 MR 上（因为那份输出的拒绝路径与掩码规则都没生效）。
    MR 上出现这条失败评论 = agent 没加载，先查第 1 项的日志行。
-3. 启动前能力检查：脚本先跑 `kiro-cli chat --help`，`--agent-engine`、`--agent`、
-   `--output-format` 三者缺任一即**硬失败**（回写「评审未完成」评论），不再降级运行。`kiro-cli --version` 跑不起来（退出码非零）
-   同样硬失败；版本号取不到只是 notice。**紧接着的「Kiro 运行目录：<路径>/cwd（空目录；业务库 <路径> 只在 allowedPaths 里…）」**：
+3. 启动前能力检查：脚本先跑 `kiro-cli chat --help`，钉引擎的参数（`--agent-engine` **或** `--v2`，任一即可）、
+   `--agent`、`--output-format` 三项缺任一即**硬失败**（回写「评审未完成」评论），不再降级运行。`kiro-cli --version` 跑不起来（退出码非零）
+   同样硬失败；版本号解析不出来同样拒绝评审（版本门的信任单位是「平台 + 版本」元组，版本未知不放行）。**紧接着的「Kiro 运行目录：<路径>/cwd（空目录；业务库 <路径> 只在 allowedPaths 里…）」**：
    四处 kiro-cli 调用（`chat --help`、`--version`、`settings`、`chat`）都在本次 `mktemp` 工作目录下的空目录 `cwd` 里运行，**绝不在**
    业务库 checkout 里——第一段路径必须与第 1 项第二条许可路径（`…/chunks`）同一个父目录，第二段必须等于第 1 项的第一条许可路径。
 4. 引擎已钉死：日志出现「Kiro 引擎：v2（--agent-engine v2」。原因见第 12 节。

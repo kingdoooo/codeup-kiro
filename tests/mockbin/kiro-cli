@@ -28,6 +28,9 @@
 #   MOCK_KIRO_EMPTY=1           退出码 0 但输出为空
 #   MOCK_SETTINGS_FAIL=1        settings 子命令失败
 #   MOCK_KIRO_NO_ENGINE_FLAG=1  模拟不支持 --agent-engine 的旧版（--help 不列出、传入即报错）
+#   MOCK_KIRO_V2_SHORTHAND=1    模拟 --help 只列出 --v2 / --v3 简写、不再列 --agent-engine 的版本，但该参数**仍然可用**
+#                               （2.21.4 两种拼法并存且帮助文本与实际行为不一致，见 ADR-0004 的 2026-09-02 实测备注）。
+#                               → 能力检查应通过（issue 04 的绝缘），调用侧仍传 --agent-engine v2
 #   MOCK_KIRO_NO_MARKER=1       finalText 无契约标记（→ 脚本应降级）
 #   MOCK_KIRO_BAD_JSON=1        标记内是非法 JSON（→ 脚本应降级）
 #   MOCK_KIRO_STATUS_FAILED=1   runFinished.data.status 非 success（→ 脚本应走失败评论）
@@ -114,6 +117,9 @@ if [[ "${2:-}" == "--help" ]]; then
   printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-help"
   if [[ "${MOCK_KIRO_NO_ENGINE_FLAG:-0}" == "1" ]]; then
     echo "--no-interactive --trust-tools --agent"
+  elif [[ "${MOCK_KIRO_V2_SHORTHAND:-0}" == "1" ]]; then
+    # 帮助文本只留简写、参数本体仍在（下面 chat 的参数解析不看这个开关）
+    echo "--no-interactive --trust-tools --agent --v2 --v3 --output-format"
   elif [[ "${MOCK_KIRO_NO_STREAM_FLAG:-0}" == "1" ]]; then
     echo "--no-interactive --trust-tools --agent --agent-engine"
   else

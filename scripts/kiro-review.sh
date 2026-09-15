@@ -1268,8 +1268,15 @@ env_allowlist_or_die
 # 所有 kiro-cli 子命令都在 $KIRO_CWD（空目录）下执行，绝不在业务库工作树里（15-fix4 #1）
 log "Kiro 运行目录：${KIRO_CWD}（空目录；业务库 ${WS_P} 只在 allowedPaths 里，模型按绝对路径读取）"
 KIRO_CHAT_HELP=$(cd "$KIRO_CWD" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" chat --help 2>&1 || true)
-grep -q -- '--agent-engine' <<<"$KIRO_CHAT_HELP" \
-  || die_review "kiro-cli chat 不支持 --agent-engine，无法钉死 ${KIRO_ENGINE} 引擎（ADR-0004：默认引擎不阻断 AGENTS.md 注入），拒绝运行。请升级 kiro-cli（≥ 2.21）"
+# 两种拼法**任一**存在即通过（issue 04）：2.21.4 里 `--agent-engine <v1|v2|v3>` 与 `--v2` / `--v3` 简写并存，`--agent-engine`
+# 仍标 "v2" (default)、没有任何废弃公告——「同一件事出现第二种拼法」是典型的废弃前兆，只认一种拼法的话，官方哪天把帮助文本
+# 收敛到简写，所有使用方的评审会在同一天停在这道门上。这道门要判的只是「这个 CLI 还能不能钉引擎」，两种拼法都答得了这个问题。
+# 调用侧刻意不动（仍显式传 --agent-engine v2）：`--v2` 与 `--agent-engine v2` 语义是否完全一致未经证实，切过去要先跑一次完整探测。
+# 真的把 --agent-engine 移除的那天，chat 会以 clap 退出码 2 失败——那是一个点名参数的失败面，而不是这道门把还能用的版本一起拦死。
+if ! grep -q -- '--agent-engine' <<<"$KIRO_CHAT_HELP" \
+   && ! grep -qE -- '(^|[^[:alnum:]_-])--v2([^[:alnum:]_-]|$)' <<<"$KIRO_CHAT_HELP"; then
+  die_review "kiro-cli chat 既不支持 --agent-engine 也不支持 --v2，无法钉死 ${KIRO_ENGINE} 引擎（ADR-0004：默认引擎不阻断 AGENTS.md 注入），拒绝运行。请升级 kiro-cli（≥ 2.21）"
+fi
 grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
   || die_review "kiro-cli chat 不支持 --agent，无法套用受信只读 agent（拒绝路径、无 MCP/shell/write/web），拒绝运行。请升级 kiro-cli"
 # 结构化输出契约完全依赖 stream-json（报告从 runFinished.data.finalText 取）。不预检的话，

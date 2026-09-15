@@ -356,13 +356,27 @@ assert_contains "$OUT" "评审未完成" "settings 失败：回写说明评论"
 assert_contains "$OUT" "disableInheritingDefaultResources" "settings 失败：日志点名失败的设置项"
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "settings 失败：Kiro 未被启动"
 
-# ============ 失败路径：kiro-cli 不支持 --agent-engine（旧版）→ 拒绝运行，且 MR 上可见（spec I10）============
+# ============ 失败路径：kiro-cli 两种引擎拼法都不支持（旧版）→ 拒绝运行，且 MR 上可见（spec I10）============
 run_case oldcli MOCK_KIRO_NO_ENGINE_FLAG=1
 assert_nonzero "$RC" "旧版 kiro-cli：非零退出"
 assert_contains "$OUT" "--agent-engine" "旧版 kiro-cli：报错点名 --agent-engine"
+assert_contains "$OUT" "--v2" "旧版 kiro-cli：报错也点名简写 --v2（两种拼法都不在才拒绝）"
 assert_contains "$OUT" "评审未完成" "旧版 kiro-cli：回写「评审未完成」评论（失败可见）"
 assert_contains "$OUT" "changeRequests/7/comments" "旧版 kiro-cli：评论发到 MR 7"
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "旧版 kiro-cli：Kiro 未被启动"
+
+# ============ 引擎拼法绝缘：--help 只列 --v2 简写时门禁不倒塌（issue 04）============
+# 2.21.4 里 `--agent-engine <v1|v2|v3>` 与 `--v2` / `--v3` 简写并存、`--agent-engine` 仍标 "v2" (default)、没有废弃公告——
+# 「同一件事出现第二种拼法」是废弃前兆。能力检查只认 `--agent-engine` 的话，官方哪天把帮助文本收敛到简写，
+# 所有使用方的评审同时停在这道门上。判据改成两种拼法**任一**存在即通过。
+# 替身在这个开关下只改帮助文本、参数本体照收（ADR-0004 2026-09-02 实测备注：帮助文本与实际行为本来就不一致）。
+run_case v2shorthand MOCK_KIRO_V2_SHORTHAND=1
+assert_rc "$RC" 0 "--help 只列 --v2：能力检查放行，评审照常跑完"
+assert_not_contains "$OUT" "无法钉死" "--help 只列 --v2：不再因为帮助文本少一种拼法就拒绝"
+# 调用侧刻意不动：`--v2` 与 `--agent-engine v2` 语义是否完全一致未经证实，切过去要先跑一次完整探测（issue 04）
+assert_contains "$(paste -sd' ' "$MD/args")" "--agent-engine v2" "--help 只列 --v2：调用侧仍显式传 --agent-engine v2"
+assert_eq "$(grep -c -x -- '--v2' "$MD/args")" "0" "--help 只列 --v2：绝不自作主张改用简写"
+assert_contains "$OUT" "引擎：v2" "--help 只列 --v2：日志仍记录所用引擎为 v2"
 
 # ============ 评论截断：MAX_COMMENT_BYTES 很小时评论被截断并注明 ============
 # 1100：高于下界 1024（票 18 ②，更小的取值回落默认 60000、不再截断），低于这条评论的 ~1.9 KB
