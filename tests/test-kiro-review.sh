@@ -2327,6 +2327,16 @@ else
     KIRO_PINNED_ARTIFACT="$ART_BAD" KIRO_PINNED_ARTIFACT_SHA256="$ART_BAD_SHA" KIRO_CLI_SHA256="$ART_ENTRY_SHA"
   assert_nonzero "$RC" "钉版安装：安装包缺 kirocli/install.sh → 拒绝评审"
   assert_contains "$(posted_comment "$OUT")" "安装包结构不认" "钉版安装：失败评论说明结构不认"
+  # 不变式 I4 的另一半：latest 档位下即使钉版那三个变量都配着（且安装包真实存在），也一概不碰——
+  # 走的是 curl 那条路，日志里不该出现任何钉版的痕迹。KIRO_INSTALL_URL 指向本地那个假安装器。
+  run_case latestignorespin PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=latest \
+    KIRO_INSTALL_URL="file://$CASE_INST/tools/installer.sh" \
+    KIRO_PINNED_ARTIFACT="$ART" KIRO_PINNED_ARTIFACT_SHA256="$zero64" KIRO_CLI_SHA256=
+  assert_rc "$RC" 0 "现装档位：钉版变量配着也照常走现装（不校验、不读安装包）"
+  assert_contains "$OUT" "用官方安装脚本安装最新版（安装档位 latest）" "现装档位：走的是 curl 那条路"
+  assert_not_contains "$OUT" "钉版安装包" "现装档位：日志里没有任何钉版痕迹"
+  # 注意这条同时证明了 latest 下钉版变量**不参与校验**：KIRO_PINNED_ARTIFACT_SHA256 是全零、
+  # KIRO_CLI_SHA256 为空，若第 1.6 步误把 pinned 的必填集用到 latest 上，这一条会以拒绝运行告终。
 fi
 # 15-fix3 #8：版本打到 stderr 的 CLI 也要取得到（否则每条评论永久带「版本未知」notice 且无法清除）
 run_case verstderr MOCK_KIRO_VERSION_STDERR=1
