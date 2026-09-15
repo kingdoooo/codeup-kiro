@@ -2097,13 +2097,8 @@ assert_not_contains "$OUT" "otheros/otherarch" "假 uname：伪造的平台键�
 # 之前这条分支端到端零覆盖（mockbin 里一直有 kiro-cli）。这里用一个**不含 kiro-cli** 的 PATH（只放脚本真需要的
 # 工具的符号链接 + /usr/bin:/bin——本机 $HOME/.local/bin 里就有真 kiro-cli，不能直接用宿主 PATH）
 # 加上 `KIRO_INSTALL_URL=file://…` 让真 curl 去取一份本地「安装脚本」，于是安装分支真的被走一遍。
-mkdir -p "$tmp/tools"
-for _t in git jq curl timeout gtimeout sha256sum shasum awk sed grep tr cut od mktemp env date base64 python3 uname mkdir chmod cp cat rm ln find sort head wc printf; do
-  _p=$(command -v "$_t" 2>/dev/null) || continue
-  ln -sf "$_p" "$tmp/tools/$_t"
-done
-unset _t _p
-[[ ! -e "$tmp/tools/kiro-cli" ]] || { echo "FAIL: 夹具错误，安装分支的 PATH 里不该有 kiro-cli" >&2; exit 1; }
+# 工具目录的构造在 helpers.sh 的 make_tools_dir（钉版档位的用例与 test-mutations.sh 复用同一份）
+make_tools_dir "$tmp/tools" || exit 1
 PATH_NO_KIRO="$tmp/tools:/usr/bin:/bin"
 # 安装器：把自己的环境与 `$-`（privileged 标志）落盘，然后把替身装进 $HOME/.local/bin
 make_installer() {  # $1=用例目录
@@ -2121,7 +2116,7 @@ INST
 CASE_INST="$tmp/case-instenv"; make_installer "$CASE_INST"
 run_case instenv PATH="$PATH_NO_KIRO" KIRO_INSTALL_URL="file://$CASE_INST/tools/installer.sh"
 assert_rc "$RC" 0 "安装分支：PATH 里没有 kiro-cli → 走安装，装完评审照常完成"
-assert_contains "$OUT" "kiro-cli 不存在，尝试安装" "安装分支：日志说明走了安装路径"
+assert_contains "$OUT" "kiro-cli 不存在，用官方安装脚本安装最新版（安装档位 latest）" "安装分支：日志说明走了现装档位的安装路径"
 inst_env=$(cat "$CASE_INST/installer-env.txt" 2>/dev/null || true)
 assert_eq "$([[ -n "$inst_env" ]] && echo dumped)" "dumped" "安装分支：安装器真的跑起来了（落下了自己的环境）"
 # ① 安装器不继承 BASH_FUNC_*（`-p` 挡不住这一类：变量还在 environ 里，普通 bash 子进程会重新导入）
@@ -2277,6 +2272,62 @@ assert_contains "$OUT" "业务库" "钉版档位：拒绝原因说明是业务�
 run_case proflatest KIRO_INSTALL_PROFILE=latest
 assert_rc "$RC" 0 "现装档位：照常完成（KIRO_CLI_SHA256 可选）"
 assert_contains "$OUT" "安装档位：latest" "现装档位：日志打印本次档位"
+
+# ---- 钉版档位：真正走安装路径 ----
+# 复用上面安装分支那套 PATH_NO_KIRO（$tmp/tools 里没有 kiro-cli，make_tools_dir 自己断言过）。
+# 额外前提：脚本要 unzip 解包、安装包内层 install.sh 要 install 拷贝，本用例自己还要 zip 打包夹具。
+pin_tools_ok=yes
+[[ -e "$tmp/tools/unzip" ]] || pin_tools_ok="缺 unzip"
+[[ -e "$tmp/tools/install" ]] || pin_tools_ok="缺 install"
+command -v zip >/dev/null 2>&1 || pin_tools_ok="缺 zip（造夹具用）"
+if [[ "$pin_tools_ok" != yes ]]; then
+  echo "SKIP: 本机${pin_tools_ok}，跳过钉版安装用例" >&2
+else
+  ART="$tmp/kirocli-fixture.zip"
+  # 夹具返回的是**装完之后入口文件**的摘要（安装包里装的是转发壳，不是替身本身）
+  ART_ENTRY_SHA=$(make_pinned_artifact "$ART")
+  ART_SHA=$( (command -v sha256sum >/dev/null 2>&1 && sha256sum "$ART" || shasum -a 256 "$ART") | cut -d' ' -f1)
+  # 成功路径。KIRO_INSTALL_URL 指向一个必然连不上的地址：钉版档位若偷偷回退现装，curl 会失败并 die_review（不变式 I4）
+  run_case pinnedok PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$ART" KIRO_PINNED_ARTIFACT_SHA256="$ART_SHA" \
+    KIRO_CLI_SHA256="$ART_ENTRY_SHA" KIRO_INSTALL_URL=http://127.0.0.1:1/must-not-be-used
+  assert_rc "$RC" 0 "钉版安装：摘要一致 → 装上并照常完成评审"
+  assert_contains "$OUT" "安装档位：pinned" "钉版安装：日志打印本次档位"
+  assert_contains "$OUT" "钉版安装包摘要核对通过" "钉版安装：日志有安装包摘要核对通过"
+  assert_contains "$OUT" "kiro-cli 二进制摘要核对通过" "钉版安装：入口文件摘要也核对通过（第 2.1 步）"
+  assert_eq "$([[ -x "$CASE/home/.local/bin/kiro-cli" ]] && echo yes || echo no)" "yes" \
+    "钉版安装：内层 install.sh 把入口装到 \$HOME/.local/bin"
+  assert_eq "$([[ -e "$CASE/home/.kirocli-setup-ran" ]] && echo ran || echo skipped)" "skipped" \
+    "钉版安装：KIRO_CLI_SKIP_SETUP=1 生效，内层不跑 kiro-cli setup"
+  # 安装包摘要不一致 → 拒绝，且未解压、未执行 kiro-cli
+  run_case pinnedshabad PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$ART" KIRO_PINNED_ARTIFACT_SHA256="$zero64" KIRO_CLI_SHA256="$ART_ENTRY_SHA"
+  assert_nonzero "$RC" "钉版安装：安装包摘要不一致 → 拒绝评审"
+  comment=$(posted_comment "$OUT")
+  assert_contains "$comment" "钉版安装包摘要与 KIRO_PINNED_ARTIFACT_SHA256 不一致" "钉版安装：失败评论说明不一致"
+  assert_contains "$comment" "$ART_SHA" "钉版安装：失败评论写出实际摘要（运维据此核对）"
+  assert_eq "$([[ -e "$CASE/home/.kiro-mock/calls" ]] && echo called || echo not-called)" "not-called" \
+    "钉版安装：摘要不一致时 kiro-cli 一次都没被执行"
+  assert_eq "$([[ -e "$CASE/home/.local/bin/kiro-cli" ]] && echo installed || echo not-installed)" "not-installed" \
+    "钉版安装：摘要不一致时未解压未安装"
+  # 安装包不存在 → 拒绝，且不回退现装（不变式 I4）
+  run_case pinnedmissing PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$tmp/does-not-exist.zip" KIRO_PINNED_ARTIFACT_SHA256="$ART_SHA" \
+    KIRO_CLI_SHA256="$ART_ENTRY_SHA" KIRO_INSTALL_URL=http://127.0.0.1:1/must-not-be-used
+  assert_nonzero "$RC" "钉版安装：安装包取不到 → 拒绝评审"
+  comment=$(posted_comment "$OUT")
+  assert_contains "$comment" "钉版安装包取不到" "钉版安装：失败评论说明取不到"
+  assert_contains "$comment" "不会回退" "钉版安装：失败评论明说不回退官方安装脚本"
+  assert_not_contains "$OUT" "kiro-cli 安装失败" "钉版安装：没有走到现装分支的报错（证明没回退）"
+  # 安装包结构不认（缺内层 install.sh）→ 拒绝
+  ART_BAD="$tmp/kirocli-fixture-noinst.zip"
+  make_pinned_artifact "$ART_BAD" --no-installer >/dev/null
+  ART_BAD_SHA=$( (command -v sha256sum >/dev/null 2>&1 && sha256sum "$ART_BAD" || shasum -a 256 "$ART_BAD") | cut -d' ' -f1)
+  run_case pinnednoinst PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$ART_BAD" KIRO_PINNED_ARTIFACT_SHA256="$ART_BAD_SHA" KIRO_CLI_SHA256="$ART_ENTRY_SHA"
+  assert_nonzero "$RC" "钉版安装：安装包缺 kirocli/install.sh → 拒绝评审"
+  assert_contains "$(posted_comment "$OUT")" "安装包结构不认" "钉版安装：失败评论说明结构不认"
+fi
 # 15-fix3 #8：版本打到 stderr 的 CLI 也要取得到（否则每条评论永久带「版本未知」notice 且无法清除）
 run_case verstderr MOCK_KIRO_VERSION_STDERR=1
 assert_rc "$RC" 0 "kiro-cli --version 打到 stderr：评审照常完成"

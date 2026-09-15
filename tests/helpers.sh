@@ -384,3 +384,65 @@ mk_patchsets_fixture() {
 # 复位成默认值（每个用例之后调用；赋值前缀是否残留取决于 bash 版本）
 reset_ps_vars() { PS_SRC="HEAD"; PS_TGT="BASE"; PS_SRC_ID="src-2"; PS_TGT_ID="tgt-1"; }
 reset_ps_vars
+
+# --- 钉版安装档位（ADR-0006）的夹具 ---
+# 造一个结构与官方 Linux 安装包一致的假 kiro-cli 安装包（zip）：
+#   kirocli/BUILD-INFO      —— 真实包里有，内层 install.sh 读它拿 BUILD_TARGET_TRIPLE 做 uname 校验
+#   kirocli/install.sh      —— 真实包里那个的等价物：纯 install -m 755 拷贝，尊重 KIRO_CLI_SKIP_SETUP
+#   kirocli/bin/kiro-cli    —— 一个**转发到替身**的小壳
+# 为什么是转发壳而不是替身本身：替身要按自己的位置找 tests/helpers.sh（`$MOCK_DIR/../helpers.sh`），
+# 复制到别处会 fail-closed 退 97（与安装分支的 instenv 夹具同一个理由）。
+# 为什么不直接塞真实安装包里那个 install.sh：它按 BUILD_TARGET_TRIPLE 校验 `uname`，而真实包是 linux 三元组，
+# 在 macOS 上跑必然失败。这里的 BUILD_TARGET_TRIPLE 按本机 uname 生成，行为等价、跨平台可跑。
+# 替身路径由本文件位置推出（helpers.sh 在 tests/ 下），不依赖调用方是否定义了 ROOT。
+# **stdout = 转发壳的 sha256**：内层 install.sh 是逐字节 `install -m 755` 拷贝，所以这个值就是装完之后
+# 入口文件的摘要，调用方直接拿它当 KIRO_CLI_SHA256（别用替身本身的摘要——装上去的是壳）。
+make_pinned_artifact() {  # <输出 zip 绝对路径> [--no-installer] → stdout 入口文件 sha256
+  local out="$1" mode="${2:-}" stage here entry_sha
+  here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
+  stage=$(mktemp -d) || return 1
+  mkdir -p "$stage/kirocli/bin" || { rm -rf "$stage"; return 1; }
+  printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$here/mockbin/kiro-cli" > "$stage/kirocli/bin/kiro-cli" \
+    || { rm -rf "$stage"; return 1; }
+  chmod 755 "$stage/kirocli/bin/kiro-cli"
+  printf 'BUILD_DATE=2026-09-11T12:52:14+00:00\nBUILD_HASH=fixture\nBUILD_TARGET_TRIPLE=%s-unknown-%s-musl\nBUILD_VERSION=fixture\n' \
+    "$(uname -m)" "$(uname -s | tr 'A-Z' 'a-z')" > "$stage/kirocli/BUILD-INFO"
+  if [[ "$mode" != "--no-installer" ]]; then
+    cat > "$stage/kirocli/install.sh" <<'SH'
+#!/bin/sh
+set -o errexit
+set -o nounset
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+mkdir -p "$HOME/.local/bin"
+install -m 755 "$SCRIPT_DIR/bin/kiro-cli" "$HOME/.local/bin/"
+# 真实安装包在这里跑 `kiro-cli setup`；KIRO_CLI_SKIP_SETUP 非空时跳过。留个 marker 让测试能断言它被跳过了。
+if [ -z "${KIRO_CLI_SKIP_SETUP:-}" ]; then
+  : > "$HOME/.kirocli-setup-ran"
+fi
+SH
+    chmod 755 "$stage/kirocli/install.sh"
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    entry_sha=$(sha256sum "$stage/kirocli/bin/kiro-cli" | cut -d' ' -f1)
+  else
+    entry_sha=$(shasum -a 256 "$stage/kirocli/bin/kiro-cli" | cut -d' ' -f1)
+  fi
+  ( cd "$stage" && zip -q -r "$out" kirocli ) || { rm -rf "$stage"; return 1; }
+  rm -rf "$stage"
+  printf '%s' "$entry_sha"
+}
+
+# 造一个**不含 kiro-cli** 的工具目录：只放脚本与安装包内层 install.sh 真需要的那些工具的符号链接。
+# 为什么不能直接过滤宿主 PATH：开发机的 $HOME/.local/bin 里就有真 kiro-cli，而「kiro-cli 不存在」
+# 正是第 2 步安装分支的前提——前提不成立时用例会去跑真实 CLI、真烧额度。
+# 调用方自己拼 PATH（惯例是 "<目录>:/usr/bin:/bin"）。夹具自检：目录里绝不能出现 kiro-cli。
+make_tools_dir() {  # <目录>
+  local dir="$1" t p
+  mkdir -p "$dir" || return 1
+  for t in git jq curl timeout gtimeout sha256sum shasum awk sed grep tr cut od mktemp env date base64 \
+           python3 uname mkdir chmod cp cat rm ln find sort head wc printf unzip install; do
+    p=$(command -v "$t" 2>/dev/null) || continue
+    ln -sf "$p" "$dir/$t"
+  done
+  [[ ! -e "$dir/kiro-cli" ]] || { echo "FAIL: 夹具错误，工具目录里不该有 kiro-cli" >&2; return 1; }
+}

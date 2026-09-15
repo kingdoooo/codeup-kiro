@@ -1108,43 +1108,72 @@ env_allowlist_or_die
 # --- 2. 安装/检测 kiro-cli（失败用 die_review：网络受限的执行器上这是最常见的失败，
 #        原来用 die 会让 MR 上什么都看不到、只有流水线标红，违反 I10）---
 if ! command -v kiro-cli >/dev/null; then
-  log "kiro-cli 不存在，尝试安装（云托管执行器场景）……"
-  # 安装器**不继承当前环境**（CodeX 2026-09-13 第五轮复审 P1）。两个理由：
-  #   ① `env -i` 把 `BASH_FUNC_*` 一并挡在外面。第 0.1 步已经拒绝了带 `BASH_FUNC_*` 的启动环境，这里是第二道——
-  #      门是时点判断，而这条管道是全脚本唯一一处「把 stdin 交给一个新的 bash」的地方，值得自己把环境收干净。
-  #   ② 在线安装脚本没有任何理由拿到 KIRO_API_KEY / YUNXIAO_TOKEN：固定名单（KIRO_ENV_FIXED_NAMES，与四次
-  #      kiro-cli 调用同一份）**再去掉 KIRO_API_KEY**，剩下的只有 PATH/HOME/locale/代理/证书/XDG 这些它真需要的。
-  # 右边用 `${BASH:-/bin/bash}` 而不是裸 `bash`：`-p` 必须显式带上（BASH 由 bash 自己在启动时写入，不取环境里的旧值）。
-  # 将来官方安装脚本需要别的变量时，把变量名加进 KIRO_ENV_FIXED_NAMES（或在这里显式补一个），
-  # **不要**改回继承整个环境——那会把 `BASH_FUNC_*` 与凭证一起交出去。这条路径本来只用于评估 / PoC
-  # （生产按 setup-guide 第 7 节预装固定版本），失败时会 die_review 回写「评审未完成」，不会静默。
-  # ⓪ **curl 之前**先确认 HOME 不在业务库内（CodeX 2026-09-13 第六轮复审 P0）。curl 会读 `$HOME/.curlrc`、
-  #    安装器会写 `$HOME/.local/bin`，两者都发生在下面那次 PATH 重新过门**之前**——HOME 指进业务库时，业务库里
-  #    一个 `.curlrc`（`url = "file://<业务库>/evil.sh"`）就能让 curl 先把业务库脚本打到 stdout，与受信安装脚本
-  #    一起被右侧 bash 执行（本机 curl 8.7 复现 marker=EVIL_RAN；env -i / -p 都在 curl 左侧之后，挡不住）。
+  # ⓪ **任何外部动作之前**先确认 HOME 不在业务库内（CodeX 2026-09-13 第六轮复审 P0，两个安装档位都需要）。
+  #    curl 会读 `$HOME/.curlrc`、两种安装器都写 `$HOME/.local/bin`，都发生在下面那次 PATH 重新过门**之前**——
+  #    HOME 指进业务库时，业务库里一个 `.curlrc`（`url = "file://<业务库>/evil.sh"`）就能让 curl 先把业务库脚本
+  #    打到 stdout，与受信安装脚本一起被右侧 bash 执行（本机 curl 8.7 复现 marker=EVIL_RAN；env -i / -p 都在
+  #    curl 左侧之后，挡不住）。
   review_dir_not_in_repo_or_die "$HOME" "$REVIEW_REPO_DIR" \
-    "安装 kiro-cli 前（curl 读 \$HOME/.curlrc、安装器写 \$HOME/.local/bin，都在 PATH 重新过门之前，所以 HOME 必须先确认不在业务库内）"
-  # 安装器与 curl **都不继承当前环境**（第五轮 P1 + 第六轮 P0）。理由：
-  #   ① `env -i` 把 `BASH_FUNC_*` 一并挡在外面（第 0.1 步已拒绝带 `BASH_FUNC_*` 的启动环境，这里是第二道）。
-  #   ② 在线安装脚本 / curl 没有任何理由拿到 KIRO_API_KEY / YUNXIAO_TOKEN / CODEUP_*：固定名单（KIRO_ENV_FIXED_NAMES，
+    "安装 kiro-cli 前（安装器写 \$HOME/.local/bin、curl 读 \$HOME/.curlrc，都在 PATH 重新过门之前，所以 HOME 必须先确认不在业务库内）"
+  # 安装器**不继承当前环境**（CodeX 2026-09-13 第五轮复审 P1 + 第六轮 P0），两个档位共用这一份：
+  #   ① `env -i` 把 `BASH_FUNC_*` 一并挡在外面。第 0.1 步已经拒绝了带 `BASH_FUNC_*` 的启动环境，这里是第二道——
+  #      门是时点判断，而安装是全脚本唯一「把控制权交给一个新的 bash」的地方，值得自己把环境收干净。
+  #   ② 安装脚本 / curl 没有任何理由拿到 KIRO_API_KEY / YUNXIAO_TOKEN / CODEUP_*：固定名单（KIRO_ENV_FIXED_NAMES，
   #      与四次 kiro-cli 调用同一份）**再去掉 KIRO_API_KEY**，剩下的只有 PATH/HOME/locale/代理/证书/XDG 这些它们真需要的。
   #      **curl 也套 env -i**（不只右侧 bash）：否则一个恶意 `.curlrc` 能借 curl 左侧继承的凭证环境做 upload/额外请求，
   #      绕开「右侧不传凭证」的设计目标（第六轮 P0）。
-  #   ③ `curl -q` 必须是**第一个选项**：禁用默认配置文件加载（`$HOME/.curlrc`；`.netrc` 只有显式 `--netrc` 才读，这里没用），与 ⓪ 的 HOME 检查互为纵深
-  #      （HOME 检查挡业务库里的 `.curlrc`，`-q` 连合法 HOME 里别的进程写的 `.curlrc` 也不读）。
-  # 右边用 `${BASH:-/bin/bash}` 而不是裸 `bash`：`-p` 必须显式带上（BASH 由 bash 自己在启动时写入，不取环境里的旧值）。
   # 将来官方安装脚本需要别的变量时，把变量名加进 KIRO_ENV_FIXED_NAMES（或在这里显式补一个），
-  # **不要**改回继承整个环境。这条路径本来只用于评估 / PoC（生产按 setup-guide 第 7 节预装固定版本），失败会 die_review。
+  # **不要**改回继承整个环境——那会把 `BASH_FUNC_*` 与凭证一起交出去。
   _kr_inst_env=()
   for _v in "${KIRO_ENV_FIXED_NAMES[@]}"; do
     [[ "$_v" != KIRO_API_KEY ]] || continue
     [[ -n "${!_v:-}" ]] || continue
     _kr_inst_env+=("${_v}=${!_v}")
   done
-  env -i "${_kr_inst_env[@]}" curl -q -fsSL --connect-timeout 10 --max-time 300 "$KIRO_INSTALL_URL" \
-    | env -i "${_kr_inst_env[@]}" "${BASH:-/bin/bash}" -p \
-    || die_review "kiro-cli 安装失败。网络受限时请使用自建执行器预装固定版本，或配置 HTTP_PROXY/HTTPS_PROXY（见 pipeline/setup-guide.md）"
-  unset _v _kr_inst_env
+  if [[ "$KIRO_INSTALL_PROFILE" == pinned ]]; then
+    # --- 钉版档位（ADR-0006）：安装包由流水线预先备好，脚本只认一个本地路径 ---
+    # **绝不回退现装**：回退会把一次基础设施故障（桶权限变了、对象被误删）转换成一次版本门拒绝；更糟的是
+    # 若最新版恰好在已探测名单内，回退会静默装上一个与 KIRO_CLI_SHA256 不匹配的二进制，于是同一次故障产生
+    # 三种不同的错误面。下面每一条失败路径都 die_review，不 fall through 到现装分支。
+    log "kiro-cli 不存在，从钉版安装包安装（安装档位 pinned）……"
+    [[ -f "$KIRO_PINNED_ARTIFACT" && -r "$KIRO_PINNED_ARTIFACT" ]] \
+      || die_review "钉版安装包取不到（路径不存在或不可读；取值不回显）。请确认流水线里预先下载安装包的步骤已成功、且 KIRO_PINNED_ARTIFACT 指向它落盘的位置。钉版档位**不会回退**到官方安装脚本——那会把一次基础设施故障变成一次版本门拒绝，把排查引向错误的方向"
+    # 安装包摘要在**解压之前**核对：解压本身就是把不受信字节交给 unzip 处理。
+    _art_rc=0; _art_have=$(kiro_cli_sha256 "$KIRO_PINNED_ARTIFACT") || _art_rc=$?
+    case "$_art_rc" in
+      0) ;;
+      2) die_review "钉版安装包摘要算不出（执行器既没有 sha256sum 也没有 shasum），而钉版档位必须核对，拒绝评审。请在执行器安装 GNU coreutils" ;;
+      *) die_review "钉版安装包读不出（权限或 I/O 错误），拒绝评审" ;;
+    esac
+    [[ "$_art_have" == "$KIRO_PINNED_ARTIFACT_SHA256" ]] \
+      || die_review "钉版安装包摘要与 KIRO_PINNED_ARTIFACT_SHA256 不一致，拒绝评审（未解压、未执行 kiro-cli）：实际 sha256 是 ${_art_have}，期望 ${KIRO_PINNED_ARTIFACT_SHA256}。对象与集成包发布的值不符——请核对是否换过安装包版本而没有同步改这个变量"
+    log "钉版安装包摘要核对通过（sha256 ${_art_have:0:12}…）"
+    command -v unzip >/dev/null \
+      || die_review "执行器缺 unzip，无法解压钉版安装包（官方 Linux 安装包是 .zip；alinux3 / alinux4 镜像预装了 unzip）"
+    _art_dir="$WORK/kirocli-artifact"
+    mkdir -p "$_art_dir" || die_review "无法创建安装包解压目录"
+    ( cd "$_art_dir" && env -i "${_kr_inst_env[@]}" unzip -q -o "$KIRO_PINNED_ARTIFACT" ) \
+      || die_review "钉版安装包解压失败（文件损坏或不是 zip）"
+    [[ -f "$_art_dir/kirocli/install.sh" ]] \
+      || die_review "钉版安装包结构不认：缺 kirocli/install.sh。官方安装包解开之后是 kirocli/{install.sh,BUILD-INFO,bin/}，请确认对象是官方按版本直链下载的那个 .zip"
+    # 用安装包**内层**的 install.sh，不要手工拷贝二进制：它会校验 `uname` 与 BUILD_TARGET_TRIPLE、并在 gnu 变体上
+    # 检查 glibc 下限（musl 变体跳过该分支），跳过它就把一个明确报错换成运行时的费解崩溃。
+    # KIRO_CLI_SKIP_SETUP=1 让它只做 `install -m 755` 拷贝，不跑 `kiro-cli setup`（那会写交互式配置）。
+    ( cd "$_art_dir/kirocli" && env -i "${_kr_inst_env[@]}" KIRO_CLI_SKIP_SETUP=1 "${BASH:-/bin/bash}" -p ./install.sh ) \
+      || die_review "钉版安装包内层 install.sh 失败：常见原因是安装包的平台变体与执行器不匹配（gnu 变体要求 glibc ≥ 2.34；云托管执行器请用 musl 变体）。详见流水线日志里它自己打的报错"
+  else
+    # --- 现装档位：官方安装脚本，只装最新版 ---
+    # 这条路径的版本不受控（脚本参数只有 --channel、下载 URL 硬编码 latest、sha256 只对在线的 latest/manifest.json
+    # 校验），所以每隔几天就会被版本门拒绝一次——那是本档位的稳态行为，不是偶发故障。生产请用钉版档位（ADR-0006）。
+    # `curl -q` 必须是**第一个选项**：禁用默认配置文件加载（`$HOME/.curlrc`；`.netrc` 只有显式 `--netrc` 才读，这里没用），
+    # 与 ⓪ 的 HOME 检查互为纵深（HOME 检查挡业务库里的 `.curlrc`，`-q` 连合法 HOME 里别的进程写的 `.curlrc` 也不读）。
+    # 右边用 `${BASH:-/bin/bash}` 而不是裸 `bash`：`-p` 必须显式带上（BASH 由 bash 自己在启动时写入，不取环境里的旧值）。
+    log "kiro-cli 不存在，用官方安装脚本安装最新版（安装档位 latest）……"
+    env -i "${_kr_inst_env[@]}" curl -q -fsSL --connect-timeout 10 --max-time 300 "$KIRO_INSTALL_URL" \
+      | env -i "${_kr_inst_env[@]}" "${BASH:-/bin/bash}" -p \
+      || die_review "kiro-cli 安装失败。网络受限时请改用钉版档位（把安装包预先备好，见 ADR-0006）或自建执行器预装固定版本，或配置 HTTP_PROXY/HTTPS_PROXY（见 pipeline/setup-guide.md）"
+  fi
+  unset _v _kr_inst_env _art_rc _art_have _art_dir
   if ! command -v kiro-cli >/dev/null; then
     # 第 0 步的门只保证**调用它那一刻**的 PATH（CodeX 2026-09-13 第四轮复审 P1）：这里往 PATH 最前面插了一个
     # 由 HOME 拼出来的目录，所以要**先重新过门、再让 command -v 去搜它**。HOME 是相对路径（PATH 里出现相对条目
