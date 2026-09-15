@@ -18,7 +18,9 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # （每用例仍是独立目录树；派生时 work 的 origin 会改指向副本的 origin.git，见 tests/fixture-repo.sh）
 FIXTURE_TEMPLATE_DIR="$tmp/fixture-template"
 export PATH="$ROOT/tests/mockbin:$PATH"
-export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456
+# KIRO_INSTALL_PROFILE 没有缺省值（ADR-0006 / I1：缺失即拒绝运行），公共环境给 latest——
+# 既有变异测的都是现装档位下的既有行为。钉版档位那两个变异在自己的用例里显式覆盖成 pinned。
+export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456 KIRO_INSTALL_PROFILE=latest
 export MR_LOCAL_ID=7 MR_TARGET_BRANCH=main CI_COMMIT_REF_NAME=feature/x
 
 # 变异定义（make_mutant / mutate_more）与它们的静态自检（票 18 ⑨）。
@@ -720,6 +722,57 @@ assert_contains "$OUT" "开始 Kiro 评审" "M-cx-p12b：kiro-cli 在摘要不�
 run_case m-cx-p12b-control "$ROOT" KIRO_CLI_SHA256="$(printf '0%.0s' $(seq 1 64))"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-cx-p12b 对照：原实现拒绝"
 assert_eq "$([[ -e "$CASE/home/.kiro-mock/calls" ]] && echo called || echo not-called)" "not-called" "M-cx-p12b 对照：原实现一次都不执行 kiro-cli"
+
+# --- 钉版安装档位（ADR-0006）的两个变异 ---
+# 前提与 test-kiro-review.sh 的钉版用例相同：PATH 上不能有 kiro-cli（含开发机上真装的那个），
+# 否则第 2 步的安装分支根本不进，两个变异都测不到东西。
+# 两个变异包在 guard 之外构造：mutation_selfcheck 只认第 0 列的 `pkg=$(make_mutant …)`，
+# 而且它要求每条 sed 模式对当前树都真的生效——所以这两行必须无条件执行、无条件被静态检查到。
+# M-pin-1：第 2 步的档位分派被绕过 → 钉版档位落进现装分支去 curl 官方安装脚本（不变式 I4）。
+# 锚在**缩进两格**的那一行：第 1.6 步的必填集判断是同样的条件但在第 0 列，不能一起改掉，
+# 否则变异体连必填集校验都没了，观察到的失败就说不清是哪一层。
+pkg=$(make_mutant m-pin-1-profile-dispatch 's|^  if \[\[ "\$KIRO_INSTALL_PROFILE" == pinned \]\]; then|  if false; then|')
+PIN_PKG_DISPATCH="$pkg"
+# M-pin-2：安装包摘要不一致换成 log → 与发布值不符的安装包照样解压、照样装、照样评审。
+pkg=$(make_mutant m-pin-2-artifact-sha 's#^      || die_review "钉版安装包摘要与#      || log "钉版安装包摘要与#')
+PIN_PKG_ARTSHA="$pkg"
+make_tools_dir "$tmp/tools" || exit 1
+PIN_PATH="$tmp/tools:/usr/bin:/bin"
+pin_ok=yes
+[[ -e "$tmp/tools/unzip" ]] || pin_ok="缺 unzip"
+[[ -e "$tmp/tools/install" ]] || pin_ok="缺 install"
+command -v zip >/dev/null 2>&1 || pin_ok="缺 zip（造夹具用）"
+if [[ "$pin_ok" != yes ]]; then
+  echo "SKIP: 本机${pin_ok}，跳过钉版档位的变异" >&2
+else
+  PIN_ART="$tmp/mut-kirocli.zip"
+  # 夹具返回的是装完之后入口文件（转发壳）的摘要，不是替身本身的
+  PIN_ENTRY_SHA=$(make_pinned_artifact "$PIN_ART")
+  PIN_ART_SHA=$( (command -v sha256sum >/dev/null 2>&1 && sha256sum "$PIN_ART" || shasum -a 256 "$PIN_ART") | cut -d' ' -f1)
+  # --- M-pin-1（变异包在上面构造）：KIRO_INSTALL_URL 指向必然连不上的地址——原实现根本不碰 curl，只有回退了才会因此失败 ---
+  run_case m-pin-1 "$PIN_PKG_DISPATCH" PATH="$PIN_PATH" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$PIN_ART" KIRO_PINNED_ARTIFACT_SHA256="$PIN_ART_SHA" \
+    KIRO_CLI_SHA256="$PIN_ENTRY_SHA" KIRO_INSTALL_URL=http://127.0.0.1:1/must-not-be-used
+  assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-pin-1：钉版档位回退去 curl 官方安装脚本 → 装不上而失败"
+  assert_contains "$(posted_comment "$OUT")" "kiro-cli 安装失败" "M-pin-1：失败来自现装分支——端到端「钉版安装：摘要一致 → 照常完成」断言会失败"
+  run_case m-pin-1-control "$ROOT" PATH="$PIN_PATH" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$PIN_ART" KIRO_PINNED_ARTIFACT_SHA256="$PIN_ART_SHA" \
+    KIRO_CLI_SHA256="$PIN_ENTRY_SHA" KIRO_INSTALL_URL=http://127.0.0.1:1/must-not-be-used
+  assert_rc "$RC" 0 "M-pin-1 对照：原实现从安装包安装、根本不碰 curl"
+  assert_contains "$OUT" "钉版安装包摘要核对通过" "M-pin-1 对照：原实现走的是钉版分支"
+  # --- M-pin-2（变异包在上面构造）：入口文件摘要仍然对得上（安装包里装的就是那个转发壳），
+  # 所以第 2.1 步拦不住它——这正说明「安装包摘要」这道门不是「入口文件摘要」的重复，两者各挡一段 ---
+  run_case m-pin-2 "$PIN_PKG_ARTSHA" PATH="$PIN_PATH" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$PIN_ART" KIRO_PINNED_ARTIFACT_SHA256="$(printf '0%.0s' $(seq 1 64))" \
+    KIRO_CLI_SHA256="$PIN_ENTRY_SHA"
+  assert_rc "$RC" 0 "M-pin-2：安装包摘要不一致也照装照跑——端到端「摘要不一致 → 拒绝评审」断言会失败"
+  assert_contains "$OUT" "开始 Kiro 评审" "M-pin-2：与发布值不符的安装包装出来的 kiro-cli 被执行了"
+  run_case m-pin-2-control "$ROOT" PATH="$PIN_PATH" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$PIN_ART" KIRO_PINNED_ARTIFACT_SHA256="$(printf '0%.0s' $(seq 1 64))" \
+    KIRO_CLI_SHA256="$PIN_ENTRY_SHA"
+  assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-pin-2 对照：原实现拒绝"
+  assert_eq "$([[ -e "$CASE/home/.kiro-mock/calls" ]] && echo called || echo not-called)" "not-called" "M-pin-2 对照：原实现未解压未执行 kiro-cli"
+fi
 
 # --- M5w：被拒的凭证形状名字不再掩码 → 完整名字进失败评论（15-fix3 #6）---
 pkg=$(make_mutant m5w-cred-mask 's/cred+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")（命中 ${rule}）")/cred+=("第 ${idx} 项 ${tok}（命中 ${rule}）")/' scripts/lib/kiro-agent.sh)
