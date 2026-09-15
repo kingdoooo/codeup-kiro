@@ -354,6 +354,35 @@ assert_contains "$body" "<!-- kiro-review:90fcb05 run:1 -->" "降级：仍带评
 rc=0; review_render_degraded --sha x --src a --dst b --ts t --diff-note n >/dev/null 2>&1 || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "降级：缺 --text 非零"
 
+# ============ 元信息里的 Kiro CLI 版本行（issue 06 / 不变式 I9）============
+# 一份评审出问题时第一个问题是「哪个版本产出的」，而这个取值以前根本没进过评论（只用于版本门判断）。
+# 加的是**不带任何限定语**的一行：名单来源（仓库常量 / 使用方追加名单）是运维信息，只进流水线日志；
+# 「谁都没探测过」才是产品信息，那条走既有的 break-glass notice。
+render fixtures/contract/empty.json "$tmp/kirocli.md" --kiro-cli 2.21.4
+kc=$(cat "$tmp/kirocli.md")
+assert_contains "$kc" $'\nKiro CLI: 2.21.4\n' "渲染：汇总评论的元信息里有独立一行 Kiro CLI: <版本>"
+kc_line=$(grep -F 'Kiro CLI:' "$tmp/kirocli.md")
+for w in 未验证 未探测 未经 注意 追加名单 仓库常量 来源; do
+  assert_not_contains "$kc_line" "$w" "渲染：Kiro CLI 版本行不带限定语（${w}）"
+done
+# 降级路径也要带这一行（降级评论与汇总同形；调用方的元信息在降级路径上不能丢）
+deg_kc=$(review_render_degraded --text "$tmp/raw.md" --sha 90fcb05 --src f --dst m --ts "2026-09-02 20:10:02" \
+  --diff-note "完整直传" --reason "输出中未找到契约标记" --kiro-cli 2.21.4)
+assert_contains "$deg_kc" $'\nKiro CLI: 2.21.4\n' "渲染：降级评论也带 Kiro CLI 版本行"
+# 不传就没有这一行（空取值绝不渲染成 `Kiro CLI: `）——上面几条 golden 因此逐字节不变
+assert_not_contains "$(cat "$tmp/degraded.md")" "Kiro CLI:" "渲染：不传 --kiro-cli 时不出现版本行"
+assert_not_contains "$(cat "$tmp/full.md")" "Kiro CLI:" "渲染：不传 --kiro-cli 时汇总也不出现版本行"
+# 取值走渲染器的结构清洗：脚本自拼的取值也不许携带结构（换行折成空格、像标签的 `<` 转义）
+render fixtures/contract/empty.json "$tmp/kirocli-inj.md" --kiro-cli $'2.21.4\n| 伪造 | 表头 |\n<script>x</script>'
+assert_eq "$(LC_ALL=C grep -c '^Kiro CLI: ' "$tmp/kirocli-inj.md")" "1" "渲染：版本行恰好一行（取值里的换行被折成空格）"
+inj_line=$(LC_ALL=C grep -F 'Kiro CLI:' "$tmp/kirocli-inj.md")
+assert_contains "$inj_line" "伪造" "渲染：取值里的后半截仍在同一行内（没有跳出去伪造表格）"
+assert_eq "$(LC_ALL=C grep -c -F '<script>' "$tmp/kirocli-inj.md")" "0" "渲染：版本行里像标签的 < 已转义"
+assert_contains "$inj_line" "&lt;script>" "渲染：转义后的形态仍可读"
+# 失败评论渲染器也声明了这个参数（元信息表出自同一份代码，声明集必须与实际渲染一致）
+rc=0; review_render_failure --reason "kiro-cli 退出码 1" --sha x --src a --dst b --ts t --diff-note n --kiro-cli 2.21.4 >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 0 "渲染：失败评论渲染器接受 --kiro-cli（元信息表与汇总同一份代码）"
+
 # ============ 渲染输入形态校验：非 review_validate 输出必须被拒，而不是渲染出空壳评论 ============
 : > "$tmp/empty-file.json"
 rc=0; err=$(review_render_summary --json "$tmp/empty-file.json" --sha x --src a --dst b --ts t --diff-note n 2>&1 >"$tmp/hollow.md") || rc=$?

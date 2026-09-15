@@ -1638,8 +1638,13 @@ fi
 DIFF_NOTE="完整直传"
 [[ "$truncated" == "10" ]] && DIFF_NOTE="超出阈值（${DIFF_SIZE_LIMIT}B）已按优先级截断，其余变更 Kiro 通过 diff 索引自主读取"
 REVIEW_TS=$(date '+%Y-%m-%d %H:%M:%S')
+# --kiro-cli（issue 06 / 不变式 I9）：这个取值原先只喂给版本门、从没进过评论，而一份评审出问题时第一个问题
+# 就是「哪个版本产出的」。汇总与降级两条路共用 render_args，所以两边都带上。**不带任何限定语**——
+# 元组是仓库常量还是使用方追加名单授权的只写流水线日志（那是运维信息）；「谁都没探测过」才进评论，走 REVIEW_NOTICE。
+# 走到这里 KIRO_CLI_VERSION 一定非空：版本解析不出在版本门那一步就已经拒绝评审了（不会渲染出空的 Kiro CLI: 行）。
 render_args=(--sha "$SHORT_SHA" --src "$SOURCE_BRANCH" --dst "$TARGET_BRANCH"
-             --ts "$REVIEW_TS" --diff-note "$DIFF_NOTE" --run "$REVIEW_RUN")
+             --ts "$REVIEW_TS" --diff-note "$DIFF_NOTE" --run "$REVIEW_RUN"
+             --kiro-cli "$KIRO_CLI_VERSION")
 # 上一条汇总里读回的历次记录：渲染器会在它后面追加本次那一行
 [[ -n "$PRIOR_HISTORY_FILE" ]] && render_args+=(--history "$PRIOR_HISTORY_FILE")
 

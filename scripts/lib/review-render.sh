@@ -1353,10 +1353,10 @@ _review_verdict_cn() {
 _review_parse_render_args() {
   _RR_JSON=""; _RR_TEXT=""; _RR_SHA=""; _RR_SRC=""; _RR_DST=""; _RR_TS=""
   _RR_DIFF_NOTE=""; _RR_RUN=1; _RR_INLINE=0; _RR_REASON=""; _RR_HISTORY=""; _RR_LOG_HINT=""
-  _RR_NOTICE=""; _RR_GIVEN=" "
+  _RR_NOTICE=""; _RR_KIRO_CLI=""; _RR_GIVEN=" "
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --json|--text|--sha|--src|--dst|--ts|--diff-note|--run|--inline-comment|--reason|--history|--log-hint|--notice)
+      --json|--text|--sha|--src|--dst|--ts|--diff-note|--run|--inline-comment|--reason|--history|--log-hint|--notice|--kiro-cli)
         [[ $# -ge 2 ]] || { echo "review 渲染：参数 $1 缺少取值" >&2; return 2; }
         _RR_GIVEN+="${1#--} "
         case "$1" in
@@ -1373,6 +1373,7 @@ _review_parse_render_args() {
           --history) _RR_HISTORY="$2" ;;
           --log-hint) _RR_LOG_HINT="$2" ;;
           --notice) _RR_NOTICE="$2" ;;
+          --kiro-cli) _RR_KIRO_CLI="$2" ;;
         esac
         shift 2 ;;
       *) echo "review 渲染：未知参数：$1" >&2; return 2 ;;
@@ -1539,6 +1540,21 @@ _review_render_header() {
   echo "| Commit | 分支 | 时间 | diff |"
   echo "|---|---|---|---|"
   echo "| \`${_RR_SHA}\` | \`$(_review_meta_cell "$_RR_SRC")\` → \`$(_review_meta_cell "$_RR_DST")\` | ${_RR_TS} | ${_RR_DIFF_NOTE} |"
+  _review_render_kiro_cli
+}
+# --- 内部：Kiro CLI 版本行（issue 06 / 不变式 I9）---
+# 一份评审出问题时第一个问题是「哪个版本产出的」，所以版本进元信息。**不带任何限定语**：
+# 已探测名单的来源（仓库常量 / 使用方追加名单）是运维信息、只进流水线日志，写进评论只会削弱开发者对这份评审的信心；
+# 「谁都没探测过」才是产品信息，那条走 --notice 的醒目引用块（break-glass）。
+# 取值虽然由脚本自己从 `kiro-cli --version` 里拼出来，仍过一遍结构清洗 + 折行（与 notice 同一约定）：
+# 评论的结构只能来自渲染器。空取值不输出任何东西——三个渲染器共用元信息表，失败评论可能在版本还未知时就发出。
+# 不做成表格里的第五列：那一列在窄屏上会把分支名挤没，而这一行读者是照抄进工单的。
+_review_render_kiro_cli() {
+  [[ -n "$_RR_KIRO_CLI" ]] || return 0
+  echo ""
+  printf 'Kiro CLI: '
+  _review_sanitize_oneline "$_RR_KIRO_CLI"
+  echo ""
 }
 
 # --- 元信息单元格的字符许可清单（$1=原始取值 → stdout）---
@@ -1732,7 +1748,7 @@ _review_render_folded() {
 # --- 汇总评论 ---
 # 用法：review_render_summary --json <契约 JSON 文件> --sha X --src A --dst B \
 #                            --ts "YYYY-mm-dd HH:MM:SS" --diff-note N [--run 1] \
-#                            [--inline-comment 0|1] [--history …] [--notice "一句话"]
+#                            [--inline-comment 0|1] [--history …] [--notice "一句话"] [--kiro-cli <版本>]
 # INLINE_COMMENT=0（spec §4.3 的 0 变体）：问题清单**完整展开**、不用折叠区、不提行内计数，
 #   观感对齐 v1（I7：默认关闭 = 观感不变）。--json 收 review_validate 的输出。
 # INLINE_COMMENT=1（spec §4.3、§4.5 第 8 步）：明细已经作为行内评论挂在「文件改动」对应行上，
@@ -1743,7 +1759,7 @@ _review_render_folded() {
 #   INLINE_COMMENT=0 渲染并带上原因——阿里云侧开发者看不到流水线日志（I10 失败可见）。
 review_render_summary() {
   _review_parse_render_args "$@" || return $?
-  _review_render_args_only review_render_summary json sha src dst ts diff-note run inline-comment history notice || return $?
+  _review_render_args_only review_render_summary json sha src dst ts diff-note run inline-comment history notice kiro-cli || return $?
   [[ -n "$_RR_JSON" ]] || { echo "review_render_summary: 缺少必填参数 --json" >&2; return 2; }
   [[ -r "$_RR_JSON" ]] || { echo "review_render_summary: 契约 JSON 不可读：${_RR_JSON}" >&2; return 2; }
   if [[ "$_RR_INLINE" != "0" && "$_RR_INLINE" != "1" ]]; then
@@ -2541,13 +2557,13 @@ review_redact_file() {
 
 # --- 降级评论：结构化解析失败时贴出评审员原文 ---
 # 用法：review_render_degraded --text <清洗后的原文文件> --sha X --src A --dst B --ts T --diff-note N \
-#                             [--run 1] [--reason 原因]
+#                             [--run 1] [--reason 原因] [--kiro-cli <版本>]
 # 标题含「结构化解析失败」（票 02 验收项），正文是原文全文。原文先过脚本侧掩码（保行模式：PEM 正文逐行就地屏蔽、不删行，
 # 两条标记行之间的评审内容不会整段消失，第 14 条），掩码失败则整个渲染失败（rc 2）——与 review_redact_file / review_redact_json
 # 同一 fail-closed 契约，绝不能让一份未掩码或半截的原文以「渲染成功」的样子发出去（第 13 条）。
 review_render_degraded() {
   _review_parse_render_args "$@" || return $?
-  _review_render_args_only review_render_degraded text sha src dst ts diff-note run reason history notice || return $?
+  _review_render_args_only review_render_degraded text sha src dst ts diff-note run reason history notice kiro-cli || return $?
   [[ -n "$_RR_TEXT" ]] || { echo "review_render_degraded: 缺少必填参数 --text" >&2; return 2; }
   [[ -r "$_RR_TEXT" ]] || { echo "review_render_degraded: 原文文件不可读：${_RR_TEXT}" >&2; return 2; }
   local hist masked
@@ -2583,7 +2599,7 @@ review_render_degraded() {
 
 # --- 失败评论：评审没跑完时唯一能到达 MR 的信息通道（spec I10 失败可见）---
 # 用法：review_render_failure --reason <失败说明> --sha X --src A --dst B --ts T --diff-note N
-#                            [--run N] [--history <历史 JSON 文件>] [--log-hint <一句话>] [--notice <一句话>]
+#                            [--run N] [--history <历史 JSON 文件>] [--log-hint <一句话>] [--notice <一句话>] [--kiro-cli <版本>]
 # --notice（15-fix4 #3）：与汇总 / 降级评论同一个渲染函数——kiro-cli 非零退出时 MR 上只剩这条评论，「未探测版本」的告警恰在最需要它的路径上不能丢
 # 与成功/降级评论**同形**：标题、评审标记、历史标记、元信息表、历次表、页脚全部出自同一份代码。
 # 早先这段是在 kiro-review.sh 里手写第二份的，结果是「形态一致」这个不变量靠人肉维护，
@@ -2593,7 +2609,7 @@ review_render_degraded() {
 # --reason 里可能带上 runFinished.status 之类来自事件流的取值（不受信），所以过一遍结构清洗。
 review_render_failure() {
   _review_parse_render_args "$@" || return $?
-  _review_render_args_only review_render_failure reason sha src dst ts diff-note run history log-hint notice || return $?
+  _review_render_args_only review_render_failure reason sha src dst ts diff-note run history log-hint notice kiro-cli || return $?
   [[ -n "$_RR_REASON" ]] || { echo "review_render_failure: 缺少必填参数 --reason" >&2; return 2; }
   local hist
   hist=$(mktemp)

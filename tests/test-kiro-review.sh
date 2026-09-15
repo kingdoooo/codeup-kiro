@@ -1969,6 +1969,44 @@ assert_not_contains "$OUT" "开始 Kiro 评审" "追加名单里有非法项：K
 run_case extraglob MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA='*'
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "追加名单取值是 * → 按形状拒绝"
 assert_not_contains "$OUT" "AGENTS.md" "追加名单取值是 *：不在业务库里做 glob 展开（业务库根下的 AGENTS.md 不会出现在输出里）"
+# ---- 汇总评论的元信息里带 Kiro CLI 版本（issue 06 / 不变式 I9）----
+# 一份评审出问题时第一个问题就是「哪个版本产出的」，而这个取值以前只用于版本门判断、根本没进过评论。
+# 加的是**不带任何限定语**的一行：已探测名单的来源（仓库常量 / 使用方追加名单）是运维信息、只进流水线日志；
+# 「谁都没探测过」才是产品信息，那条走既有的 break-glass notice（oldver_ack 用例守着，不动）。
+run_case kirocliline
+assert_rc "$RC" 0 "版本行：成功路径退出码 0"
+kc_comment=$(posted_comment "$OUT")
+assert_contains "$kc_comment" $'\nKiro CLI: '"${LISTED_VER}"$'\n' "版本行：汇总评论里有独立一行 Kiro CLI: <本次版本>"
+kc_line=$(printf '%s\n' "$kc_comment" | grep -F 'Kiro CLI:')
+for w in 未验证 未探测 未经 注意 追加名单 仓库常量 来源; do
+  assert_not_contains "$kc_line" "$w" "版本行：不带任何限定语（${w}）"
+done
+# 降级路径也要带这一行（review-render.sh 的降级评论与汇总同形，调用方的元信息在降级路径上不能丢）
+run_case degkirocli MOCK_KIRO_NO_MARKER=1
+assert_rc "$RC" 0 "版本行（降级）：降级路径退出码 0"
+assert_contains "$(posted_comment "$OUT")" $'\nKiro CLI: '"${LISTED_VER}"$'\n' "版本行：降级评论也带这一行"
+# 版本解析不出时走的是既有的拒绝路径，绝不会出现一行空的 `Kiro CLI: `
+run_case noverkirocli MOCK_KIRO_VERSION=
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "版本行：版本解析不出仍是拒绝路径"
+assert_not_contains "$(posted_comment "$OUT")" "Kiro CLI:" "版本行：拒绝路径的失败评论里没有空的 Kiro CLI 行"
+# I9 的核心断言：同一份评审，元组一次由仓库常量授权、一次由追加名单授权，两条汇总评论逐字节相同。
+# 归一掉三个「每次运行都不同」的取值——本次时间戳、本次发布随机串、以及版本号本身（两次跑的本来就是不同版本）；
+# 除此之外一个字节都不许随来源变化。归一之后立刻断言版本行与元信息表仍在，避免比对退化成空转。
+i9_norm() { # <评论正文> → stdout
+  printf '%s\n' "$1" | LC_ALL=C sed -E \
+    -e 's/^(<!-- kiro-review-post:)[0-9a-f]{16}( -->)$/\1<NONCE>\2/' \
+    -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}/<TS>/g' \
+    -e 's/^Kiro CLI: [0-9][0-9.]*$/Kiro CLI: <VER>/'
+}
+run_case i9const
+i9a=$(i9_norm "$(posted_comment "$OUT")")
+assert_contains "$OUT" "仓库常量" "I9 核心：第一次跑由仓库常量授权（只有日志这么说）"
+run_case i9extra MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA="${HOST_PLAT}:9.9.9"
+i9b=$(i9_norm "$(posted_comment "$OUT")")
+assert_contains "$OUT" "KIRO_TESTED_TARGETS_EXTRA" "I9 核心：第二次跑由追加名单授权（只有日志这么说）"
+assert_eq "$i9b" "$i9a" "I9 核心：元组来自追加名单时，汇总评论与来自仓库常量时逐字节相同（差异只在流水线日志）"
+assert_contains "$i9a" "Kiro CLI: <VER>" "I9 核心：归一后版本行仍在（否则上面那条比对是空转）"
+assert_contains "$i9a" "| Commit | 分支 | 时间 | diff |" "I9 核心：归一后元信息表仍在"
 # ---- CodeX 2026-09-13 复审 P1：名单的单位是「平台 + 版本」，同一个版本换平台不算已验证 ----
 # 名单外的组合会被拒绝，失败评论要点名本次元组（上面的 oldver 用例已覆盖「版本不在名单」；这里断言元组形态）。
 # **平台维度没法靠打桩 uname 在 e2e 里模拟**——kiro_platform_key 走 command -p，连相对/绝对 PATH 里的假 uname 都不看
