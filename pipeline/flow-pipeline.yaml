@@ -120,6 +120,13 @@ stages:
 #                      探测通过、组合进名单后删掉。不是布尔开关，不匹配仍拒绝。
 #                      旧的 KIRO_ACK_UNTESTED_VERSION（只绑版本）**已废弃**：设了会直接拒绝运行——它设过一次就会在
 #                      执行器换平台后继续放行同一个版本
+#   KIRO_TESTED_TARGETS_EXTRA 可选，默认空。空格分隔的「<os>/<arch>:<版本>」元组，登记**你自己探测过**的组合，
+#                      与脚本里的 KIRO_TESTED_TARGETS 取**并集**：加得进来，但删不掉、也覆盖不了集成包已验证的那些。
+#                      它让升级仪式不必再改集成包源码（否则只能 fork 或长期靠 break-glass 顶着）。
+#                      **与 KIRO_ACK_UNTESTED_TARGET 的区别就是语义**：本变量 = 「这个组合我按 scripts/probe/README.md
+#                      跑过探测且全 PASS」，放行时**不带 notice**；KIRO_ACK_UNTESTED_TARGET = 「谁都没探测过、我自担风险」，
+#                      放行时汇总带醒目 notice。没跑探测就往本变量里加元组，等于悄悄关掉版本门——它安静，所以更该守规矩。
+#                      任一项形状不合法即拒绝运行（取值不回显）；本次元组由哪个来源授权只写流水线日志、不进 MR 评论
 #   MAX_COMMENT_BYTES  可选，默认 60000（字节）
 #   CODEUP_BOT_USERNAME 可选但强烈建议，机器人账号在 Codeup 上的用户名。
 #                      未配置且令牌身份接口不可用时：汇总评论每次新建（不原地更新）；INLINE_COMMENT=1 也整轮

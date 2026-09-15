@@ -203,11 +203,33 @@ assert_nonzero "$RC" "M-cx-plat 基线：名单里只有别的平台的同一个
 assert_contains "$(posted_comment "$OUT")" "同一个版本换平台不算已验证" "M-cx-plat 基线：失败评论解释平台维度"
 assert_not_contains "$OUT" "开始 Kiro 评审" "M-cx-plat 基线：Kiro 不启动"
 # 再把门禁改成只比版本 → 别的平台的证据被当成本平台的，评审照跑
-mutate_more "$pkg" 's#\[\[ " \$KIRO_TESTED_TARGETS " == \*" \$KIRO_CLI_TARGET "\* \]\]#[[ " $KIRO_TESTED_TARGETS " == *":$KIRO_CLI_VERSION "* ]]#'
+# 锚在**判定用的那个并集变量**（KIRO_TESTED_TARGETS_ALL）上：issue 07 之后「同一个形状」在源码里出现两次，
+# 另一处是判定通过之后算「授权来源是仓库常量还是追加名单」的那行日志判断。改错那一处的话门禁根本没动，
+# 变异体仍然拒绝、`assert_rc 0` 会响——但排查方向会被带偏，所以这里显式绑住 _ALL。
+mutate_more "$pkg" 's#\[\[ " \$KIRO_TESTED_TARGETS_ALL " == \*" \$KIRO_CLI_TARGET "\* \]\]#[[ " $KIRO_TESTED_TARGETS_ALL " == *":$KIRO_CLI_VERSION "* ]]#'
 run_case m-cx-plat "$pkg" MOCK_KIRO_VERSION=9.9.9
 assert_rc "$RC" 0 "M-cx-plat：门禁只比版本 → 别的平台的证据被当成本平台的，评审照跑"
 assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "M-cx-plat：日志声称在名单内"
 assert_contains "$OUT" "开始 Kiro 评审" "M-cx-plat：Kiro 在未验证的平台上被启动了"
+
+# --- M-extra（issue 07 / 不变式 I8）：判定名单从「常量 ∪ 追加」改成「只看追加名单」→ 使用方一设追加名单，
+# 集成包已验证的元组就被挤出名单。这是「只追加、不覆盖」这条不变式唯一的承重实现，必须有变异守着 ---
+pkg=$(make_mutant m-extra-override 's#^KIRO_TESTED_TARGETS_ALL=.*#KIRO_TESTED_TARGETS_ALL="$KIRO_TESTED_TARGETS_EXTRA"#')
+run_case m-extra-override "$pkg" MOCK_KIRO_VERSION="$(listed_version_for_host)" KIRO_TESTED_TARGETS_EXTRA="linux/mips64:1.2.3"
+assert_nonzero "$RC" "M-extra：追加名单覆盖常量 → 常量里的元组被判名单外而拒绝"
+assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-extra：失败评论说本次组合未经探测——端到端「追加名单删不掉常量里的元组」断言会失败"
+run_case m-extra-override-control "$ROOT" MOCK_KIRO_VERSION="$(listed_version_for_host)" KIRO_TESTED_TARGETS_EXTRA="linux/mips64:1.2.3"
+assert_rc "$RC" 0 "M-extra 对照：原实现取并集，常量里的元组照常放行"
+assert_contains "$OUT" "仓库常量" "M-extra 对照：日志说明授权来源是仓库常量"
+
+# --- M-extra-norm（issue 07）：追加名单不再归一成单空格 → 逐项校验按 IFS 分词（制表符也算）过得去，
+# 名单判定按「空格 + 元组 + 空格」比对却一项都匹配不上，表现是「变量配了但不生效」然后被版本门拒绝 ---
+pkg=$(make_mutant m-extra-norm 's#^  KIRO_TESTED_TARGETS_EXTRA="\${_extra_norm% }"$#  :#')
+run_case m-extra-norm "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'otheros/otherarch:1.2.3\t'"${HOST_PLAT}:9.9.9"
+assert_nonzero "$RC" "M-extra-norm：制表符分隔的追加名单静默不生效 → 被版本门拒绝"
+assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-extra-norm：失败评论说未经探测——端到端「制表符分隔照常放行」断言会失败"
+run_case m-extra-norm-control "$ROOT" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'otheros/otherarch:1.2.3\t'"${HOST_PLAT}:9.9.9"
+assert_rc "$RC" 0 "M-extra-norm 对照：原实现归一后照常放行"
 
 # --- M-cx-path（CodeX 2026-09-13 第三轮复审 P0）：第 0 步的 PATH 门被拆掉 → 业务库里的假 git 真的会被执行 ---
 # 双变异：① PATH 门恒不报可疑；② 平台键的 command -p 退回裸命令。两道都杀掉，业务库里的假工具才生效——

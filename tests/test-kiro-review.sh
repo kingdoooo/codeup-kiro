@@ -1929,6 +1929,46 @@ run_case ack_listed MOCK_KIRO_VERSION="$LISTED_VER" KIRO_ACK_UNTESTED_TARGET="${
 assert_rc "$RC" 0 "P1-2：名单内版本照常运行，残留的确认值不影响"
 assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "P1-2：名单内版本仍打名单内日志"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "P1-2：名单内版本无 notice（残留确认值也不出 notice）"
+# ---- 使用方追加名单 KIRO_TESTED_TARGETS_EXTRA（issue 07 / 不变式 I8 I9）----
+# 升级仪式原先要求改 scripts/kiro-review.sh:157 那个常量，也就是要求使用方改集成包的源码：他们要么 fork（然后永远合不回来），
+# 要么一直用 KIRO_ACK_UNTESTED_TARGET 顶着（版本门形同虚设）。追加名单只做**并集**：使用方自己探测过的元组能加进来，
+# 但删不掉也覆盖不了集成包已验证的那些。它与 break-glass 的语义刻意不同——「我自己探测过」vs「谁都没探测过、自担风险」，
+# 所以前者不出 notice、后者出；两者的来源都只进流水线日志（I9：读评审的开发者不关心这个元组是谁加进名单的）。
+run_case extraok MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA="linux/mips64:1.2.3 ${HOST_PLAT}:9.9.9"
+assert_rc "$RC" 0 "追加名单：元组在追加名单里 → 放行、评审完成（多项以空格分隔）"
+assert_contains "$OUT" "KIRO_TESTED_TARGETS_EXTRA" "追加名单：流水线日志说明本次授权来自追加名单（I9：来源只进日志）"
+comment=$(posted_comment "$OUT")
+assert_not_contains "$comment" "未经 P1-15 探测" "追加名单：不出 break-glass 那条 notice（语义是「我自己探测过」）"
+assert_not_contains "$comment" "KIRO_TESTED_TARGETS_EXTRA" "追加名单：来源不进 MR 评论（I9）"
+assert_not_contains "$comment" "追加名单" "追加名单：评论里没有任何来源限定语（I9）"
+# 分隔用的空白不止空格：逐项校验按 IFS 分词（制表符也算），名单判定按「空格 + 元组 + 空格」比对——
+# 不把校验通过的项归一成单空格的话，这条用例会变成「变量配了但不生效」然后被版本门拒绝（变异 M-extra-norm 守着）
+run_case extratab MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'linux/mips64:1.2.3\t'"${HOST_PLAT}:9.9.9"
+assert_rc "$RC" 0 "追加名单用制表符分隔：校验与判定看同一份列表，照常放行"
+assert_contains "$OUT" "KIRO_TESTED_TARGETS_EXTRA" "追加名单用制表符分隔：日志仍说明来源是追加名单"
+# 追加名单删不掉常量里的元组：常量里的元组仍被判名单内，且日志说的来源是仓库常量
+run_case extranooverride MOCK_KIRO_VERSION="$LISTED_VER" KIRO_TESTED_TARGETS_EXTRA="linux/mips64:1.2.3"
+assert_rc "$RC" 0 "追加名单：设了别的元组，常量里的元组照常放行（只追加、不覆盖）"
+assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "追加名单：常量里的元组仍打名单内日志"
+assert_contains "$OUT" "仓库常量" "追加名单：日志说明本次授权来自仓库常量而不是追加名单"
+# 空 / 未设置时行为与现在完全一致（oldver 系列不回归；这条显式覆盖「设了但为空」）
+run_case extraempty MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "追加名单为空：等于没配，名单外仍拒绝评审"
+assert_not_contains "$OUT" "开始 Kiro 评审" "追加名单为空：Kiro 不启动"
+# 形状校验逐项做（第 1.6 步，任何 I/O 之前），非法取值不回显——与 KIRO_ACK_UNTESTED_TARGET 同一个正则
+run_case extrabad MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA='linux/x86_64:9.9.9; rm -rf /'
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "追加名单含非法形状 → 拒绝运行"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "KIRO_TESTED_TARGETS_EXTRA 不合法" "追加名单非法：失败评论点名变量"
+assert_not_contains "$comment" "rm -rf" "追加名单非法：非法取值原文不进评论"
+# 一项合法 + 一项非法：不能因为有合法项就把非法项放过去（逐项校验，不是「有一项对就行」）
+run_case extrabadmix MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA="${HOST_PLAT}:9.9.9 9.9.9"
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "追加名单里一项合法一项非法 → 仍拒绝（逐项校验）"
+assert_not_contains "$OUT" "开始 Kiro 评审" "追加名单里有非法项：Kiro 不启动"
+# `*` 这类取值绝不能被当成 glob 去展开（cwd 就是业务库，展开出来的是业务库文件名）：按形状拒绝，且文件名不进输出
+run_case extraglob MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA='*'
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "追加名单取值是 * → 按形状拒绝"
+assert_not_contains "$OUT" "AGENTS.md" "追加名单取值是 *：不在业务库里做 glob 展开（业务库根下的 AGENTS.md 不会出现在输出里）"
 # ---- CodeX 2026-09-13 复审 P1：名单的单位是「平台 + 版本」，同一个版本换平台不算已验证 ----
 # 名单外的组合会被拒绝，失败评论要点名本次元组（上面的 oldver 用例已覆盖「版本不在名单」；这里断言元组形态）。
 # **平台维度没法靠打桩 uname 在 e2e 里模拟**——kiro_platform_key 走 command -p，连相对/绝对 PATH 里的假 uname 都不看
