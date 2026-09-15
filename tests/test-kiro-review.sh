@@ -27,7 +27,9 @@ export PATH="$ROOT/tests/mockbin:$PATH"
 # REVIEW_RERUN_HINT 是渲染器唯一的隐式环境输入：开发者环境里导出了它，
 # 「默认取 Flow 语义」的断言与 golden 比对就会莫名失败（run_case 用 env 继承外部环境）。
 unset REVIEW_RERUN_HINT
-export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456
+# KIRO_INSTALL_PROFILE 没有缺省值（ADR-0006 / I1：缺失即拒绝运行），所以公共环境里给 latest——
+# 既有用例测的都是现装档位下的既有行为。「变量缺失」那一条用 `KIRO_INSTALL_PROFILE=` 显式覆盖来表达。
+export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456 KIRO_INSTALL_PROFILE=latest
 export MR_LOCAL_ID=7 MR_TARGET_BRANCH=main CI_COMMIT_REF_NAME=feature/x
 # 本平台在 KIRO_TESTED_TARGETS 里的版本与完整元组（名单是「平台 + 版本」之后，用例不能再硬写 2.21.1）
 LISTED_VER=$(listed_version_for_host)
@@ -2237,6 +2239,44 @@ assert_not_contains "$comment" "rm -rf" "sha 钉死：非法取值原文不进�
 run_case shaunset
 assert_rc "$RC" 0 "sha 钉死：未配置 → 照常完成（不核对）"
 assert_contains "$OUT" "未配置 KIRO_CLI_SHA256" "sha 钉死：未配置时日志明说没核对（生产按第 7 节配置）"
+
+# ---- 安装档位（KIRO_INSTALL_PROFILE，ADR-0006）：第 1.6 步校验 ----
+# 公共环境里已经把档位设成 latest（既有用例测的都是现装档位的既有行为），所以「变量缺失」要用空值显式覆盖。
+run_case profmissing KIRO_INSTALL_PROFILE=
+assert_nonzero "$RC" "安装档位：变量缺失 → 拒绝运行（刻意不给缺省值）"
+assert_contains "$(posted_comment "$OUT")" "KIRO_INSTALL_PROFILE" "安装档位：缺失时失败评论点名变量"
+assert_not_contains "$OUT" "开始 Kiro 评审" "安装档位：缺失时 Kiro 未启动"
+run_case profbad KIRO_INSTALL_PROFILE='pinned; rm -rf /'
+assert_nonzero "$RC" "安装档位：非法取值 → 拒绝运行"
+assert_not_contains "$(posted_comment "$OUT")" "rm -rf" "安装档位：非法取值原文不进评论"
+run_case profpinnedbare KIRO_INSTALL_PROFILE=pinned
+assert_nonzero "$RC" "钉版档位：未给安装包路径 → 拒绝运行"
+assert_contains "$(posted_comment "$OUT")" "KIRO_PINNED_ARTIFACT" "钉版档位：失败评论点名缺的变量"
+zero64=$(printf '0%.0s' $(seq 1 64))
+run_case profpinnedrel KIRO_INSTALL_PROFILE=pinned KIRO_PINNED_ARTIFACT=relative/kirocli.zip \
+  KIRO_PINNED_ARTIFACT_SHA256="$zero64" KIRO_CLI_SHA256="$mock_sha"
+assert_nonzero "$RC" "钉版档位：安装包路径是相对路径 → 拒绝运行"
+run_case profpinnedshabad KIRO_INSTALL_PROFILE=pinned KIRO_PINNED_ARTIFACT=/tmp/nope.zip \
+  KIRO_PINNED_ARTIFACT_SHA256='deadbeef; rm -rf /' KIRO_CLI_SHA256="$mock_sha"
+assert_nonzero "$RC" "钉版档位：安装包摘要不是 64 位十六进制 → 拒绝运行"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "KIRO_PINNED_ARTIFACT_SHA256" "钉版档位：摘要形状失败评论点名变量"
+assert_not_contains "$comment" "rm -rf" "钉版档位：非法摘要原文不进评论"
+# issue 03 / 不变式 I2：钉版档位下入口文件摘要必填（现装档位才是可选）
+run_case profpinnednoentry KIRO_INSTALL_PROFILE=pinned KIRO_PINNED_ARTIFACT=/tmp/nope.zip \
+  KIRO_PINNED_ARTIFACT_SHA256="$zero64" KIRO_CLI_SHA256=
+assert_nonzero "$RC" "钉版档位：未配 KIRO_CLI_SHA256 → 拒绝运行（钉版下必填）"
+assert_contains "$(posted_comment "$OUT")" "KIRO_CLI_SHA256" "钉版档位：必填失败评论点名变量"
+# 不变式 I6：安装包路径落在业务库内 → 拒绝（业务库内容一律不受信，否则业务库能自己放一个「安装包」）
+run_case profpinnedinrepo KIRO_INSTALL_PROFILE=pinned \
+  KIRO_PINNED_ARTIFACT="$tmp/case-profpinnedinrepo/work/kirocli.zip" \
+  KIRO_PINNED_ARTIFACT_SHA256="$zero64" KIRO_CLI_SHA256="$mock_sha"
+assert_nonzero "$RC" "钉版档位：安装包路径在业务库内 → 拒绝运行"
+assert_contains "$OUT" "业务库" "钉版档位：拒绝原因说明是业务库内"
+# 现装档位：既有行为不变（KIRO_CLI_SHA256 仍可选），且日志打印本次档位
+run_case proflatest KIRO_INSTALL_PROFILE=latest
+assert_rc "$RC" 0 "现装档位：照常完成（KIRO_CLI_SHA256 可选）"
+assert_contains "$OUT" "安装档位：latest" "现装档位：日志打印本次档位"
 # 15-fix3 #8：版本打到 stderr 的 CLI 也要取得到（否则每条评论永久带「版本未知」notice 且无法清除）
 run_case verstderr MOCK_KIRO_VERSION_STDERR=1
 assert_rc "$RC" 0 "kiro-cli --version 打到 stderr：评审照常完成"

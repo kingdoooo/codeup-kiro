@@ -122,6 +122,20 @@ INLINE_FROM_OFFSET=0
 # `curl -fsSL https://cli.kiro.dev/install | bash`；脚本本身支持 Linux/macOS，
 # Linux 下安装到 ~/.local/bin，含 glibc 检测与 musl 回退）。核实日期：2026-07-21。
 KIRO_INSTALL_URL="${KIRO_INSTALL_URL:-https://cli.kiro.dev/install}"
+# 安装档位（ADR-0006）：pinned = 安装包由流水线预先备好在本地路径上、脚本核对摘要后安装；latest = 官方安装脚本现装（只装最新版）。
+# **刻意不给缺省值**：靠「某个来源变量是否非空」推断档位的话，变量名拼错的表现就是静默落回现装档位装最新版、然后被版本门拒绝——
+# 错误信息指向 Kiro 版本，真实原因是一个拼错的变量名。这与本脚本别处一致的 fail-closed 原则相悖（平台键确定不了就拒、
+# 版本解析不出就拒、摘要算不出就拒），所以档位必须显式声明。形状校验在第 1.6 步。
+# **这是运维可见的行为变更**：流水线变量在 Flow UI 的「变量和缓存」里配，脚本无法自己补上；升级到本版本之前必须先配好它
+# （与 KIRO_TIMEOUT 只收纯数字、KIRO_ACK_UNTESTED_VERSION 设了就拒绝运行同一类）。
+KIRO_INSTALL_PROFILE="${KIRO_INSTALL_PROFILE:-}"
+# 钉版档位的安装包本地路径（绝对路径）。脚本**不知道文件是怎么到那儿的**——OSSDownload 内置步骤、制品源、烤进镜像都行。
+# 这也是自建执行器将来不需要改代码的原因：路径指向镜像里的位置即可。
+KIRO_PINNED_ARTIFACT="${KIRO_PINNED_ARTIFACT:-}"
+# 安装包本身的 SHA-256（核对「拉到的字节对不对」）。与 KIRO_CLI_SHA256（核对「装完之后被执行的那个文件对不对」）
+# **不是同一个数**，钉版档位下两个都必填：官方按版本直链没有公开的校验和（`stable/<版本>/manifest.json` 返回 403），
+# 所以这两个摘要是钉版安装唯一的完整性依据。
+KIRO_PINNED_ARTIFACT_SHA256="${KIRO_PINNED_ARTIFACT_SHA256:-}"
 PROMPT_FILE="${PROMPT_FILE:-${PKG_ROOT}/prompts/review-prompt.md}"
 AGENT_FILE="${PKG_ROOT}/kiro/agent-codeup-reviewer.json"
 REVIEW_REPO_DIR="${REVIEW_REPO_DIR:-$PWD}"
@@ -1056,6 +1070,34 @@ if [[ -n "$KIRO_CLI_SHA256" ]]; then
   [[ "$KIRO_CLI_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || die_review "KIRO_CLI_SHA256 不合法：只能是 kiro-cli 入口文件的 64 位十六进制 SHA-256（setup-guide 第 7 节给出取法）。请修正或删除该流水线变量"
 fi
+# 安装档位（ADR-0006 / 不变式 I1 I2 I3 I6）。取值只有 pinned / latest，缺失与非法都拒绝运行、取值不回显。
+case "$KIRO_INSTALL_PROFILE" in
+  pinned|latest) ;;
+  "") die_review "缺少 KIRO_INSTALL_PROFILE：必须显式声明安装档位（pinned = 用预先备好的安装包，latest = 官方安装脚本现装最新版）。刻意不给缺省值——靠变量非空推断档位时，变量名拼错会静默落回现装最新版并在之后被版本门拒绝，错误信息会指向错误的方向。请在流水线的「变量和缓存」里设置它（见 pipeline/setup-guide.md）" ;;
+  *) die_review "KIRO_INSTALL_PROFILE 不合法：只能是 pinned 或 latest（取值不回显）。请修正该流水线变量" ;;
+esac
+if [[ "$KIRO_INSTALL_PROFILE" == pinned ]]; then
+  # 三个必填项：安装包路径、安装包摘要、入口文件摘要。缺任一即拒绝——只核对安装包等于「下载的字节验过了，
+  # 但装完之后执行的那个文件没验」，中间的解压 / install -m 755 / PATH 解析是不设防的；libc 变体那一维
+  # （平台键取自 uname，区分不出 glibc 与 musl）也正是靠入口文件摘要覆盖。
+  [[ -n "$KIRO_PINNED_ARTIFACT" ]] \
+    || die_review "钉版档位缺少 KIRO_PINNED_ARTIFACT：需要安装包在执行器上的绝对路径（由流水线的 OSS 下载步骤或等价机制预先备好）。请设置该流水线变量，或把 KIRO_INSTALL_PROFILE 改成 latest"
+  [[ -n "$KIRO_PINNED_ARTIFACT_SHA256" ]] \
+    || die_review "钉版档位缺少 KIRO_PINNED_ARTIFACT_SHA256：需要安装包本身的 64 位十六进制 SHA-256（集成包随已探测元组一起发布）。请设置该流水线变量"
+  KIRO_PINNED_ARTIFACT_SHA256=$(printf '%s' "$KIRO_PINNED_ARTIFACT_SHA256" | tr 'A-F' 'a-f')
+  [[ "$KIRO_PINNED_ARTIFACT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || die_review "KIRO_PINNED_ARTIFACT_SHA256 不合法：只能是安装包的 64 位十六进制 SHA-256（取值不回显）。请修正该流水线变量"
+  [[ -n "$KIRO_CLI_SHA256" ]] \
+    || die_review "钉版档位缺少 KIRO_CLI_SHA256：钉版档位下入口文件摘要**必填**（现装档位才是可选）。它核对的是安装完成后真正被执行的那个文件，与安装包摘要不是同一个数；集成包随已探测元组一起发布这两个值。请设置该流水线变量"
+  # 路径本身是不受信输入：相对路径 = 当前目录 = 业务库；落在业务库内则业务库可以自己放一个「安装包」。
+  # 摘要门能挡住内容替换，但路径判据要独立成立、不靠摘要兜底。包含判定复用 PATH 门同一个 helper
+  # （它解引用符号链接、按「最近的能进去的祖先」比对，且刻意不回显取值）。
+  [[ "$KIRO_PINNED_ARTIFACT" == /* ]] \
+    || die_review "KIRO_PINNED_ARTIFACT 必须是绝对路径（相对路径会相对业务库解析；取值不回显）。请修正该流水线变量"
+  review_dir_not_in_repo_or_die "$KIRO_PINNED_ARTIFACT" "$REVIEW_REPO_DIR" \
+    "校验钉版安装包路径（业务库内容一律不受信，安装包不能取自业务库）"
+fi
+log "安装档位：${KIRO_INSTALL_PROFILE}"
 # KIRO_ENV_PASSTHROUGH 只收变量名：非法名字（写成 NAME=value、带空格/连字符）与凭证形状的名字（规则表 KIRO_ENV_CRED_RULES，
 # AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 显式放行）一律拒绝运行——静默忽略会让运维以为透传生效了。这份拒绝清单是防运维手滑、
 # 不是安全边界（受信 agent 没有 shell / env 工具）。原因文案只有一处（kiro_env_allowlist 的 KIRO_ENV_ALLOW_ERROR：MR 评论按条目序号 +
