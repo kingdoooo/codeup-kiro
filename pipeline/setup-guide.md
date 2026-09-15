@@ -161,15 +161,22 @@ Flow 在多代码源流水线里给每个代码源的内置变量加数字下标
   照抄即可，不需要再改。`CI_COMMIT_REF_NAME` 那行刻意仍是无条件 `export`：不带下标的取值在多代码源下可能是集成包那个
   代码源的分支，必须显式压掉。
 
-## 6. 连通性验证（云托管执行器：评估 / PoC 路径）
-云托管执行器上 kiro-cli 由官方安装脚本 `curl | bash` 现装：脚本只装 **latest**、没有版本开关，sha256 也只对在线 manifest 校验。
+## 6. 连通性验证（云托管执行器 + 现装档位）
+云托管执行器上 kiro-cli 由官方安装脚本 `curl | bash` **现装**（现装档位）：脚本只装 **latest**、**没有版本开关**
+（参数只有 `--channel`，下载 URL 硬编码 `latest`），sha256 也只对**在线的** `latest/manifest.json` 校验——
+即校验「当前最新」而不是「你探测过的那个」。
 latest 与执行器平台的组合不在 `KIRO_TESTED_TARGETS` 名单内时，评审会被版本门**拒绝**并回写「评审未完成」（第 8 节第 5 项、第 10 节），
-只能临时用 `KIRO_ACK_UNTESTED_TARGET=<os>/<arch>:<版本>` 放行。所以这条路径只用于评估 / PoC；**生产按第 7 节预装固定版本**
-（ADR-0004 要求的「固定版本 + 校验」只有那条路径能满足）。
-**这条路径的停摆是可预期的、且已经真实发生过一次**：2026-09-12 Kiro 发布 2.21.4，云托管执行器下一次运行的
-`curl | bash` 立刻装到它，于是**摘要门与版本门同时拒绝**（先报摘要不一致，因为它在版本门之前）——MR 上是
-「评审未完成」，Kiro 一次都没跑。恢复方式就是第 7 节那四步：在执行器平台上探测新版本 → 把 `<os>/<arch>:<版本>` 加进 `KIRO_TESTED_TARGETS` →
-重新记录入口文件 sha256 → 改流水线变量。生产不要依赖这条路径。
+只能临时用 `KIRO_ACK_UNTESTED_TARGET=<os>/<arch>:<版本>` 放行。
+**这不是偶发故障，是现装档位的稳态行为**：Kiro 平均 2.9 天发一个版本（2.0.0→2.21.4 共 52 个版本 / 151 天），
+所以每隔几天就会被拒绝一次，直到有人重新探测并更新名单。已经真实发生过一次：2026-09-12 Kiro 发布 2.21.4，
+云托管执行器下一次运行的 `curl | bash` 立刻装到它，于是**摘要门与版本门同时拒绝**（先报摘要不一致，因为它在版本门之前）——
+MR 上是「评审未完成」，Kiro 一次都没跑。恢复方式就是第 7 节那四步：在执行器平台上探测新版本 →
+把 `<os>/<arch>:<版本>` 加进 `KIRO_TESTED_TARGETS` → 重新记录入口文件 sha256 → 改流水线变量。
+**所以现装档位只用于评估 / PoC。** 想在云托管执行器上把版本钉住，改用**钉版档位**（安装包由流水线预先备好、
+核对两个摘要后安装，见 `docs/adr/0006-flow-pinned-install-profile.md`）；自建执行器见第 7 节。
+
+**容器环境**：Codeup 的「默认环境」已 `Deprecated`，2025.4.1 之后创建的组织**不支持**，必须使用「指定容器环境」
+（官方镜像 `alinux3` / `alinux4`，两者都预装 `ossutil` / `xz` / `unzip` / `jq`，都**没有** `zstd`）。
 
 前提：先在该验证流水线的「变量和缓存」中配置 `KIRO_API_KEY`（私密变量）——
 headless 调用必须依赖它认证，未配置时 chat 命令会因认证失败而报错。
@@ -177,7 +184,8 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
     curl -fsSL https://cli.kiro.dev/install | bash
     export PATH="$HOME/.local/bin:$PATH"
     set -e                                   # 缺参数必须让这一步标红，不能只在日志里留一行提示
-    kiro-cli --version                       # 需在 KIRO_TESTED_TARGETS 名单内（当前 2.21.1 / 2.21.3 / 2.21.4），否则评审被版本门拒绝
+    kiro-cli --version                       # 「平台 + 版本」元组需在 KIRO_TESTED_TARGETS 名单内，否则评审被版本门拒绝
+    uname -s; uname -m                       # 名单的单位是 <os>/<arch>:<版本>，只看版本号不够；当前名单见 scripts/kiro-review.sh
     # 三个参数各查一次，缺任一就退出：合成一条 grep 时任一命中即通过，而 `--agent` 又会被
     # `--agent-engine` 那一行命中，于是缺 --agent 也照样"通过"。
     # --agent 用与评审脚本相同的正则（前后必须是空白或行首尾）；help 一并收 stderr（脚本也是 2>&1）。
@@ -501,16 +509,19 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 11. **拒绝路径不影响正常评审**：默认模式（不带 `PROBE_FORCE_READ`）那一次仍应产出正常的评审 JSON，
     真实 MR 上那一次仍应给出正常的问题清单（不是整体失败）。
 12. **读取许可清单边界（allowedPaths；接入前必做一次，改动 agent 定义或升级 kiro-cli 后重做）**：
-    在装有 kiro-cli 的机器上跑 `bash -p scripts/probe/probe-kiro-allowlist.sh`（P1-15，默认十个用例、每个一次调用）。
-    它用**生产定义**（改名换中性提示词、同一安装函数写入路径、同一环境许可清单）验证七个**门禁**用例：allow 内 read /
+    在装有 kiro-cli 的机器上跑 `bash -p scripts/probe/probe-kiro-allowlist.sh`（P1-15，默认 **13 次调用**：
+    十二个门禁用例 + T5 正控，每个用例一次、约 0.3 credit / 15–55 s）。
+    它用**生产定义**（改名换中性提示词、同一安装函数写入路径、同一环境许可清单）验证**十二个门禁**用例：allow 内 read /
     grep / glob 都正常（T1 / T1b / T1c——去掉 `--trust-tools` 后 grep/glob 不能落入权限申请）、allow 外且不在拒绝清单里的
     `$HOME` canary 被 CLI **拒绝而不是等待确认到超时**（T2）、deny 先于 allow（T3，读 `.git/logs/HEAD`，只被新加的
-    `**/.git/**` 覆盖）、`env -i` 许可清单下 kiro-cli 能启动（T4）、业务库里指向 `$HOME` 的符号链接与 `<业务库>/../`
-    越界路径都被拒（T8）、业务库里提交的 `.ssh/config`、`.aws/config`、`keys/id_rsa.pub`、`keys/id_ed25519.pub` 都被拒（T9——拒绝清单里的
+    `**/.git/**` 覆盖）、`env -i` 许可清单下 kiro-cli 能启动（T4）、业务库里指向 `$HOME` 的符号链接（T8a）与 `<业务库>/../`
+    越界路径（T8b）都被拒、业务库里提交的 `.ssh/config`、`.aws/config`、`keys/id_rsa.pub`、`keys/id_ed25519.pub` 都被拒
+    （T9a–T9d——拒绝清单里的
     绝对路径落在 allow 之外永远测不到，这几条仓库相对形状是唯一能在 allow 内证明 deny 仍被解析的用例）。正控 T5 用票 15
     之前的旧形态 + `--trust-tools`，canary **应被读出**——正控不成立说明探测本身不可信（INCONCLUSIVE），不是 allowedPaths 的结论。
-    **退出码分级**：0 = 八个门禁用例全部实际运行且全 PASS（走主方案）；1 = 门禁 FAIL（**不得上线**）；2 = 参数错；
-    3 = INCONCLUSIVE；4 = 门禁用例未全部运行（`PROBE_CASES` 子集，不作发布判定）；5 = 环境准备失败。
+    **退出码分级**（权威口径在脚本头部，与 `scripts/probe/README.md` 的表逐字一致）：0 = 十二个门禁用例全部实际运行且全 PASS
+    （走主方案）；1 = 门禁 FAIL（**不得上线**）；2 = 参数错；3 = INCONCLUSIVE；4 = 门禁用例未全部运行（`PROBE_CASES` 子集，
+    不作发布判定）；5 = 环境准备失败。
 
 以上 9.1–9.3 全部为**人工验收**，需要真实 Codeup 测试库与真实 kiro-cli，本地测试套件覆盖不到。
 本地可自动化的部分（渲染、去重、排序、上限、降级、截断、变更行解析）见第 13 节。

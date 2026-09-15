@@ -72,10 +72,11 @@ KIRO_ENGINE=v3 bash -p scripts/probe/probe-kiro-headless.sh
 
 # 5) 读取许可清单边界（P1-15；票 15 主方案的前提，改动 agent 定义 / kiro_install_agent / 许可清单函数后重跑）
 bash -p scripts/probe/probe-kiro-allowlist.sh
-# 默认 = 八个门禁用例 + T5 正控（9 次调用）；T6/T7 是 INFO，要跑得显式列出
+# 默认 = 十二个门禁用例 + T5 正控（13 次调用，每个用例一次、约 0.3 credit / 15–55 s）；T6/T7 是 INFO，要跑得显式列出
 # 只跑子集省额度：PROBE_CASES="T1 T2 T4" bash -p scripts/probe/probe-kiro-allowlist.sh
-#   用例名逐个校验（写错 → 退出码 2、零调用）；子集运行时结论打「不作发布判定」并以 4 退出，只有八个门禁用例全跑才打「走主方案」
-# 升级 kiro-cli 之后：跑一次（至少 T8a T8b）→ 全 PASS 后把 summary.json 里的 kiro_cli 版本号加进 scripts/kiro-review.sh 的 KIRO_TESTED_TARGETS，
+#   用例名逐个校验（写错 → 退出码 2、零调用）；子集运行时结论打「不作发布判定」并以 4 退出，只有十二个门禁用例全跑才打「走主方案」
+# 升级 kiro-cli 之后：跑**完整**一次（子集以 4 退出、不作发布判定，所以不能只跑 T8a T8b）→ 全 PASS 后把 summary.json 里的
+#   `target` 字段（`<os>/<arch>:<版本>` 元组，**不是** `kiro_cli` 那个纯版本号）加进 scripts/kiro-review.sh 的 KIRO_TESTED_TARGETS，
 #   否则评审会被版本门**拒绝**（名单外默认拒绝，2026-09-10 起；临时放行只能设流水线变量 KIRO_ACK_UNTESTED_TARGET=<os>/<arch>:<版本>，汇总带醒目 notice）
 # 原始输出默认留在 /tmp/kiro-probe-allowlist-<时间>（每用例 .jsonl/.err、agent-installed.json、
 # env-allowlist-names.txt、summary.json）

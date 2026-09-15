@@ -139,20 +139,24 @@ KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 # 同一个版本换平台就要各自探测、各自进名单，这个缺口不会随着「又加了一个只在本机探测的新版本」重新出现。
 #
 # 本次版本 / 平台的组合不在名单里时**拒绝评审**（CodeX 2026-09-09 复审 P1-2，推翻 15-fix2 #24 的「只 notice」），
-# 除非 KIRO_ACK_UNTESTED_VERSION 逐字等于实际版本（见下；break-glass 仍按版本给，不要求写平台——它是人工确认，
-# 拒绝信息里会写清缺的是哪个元组）。升级 kiro-cli 或换执行器平台后：在**那个平台上**跑
+# 除非 KIRO_ACK_UNTESTED_TARGET 逐字等于本次的 `<os>/<arch>:<版本>` 元组（见下——2026-09-13 起 break-glass 绑定的单位
+# 也是元组，只绑版本的旧变量 KIRO_ACK_UNTESTED_VERSION 已废弃、设了就拒绝运行；拒绝信息里会写清缺的是哪个元组）。
+# 升级 kiro-cli 或换执行器平台后：在**那个平台上**跑
 # scripts/probe/probe-kiro-allowlist.sh，通过后把它打印的 `<os>/<arch>:<版本>` 原样加进这里。
 #
 # 平台键**不含** libc 变体（glibc/musl）与发行版：那一维靠运维固定执行器镜像 digest 控（setup-guide 第 7 节第 6 项）。
 #
 # darwin/arm64:2.21.1  2026-09-06 / 09-07 探测（15-fix2 / 15-fix4），Phase 1 全部真实验收都在这个版本上做。
 #                      它的 Linux 侧读取边界没有同等证据——自建执行器若预装 2.21.1，要在自己的镜像上补跑探测。
+# （2.21.2 刻意不在名单里：它于 2026-09-08 发布过，但从未在任何平台上探测，不是遗漏。）
 # darwin/arm64:2.21.3  2026-09-11 探测，十二个门禁用例 + T5 正控全 PASS（any_fail=false、gate_missing=[]）。
 # linux/x86_64:2.21.3  2026-09-11 在真实 Flow 执行器（alinux3 容器）里跑同一套探测，退出码 0。
+#                      libc 变体 = **musl**（官方安装脚本在 alinux3 上自动选 musl，因为该镜像的 glibc 低于 gnu 版要求的 2.34）。
 # darwin/arm64:2.21.4  2026-09-13 探测，同一套门禁全 PASS。起因是 Kiro 09-12 发了 2.21.4、云托管执行器的
 #                      curl|bash 立刻装到它，摘要门与版本门双双拒绝——按 setup-guide 第 7 节四步恢复。
 # linux/x86_64:2.21.4  2026-09-13 在真实 Flow 执行器（alinux3 容器）里补跑同一套探测：平台键 linux/x86_64、
-#                      入口 /root/.local/bin/kiro-cli（sha256 940b47e5…）、十二个门禁用例全 PASS、退出码 0。
+#                      入口 /root/.local/bin/kiro-cli（sha256 940b47e5…，该摘要即 **musl** 变体的入口文件）、
+#                      十二个门禁用例全 PASS、退出码 0。
 #                      这一条是 CodeX 2026-09-13 复审 P1 逼出来的——在它之前，2.21.4 只有 darwin 的证据却被门禁当成通用。
 KIRO_TESTED_TARGETS="darwin/arm64:2.21.1 darwin/arm64:2.21.3 linux/x86_64:2.21.3 darwin/arm64:2.21.4 linux/x86_64:2.21.4"
 # break-glass（CodeX 2026-09-09 复审 P1-2；2026-09-13 复审 P2 把绑定单位升级为元组）：名单外的组合默认**拒绝评审**；
@@ -1037,8 +1041,8 @@ for _v in KIRO_TIMEOUT DIFF_SIZE_LIMIT; do
     || die_review "${_v}=0 不合法（必须 ≥1；0 会让超时形同不限时、让 diff 阈值变成「全部省略」）。请修正该流水线变量"
 done
 unset _v
-# KIRO_ACK_UNTESTED_VERSION 只收版本号形状（与 kiro_cli_version 取到的形状同一字符集：数字与点）：别的形状一律拒绝运行、取值不回显——
-# 它会原样进 notice 与失败评论（CodeX 2026-09-09 复审 P1-2）
+# KIRO_ACK_UNTESTED_TARGET 只收「<os>/<arch>:<版本>」形状（平台键与 kiro_cli_version 取到的字符集一致）：别的形状一律拒绝运行、
+# 取值不回显——它会原样进 notice 与失败评论（CodeX 2026-09-09 复审 P1-2；2026-09-13 复审 P2 把单位从版本升级为元组）
 # 旧的只绑版本的确认变量：设了就拒绝，并把该改成的新取值算给运维（本次元组要等版本门那一步才知道，所以这里只给形态说明）
 if [[ -n "$KIRO_ACK_UNTESTED_VERSION" ]]; then
   die_review "KIRO_ACK_UNTESTED_VERSION 已废弃（2026-09-13 起），拒绝评审：版本门的信任单位是「平台 + 版本」元组，只绑版本的确认值在执行器换平台之后会继续自动放行同一个版本。请删掉它，改用 KIRO_ACK_UNTESTED_TARGET=<os>/<arch>:<版本>（取值必须逐字等于本次组合；失败评论会写出该填什么）"
@@ -1204,8 +1208,8 @@ grep -q -- '--output-format' <<<"$KIRO_CHAT_HELP" \
 # kiro-cli 版本 vs 探测过的版本（CodeX 2026-09-09 复审 P1-2，推翻 15-fix2 #24 的「名单外只 notice」）：读取边界（allowedPaths 之外的
 # 符号链接、../ 越界、`**/` 形状按 cwd 解析）靠 kiro-cli 的路径解析行为，这是 P1-15 在 KIRO_TESTED_TARGETS 的每个平台 + 版本上**实测**的，不是文档承诺；
 # 官方安装脚本只装 latest 且没有版本开关，Kiro 3.x 的权限模型又是 breaking change，「新版本仍保持已探测版本的安全语义」不能当默认假设。
-# 所以：名单内 → 跑；名单外 → **拒绝评审**（失败评论写明版本与 break-glass 变量，Kiro 不启动、不烧额度）；只有 KIRO_ACK_UNTESTED_VERSION
-# 与实际版本**逐字相等**才放行（汇总带醒目 notice）；版本解析不出一律拒绝，不接受任何确认值放行「未知」。生产的兜底不变：符号链接在隔离步骤
+# 所以：名单内 → 跑；名单外 → **拒绝评审**（失败评论写明元组与 break-glass 变量，Kiro 不启动、不烧额度）；只有 KIRO_ACK_UNTESTED_TARGET
+# 与本次「平台 + 版本」元组**逐字相等**才放行（汇总带醒目 notice）；版本或平台确定不了一律拒绝，不接受任何确认值放行「未知」。生产的兜底不变：符号链接在隔离步骤
 # 里全部删除。ADR-0004 的 2026-09-10 修订记录了这次改动；变异 M-cx-p12 守住「拒绝」那一行。
 # 取法在 kiro_cli_version（scripts/lib/kiro-agent.sh，探测脚本共用，15-fix4 #7）：stdout / stderr 分开捕获、按程序名锚定——stderr 上先到的
 # 升级提示「A new version (2.30.0) …」不能被当成已装版本；版本打到 stderr 的 CLI 仍取得到（15-fix3 #8）。--version 退出码非零 → 失败评论：
