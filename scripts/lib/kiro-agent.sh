@@ -367,8 +367,9 @@ kiro_cli_sha256_check() {
 # **逃生口** KIRO_ENV_PASSTHROUGH：逗号分隔的变量**名**（自建执行器可能需要 LD_LIBRARY_PATH / JAVA_HOME / AWS_PROFILE 这类），
 #   只放名字不放值。两道校验，任一不过 → 返回 1、原因放进 KIRO_ENV_ALLOW_ERROR，调用方必须拒绝运行而不是静默忽略：
 #   ① 语法：不是 [A-Za-z_][A-Za-z0-9_]*（例如写成 NAME=value）→ 拒绝。
-#   ② 凭证形状的名字 → 拒绝（15-fix2 #13 / 15-fix3 #6 / 15-fix4 #4）：规则表 KIRO_ENV_CRED_RULES（YUNXIAO_*、CODEUP_*、AWS_*、*TOKEN*、
-#      *SECRET*、*PASSWORD*、*CREDENTIAL*、*_KEY、*_PAT、*_PAT_*、DCKR_PAT_*，以及令牌前缀 GHP_*、GHO_*、GITHUB_PAT_*、AKIA*、ASIA*；大小写不敏感），
+#   ② 凭证形状的名字 → 拒绝（15-fix2 #13 / 15-fix3 #6 / 15-fix4 #4）：规则表 KIRO_ENV_CRED_RULES（YUNXIAO_*、CODEUP_*、AWS_*、
+#      OSS_*、ALIBABA_CLOUD_*、ALICLOUD_*、*TOKEN*、*SECRET*、*PASSWORD*、*CREDENTIAL*、*ACCESS_KEY*、*_KEY、*_PAT、*_PAT_*、
+#      DCKR_PAT_*，以及令牌前缀 GHP_*、GHO_*、GITHUB_PAT_*、AKIA*、ASIA*；大小写不敏感），
 #      显式放行 KIRO_ENV_CRED_ALLOW（AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION：它们是配置不是凭证；AWS_* 其余仍拒）。
 #      这份拒绝清单是**防运维手滑**、不是安全边界：受信 agent 没有 shell / env 工具，变量到不了模型手里；逃生口存在的意义就是客户不改代码
 #      也能放行自家构建变量。`XOX*` 已删（死代码：真实 Slack 令牌带连字符，先被 ① 拒）。
@@ -402,7 +403,13 @@ _kiro_env_mask_token() {
 # 凭证形状规则表与显式放行（15-fix4 #4）。_kiro_env_cred_rule <大写名字> → stdout 命中的规则（空 = 放行）；
 # 令牌前缀类规则（更像贴了真令牌）在流水线日志里也只留掩码，其余名字类规则日志给全名
 # 顺序即优先级：先具体（令牌前缀、DCKR_PAT_*）再泛（*_PAT_* 也匹配 GITHUB_PAT_…），命中的规则名要能说明「为什么」
-KIRO_ENV_CRED_RULES=('GHP_*' 'GHO_*' 'GITHUB_PAT_*' 'AKIA*' 'ASIA*' 'DCKR_PAT_*' 'YUNXIAO_*' 'CODEUP_*' 'AWS_*' '*TOKEN*' '*SECRET*' '*PASSWORD*' '*CREDENTIAL*' '*_KEY' '*_PAT' '*_PAT_*')
+# 阿里云一侧三条前缀与 `*ACCESS_KEY*`（2026-09-15 补）：`*_KEY` 要求以 `_KEY` **结尾**，于是 `..._KEY_ID` 这个形状整个漏过——
+# `OSS_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_ID` 原先一条都不命中，而同一对凭证的另一半（`..._KEY_SECRET`）命中 `*SECRET*`。
+# 这不是漏了某个厂商，是一个通用盲点：任何 `<厂商>_ACCESS_KEY_ID` 都过得去。`*ACCESS_KEY*` 补的就是这个形状（放在 `*_KEY` 之前，
+# 命中的规则名要能说明「为什么」）。刻意**不**给 `OSS_ENDPOINT` / `OSS_REGION` 这类配置开 KIRO_ENV_CRED_ALLOW 的口子：
+# 本仓库不碰 OSS（钉版档位只认一个本地路径，OSS 凭证走服务连接、不进流水线环境，ADR-0006 / 不变式 I10），
+# 没有已知的使用方需要透传它们；真的需要时往 KIRO_ENV_CRED_ALLOW 加名字即可，比先开一个没人用的口子安全。
+KIRO_ENV_CRED_RULES=('GHP_*' 'GHO_*' 'GITHUB_PAT_*' 'AKIA*' 'ASIA*' 'DCKR_PAT_*' 'YUNXIAO_*' 'CODEUP_*' 'AWS_*' 'OSS_*' 'ALIBABA_CLOUD_*' 'ALICLOUD_*' '*TOKEN*' '*SECRET*' '*PASSWORD*' '*CREDENTIAL*' '*ACCESS_KEY*' '*_KEY' '*_PAT' '*_PAT_*')
 KIRO_ENV_CRED_TOKEN_RULES=('GHP_*' 'GHO_*' 'GITHUB_PAT_*' 'AKIA*' 'ASIA*')
 KIRO_ENV_CRED_ALLOW=(AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION)
 # 用「、」拼接条目（IFS 只认单字节，不能塞多字节分隔符）

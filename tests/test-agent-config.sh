@@ -546,7 +546,8 @@ for pair in 'KIRO_FOO=s3cr3t|KIRO_FOO****|s3cr3t' 'LD_LIBRARY_PATH=/opt/lib|LD_L
 done
 # 令牌形态的假字面量由 helpers.sh 的 fake_token 片段拼出（15-fix4 #9）：仓库是公开的，密钥扫描器会把 ghp_<36 位> 这类完整形态当真令牌
 # 15-fix2 #13 / 15-fix3 #6 / 15-fix4 #4：凭证形状的名字（语法合法）也拒绝——规则表 KIRO_ENV_CRED_RULES：YUNXIAO_* / CODEUP_* / AWS_* /
-# *TOKEN* / *SECRET* / *PASSWORD* / *CREDENTIAL* / *_KEY / *_PAT / *_PAT_* / DCKR_PAT_*，加令牌前缀 GHP_* / GHO_* / GITHUB_PAT_* / AKIA* / ASIA*，
+# OSS_* / ALIBABA_CLOUD_* / ALICLOUD_* / *TOKEN* / *SECRET* / *PASSWORD* / *CREDENTIAL* / *ACCESS_KEY* / *_KEY / *_PAT / *_PAT_* /
+# DCKR_PAT_*，加令牌前缀 GHP_* / GHO_* / GITHUB_PAT_* / AKIA* / ASIA*，
 # 大小写不敏感；被拒名字**掩码**（首段 + ****）——`svc_SECRET_9f3ab21c7de4` 这种合法标识符形态的密钥会进 MR 失败评论。
 # 第三列 = 期望命中的规则名（评论里「第 N 项 掩码（命中 规则）」）。XOX* 已删（真实 Slack 令牌带连字符，先被语法规则拒）。
 for pair in 'YUNXIAO_TOKEN|YUNXIAO****|YUNXIAO_*' 'yunxiao_org_id|yunxiao****|YUNXIAO_*' 'CODEUP_REPO_ID|CODEUP****|CODEUP_*' 'AWS_SECRET_ACCESS_KEY|AWS****|AWS_*' \
@@ -554,6 +555,9 @@ for pair in 'YUNXIAO_TOKEN|YUNXIAO****|YUNXIAO_*' 'yunxiao_org_id|yunxiao****|YU
             'GITHUB_TOKEN|GITHUB****|*TOKEN*' 'MY_SECRET|MY****|*SECRET*' 'DB_PASSWORD|DB****|*PASSWORD*' 'GCP_CREDENTIALS|GCP****|*CREDENTIAL*' 'SIGNING_KEY|SIGNING****|*_KEY' 'KIRO_API_KEY|KIRO****|*_KEY' \
             "$(fake_token svc)|svc****|*SECRET*" '_FOO_SECRET|_FOO****|*SECRET*' \
             'MY_PAT|MY****|*_PAT' 'MY_PAT_2|MY****|*_PAT_*' 'DCKR_PAT_abc|DCKR****|DCKR_PAT_*' 'dckr_pat_xyz|dckr****|DCKR_PAT_*' \
+            'OSS_ACCESS_KEY_ID|OSS****|OSS_*' 'oss_access_key_id|oss****|OSS_*' 'OSS_ACCESS_KEY_SECRET|OSS****|OSS_*' \
+            'ALIBABA_CLOUD_ACCESS_KEY_ID|ALIBABA****|ALIBABA_CLOUD_*' 'ALICLOUD_ACCESS_KEY|ALICLOUD****|ALICLOUD_*' \
+            'FOO_ACCESS_KEY_ID|FOO****|*ACCESS_KEY*' \
             "$(fake_token ghp)|ghp****|GHP_*" "$(fake_token gho)|gho****|GHO_*" "$(fake_token ghpat)|github****|GITHUB_PAT_*" \
             "$(fake_token akia)|AKIA****|AKIA*" "$(fake_token asia)|ASIA****|ASIA*"; do
   IFS='|' read -r cn want_mask want_rule <<<"$pair"   # G8：一次拆三列
@@ -590,6 +594,16 @@ assert_eq "$(printf '%s\n' "$xox_ok" | grep -c -x -- "$(fake_token xoxb)")" "1" 
 ok_names=$(names_under HOME="$tmp/h" KEYBOARD=1 MONKEY_PATCH=1 KIRO_ENV_PASSTHROUGH='KEYBOARD,MONKEY_PATCH')
 assert_eq "$(printf '%s\n' "$ok_names" | grep -c -x KEYBOARD)" "1" "KEYBOARD 不命中 *_KEY：正常透传"
 assert_eq "$(printf '%s\n' "$ok_names" | grep -c -x MONKEY_PATCH)" "1" "MONKEY_PATCH 不命中：正常透传"
+# 正控（issue 05）：新增的阿里云三条前缀规则与 *ACCESS_KEY* 不许扩到形状相近的名字上——OSS_* 是**前缀**（CROSS_COMPILE 含 OSS 但不匹配），
+# *ACCESS_KEY* 要求 ACCESS 与 KEY 相连（ACCESS_LOG_DIR 不匹配）。没有这两条，一条写宽了的规则会把使用方的普通构建变量一起关在门外。
+ali_ok=$(names_under HOME="$tmp/h" CROSS_COMPILE=1 ACCESS_LOG_DIR=1 KIRO_ENV_PASSTHROUGH='CROSS_COMPILE,ACCESS_LOG_DIR')
+assert_eq "$(printf '%s\n' "$ali_ok" | grep -c -x CROSS_COMPILE)" "1" "CROSS_COMPILE 不命中 OSS_*（前缀规则）：正常透传"
+assert_eq "$(printf '%s\n' "$ali_ok" | grep -c -x ACCESS_LOG_DIR)" "1" "ACCESS_LOG_DIR 不命中 *ACCESS_KEY*：正常透传"
+# 取值绝不出现在任何输出（issue 05 验收判据）：给被拒的名字真的赋一个值，MR 文案（KIRO_ENV_ALLOW_ERROR）与流水线日志都不许带它
+oss_out=$(env -i PATH="$PATH" HOME="$tmp/h" OSS_ACCESS_KEY_ID='notarealvalue-oss-0001' KIRO_ENV_PASSTHROUGH='OSS_ACCESS_KEY_ID' \
+  bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist || printf "%s\n" "$KIRO_ENV_ALLOW_ERROR"' _ "$LIB" 2>&1)
+assert_contains "$oss_out" "凭证形状" "OSS_ACCESS_KEY_ID 有取值时：仍按凭证形状拒绝"
+assert_not_contains "$oss_out" "notarealvalue-oss-0001" "OSS_ACCESS_KEY_ID 有取值时：取值不进 MR 文案、也不进流水线日志"
 # 空值 / 只有空白 → 等于没配
 empty_names=$(names_under HOME="$tmp/h" KIRO_FOO=1 KIRO_ENV_PASSTHROUGH='  ')
 assert_eq "$(printf '%s\n' "$empty_names" | grep -c -x -- "KIRO_FOO")" "0" "KIRO_ENV_PASSTHROUGH 只有空白：等于没配"
