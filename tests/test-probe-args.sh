@@ -127,6 +127,36 @@ assert_contains "$(cat "$YAML")" "业务库" "08：YAML 注明落地路径必须
 # 钉版路径绝不 curl 官方安装脚本（那是 latest 档位的事）——整份 YAML 不出现安装脚本 URL
 assert_eq "$(LC_ALL=C grep -c 'cli.kiro.dev/install' "$YAML")" "0" "08：钉版参考 YAML 不出现 curl 官方安装脚本"
 
+# ============ issue 09：setup-guide 钉版档位使用方手册（静态断言；可读性/完整性靠人工验收判据 1）============
+SPEC="$ROOT/.scratch/kiro-pinned-install/spec.md"
+# 09 验收判据 2：文档里出现的每个摘要值必须与 spec 的「已发布值」一致——跨文件一致，防任一处漂移。
+# spec 是 gitignore 的工作文件；本机在，CI 上没有则跳过这条（其余断言不依赖它）。
+if [[ -r "$SPEC" ]]; then
+  spec_art=$(LC_ALL=C grep -m1 -oE 'bbb0a221[0-9a-f]{56}' "$SPEC")
+  spec_entry=$(LC_ALL=C grep -m1 -oE '940b47e5[0-9a-f]{56}' "$SPEC")
+  assert_eq "$([[ "$(LC_ALL=C grep -c -F "$spec_art" "$GUIDE")" -ge 1 ]] && echo present)" "present" "09：setup-guide 里的安装包摘要与 spec 已发布值一致"
+  assert_eq "$([[ "$(LC_ALL=C grep -c -F "$spec_entry" "$GUIDE")" -ge 1 ]] && echo present)" "present" "09：setup-guide 里的入口文件摘要与 spec 已发布值一致"
+else
+  echo "SKIP: spec.md 不在（gitignore 工作文件），跳过摘要跨文件一致断言" >&2
+fi
+# 钉版档位有自己的一节
+assert_contains "$(cat "$GUIDE")" "钉版档位" "09：setup-guide 有钉版档位这一节"
+# 备包三条硬要求：续传 -C -、核对通过再上传、专用私有同区域桶
+assert_contains "$(cat "$GUIDE")" "核对通过再上传" "09：备包流程强调「核对通过再上传」（不是传完再核对）"
+assert_contains "$(cat "$GUIDE")" "aliyun oss cp" "09：备包用已验证的 aliyun oss（Cloud Shell 未预装 ossutil）"
+# 升级仪式五步（钉版比现装多一步「换 bucket 里的安装包对象」）
+assert_contains "$(cat "$GUIDE")" "换 bucket 里的安装包对象" "09：升级仪式五步含「换 bucket 里的安装包对象」"
+# 排错表补钉版档位四种失败，每条指向不同原因（验收判据 3）
+for f in "安装包取不到" "安装包摘要不一致" "入口文件摘要不一致" "KIRO_INSTALL_PROFILE 非法"; do
+  assert_contains "$(cat "$GUIDE")" "$f" "09：排错表有钉版失败「${f}」"
+done
+# 保质期提醒：服务端 EOL（2026-11-09 / 1.28.2）
+assert_contains "$(cat "$GUIDE")" "2026-11-09" "09：写了服务端保质期提醒（2026-11-09 起低于 1.28.2 被拒）"
+# 服务连接：RAM 权限是该专用桶的只读，凭证不进 YAML/环境
+assert_contains "$(cat "$GUIDE")" "服务连接" "09：讲了 OSS 服务连接的建法与权限"
+# README 安全性质提到钉版档位
+assert_contains "$(cat "$ROOT/README.md")" "钉版档位" "09：README 提到钉版档位"
+
 # ============ 票 18 ⑫：探测脚本的三处静态守卫 ============
 # ① 「命令管进 grep -q」的形状（grep -q 命中即退出 → 上游收 SIGPIPE → pipefail 下管道非零 → 找到了却判成没找到）
 for f in probe-kiro-headless.sh probe-kiro-allowlist.sh probe-codeup-inline.sh probe-flow-run.sh; do

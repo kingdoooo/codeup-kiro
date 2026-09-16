@@ -20,7 +20,10 @@
       2. 定位 MR（环境变量优先，OpenAPI 反查兜底，歧义即报错）；
          找出本评审员上一次的汇总评论（原地更新与 run 计数的前提）。
          此后任何失败（含第 3 步的安装失败与能力检查不通过）都会在 MR 上回写「评审未完成」
-      3. 安装/检测 kiro-cli；安装只读受信 agent（read/grep/glob，禁 shell/write/web/MCP；
+      3. 安装/检测 kiro-cli（安装档位由 KIRO_INSTALL_PROFILE 显式声明、无默认：**钉版档位** pinned = 安装包由流水线
+         预先备好、核对安装包与入口文件两个摘要后安装，版本受控，Flow 云托管执行器的推荐路径；**现装档位** latest =
+         官方脚本 curl|bash 现装最新版，版本不受控、被版本门拒绝是其稳态行为，仅评估/PoC。见 setup-guide 第 6.1 节）；
+         安装只读受信 agent（read/grep/glob，禁 shell/write/web/MCP；
          读取**许可清单** allowedPaths = 业务库 checkout + 本次 diff chunk 目录，安装时把三处结构化写成物理路径，
          两条路径缺任一或某工具 deniedPaths 缺失即拒绝安装，安装后按值自检（三处路径、allowedTools=[]、
          includeMcpJson/includePowers=false、deniedPaths 含 **/.git/**）不符即拒绝运行；敏感路径、.git 与仓库相对形状

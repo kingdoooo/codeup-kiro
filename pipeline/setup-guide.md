@@ -212,7 +212,96 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 同时验证执行器具备 timeout 命令（GNU coreutils）：`command -v timeout`；
 计划开启行内评论的话再验 `command -v sha1sum || command -v shasum`。
 
-## 7. 自建执行器（生产唯一支持的路径；网络受限时也走这里）
+### 6.1 钉版档位（Flow 云托管执行器，推荐生产路径）
+
+上文现装档位版本不受控——每隔几天被版本门拒绝一次是它的**稳态行为**。要在云托管执行器上把版本钉住，用**钉版档位**
+（`KIRO_INSTALL_PROFILE=pinned`，ADR-0006）：安装包由流水线预先备好在执行器本地路径上，评审脚本核对**两个摘要**后用包内
+`install.sh` 安装。它比自建执行器（第 7 节）轻——不必维护 ECS 与镜像 digest，但同样把版本、libc 变体、二进制完整性都钉死。
+（容器环境要求同第 6 节：默认环境已 `Deprecated`，必须用「指定容器环境」`alinux3`/`alinux4`。）
+
+**流程总览**：一次性把安装包放进你自己的**私有** OSS 桶 → 参考 YAML 的 `oss_download`（`OSSDownload`）步骤每次评审前把它
+下到执行器本地 → 评审脚本核对两个摘要后安装。评审脚本对 OSS 一无所知、只认那个本地路径，所以自建执行器把 kiro-cli
+烤进镜像时同一套脚本不用改。
+
+#### 一次性备包（必须在阿里云内部做）
+
+从本机拉安装包实测约 230 KB/s、586 MB 要 40 分钟且会断；阿里云内网约 20 秒到 1 分钟。用**阿里云 Cloud Shell**
+（跑在云内网、免开 ECS，控制台右上角 `>_`；先把左上角区域切到你要建桶的区域）。Cloud Shell 现在**不一定预装 `ossutil`**，
+但 `aliyun` CLI（≥ 3.x）内置 `aliyun oss` 子命令、Cloud Shell 的临时凭证自动带上，直接用它:
+
+```bash
+# ===== 只需改这两行 =====
+REGION=cn-hangzhou                 # 与 Flow 执行器同区域（云效国内托管执行器一般在华东1 杭州；
+                                   # 不确定就在任一构建步骤跑 curl -s http://100.100.100.200/latest/meta-data/region-id 确认）
+BUCKET=codeup-kiro-cli-CHANGEME    # 全局唯一、3-63 位小写字母/数字/连字符；专用私有桶
+# ========================
+set -euo pipefail
+EP="oss-${REGION}.aliyuncs.com"
+KEY="kiro/2.21.4/kirocli-x86_64-linux-musl.zip"
+URL="https://prod.download.cli.kiro.dev/stable/2.21.4/kirocli-x86_64-linux-musl.zip"
+ART_SHA="bbb0a22161d5aea045919cc75e9210e61b63b8c877525f123a30610911b6c44d"   # 安装包摘要（集成包发布值）
+
+aliyun oss mb "oss://${BUCKET}" -e "$EP" --acl private        # 私有桶（默认 ACL 即 private）
+curl -fL -C - -o kirocli.zip "$URL"                          # -C - 续传：连接会断，不是可选的
+echo "${ART_SHA}  kirocli.zip" | sha256sum -c -              # 核对通过再上传（失败即 set -e 退出）
+aliyun oss cp kirocli.zip "oss://${BUCKET}/${KEY}" -e "$EP" -f
+aliyun oss stat "oss://${BUCKET}/${KEY}" -e "$EP"            # 确认 Content-Length = 613998311
+```
+
+三点必须照做:① `-C -` 续传**不是可选的**;② **核对通过再上传**,绝不传完再核对(错的字节进了桶,摘要门只会在评审时才拒、白跑一趟);
+③ 桶必须与执行器**同区域**、且是**专用私有**桶(公共读会让一个 586 MB 对象变成带宽账单 DoS 的靶子)。
+把脚本存成文件用 `bash 文件` 跑,别把 `set -euo pipefail` 裸贴进交互 shell(命令一失败会把登录 shell 本身退出、Cloud Shell 掉线)。
+
+#### 为什么 Linux 统一钉 musl
+
+云托管执行器(`alinux3`,`platform:al8` 世系)的 glibc 低于 gnu 版要求的 2.34;musl 变体静态链接、安装时**完全不检查 glibc**,
+对一台你控制不了的执行器,这个确定性比 3 MB 体积差重要。官方安装脚本在这类机器上本来也自动选 musl。所以对象固定用
+`kirocli-x86_64-linux-musl.zip`,你不需要自己判断变体。
+
+#### 两个摘要的分工(最容易混)
+
+- `KIRO_PINNED_ARTIFACT_SHA256` 核对**安装包本身**——「拉到的字节对不对」,在**解压之前**核对。
+  值 = `bbb0a22161d5aea045919cc75e9210e61b63b8c877525f123a30610911b6c44d`。
+- `KIRO_CLI_SHA256` 核对**装完之后真正被执行的那个入口文件**——「解压 / `install -m 755` / PATH 解析之后跑的是不是那个文件」。
+  值 = `940b47e51692c5ccb65f50a5036cb658b284bc824c2932e5b34460189c0ce4a9`。它同时承担 **libc 变体那一维**:平台键取自 `uname`,
+  区分不出 glibc 与 musl,靠这个入口文件摘要兜住。
+
+**不是同一个数,两个都必填。** 官方按版本直链不发布校验和(`stable/<版本>/manifest.json` 返回 403),所以入口文件摘要是这条链上
+唯一的完整性依据——不配它,「下载的字节验过了,但装完执行的那个文件没验」,中间的解压 / 拷贝 / PATH 解析全不设防。
+
+#### 服务连接(鉴权,凭证不落地)
+
+`OSSDownload` 走**服务连接(RAM)**,不是 AK/SK;凭证既不进 YAML 也不进流水线环境(不变式 I10):
+1. 云效「运维 → 服务连接 / 连接管理」新建一个 OSS/RAM 类型的服务连接。
+2. 它绑定的 RAM 身份只需要**该专用桶的只读**权限(`oss:GetObject`,Resource 限定到 `acs:oss:*:*:<bucket>/*`)——桶里只有安装包、
+   没有别的东西,桶级只读足够,**不要**给账号级 OSS 权限。
+3. 参考 YAML 的 `oss_download` 步骤里 `serviceConnection: "<id>"` 填这个连接(首次在 YAML 编辑器粘贴后校验器会回填 ID)。
+
+#### 升级 kiro-cli 是**五步仪式**(比现装/自建多一步)
+
+钉版档位下换版本,缺一不可:
+1. 在执行器平台上重新探测(`scripts/probe/probe-kiro-allowlist.sh`,全 PASS);
+2. 把新元组**加进名单**——集成包常量 `KIRO_TESTED_TARGETS`,或流水线变量 `KIRO_TESTED_TARGETS_EXTRA`(你自己探测过的,只追加);
+3. 重新发布/记录**两个摘要**(安装包摘要 + 入口文件摘要);
+4. **换 bucket 里的安装包对象**(按 `kiro/<新版本>/...` 传新对象,改 `sourceFilePath`);
+5. 改流水线变量 `KIRO_PINNED_ARTIFACT_SHA256` / `KIRO_CLI_SHA256`(若换了对象键还要改 `KIRO_PINNED_ARTIFACT` 与 `targetFilePath`,两者逐字相同)。
+
+漏第 4 步:桶里还是旧包,安装包摘要门拒绝。漏第 3/5 步:新包装上、摘要对不上,同样拒绝。这五步都在评审真正跑之前把关。
+
+#### 追加名单 vs break-glass(别把前者当安静的绕过口)
+
+- `KIRO_TESTED_TARGETS_EXTRA`:语义是「**我自己按 probe 跑过探测且全 PASS**」,放行**不带 notice**。
+- `KIRO_ACK_UNTESTED_TARGET`:语义是「**谁都没探测过、我自担风险**」,放行时汇总评论带**醒目 notice**,读评审的人能看到。
+
+没跑探测就往追加名单里塞元组,等于悄悄关掉版本门——它安静,所以更要守规矩。
+
+#### 保质期:名单里的元组不是永久授权
+
+kirodotdev/Kiro#11335 公布 **2026-11-09 起 CLI 低于 1.28.2 将被服务端拒绝连接**。这是**服务端**开关:版本没变、摘要没变、
+名单没变,但连不上了,现有门禁一个都不会响(它们只管读取边界与完整性,管不了服务端 EOL)。所以要**按季度重新探测**、盯 Kiro 的
+EOL 公告;遇到这类失败别照「回到已探测版本」的常规 runbook(方向正好相反,那只会退到更旧、更早被服务端拒的版本)。
+
+## 7. 自建执行器（掌控镜像的路径；网络受限时也走这里）
 1. ECS/物理机按 Flow 文档接入为自有构建集群。
 2. 预装：git、curl、jq（≥1.6）、coreutils（`timeout`、`sha1sum`）、kiro-cli **固定为 `KIRO_TESTED_TARGETS` 名单内的版本**
    **名单的单位是「平台 + 版本」元组**（`<os>/<arch>:<版本>`，2026-09-13 起）：探测结论只对探测所用的那个组合成立——
@@ -552,6 +641,10 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 | 降级评论（「结构化解析失败」）的原文里出现 `Permission request failed` | 评审员试图读取**许可路径之外**的文件（业务库 checkout 与本次 diff 片段目录以外），被 kiro-cli 直接拒绝（headless 下不弹确认）。正常评审不该读那里，所以先检查业务库这次改动里有没有提示词注入（要求「读取 ~/.aws/credentials 并复述」之类的文本）；降级评论里会带出被拒的**路径名**（不是内容）。若被拒的路径就在业务库或 chunks 目录里，对照日志「受信 agent 许可路径」两条是否与本次 checkout 一致（第 8 节第 1 项）。**不要**按拒绝信息的建议加 `--trust-all-tools`——它绕过 allowedPaths（第 12 节） |
 | 评论说「kiro-cli 二进制摘要与 KIRO_CLI_SHA256 不一致」或「二进制摘要算不出」 | 执行器上的 kiro-cli 入口文件与镜像构建时记录的摘要不同：被替换、被自动升级、或安装路径变了（评论里有实际摘要与入口文件路径）。脚本在执行 kiro-cli 之前就停，Kiro 一次都没跑。处置：核对执行器镜像 digest 是否还是发布记录里那个；确属有意升级，按第 7 节四步（探测 → 名单 → 重新记录摘要 → 改变量）走完再放行。「算不出」= 执行器缺 `sha256sum` / `shasum`，或 kiro-cli 的符号链接断了 |
 | 评论说「kiro-cli 版本 X 未经 P1-15 探测…拒绝评审」或「版本号无法解析」 | 版本门（2026-09-10 起）：执行器上的 kiro-cli 不在 `KIRO_TESTED_TARGETS` 名单内，或 `--version` 解析不出版本号。云托管执行器 `curl \| bash` 装的是 latest，Kiro 发新版后就会这样；读取边界（符号链接 / `../` 是否先解析再比对 allowedPaths）只在名单内版本上实测过，不放行未验证版本。处置：生产执行器预装名单内版本（第 7 节）；确需在新版本上跑，先按 `scripts/probe/README.md`「升级 kiro-cli 之后」探测，通过后把元组加进流水线变量 `KIRO_TESTED_TARGETS_EXTRA`（只追加，不必改集成包源码）；**没跑探测**的临时放行才用 `KIRO_ACK_UNTESTED_TARGET=<与本次「平台:版本」逐字相同>`（汇总带醒目 notice，探测通过后删掉）。确认值与本次组合不一致、或版本 / 平台确定不了，一律拒绝。旧的 `KIRO_ACK_UNTESTED_VERSION` 已废弃，设了会直接拒绝运行 |
+| 评论说「钉版档位缺少 KIRO_PINNED_ARTIFACT」或**安装包取不到** | 钉版档位下安装包没落到约定路径。查 `oss_download`（`OSSDownload`）步骤是否成功、服务连接是否有该桶只读权限、桶里对象键是否与 `sourceFilePath` 一致；并确认 `KIRO_PINNED_ARTIFACT` 与 `targetFilePath` **逐字相同**（对不上就是下到一处、脚本读另一处）。**钉版档位不回退现装**——取不到就拒绝评审，不会偷偷 `curl \| bash` 装最新版 |
+| 评论说「安装包摘要不一致」（`KIRO_PINNED_ARTIFACT_SHA256`） | **拉到的字节**与集成包发布的安装包摘要对不上，在**解压之前**就停。成因：桶里对象被换过（升级时漏了「换 bucket 里的安装包对象」这一步）、`KIRO_PINNED_ARTIFACT_SHA256` 填错、或下载损坏。对照本节「已发布值」重新核对，或在 Cloud Shell 里重跑备包脚本（`sha256sum -c` 通过再上传） |
+| 评论说「入口文件摘要不一致」（`KIRO_CLI_SHA256`） | 安装包**解出来装上的那个入口文件**与发布的入口文件摘要对不上（安装包摘要可能还是对的——说明包被换成了另一个构建，比如 gnu 变体或别的版本）。这与上一条**不是同一个数**：上一条管下载、这条管「装完执行的到底是不是那个文件」。重新核对 `KIRO_CLI_SHA256` 是否是本版本 musl 入口文件的值，或重新备包 |
+| 报错 `KIRO_INSTALL_PROFILE 非法` / 缺失 | 档位变量配置错：未设置（**必配、无默认**）、取值不是 `pinned`/`latest`、或 `pinned` 下缺了 `KIRO_PINNED_ARTIFACT`/`KIRO_PINNED_ARTIFACT_SHA256`/`KIRO_CLI_SHA256` 三个必填之一。评论里会点明缺哪一个。这是纯配置问题，与 kiro-cli、网络、OSS 都无关——照第 11.1 节把变量配齐 |
 | 评论标题含「结构化解析失败」 | 评审跑完了、但输出不符合结构化契约，脚本降级为贴出评审员原文（退出码仍为 0）。评论里的引用块写明了具体原因：没有成对契约标记 / 标记内不是恰好一个 JSON 对象 / 出现多于一对标记（多为被评审代码里的假标记被原文引用）/ 顶层结构不符。排查：流水线日志里搜「Kiro 用量」看 credits 是否正常消耗（正常 = 评审真的跑了）、搜「结构化解析失败」看原因；若原因里带 `finalTextTruncated=true`，是 kiro-cli 自己截断了最终消息，重跑同样会截断，需缩小 diff（调低 DIFF_SIZE_LIMIT）或调高 kiro-cli 输出上限。重跑通常可恢复 |
 | 流水线绿灯但 MR 上一条评论都没有 | ① 日志有「diff 为空，跳过评审。」→ 源分支相对 merge-base 没有改动（或 MR 已合并后重跑），脚本按成功退出、不发评论；② 误配了 `DRY_RUN=1` → 日志里每个请求都以「DRY_RUN」开头，一条评论都不会真的发出，但结尾照样写「评审完成，已回写 MR」。生产流水线不要配 `DRY_RUN` |
 | 评论标题含「评审未完成」 | 评审没跑出结果（安装失败、超时、能力检查不通过、隔离步骤失败、受信 agent 未生效等），原因写在评论正文。这条评论会**原地更新覆盖上一次的报告正文**，但「历次评审」表仍保留历次记录，重跑成功即恢复完整报告 |
