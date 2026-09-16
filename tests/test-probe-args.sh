@@ -105,6 +105,28 @@ assert_eq "$(LC_ALL=C grep -c '已知坑：若之后要从 API 触发流水线' 
 assert_contains "$(cat "$GUIDE")" "参考 YAML（\`pipeline/flow-pipeline.yaml\`）已经用" "④：指南改为指向参考 YAML 的写法"
 rm -f "$runblk"
 
+# ============ issue 08：钉版档位的 OSSDownload 步骤（静态断言；真实行为是人工/流水线验收）============
+# 评审脚本对 OSS 一无所知（ADR-0006），所以这一步纯粹是流水线配置。本地套件覆盖不到 OSSDownload 的真实执行，
+# 只能守住参考 YAML 的结构不变式：步骤存在、排在评审之前、走服务连接不带 AK/SK（I10）、并把
+# 「targetFilePath ≡ KIRO_PINNED_ARTIFACT 且在业务库之外」这条跨组件不变式写进注释。
+assert_eq "$(LC_ALL=C grep -c 'step: OSSDownload' "$YAML")" "1" "08：参考 YAML 恰有一个 OSSDownload 步骤"
+# 排序：OSSDownload 必须在评审启动行之前（安装包要先落地，评审脚本才读得到）
+oss_ln=$(LC_ALL=C grep -m1 -n 'step: OSSDownload' "$YAML" | cut -d: -f1)
+rev_ln=$(LC_ALL=C grep -m1 -n '/bin/bash -p "\$PROJECT_DIR/\.\./integration_repo/scripts/kiro-review\.sh"' "$YAML" | cut -d: -f1)
+assert_eq "$([[ -n "$oss_ln" && -n "$rev_ln" && "$oss_ln" -lt "$rev_ln" ]] && echo before)" "before" \
+  "08：OSSDownload 步骤排在评审启动行之前"
+# 步骤配置齐备：源对象键 + 落地路径 + 走服务连接
+assert_eq "$(LC_ALL=C grep -c '^ *sourceFilePath:' "$YAML")" "1" "08：OSSDownload 配了 sourceFilePath（桶内对象键）"
+assert_eq "$(LC_ALL=C grep -c '^ *targetFilePath:' "$YAML")" "1" "08：OSSDownload 配了 targetFilePath（执行器本地落地路径）"
+# I10：OSS 鉴权走服务连接（RAM），AK/SK 绝不进 YAML。整份 YAML 不得出现任何形态的 access key
+assert_eq "$(LC_ALL=C grep -ciE 'accesskey|access-key|ak_secret|aksk' "$YAML")" "0" "08：YAML 里没有任何 AK/SK 形态（OSS 鉴权走服务连接，I10）"
+# 跨组件不变式必须在注释里写清：targetFilePath 与 KIRO_PINNED_ARTIFACT 逐字相同、且在业务库之外
+assert_eq "$(LC_ALL=C grep -c '与 UI 变量 KIRO_PINNED_ARTIFACT 逐字相同' "$YAML")" "1" \
+  "08：YAML 注明 targetFilePath ≡ KIRO_PINNED_ARTIFACT（否则下载到的文件与脚本读的路径对不上）"
+assert_contains "$(cat "$YAML")" "业务库" "08：YAML 注明落地路径必须在业务库 checkout 之外"
+# 钉版路径绝不 curl 官方安装脚本（那是 latest 档位的事）——整份 YAML 不出现安装脚本 URL
+assert_eq "$(LC_ALL=C grep -c 'cli.kiro.dev/install' "$YAML")" "0" "08：钉版参考 YAML 不出现 curl 官方安装脚本"
+
 # ============ 票 18 ⑫：探测脚本的三处静态守卫 ============
 # ① 「命令管进 grep -q」的形状（grep -q 命中即退出 → 上游收 SIGPIPE → pipefail 下管道非零 → 找到了却判成没找到）
 for f in probe-kiro-headless.sh probe-kiro-allowlist.sh probe-codeup-inline.sh probe-flow-run.sh; do
