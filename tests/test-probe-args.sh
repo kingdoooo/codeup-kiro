@@ -120,10 +120,15 @@ assert_eq "$(LC_ALL=C grep -c '^ *sourceFilePath:' "$YAML")" "1" "08：OSSDownlo
 assert_eq "$(LC_ALL=C grep -c '^ *targetFilePath:' "$YAML")" "1" "08：OSSDownload 配了 targetFilePath（执行器本地落地路径）"
 # I10：OSS 鉴权走服务连接（RAM），AK/SK 绝不进 YAML。整份 YAML 不得出现任何形态的 access key
 assert_eq "$(LC_ALL=C grep -ciE 'accesskey|access-key|ak_secret|aksk' "$YAML")" "0" "08：YAML 里没有任何 AK/SK 形态（OSS 鉴权走服务连接，I10）"
-# 跨组件不变式必须在注释里写清：targetFilePath 与 KIRO_PINNED_ARTIFACT 逐字相同、且在业务库之外
-assert_eq "$(LC_ALL=C grep -c '与 UI 变量 KIRO_PINNED_ARTIFACT 逐字相同' "$YAML")" "1" \
-  "08：YAML 注明 targetFilePath ≡ KIRO_PINNED_ARTIFACT（否则下载到的文件与脚本读的路径对不上）"
-assert_contains "$(cat "$YAML")" "业务库" "08：YAML 注明落地路径必须在业务库 checkout 之外"
+# OSSDownload 的真实路径语义（2026-09-16 真实流水线实测）：targetFilePath 是【相对 PROJECT_DIR 的目录名】，
+# 不是绝对路径、也不带文件名（填绝对路径会被剥前导 / 拼进业务库）。对象落在业务库内，由 review_step 的 run 块
+# move 到业务库外的 /tmp、再作为 KIRO_PINNED_ARTIFACT 交给脚本（OSSDownload 无法直接落到业务库之外）。
+assert_eq "$(LC_ALL=C grep -c '^ *targetFilePath: "kiro-artifact"$' "$YAML")" "1" "08：targetFilePath 是相对目录名 kiro-artifact"
+assert_eq "$(LC_ALL=C grep -c 'targetFilePath: "/' "$YAML")" "0" "08：targetFilePath 不写成绝对路径（会被剥前导 / 拼进业务库）"
+assert_eq "$(LC_ALL=C grep -c 'if \[ "\${KIRO_INSTALL_PROFILE:-}" = pinned \]' "$YAML")" "1" "08：run 块仅在 pinned 档位 move 安装包（latest 跳过）"
+assert_eq "$(LC_ALL=C grep -c 'export KIRO_PINNED_ARTIFACT=/tmp/kiro-artifact/' "$YAML")" "1" "08：run 块把 KIRO_PINNED_ARTIFACT 指向业务库外的 /tmp 绝对路径"
+assert_contains "$(cat "$YAML")" "OSSDownload 对不存在的对象" "08：注明 OSSDownload 不报错、靠 [ -f ] 守卫兜底（负向用例）"
+assert_contains "$(cat "$YAML")" "业务库" "08：YAML 注明安装包不能留在业务库 checkout 内"
 # 钉版路径绝不 curl 官方安装脚本（那是 latest 档位的事）——整份 YAML 不出现安装脚本 URL
 assert_eq "$(LC_ALL=C grep -c 'cli.kiro.dev/install' "$YAML")" "0" "08：钉版参考 YAML 不出现 curl 官方安装脚本"
 

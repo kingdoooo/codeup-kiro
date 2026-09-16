@@ -72,16 +72,30 @@ stages:
               bucket: "<你的私有 bucket，如 codeup-kiro-cli-0916>"
               # 桶内对象键：按 kiro/<版本>/<平台变体>.zip 组织，便于多版本并存（升级只加新对象，不动旧的）。
               sourceFilePath: "kiro/2.21.4/kirocli-x86_64-linux-musl.zip"
-              # ★ 跨组件不变式：targetFilePath 落地的绝对路径必须与 UI 变量 KIRO_PINNED_ARTIFACT 逐字相同，
-              #   且必须在【业务库 checkout（PROJECT_DIR）之外】——业务库内容一律不受信，落在库内会被评审脚本拒绝运行。
-              #   评审脚本只认这个本地路径、对 OSS 一无所知（ADR-0006），所以自建执行器把 kiro-cli 烤进镜像时同一套脚本不用改。
-              #   /root 是 alinux3 执行器的 home（实测入口 /root/.local/bin/kiro-cli），在业务库之外、可写。
-              targetFilePath: "/root/kiro-artifact/kirocli-x86_64-linux-musl.zip"
+              # ★ OSSDownload 的真实路径语义（2026-09-16 真实流水线实测，OSSDownload v1.0.27 + ossutil 1.7.19）：
+              #   targetFilePath 被当作【相对 PROJECT_DIR（业务库 checkout）的目录】，用 `ossutil cp -r` 把对象按原名下进该目录。
+              #   → 填绝对路径会被剥掉前导 / 拼进业务库；填带文件名会多套一层同名目录。所以这里填【目录名】，
+              #   对象最终落在 <PROJECT_DIR>/kiro-artifact/kirocli-x86_64-linux-musl.zip（在业务库内）。
+              #   业务库内容不受信、评审脚本会拒绝库内的安装包路径，OSSDownload 又无法直接落到业务库之外——
+              #   所以由下面 review_step 的 run 块把它 move 到业务库外的固定绝对路径，再作为 KIRO_PINNED_ARTIFACT 交给脚本。
+              #   （另注：OSSDownload 对不存在的对象**不报错**、只建空目录，兜底靠 run 块的 [ -f ] 守卫。）
+              targetFilePath: "kiro-artifact"
           review_step:
             step: Command
             name: 运行 Kiro 评审（脚本来自受信集成包）
             with:
               run: |
+                # 钉版档位（KIRO_INSTALL_PROFILE=pinned）：oss_download 把安装包下到了业务库内（见其路径语义说明），
+                # 这里把它 move 到业务库之外的固定绝对路径，再作为 KIRO_PINNED_ARTIFACT 交给脚本。latest 档位跳过这段。
+                # OSSDownload 对不存在的对象不报错（只建空目录），所以 [ -f ] 守卫 = 「取不到就红、绝不放行到评审」的兜底
+                # （2026-09-16 负向用例实测：坏对象 → 这里 exit 1、评审脚本不启动、不回退 curl 现装）。
+                set -e
+                if [ "${KIRO_INSTALL_PROFILE:-}" = pinned ]; then
+                  src="$PROJECT_DIR/kiro-artifact/kirocli-x86_64-linux-musl.zip"
+                  [ -f "$src" ] || { echo "钉版安装包不在预期位置：$src"; ls -RA "$PROJECT_DIR/kiro-artifact" 2>/dev/null || true; exit 1; }
+                  mkdir -p /tmp/kiro-artifact && mv -f "$src" /tmp/kiro-artifact/kirocli-x86_64-linux-musl.zip
+                  export KIRO_PINNED_ARTIFACT=/tmp/kiro-artifact/kirocli-x86_64-linux-musl.zip
+                fi
                 # 多代码源下无下标 CI_COMMIT_REF_NAME 取值不可预期（可能取到集成包分支）；
                 # 用带下标变量显式指定业务库源分支与 MR 目标分支（约定见 setup-guide 第 5.1 节）。
                 # 首次接入务必用 `env | cut -d= -f1 | sort`（只打变量名）核对本组织的变量名。
@@ -122,11 +136,11 @@ stages:
 #                      **缺失即拒绝评审**——刻意不给缺省值：靠「某个来源变量是否非空」推断档位时，变量名拼错会静默落回现装最新版，
 #                      然后被版本门拒绝，错误信息指向 Kiro 版本而真实原因是拼错的变量名。**这是运维可见的行为变更**：
 #                      升级到本版本之前必须先在 UI 里配好它，否则每次评审都会以「缺少 KIRO_INSTALL_PROFILE」失败
-#   KIRO_PINNED_ARTIFACT 钉版档位**必配**（latest 档位下忽略）。安装包在执行器上的**绝对路径**，由上面的 oss_download 步骤
-#                      （或制品源等价机制）预先备好。**取值必须与 oss_download 的 targetFilePath 逐字相同**（如
-#                      /root/kiro-artifact/kirocli-x86_64-linux-musl.zip），对不上则 OSSDownload 下到一处、脚本读另一处。
-#                      必须在业务仓库之外——业务库内容一律不受信，落在库内会被拒绝运行。
-#                      评审脚本不知道文件是怎么到那儿的，所以自建执行器把 kiro-cli 烤进镜像时同一套脚本不用改
+#   KIRO_PINNED_ARTIFACT 钉版档位**必配**：安装包在执行器上的**绝对路径**，且必须在业务仓库之外（业务库内容不受信，
+#                      落在库内会被拒绝运行）。评审脚本只认这个本地路径、不知道文件怎么来的（自建执行器烤进镜像时同一套脚本不用改）。
+#                      **本参考不把它配成 UI 变量**：OSSDownload 只能把对象下到业务库内（见 oss_download 的路径语义），所以由
+#                      review_step 的 run 块把包 move 到业务库外的 /tmp/kiro-artifact/ 后 `export KIRO_PINNED_ARTIFACT` 指向它。
+#                      若你的执行器/下载方式能直接把包放到业务库外的固定绝对路径，可省掉 move、把它配成 UI 变量
 #   KIRO_PINNED_ARTIFACT_SHA256 钉版档位**必配**。**安装包本身**的 64 位十六进制 SHA-256，核对「拉到的字节对不对」，
 #                      在解压之前核对。与 KIRO_CLI_SHA256（核对「装完之后被执行的那个文件」）**不是同一个数**，两个都要配：
 #                      官方按版本直链不发布校验和（`stable/<版本>/manifest.json` 返回 403），这两个摘要是钉版安装唯一的完整性依据。
