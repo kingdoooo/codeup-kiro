@@ -1969,6 +1969,21 @@ assert_not_contains "$OUT" "开始 Kiro 评审" "追加名单里有非法项：K
 run_case extraglob MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA='*'
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "追加名单取值是 * → 按形状拒绝"
 assert_not_contains "$OUT" "AGENTS.md" "追加名单取值是 *：不在业务库里做 glob 展开（业务库根下的 AGENTS.md 不会出现在输出里）"
+# 分隔用的空白也包括**换行**（CodeX 2026-09-16 复审 R4；变异 M-extra-multiline 守着）：运维从探测结果整段粘贴
+# 就是多行。`read -ra` 默认只读到第一个换行，第一行之后的项被**静默丢掉**——合法元组不生效（表现是「变量配了
+# 但不生效」然后被版本门拒绝），非法项也不再触发上面那条「任一项非法即拒绝」。两个方向各一条用例。
+run_case extranl MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'linux/mips64:1.2.3\n'"${HOST_PLAT}:9.9.9"
+assert_rc "$RC" 0 "追加名单用换行分隔：第二行的元组照样生效（不被静默截断）"
+assert_contains "$OUT" "KIRO_TESTED_TARGETS_EXTRA" "追加名单用换行分隔：日志仍说明来源是追加名单"
+run_case extranlbad MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA="${HOST_PLAT}:9.9.9"$'\nNOT-A-TARGET'
+assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "追加名单第二行非法 → 拒绝运行（首行合法也不放过）"
+assert_contains "$(posted_comment "$OUT")" "KIRO_TESTED_TARGETS_EXTRA 不合法" "追加名单第二行非法：失败评论点名变量"
+assert_not_contains "$OUT" "NOT-A-TARGET" "追加名单第二行非法：非法取值不回显"
+assert_not_contains "$OUT" "开始 Kiro 评审" "追加名单第二行非法：Kiro 不启动"
+# 多行 + 混合空白（空格 / 制表符 / 尾随换行）：校验与判定看的是同一份归一后的列表
+run_case extranlmix MOCK_KIRO_VERSION=9.9.9 \
+  KIRO_TESTED_TARGETS_EXTRA=$'linux/mips64:1.2.3\nlinux/riscv64:2.0.0 \t'"${HOST_PLAT}:9.9.9"$'\n'
+assert_rc "$RC" 0 "追加名单多行 + 混合空白：全部逐项校验并生效"
 # ---- 汇总评论的元信息里带 Kiro CLI 版本（issue 06 / 不变式 I9）----
 # 一份评审出问题时第一个问题就是「哪个版本产出的」，而这个取值以前只用于版本门判断、根本没进过评论。
 # 加的是**不带任何限定语**的一行：已探测名单的来源（仓库常量 / 使用方追加名单）是运维信息、只进流水线日志；
@@ -2156,6 +2171,25 @@ assert_contains "$OUT" "开始 Kiro 评审" "/bin/bash -p：Kiro 正常启动"
 # 参考 YAML 的启动行必须带 -p（这是上面那些「-p 之后就不成立」的形态在生产上的唯一保证）
 assert_eq "$(LC_ALL=C grep -c '^                /bin/bash -p "\$PROJECT_DIR/\.\./integration_repo/scripts/kiro-review\.sh"$' "$ROOT/pipeline/flow-pipeline.yaml")" "1" \
   "参考 YAML 用 /bin/bash -p 绝对路径启动脚本"
+# 同一条不变量的另一半（CodeX 2026-09-16 复审 R1）：run 块**整段**都跑在 Flow 的外层 shell 里，比脚本自己的
+# PATH 门更早，而 cwd 是业务库。里面任何**裸**外部命令都按 PATH 查找 = 让 MR 作者在所有安全检查之前提供那个
+# 命令（还继承整个流水线环境，含私密变量）。所以守形态：run 块里只许出现 shell builtin 与绝对路径命令。
+_yaml="$ROOT/pipeline/flow-pipeline.yaml"
+_run_block=$(LC_ALL=C awk '/^ *run: \|$/{f=1;next} f && /^[^ ]/{f=0} f' "$_yaml")
+# 命令位置 = 行首 / `;` / `&`/`|` / `{`/`}` / `&&` / `||` 之后。绝对路径写法（`/bin/mv`）不会命中：那些位置上
+# 紧跟的是 `/`。名单列的是这段脚本真可能用到的外部命令，新增别的命令时请一并加进来。
+_bare_cmd_re='(^|[;&|(){}]|&&|\|\|)[[:space:]]*(mkdir|mv|cp|ln|ls|rm|cat|install|unzip|zip|curl|wget|env|sed|awk|grep|find|xargs|chmod|chown|sha256sum|shasum|dirname|basename|tar|python[0-9.]*|perl|bash|sh)([[:space:]]|$)'
+assert_eq "$(printf '%s\n' "$_run_block" | LC_ALL=C grep -v '^[[:space:]]*#' | LC_ALL=C grep -cE "$_bare_cmd_re" || true)" "0" \
+  "参考 YAML 的 run 块里没有裸调用的外部命令（它整段跑在评审脚本 PATH 门之前，裸命令按 PATH 查找、cwd 是业务库）"
+assert_eq "$(printf '  mkdir -p /tmp/x && mv -f "$src" /tmp/x/a.zip\n' | LC_ALL=C grep -cE "$_bare_cmd_re")" "1" \
+  "元测试：上面那条守卫的正则真的命中裸命令（否则它永远是 0、什么都守不住）"
+assert_eq "$(printf '  /bin/mkdir -p /tmp/x && /bin/mv -f "$src" /tmp/x/a.zip\n' | LC_ALL=C grep -cE "$_bare_cmd_re" || true)" "0" \
+  "元测试：同一行改成绝对路径就不再命中（守卫不是恒真）"
+assert_eq "$(printf '%s\n' "$_run_block" | LC_ALL=C grep -c '/bin/mv -f "\$src" /tmp/kiro-artifact/')" "1" \
+  "参考 YAML 的搬包命令是绝对路径的 /bin/mv，且目标在业务库之外"
+assert_eq "$(printf '%s\n' "$_run_block" | LC_ALL=C grep -c '\[ ! -L "\$src" \]')" "1" \
+  "参考 YAML 搬包前拒绝符号链接（业务库能提交同名链接，`[ -f ]` 会跟着它读业务库文件）"
+unset _yaml _run_block _bare_cmd_re
 # 静态守卫（第四轮复审 P1）：门是**时点**判断，所以「脚本里每一次改写 PATH 都紧跟一次重新过门，之后 PATH 冻住」
 # 这条不变量得有人守——e2e 造不出「kiro-cli 不存在」那条安装分支（mockbin 里一直有 kiro-cli）。
 _kr_src="$ROOT/scripts/kiro-review.sh"
@@ -2360,6 +2394,25 @@ run_case profpinnedinrepo KIRO_INSTALL_PROFILE=pinned \
   KIRO_PINNED_ARTIFACT_SHA256="$zero64" KIRO_CLI_SHA256="$mock_sha"
 assert_nonzero "$RC" "钉版档位：安装包路径在业务库内 → 拒绝运行"
 assert_contains "$OUT" "业务库" "钉版档位：拒绝原因说明是业务库内"
+# R6（CodeX 2026-09-17 复审）：这条拒绝以前直接 exit 1、绕过失败评论，让上一条报告原样留在 MR 上（违反 I10）。
+# 现在它与本步骤其余校验一样走 die_review：失败要在 MR 上看得见。
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "评审未完成" "R6：安装包路径在业务库内 → 回写「评审未完成」失败评论（不再静默 exit）"
+assert_contains "$comment" "KIRO_PINNED_ARTIFACT" "R6：失败评论点名变量"
+assert_not_contains "$comment" "case-profpinnedinrepo" "R6：路径取值不进评论"
+assert_not_contains "$OUT" "case-profpinnedinrepo/work/kirocli.zip" "R6：路径取值也不进日志（helper 只报状态）"
+# R6 最强判据：已有一条**旧汇总**在 MR 上时，路径被拒必须把它**原地更新**为「评审未完成」——否则上一条
+# 成功报告原样留着，读 MR 的人看到的是过期的成功结论。用 prior-run1 fixture（同 §票03）+ 已配机器人账号。
+run_case r6priorupdate DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" \
+  KIRO_INSTALL_PROFILE=pinned KIRO_PINNED_ARTIFACT="$tmp/case-r6priorupdate/work/kirocli.zip" \
+  KIRO_PINNED_ARTIFACT_SHA256="$zero64" KIRO_CLI_SHA256="$mock_sha"
+assert_nonzero "$RC" "R6：路径在业务库内、且已有旧汇总 → 拒绝运行"
+assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" \
+  "R6：把旧汇总原地更新（PUT 到同一 biz_id），不是留着过期的成功报告"
+assert_eq "$(req_count "$OUT" POST 'changeRequests/7/comments$')" "0" "R6：不新建第二条汇总"
+assert_contains "$(posted_comment "$OUT")" "评审未完成" "R6：更新后的旧汇总正文是「评审未完成」"
+assert_eq "$([[ -e "$tmp/case-r6priorupdate/home/.kiro-mock/calls" ]] && echo called || echo not-called)" "not-called" \
+  "R6：路径被拒时 kiro-cli 一次都没被执行"
 # 现装档位：既有行为不变（KIRO_CLI_SHA256 仍可选），且日志打印本次档位
 run_case proflatest KIRO_INSTALL_PROFILE=latest
 assert_rc "$RC" 0 "现装档位：照常完成（KIRO_CLI_SHA256 可选）"
@@ -2402,6 +2455,26 @@ else
     "钉版安装：摘要不一致时 kiro-cli 一次都没被执行"
   assert_eq "$([[ -e "$CASE/home/.local/bin/kiro-cli" ]] && echo installed || echo not-installed)" "not-installed" \
     "钉版安装：摘要不一致时未解压未安装"
+  # 不变式 I6 的另一半（CodeX 2026-09-16 复审 R2）：安装包路径是**库外的符号链接、指向业务库里的 ZIP**。
+  # 两项摘要都**故意配对**（链接目标就是同一份夹具的拷贝），所以这条用例证明的是「路径判据独立成立」，
+  # 不是「摘要挡住了它」——旧实现下 `cd -P` 对文件必然失败、祖先退到链接所在的库外目录，于是安装成功、评审照跑。
+  SYM_LINK="$tmp/pinned-symlink.zip"
+  ln -sf "$tmp/case-pinnedsymlink/work/inrepo-kirocli.zip" "$SYM_LINK"
+  plant_inrepo_artifact() { cp "$ART" ./inrepo-kirocli.zip; }
+  CASE_TWEAK=plant_inrepo_artifact run_case pinnedsymlink PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$SYM_LINK" KIRO_PINNED_ARTIFACT_SHA256="$ART_SHA" \
+    KIRO_CLI_SHA256="$ART_ENTRY_SHA" KIRO_INSTALL_URL=http://127.0.0.1:1/must-not-be-used
+  assert_eq "$([[ -f "$CASE/work/inrepo-kirocli.zip" ]] && echo planted || echo missing)" "planted" \
+    "夹具自检：业务库里真的放了一份安装包（否则下面几条断言测不到东西）"
+  assert_nonzero "$RC" "钉版安装：路径是库外链接、指向业务库内的 ZIP → 拒绝评审（两项摘要都对得上）"
+  assert_contains "$OUT" "本身是符号链接" "钉版安装：拒绝原因点明它是符号链接"
+  assert_contains "$(posted_comment "$OUT")" "评审未完成" "R6：链接被拒也回写失败评论（不再静默 exit）"
+  assert_not_contains "$OUT" "钉版安装包摘要核对通过" "钉版安装：在算摘要与解压之前就停（路径判据不靠摘要兜底）"
+  assert_eq "$([[ -e "$CASE/home/.kiro-mock/calls" ]] && echo called || echo not-called)" "not-called" \
+    "钉版安装：链接被拒时 kiro-cli 一次都没被执行"
+  assert_eq "$([[ -e "$CASE/home/.local/bin/kiro-cli" ]] && echo installed || echo not-installed)" "not-installed" \
+    "钉版安装：链接被拒时未解压未安装"
+  assert_not_contains "$OUT" "kiro-cli 安装失败" "钉版安装：链接被拒时也不回退现装（不变式 I4）"
   # 安装包不存在 → 拒绝，且不回退现装（不变式 I4）
   run_case pinnedmissing PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
     KIRO_PINNED_ARTIFACT="$tmp/does-not-exist.zip" KIRO_PINNED_ARTIFACT_SHA256="$ART_SHA" \

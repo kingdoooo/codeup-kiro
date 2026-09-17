@@ -273,8 +273,16 @@ aliyun oss stat "oss://${BUCKET}/${KEY}" -e "$EP"            # 确认 Content-Le
 
 `OSSDownload` 走**服务连接(RAM)**,不是 AK/SK;凭证既不进 YAML 也不进流水线环境(不变式 I10):
 1. 云效「运维 → 服务连接 / 连接管理」新建一个 OSS/RAM 类型的服务连接。
-2. 它绑定的 RAM 身份只需要**该专用桶的只读**权限(`oss:GetObject`,Resource 限定到 `acs:oss:*:*:<bucket>/*`)——桶里只有安装包、
-   没有别的东西,桶级只读足够,**不要**给账号级 OSS 权限。
+2. 它绑定的 RAM 身份只需要**该专用桶的只读**权限,但要**两条**——只给 `oss:GetObject` 装不上:
+   - `oss:ListObjects`,Resource 是**桶本身** `acs:oss:*:*:<bucket>`(可再用条件 `oss:Prefix` 限到 `kiro/`);
+   - `oss:GetObject`,Resource 是**对象路径** `acs:oss:*:*:<bucket>/*`。
+
+   为什么要 List:`OSSDownload` 底层是 `ossutil cp -r`(OSSDownload v1.0.27 + ossutil 1.7.19,2026-09-16 实测),
+   递归分支先 ListObjects 列出前缀下的对象、再逐个下载,所以缺 List 会在**列举那一步**就被拒。这也正是
+   「对象不存在时这个 step 不报错、只建空目录」的成因(列举返回零个对象)。桶里只有安装包、没有别的东西,
+   桶级只读足够,**不要**给账号级 OSS 权限。
+   ⚠ 证据分级:本仓库的实测运行用的是云效在「同意授权」时自动创建的 `AliyunRDCDefaultRole`(权限比这宽),
+   上面这份最小权限策略是按 ossutil 行为与阿里云 RAM 文档推出来的,**还没有用一个只带它的身份实测过**。
 3. 参考 YAML 的 `oss_download` 步骤里 `serviceConnection: "<id>"` 填这个连接(首次在 YAML 编辑器粘贴后校验器会回填 ID)。
 
 #### 升级 kiro-cli 是**五步仪式**(比现装/自建多一步)
@@ -284,7 +292,12 @@ aliyun oss stat "oss://${BUCKET}/${KEY}" -e "$EP"            # 确认 Content-Le
 2. 把新元组**加进名单**——集成包常量 `KIRO_TESTED_TARGETS`,或流水线变量 `KIRO_TESTED_TARGETS_EXTRA`(你自己探测过的,只追加);
 3. 重新发布/记录**两个摘要**(安装包摘要 + 入口文件摘要);
 4. **换 bucket 里的安装包对象**(按 `kiro/<新版本>/...` 传新对象,改 `sourceFilePath`);
-5. 改流水线变量 `KIRO_PINNED_ARTIFACT_SHA256` / `KIRO_CLI_SHA256`(若换了对象键还要改 `KIRO_PINNED_ARTIFACT` 与 `targetFilePath`,两者逐字相同)。
+5. 改流水线变量 `KIRO_PINNED_ARTIFACT_SHA256` / `KIRO_CLI_SHA256`。**只换对象键里的版本目录、文件名不变**时到这里就结束了——
+   `targetFilePath` 与 run 块里的路径都不含版本号。**文件名或暂存目录变了**才要一起改三处、并保证它们首尾相接:
+   `oss_download` 的 `targetFilePath`(相对 `PROJECT_DIR` 的**目录**,对象按原名落在里面)→ run 块的 `src=`(搬包来源,
+   必须等于上一步的落点)→ run 块 `mv` 的目标与紧随的 `export KIRO_PINNED_ARTIFACT`(业务库**之外**的绝对文件路径)。
+   `targetFilePath` 与 `KIRO_PINNED_ARTIFACT` 语义不同(库内相对目录 vs 库外绝对文件),**不能写成同一个值**;
+   参考 YAML 也不把后者配成 UI 变量,它由 run 块 export。
 
 漏第 4 步:桶里还是旧包,安装包摘要门拒绝。漏第 3/5 步:新包装上、摘要对不上,同样拒绝。这五步都在评审真正跑之前把关。
 

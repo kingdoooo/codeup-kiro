@@ -89,11 +89,20 @@ stages:
                 # 这里把它 move 到业务库之外的固定绝对路径，再作为 KIRO_PINNED_ARTIFACT 交给脚本。latest 档位跳过这段。
                 # OSSDownload 对不存在的对象不报错（只建空目录），所以 [ -f ] 守卫 = 「取不到就红、绝不放行到评审」的兜底
                 # （2026-09-16 负向用例实测：坏对象 → 这里 exit 1、评审脚本不启动、不回退 curl 现装）。
+                # ★ 搬包的三个命令**都写绝对路径**（CodeX 2026-09-16 复审 R1）：这一段跑在 Flow 的**外层** shell 里，
+                #   比评审脚本自己的 PATH 门更早，而 cwd 就是业务库。裸 `mkdir` / `mv` / `ls` 都按 PATH 查找——
+                #   执行器 PATH 一旦含业务库目录、相对条目或空条目，MR 作者提交一个同名可执行文件就能在任何安全检查
+                #   之前跑起来，并继承整个流水线环境（含私密变量）；下一行的 `-p` 只管它自己那次调用，管不了这里。
+                #   `[`、`echo`、`export`、`:` 是 shell builtin，不走 PATH。换镜像时按该镜像里这三个命令的绝对路径改
+                #   （alinux3 / alinux4 的 /bin 是 /usr/bin 的符号链接，/bin/mkdir 等都在）。
+                # ★ `-L` 也要拒：业务库可以提交一个同名符号链接，OSSDownload 取不到对象时它会原样留在那里，
+                #   `[ -f ]` 跟着链接读到业务库文件、`mv` 又只搬链接本身。评审脚本的路径门会独立拒绝它（复审 R2），
+                #   这里只是让报错更早、更像话。
                 set -e
                 if [ "${KIRO_INSTALL_PROFILE:-}" = pinned ]; then
                   src="$PROJECT_DIR/kiro-artifact/kirocli-x86_64-linux-musl.zip"
-                  [ -f "$src" ] || { echo "钉版安装包不在预期位置：$src"; ls -RA "$PROJECT_DIR/kiro-artifact" 2>/dev/null || true; exit 1; }
-                  mkdir -p /tmp/kiro-artifact && mv -f "$src" /tmp/kiro-artifact/kirocli-x86_64-linux-musl.zip
+                  [ -f "$src" ] && [ ! -L "$src" ] || { echo "钉版安装包不在预期位置、或它是符号链接（业务库可提交同名链接）：$src"; /bin/ls -RA "$PROJECT_DIR/kiro-artifact" 2>/dev/null || true; exit 1; }
+                  /bin/mkdir -p /tmp/kiro-artifact && /bin/mv -f "$src" /tmp/kiro-artifact/kirocli-x86_64-linux-musl.zip
                   export KIRO_PINNED_ARTIFACT=/tmp/kiro-artifact/kirocli-x86_64-linux-musl.zip
                 fi
                 # 多代码源下无下标 CI_COMMIT_REF_NAME 取值不可预期（可能取到集成包分支）；

@@ -1076,7 +1076,11 @@ fi
 # 用 read -ra 而不是 `for t in $VAR`：后者除了按 IFS 分词还会做**路径展开**，而 cwd 就是业务库，一个 `*` 会展开成业务库的文件名
 # （既让形状校验对着文件名跑，也把业务库的目录内容漏进日志与评论）。取值不回显：它会原样进日志。
 if [[ -n "$KIRO_TESTED_TARGETS_EXTRA" ]]; then
-  read -ra _extra_targets <<<"$KIRO_TESTED_TARGETS_EXTRA"
+  # `-d ''`（NUL 作行分隔符）不可省（CodeX 2026-09-16 复审 R4）：`read -ra` 默认只读到**第一个换行**，
+  # 于是多行取值（从探测结果整段粘贴很自然）第一行之后的项被**静默丢掉**——合法元组不生效、非法项也不再触发
+  # 下面那条「任一项非法即拒绝」。here-string 里没有 NUL，read 会以 1 退出（EOF），但数组已经赋好，
+  # 所以显式吞掉返回码；这一步唯一的非零来源就是「没遇到 NUL」。
+  read -ra _extra_targets -d '' <<<"$KIRO_TESTED_TARGETS_EXTRA" || :
   _extra_norm=""
   # 下标循环而不是 `for _t in "${_extra_targets[@]}"`：取值只有空白时数组是空的，而 bash 3.2 在 `set -u` 下
   # 展开空数组会直接报 unbound variable——那会绕过 die_review，MR 上什么都看不到（违反 I10）
@@ -1120,10 +1124,22 @@ if [[ "$KIRO_INSTALL_PROFILE" == pinned ]]; then
   # 路径本身是不受信输入：相对路径 = 当前目录 = 业务库；落在业务库内则业务库可以自己放一个「安装包」。
   # 摘要门能挡住内容替换，但路径判据要独立成立、不靠摘要兜底。包含判定复用 PATH 门同一个 helper
   # （它解引用符号链接、按「最近的能进去的祖先」比对，且刻意不回显取值）。
+  # **安装包是文件，所以「链接本身」这一维必须由 helper 明确拒绝**（CodeX 2026-09-16 复审 R2）：库外的一个
+  # 链接指向业务库里的 ZIP 时，`cd -P` 对文件必然失败、祖先退到链接所在的库外目录，路径判据就整类失效，
+  # 而后面的 `-f` / 摘要 / unzip 全都跟着链接读业务库文件（流水线的 `mv` 也只搬链接本身）。
   [[ "$KIRO_PINNED_ARTIFACT" == /* ]] \
     || die_review "KIRO_PINNED_ARTIFACT 必须是绝对路径（相对路径会相对业务库解析；取值不回显）。请修正该流水线变量"
-  review_dir_not_in_repo_or_die "$KIRO_PINNED_ARTIFACT" "$REVIEW_REPO_DIR" \
-    "校验钉版安装包路径（业务库内容一律不受信，安装包不能取自业务库）"
+  # 这个 helper 的通用契约是失败即 `exit 1`（它同样服务于第 2 步 curl 之前的 HOME 检查，那处保留直接退出：
+  # HOME 指进业务库时，安装器会把 $HOME/.local/bin 写进业务库——那是安装副作用，与失败评论无关）。
+  # 但钉版安装包路径是第 1.6 步的**配置校验**，与它周围每一条校验（缺变量 / 摘要形状 / 相对路径）一样，失败要在
+  # MR 上看得见（spec I10）；直接 `exit 1` 会绕过失败评论出口，让上一条**成功**报告原样留在 MR 上，本次未完成
+  # 无迹可寻（CodeX 2026-09-17 复审 R6）。所以把检查放进子 shell 收住它的 `exit`，失败再走 die_review——
+  # 它与本步骤其余每一个 die_review 走同一条出口，令牌不被业务库 `.curlrc` 引到外部靠的是 API 客户端的
+  # `curl -q`（codeup-api.sh，CodeX 复审 R7），不是靠「谁先退出」。
+  # helper 自己的 stderr（含具体形态：库内 / 符号链接）已进流水线日志；die_review 的文案点名变量、不回显路径。
+  ( review_dir_not_in_repo_or_die "$KIRO_PINNED_ARTIFACT" "$REVIEW_REPO_DIR" \
+      "校验钉版安装包路径（业务库内容一律不受信，安装包不能取自业务库）" ) \
+    || die_review "KIRO_PINNED_ARTIFACT 路径不可信：它落在业务仓库之内、或本身是符号链接（业务库内容一律不受信，安装包不能取自业务库；取值不回显，具体形态见流水线日志）。请把它指到业务仓库之外的物理文件路径，或把 KIRO_INSTALL_PROFILE 改成 latest"
 fi
 log "安装档位：${KIRO_INSTALL_PROFILE}"
 # KIRO_ENV_PASSTHROUGH 只收变量名：非法名字（写成 NAME=value、带空格/连字符）与凭证形状的名字（规则表 KIRO_ENV_CRED_RULES，

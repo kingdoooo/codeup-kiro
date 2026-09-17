@@ -3,7 +3,8 @@
 #
 # 分工：test-kiro-review.sh 的 e2e 用例证明「门装在脚本第 0 步、在第一个外部命令之前」；本文件测**判据本身**，
 # 覆盖 e2e 造不出或造起来很贵的形态：改写 PATH 之后重新过门、业务库目录解析不出物理路径、业务库解析成 `/`、
-# 业务库里**还不存在**的 PATH 条目、经符号链接指进业务库的条目。
+# 业务库里**还不存在**的 PATH 条目、经符号链接指进业务库的条目、待检路径自己是符号链接（含相对目标 / 链式 /
+# 断链 / 链接环，CodeX 2026-09-16 复审 R2）。
 # 门用 `exit 1` 而不是 return，所以每次调用都放在子 shell 里。
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -148,5 +149,43 @@ assert_not_contains "$OUT" "no-such-repo" "HOME 检查：业务库路径取值�
 assert_not_contains "$OUT" "$outside" "HOME 检查：待检目录取值也不进日志"
 # 业务库解析成 / → 拒绝（与 PATH 门同款）
 gate2 "$outside" "/";            assert_nonzero "$RC" "HOME 检查：业务库解析成根目录 → 拒绝"
+
+# ---- 待检路径自己是符号链接（CodeX 2026-09-16 复审 R2）----
+# 钉版档位把这个 helper 也用在**文件**上（KIRO_PINNED_ARTIFACT）。文件的 `cd -P` 必然失败，于是「最近的能进去的
+# 祖先」退到链接**所在的目录**：库外的一个链接指向业务库里的 ZIP 时祖先在库外，路径判据整类失效，而调用方随后的
+# `-f` / 摘要 / `unzip` 全都跟着链接读业务库文件。只用 builtin 解不出链接目标（没有 readlink builtin），只能拒绝。
+: > "$repo/inrepo.zip"
+: > "$outside/real.zip"
+ln -s "$repo/inrepo.zip" "$outside/abs-link.zip"                      # 绝对目标指进业务库
+ln -s "../business-repo/inrepo.zip" "$outside/rel-link.zip"           # 相对目标指进业务库
+ln -s "abs-link.zip" "$outside/chain-link.zip"                        # 链式链接
+ln -s "$tmp/no-such-target.zip" "$outside/broken-link.zip"            # 断链
+ln -s "$outside/loop-b.zip" "$outside/loop-a.zip"                     # 链接环
+ln -s "$outside/loop-a.zip" "$outside/loop-b.zip"
+ln -s "$outside/real.zip" "$outside/out-link.zip"                     # 目标在库外：同样拒绝（解不出就是解不出）
+for _f in abs-link.zip rel-link.zip chain-link.zip broken-link.zip loop-a.zip out-link.zip; do
+  gate2 "$outside/$_f" "$repo"
+  assert_nonzero "$RC" "R2：待检路径自己是符号链接（${_f}）→ 拒绝"
+  assert_contains "$OUT" "本身是符号链接" "R2（${_f}）：报错点明它是符号链接"
+  assert_not_contains "$OUT" "$repo" "R2（${_f}）：取值不回显"
+done
+unset _f
+# 正控①：库外的普通文件放行（钉版档位的正常形态），且一句话都不打
+gate2 "$outside/real.zip" "$repo"; assert_rc "$RC" 0 "R2 正控：库外的普通文件 → 放行"
+assert_eq "$OUT" "" "R2 正控：放行时一句话都不打"
+# 正控②：库外、尚不存在的文件路径仍按祖先判定放行（「取不到」由调用方的 `-f` 报，不是路径门的事）
+gate2 "$outside/not-yet.zip" "$repo"; assert_rc "$RC" 0 "R2 正控：库外尚不存在的文件路径 → 放行（祖先在库外）"
+# 正控③：待检目录是指向**库外目录**的符号链接不受影响——`cd -P` 对它成功，上一步就解析成物理路径了
+# （$HOME 是 /home/x → /data/x 这类形态很常见，不能误伤）
+ln -s "$outside" "$tmp/home-dirlink"
+gate2 "$tmp/home-dirlink" "$repo"; assert_rc "$RC" 0 "R2 正控：待检目录是指向库外目录的符号链接 → 放行"
+# 目录链接指进业务库仍走原来那条判据（报「解析到业务库内」，不是新加的这条）
+gate2 "$tmp/home-link" "$repo"
+assert_nonzero "$RC" "R2：指向业务库的目录链接 → 拒绝"
+assert_contains "$OUT" "解析到业务库内" "R2：目录链接报「解析到业务库内」（cd -P 解析得出物理路径）"
+# 不经链接、直接落在业务库内的文件路径 → 仍按祖先判定拒绝
+gate2 "$repo/inrepo.zip" "$repo"
+assert_nonzero "$RC" "R2：业务库内的文件路径 → 拒绝"
+assert_contains "$OUT" "解析到业务库内" "R2：库内文件报「解析到业务库内」"
 
 report

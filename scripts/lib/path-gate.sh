@@ -140,13 +140,18 @@ review_path_gate_or_die() {
   return 0
 }
 
-# review_dir_not_in_repo_or_die <待检目录> <业务库目录> [<时点说明>]
-#   在**运行 curl / 安装器之前**用它挡住「$HOME 落在业务库内」（CodeX 2026-09-13 第六轮复审 P0）。
+# review_dir_not_in_repo_or_die <待检路径> <业务库目录> [<时点说明>]
+#   在**运行 curl / 安装器之前**用它挡住「$HOME 落在业务库内」（CodeX 2026-09-13 第六轮复审 P0），
+#   钉版档位还用它挡「安装包路径取自业务库」（不变式 I6）。待检路径可以是目录也可以是文件。
 #   为什么不能只靠第 2 步那次 PATH 重新过门：curl 会读 `$HOME/.curlrc`、安装器会写 `$HOME/.local/bin`，
 #   两者都发生在那次过门**之前**——业务库里提交一个 `.curlrc`（`url = "file://<业务库>/evil.sh"`）就能让 curl
 #   先把业务库脚本打到 stdout，与受信安装脚本一起被右侧 bash 执行（本机 curl 8.7 复现：marker=EVIL_RAN）。
 #   env -i 与 `-p` 都挡不住它，因为注入发生在 curl 左侧、在它们之前。所以 HOME 的可信性必须在 curl 之前定。
 #   判据与 review_path_gate_or_die 的单条一致：相对 / 空 / 物理祖先落在业务库内 → 拒绝。只用 builtin。
+#   多一条（CodeX 2026-09-16 复审 R2）：**待检路径自己 `cd -P` 进不去、而它是符号链接 → 拒绝**。
+#   只用 builtin 读不出链接目标（bash 没有 readlink 这类 builtin），于是「最近的能进去的祖先」会退到
+#   链接**所在的目录**——库外的一个链接指向业务库里的文件时，祖先在库外，整类形态就被放过去了。
+#   目录形态的链接不受影响：`cd -P` 对它成功，上一步已经把它解析成物理路径。
 review_dir_not_in_repo_or_die() {
   local cand="$1" repo="$2" ctx="${3:-未执行任何外部命令}"
   local probe phys
@@ -173,6 +178,13 @@ review_dir_not_in_repo_or_die() {
   while :; do
     if phys=$(cd -P -- "$probe" 2>/dev/null && pwd -P); then break; fi
     phys=""
+    # 进不去、而它自己是符号链接：祖先回退在这里会失真（见函数头 R2），只能拒绝。链接环、断链、
+    # 指向文件的链接（钉版安装包就是文件）都落在这一条上。检查放在 cd 失败之后：指向目录的链接
+    # 已经在上一行被 `cd -P` 解析成物理路径了，不会误伤 `$HOME` 是目录链接这种正常形态。
+    if [[ -L "$probe" ]]; then
+      echo "[kiro-review] 错误：${ctx}——待检路径本身是符号链接（进不去、且只用 builtin 解不出链接目标，无法判断它是否指进业务库；取值不打印）。请把它指到业务仓库之外的**物理**路径（setup-guide 第 7 节），拒绝运行" >&2
+      exit 1
+    fi
     [[ "$probe" != "/" ]] || break
     probe="${probe%/*}"; [[ -n "$probe" ]] || probe="/"
   done

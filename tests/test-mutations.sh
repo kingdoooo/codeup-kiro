@@ -231,6 +231,19 @@ assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-extra-norm�
 run_case m-extra-norm-control "$ROOT" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'otheros/otherarch:1.2.3\t'"${HOST_PLAT}:9.9.9"
 assert_rc "$RC" 0 "M-extra-norm 对照：原实现归一后照常放行"
 
+# --- M-extra-multiline（CodeX 2026-09-16 复审 R4）：`read -ra` 少了 `-d ''` → 只读到第一个换行，
+# 第二行起的项被**静默丢掉**：合法元组不生效（被版本门拒绝），非法项也不再触发「任一项非法即拒绝」。
+# sed 里用 `..` 匹配那对单引号（单引号的 sed 表达式里写不进单引号）---
+pkg=$(make_mutant m-extra-multiline 's#read -ra _extra_targets -d .. <<<#read -ra _extra_targets <<<#')
+run_case m-extra-multiline "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'linux/mips64:1.2.3\n'"${HOST_PLAT}:9.9.9"
+assert_nonzero "$RC" "M-extra-multiline：多行追加名单第一行之后被静默丢掉 → 本次元组判名单外而拒绝"
+assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-extra-multiline：失败评论说未经探测——端到端「换行分隔照常放行」断言会失败"
+run_case m-extra-multiline-bad "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA="${HOST_PLAT}:9.9.9"$'\nNOT-A-TARGET'
+assert_rc "$RC" 0 "M-extra-multiline：第二行的非法项被静默丢掉 → 照常放行（形状校验根本没看见它）"
+assert_contains "$OUT" "开始 Kiro 评审" "M-extra-multiline：非法项没触发拒绝——端到端「第二行非法 → 拒绝」断言会失败"
+run_case m-extra-multiline-control "$ROOT" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA="${HOST_PLAT}:9.9.9"$'\nNOT-A-TARGET'
+assert_nonzero "$RC" "M-extra-multiline 对照：原实现读完整份取值，第二行的非法项照样拒绝"
+
 # --- M-cx-path（CodeX 2026-09-13 第三轮复审 P0）：第 0 步的 PATH 门被拆掉 → 业务库里的假 git 真的会被执行 ---
 # 双变异：① PATH 门恒不报可疑；② 平台键的 command -p 退回裸命令。两道都杀掉，业务库里的假工具才生效——
 # 单独杀任一道都还挡得住（PATH 门拦住相对条目；command -p 让平台键不看 PATH），这正是纵深该有的样子。
@@ -758,6 +771,16 @@ PIN_PKG_DISPATCH="$pkg"
 # M-pin-2：安装包摘要不一致换成 log → 与发布值不符的安装包照样解压、照样装、照样评审。
 pkg=$(make_mutant m-pin-2-artifact-sha 's#^      || die_review "钉版安装包摘要与#      || log "钉版安装包摘要与#')
 PIN_PKG_ARTSHA="$pkg"
+# M-pin-3（CodeX 2026-09-16 复审 R2）：路径门不再拒绝「待检路径自己是符号链接」→ 库外的一个链接指向业务库里的
+# ZIP 时，`cd -P` 对文件必然失败、祖先退到链接所在的库外目录，I6 的路径判据整类失效。两项摘要都对得上
+# （链接目标就是同一份夹具），所以这条变异同时证明「摘要门不能替路径判据兜底」。
+pkg=$(make_mutant m-pin-3-artifact-symlink 's#^    if \[\[ -L "\$probe" \]\]; then#    if false; then#' scripts/lib/path-gate.sh)
+PIN_PKG_SYMLINK="$pkg"
+# M-pin-4（CodeX 2026-09-17 复审 R6）：把钉版安装包路径校验的 `|| die_review` 改回旧的 `exit 1`（绕过失败评论）。
+# 在 guard 之外构造（同 M-pin-1/2/3）：mutation_selfcheck 只认第 0 列的 `pkg=$(make_mutant …)`。
+# 用 @ 作 sed 分隔符：替换文本里要放一个 `#` 注释，与默认的 `#` 分隔符会冲突。
+pkg=$(make_mutant m-pin-4-path-die 's@^    || die_review "KIRO_PINNED_ARTIFACT 路径不可信@    || exit 1  # was die_review@')
+PIN_PKG_PATHDIE="$pkg"
 make_tools_dir "$tmp/tools" || exit 1
 PIN_PATH="$tmp/tools:/usr/bin:/bin"
 pin_ok=yes
@@ -794,6 +817,39 @@ else
     KIRO_CLI_SHA256="$PIN_ENTRY_SHA"
   assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-pin-2 对照：原实现拒绝"
   assert_eq "$([[ -e "$CASE/home/.kiro-mock/calls" ]] && echo called || echo not-called)" "not-called" "M-pin-2 对照：原实现未解压未执行 kiro-cli"
+  # --- M-pin-3（变异包在上面构造）：安装包放在业务库里、KIRO_PINNED_ARTIFACT 是库外指向它的链接 ---
+  plant_pin_art() { cp "$PIN_ART" ./inrepo-kirocli.zip; }
+  ln -sf "$tmp/case-m-pin-3/work/inrepo-kirocli.zip" "$tmp/mut-symlink.zip"
+  MUT_TWEAK=plant_pin_art run_case m-pin-3 "$PIN_PKG_SYMLINK" PATH="$PIN_PATH" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$tmp/mut-symlink.zip" KIRO_PINNED_ARTIFACT_SHA256="$PIN_ART_SHA" \
+    KIRO_CLI_SHA256="$PIN_ENTRY_SHA" KIRO_INSTALL_URL=http://127.0.0.1:1/must-not-be-used
+  assert_rc "$RC" 0 "M-pin-3：业务库里的安装包经库外链接照样装上、照样评审——端到端「链接 → 拒绝」断言会失败"
+  assert_contains "$OUT" "钉版安装包摘要核对通过" "M-pin-3：摘要门只看内容，对「文件来自业务库」一无所知（路径判据必须独立成立）"
+  ln -sf "$tmp/case-m-pin-3-control/work/inrepo-kirocli.zip" "$tmp/mut-symlink-control.zip"
+  MUT_TWEAK=plant_pin_art run_case m-pin-3-control "$ROOT" PATH="$PIN_PATH" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$tmp/mut-symlink-control.zip" KIRO_PINNED_ARTIFACT_SHA256="$PIN_ART_SHA" \
+    KIRO_CLI_SHA256="$PIN_ENTRY_SHA" KIRO_INSTALL_URL=http://127.0.0.1:1/must-not-be-used
+  assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-pin-3 对照：原实现拒绝"
+  assert_contains "$OUT" "本身是符号链接" "M-pin-3 对照：拒绝原因点明符号链接"
+  assert_eq "$([[ -e "$CASE/home/.kiro-mock/calls" ]] && echo called || echo not-called)" "not-called" "M-pin-3 对照：原实现未解压未执行 kiro-cli"
+  # --- M-pin-4（变异包在上面构造，CodeX 2026-09-17 复审 R6）：路径校验改回旧的静默 `exit 1` →
+  # 已有旧汇总时，路径被拒会把上一条成功报告原样留在 MR 上（PUT 0 次），违反 I10 失败可见 ---
+  plant_pin4_art() { cp "$PIN_ART" ./inrepo-kirocli.zip; }
+  MUT_TWEAK=plant_pin4_art run_case m-pin-4 "$PIN_PKG_PATHDIE" PATH="$PIN_PATH" \
+    DRY_RUN_FIXTURE_DIR="$ROOT/tests/fixtures/comments/prior-run1" CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
+    KIRO_INSTALL_PROFILE=pinned KIRO_PINNED_ARTIFACT="$tmp/case-m-pin-4/work/inrepo-kirocli.zip" \
+    KIRO_PINNED_ARTIFACT_SHA256="$PIN_ART_SHA" KIRO_CLI_SHA256="$PIN_ENTRY_SHA"
+  assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-pin-4：路径仍被拒（exit 1）"
+  assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "0" \
+    "M-pin-4：旧汇总没有被更新——端到端「R6：把旧汇总原地更新为评审未完成」断言会失败"
+  assert_not_contains "$(posted_comment "$OUT")" "评审未完成" "M-pin-4：没有回写失败评论（静默 exit，正是 R6 修复前的行为）"
+  MUT_TWEAK=plant_pin4_art run_case m-pin-4-control "$ROOT" PATH="$PIN_PATH" \
+    DRY_RUN_FIXTURE_DIR="$ROOT/tests/fixtures/comments/prior-run1" CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
+    KIRO_INSTALL_PROFILE=pinned KIRO_PINNED_ARTIFACT="$tmp/case-m-pin-4-control/work/inrepo-kirocli.zip" \
+    KIRO_PINNED_ARTIFACT_SHA256="$PIN_ART_SHA" KIRO_CLI_SHA256="$PIN_ENTRY_SHA"
+  assert_eq "$(req_count "$OUT" PUT 'comments/b1f0e9d8c7b6a5948372615049382716$')" "1" \
+    "M-pin-4 对照：原实现把旧汇总原地更新为「评审未完成」"
+  assert_contains "$(posted_comment "$OUT")" "评审未完成" "M-pin-4 对照：更新后的旧汇总正文是「评审未完成」"
 fi
 
 # --- M5w：被拒的凭证形状名字不再掩码 → 完整名字进失败评论（15-fix3 #6）---

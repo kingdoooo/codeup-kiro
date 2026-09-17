@@ -566,4 +566,84 @@ rm -f "$imd" "$emptymd" "$resp" "$ids"
 
 unset DRY_RUN
 
+# ---- R7（CodeX 2026-09-17 复审）：API 客户端必须用 `curl -q`，否则业务库里的 `.curlrc` 能把令牌引到额外地址 ----
+# DRY_RUN 分支在 :157 直接返回、根本不跑 :208 的真实 curl，所以这个洞只有**真实 curl** 才测得到。
+# 用一个只绑 127.0.0.1、端口 0（临时端口）的回环 HTTP 服务，记录每个请求的 path 与 x-yunxiao-token 头。
+# 令牌只用合成值 CANARY_R7_ONLY；不连真实 Codeup。
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "SKIP: 本机无 python3，跳过 R7 真实 curl 回环回归" >&2
+else
+  r7tmp=$(mktemp -d)
+  srvlog="$r7tmp/requests.log"; : > "$srvlog"
+  cat > "$r7tmp/server.py" <<'PY'
+import http.server, socketserver, sys
+logpath = sys.argv[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def _log(self):
+        tok = self.headers.get('x-yunxiao-token', '')
+        with open(logpath, 'a') as f:
+            f.write("%s %s token=%s\n" % (self.command, self.path, tok))
+        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
+        self.wfile.write(b'[]')
+    do_GET = do_POST = do_PUT = do_DELETE = _log
+    def log_message(self, *a): pass
+srv = socketserver.TCPServer(('127.0.0.1', 0), H)
+print(srv.server_address[1], flush=True)
+srv.serve_forever()
+PY
+  # 清理注册在服务启动**之前**（CodeX 2026-09-17 复审 R8）：assert_eq 失败会直接 exit，若只把 kill/rm 放在
+  # 全部断言之后，一次断言失败就会漏掉回收、留下一个存活的 Python 回环服务。trap EXIT 覆盖正常结束 / 启动失败 /
+  # 断言失败三条路径；idempotent（wait 已回收的 pid、rm 不存在的目录都无害）。本文件此前没有别的 EXIT trap。
+  r7pid=""
+  r7_cleanup() {
+    [[ -n "$r7pid" ]] && { kill "$r7pid" 2>/dev/null || true; wait "$r7pid" 2>/dev/null || true; }
+    [[ -n "${r7tmp:-}" ]] && rm -rf "$r7tmp"
+  }
+  trap r7_cleanup EXIT
+  python3 "$r7tmp/server.py" "$srvlog" > "$r7tmp/port" 2>/dev/null &
+  r7pid=$!
+  for _ in $(seq 1 50); do [[ -s "$r7tmp/port" ]] && break; sleep 0.1; done
+  R7PORT=$(cat "$r7tmp/port" 2>/dev/null || true)
+  [[ -n "$R7PORT" ]] || { echo "FAIL: R7 回环服务没起来（拿不到端口）" >&2; exit 1; }
+  R7BASE="http://127.0.0.1:$R7PORT"
+  R7CANARY="CANARY_R7_ONLY"
+  r7biz="$r7tmp/biz"; mkdir -p "$r7biz"
+  r7safe="$r7tmp/safe"; mkdir -p "$r7safe"
+  printf 'url = "%s/LEAK"\n' "$R7BASE" > "$r7biz/.curlrc"   # 业务库里的恶意 .curlrc：追加一个额外地址
+  # grep -c 在无匹配时已经打印 0（只是退出码非零），所以 `|| true` 只吞退出码、不再补第二个 0
+  leaks() { grep -c '/LEAK' "$srvlog" 2>/dev/null || true; }
+  apihits() { grep -c '/api/probe' "$srvlog" 2>/dev/null || true; }
+  # 隔离**调用者**的 curl 配置来源（CodeX 2026-09-17 复审 R8）：curl 找 .curlrc 的顺序是
+  # $CURL_HOME/.curlrc → $XDG_CONFIG_HOME/curlrc → $HOME/.curlrc。开发机 / CI 若已设 CURL_HOME 或
+  # XDG_CONFIG_HOME 指向一份合法配置，正控的裸 curl 会读它、而不是测试刚写的恶意 .curlrc，于是观测不到 /LEAK、
+  # 正控误报失败。每个子 shell 先清掉这两个来源与代理变量（代理会把回环请求引去别处），再设本用例需要的变量。
+  # 说明：`-q` 关掉的是**全部**配置来源，所以生产客户端不受这些变量影响；隔离只为让**正控**的裸 curl 稳定复现泄露。
+  r7_isolate='unset CURL_HOME XDG_CONFIG_HOME http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY'
+
+  # 正控（元测试）：**不带 -q** 的裸 curl 在 HOME=业务库 时，.curlrc 真的会把请求 + 令牌发到 /LEAK。
+  # 没有这条，下面两条「泄露=0」的断言可能只是因为环境根本没复现出漏洞而恒真。裸 curl 加连接/总超时，异常环境下不空等。
+  : > "$srvlog"
+  ( eval "$r7_isolate"; HOME="$r7biz" curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -H "x-yunxiao-token: $R7CANARY" "$R7BASE/api/probe" ) >/dev/null 2>&1 || true
+  assert_eq "$([[ "$(leaks)" -ge 1 ]] && echo yes)" "yes" "R7 正控：裸 curl（无 -q）+ 业务库 .curlrc → /LEAK 确实收到请求（证明回环能抓到泄露）"
+  assert_eq "$(grep '/LEAK' "$srvlog" | grep -c "token=$R7CANARY")" "1" "R7 正控：泄露的请求确实带着令牌"
+
+  # 用例 A：HOME 指向业务库 → 修好的 _codeup_request 用 curl -q，不读 .curlrc，/LEAK 零请求，正常 API 仍发出
+  : > "$srvlog"
+  ( eval "$r7_isolate"; CODEUP_API_BASE="$R7BASE" HOME="$r7biz" YUNXIAO_TOKEN="$R7CANARY" _codeup_request GET "/api/probe" ) >/dev/null 2>&1 || true
+  assert_eq "$(leaks)" "0" "R7-A：HOME=业务库时，API curl -q 不读 .curlrc → 额外地址零请求（令牌不外泄）"
+  assert_eq "$([[ "$(apihits)" -ge 1 ]] && echo yes)" "yes" "R7-A：正常 API 请求仍然发出（-q 不影响功能）"
+
+  # 用例 B：HOME 合法、CURL_HOME 指向业务库 → curl 也会读 $CURL_HOME/.curlrc；-q 同样挡住，且 HOME 门识别不了这条来源。
+  # 这里**显式设**自己的 CURL_HOME（不清），其余来源仍清掉。
+  : > "$srvlog"
+  ( eval "$r7_isolate"; CODEUP_API_BASE="$R7BASE" HOME="$r7safe" CURL_HOME="$r7biz" YUNXIAO_TOKEN="$R7CANARY" _codeup_request GET "/api/probe" ) >/dev/null 2>&1 || true
+  assert_eq "$(leaks)" "0" "R7-B：CURL_HOME=业务库时，API curl -q 同样不读 .curlrc → 额外地址零请求"
+  assert_eq "$([[ "$(apihits)" -ge 1 ]] && echo yes)" "yes" "R7-B：正常 API 请求仍然发出"
+
+  # 静态守卫：_codeup_request 的真实 curl 必须以 `-q` 为第一个选项（换写法/挪位置都会让上面的行为回归悄悄失效时这条先红）
+  assert_eq "$(grep -c 'curl -q -sS -o "\$tmp"' ../scripts/lib/codeup-api.sh)" "1" "R7 静态：API 客户端的 curl 第一个选项是 -q"
+
+  r7_cleanup; trap - EXIT   # 正常路径主动回收；trap 只兜断言失败 / 启动失败
+fi
+
 report
