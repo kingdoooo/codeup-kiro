@@ -500,10 +500,27 @@ EOL 公告;遇到这类失败别照「回到已探测版本」的常规 runbook(
     「结构化解析失败」且原文里有「Permission request failed」，多半是 chunk 目录的许可路径与实际落盘目录不一致。
 12. 安装源核对：确认 `https://cli.kiro.dev/install` 与 kiro.dev 官方文档一致；
     生产环境建议自建执行器预装固定版本（见第 7 节）。
-13. 模型是否生效：agent 配置指定了 `"model": "gpt-5.6-sol"`（GPT-5.6 Sol，
-    Kiro 官方已上线，实验性支持，credit 倍率 2.4x）。确切模型 ID 以交互式会话 `/model`
-    列表为准——若 ID 不匹配或组织管理员的模型访问策略未放行，Kiro 会**静默回退默认模型**
-    并在日志留一行提示，不报错中断，因此要检查日志里没有模型回退提示。
+13. 模型是否生效：agent 配置指定了 `"model": "gpt-5.6-sol"`（GPT-5.6 Sol，Kiro 官方已上线，实验性支持，
+    **credit 倍率 4.40x**——`kiro-cli chat --list-models` 2026-09-18 的实际取值；此处原先写的 2.4x 是错的，
+    第 1 节的费用区间按 4.40x 重新理解）。**核对模型 ID 用零成本的 `kiro-cli chat --list-models`**
+    （不必进交互式会话 `/model`；它列出本账号/组织实际可用的模型与倍率，不发起任何调用、不烧额度）。
+
+    **2026-09-18 实测的三条事实**（issue 11 取证，kiro-cli 2.22.0 + v2 引擎）：
+    - **agent 定义里的 `model` 字段确实生效**：同一提示词，带 `gpt-5.6-sol` 花 1.1856 credits、
+      删掉 model 字段（回落默认 `auto`）花 0.0997 credits——差约 12 倍，而且是更短的回答花了更多钱。
+      所以「声明了但没生效」目前**不是**正在发生的问题。
+    - **命令行 `--model` 在 v2 引擎上不生效**：合法与非法模型都只回一行
+      `[warn] failed to set model '<ID>': Method not found`（stderr，退出码仍是 0）。生产不传这个开关，
+      也**不要**为了「保险」去加——它不会生效，只会在 stderr 留下误导性的一行。
+    - **本条原先写的「静默回退时会在日志留一行提示」在 agent 定义这条路上没有观测到**：带 model 与
+      不带 model 两种 agent 的 stderr 都是**空的**，事件流里也**没有任何模型名字段**
+      （`runStarted.data` 只有 `payloadSchema` / `acpProtocolVersion` / `engine`；`metadata.data` 只有
+      `sessionId` / `contextUsagePercentage` / `meteringUsage` / `turnDurationMs`）。
+      也就是说**没有可直接观测的「本次用了哪个模型」信号**。
+
+    因此核对方法改成两条，都不依赖那条不存在的提示：① 上线前用 `--list-models` 确认 agent 里的 ID 在清单内
+    （ID 轮换或组织策略未放行时会不在）；② 事后看流水线日志里的「Kiro 用量：credits=…」——倍率差异是唯一
+    可观测的旁证，评审用量突然掉到原来的几分之一，就要怀疑模型回落了。
 14. 评审输入是否真正到达 Kiro：脚本把运行时提示词与「变更元信息 + diff」拼成**一份 stdin**、**不给位置参数**
     （`kiro-cli chat --no-interactive … < kiro-stdin.txt`）。kiro-cli 2.21.1 实测：只要有位置参数 `[INPUT]`，
     stdin 一个字节也到不了模型——2026-09-08 之前的集成包正是「提示词作参数 + diff 走 stdin」，模型只是自己读工作树、
