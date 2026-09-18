@@ -2361,6 +2361,50 @@ run_case shaunset
 assert_rc "$RC" 0 "sha 钉死：未配置 → 照常完成（不核对）"
 assert_contains "$OUT" "未配置 KIRO_CLI_SHA256" "sha 钉死：未配置时日志明说没核对（生产按第 7 节配置）"
 
+# ---- 第 3.1 步：agent 声明的模型是否在可用清单内（issue 16）----
+# 背景（issue 11 取证）：事件流里没有模型名字段、agent 这条路 stderr 也是空的，所以「本次用了哪个模型」
+# **事后无法判定**；但 `chat --list-models` 零成本，可以事前核对。口径：挂 notice、**不拒绝评审**。
+# 反控（清单里有 → 无 notice）必须有，否则「每次都挂」也会让正控通过。
+run_case modelok
+assert_rc "$RC" 0 "模型核对：声明的模型在清单内 → 评审照常完成"
+assert_contains "$OUT" "模型核对通过" "模型核对：日志说明核对通过"
+mk_comment=$(posted_comment "$OUT")
+assert_not_contains "$mk_comment" "不在本账号" "模型核对反控：清单里有该模型时**不挂** notice（否则正控无意义）"
+assert_eq "$(call_count "$MD/calls" listmodels)" "1" "模型核对：--list-models 恰好调一次"
+assert_eq "$(call_count "$MD/calls" chat)" "1" "模型核对：--list-models 不计入 chat 调用次数（否则别的用例会集体错位）"
+assert_eq "$(cat "$MD/listmodelscwd")" "$(cat "$MD/chatcwd")" "模型核对：--list-models 与 chat 在同一个空运行目录下跑（15-fix4 #1）"
+assert_eq "$(grep -c -x -- 'KIRO_API_KEY' "$MD/env-listmodels")" "1" "模型核对：--list-models 走 env -i + 许可清单（有 KIRO_API_KEY）"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-listmodels")" "0" "模型核对：--list-models 的环境里没有 YUNXIAO_TOKEN"
+# 正控：清单里**没有** agent 声明的那个模型（模拟 ID 轮换 / 组织策略未放行）
+run_case modelgone MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
+assert_rc "$RC" 0 "模型核对正控：模型不在清单内**不拒绝评审**（issue 11 已定口径）"
+mk_comment=$(posted_comment "$OUT")
+assert_contains "$mk_comment" "不在本账号" "模型核对正控：汇总评论挂 notice"
+assert_contains "$mk_comment" "gpt-5.6-sol" "模型核对正控：notice 写出具体模型 ID（不是敏感值）"
+assert_contains "$mk_comment" "静默回落默认模型" "模型核对正控：notice 说明后果"
+assert_contains "$OUT" "不在 --list-models 清单内" "模型核对正控：流水线日志也记一行"
+assert_eq "$(call_count "$MD/calls" chat)" "1" "模型核对正控：Kiro 照常跑（不是拒绝）"
+# fail-open ①：--list-models 命令失败
+run_case modellmfail MOCK_LIST_MODELS_RC=3
+assert_rc "$RC" 0 "fail-open①：--list-models 失败 → 评审照常完成"
+assert_contains "$OUT" "取不到可用模型清单" "fail-open①：日志说明跳过核对"
+assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "fail-open①：不挂 notice（建议性检查的失败不该污染评论）"
+# fail-open ②：输出形态变了（将来 kiro-cli 改格式）
+run_case modellmgarbage MOCK_LIST_MODELS_GARBAGE=1
+assert_rc "$RC" 0 "fail-open②：清单解析不出来 → 评审照常完成"
+assert_contains "$OUT" "取不到可用模型清单" "fail-open②：日志说明跳过核对"
+assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "fail-open②：不挂 notice（否则格式一变就每次评审都挂）"
+# 「agent 定义里没有 model 字段 → 跳过核对」那条分支要改 kiro/agent-codeup-reviewer.json 才测得到，
+# 而 AGENT_FILE 是从 PKG_ROOT 硬编码的（scripts/kiro-review.sh:140），本套件跑的就是真包。
+# 那条分支放在 test-mutations.sh 里用变异包覆盖（M-model-none），连同「删掉 notice 那行」的变异一起。
+# 静态守卫：核对必须是 fail-open 形态——命令失败与解析不出都只 log、不进 REVIEW_NOTICE
+assert_eq "$(LC_ALL=C grep -c 'log "警告：kiro-cli chat --list-models 取不到可用模型清单' "$ROOT/scripts/kiro-review.sh")" "1" \
+  "issue 16 静态：取不到清单时只写日志（fail-open），不挂 notice"
+assert_eq "$(LC_ALL=C grep -cE '^ *_lm=\$\(cd "\$KIRO_CWD".*chat --list-models' "$ROOT/scripts/kiro-review.sh")" "1" \
+  "issue 16 静态：--list-models 只在一处真正调用，且在 \$KIRO_CWD 空目录下走 env -i"
+assert_eq "$(LC_ALL=C grep -c 'die_review.*list-models' "$ROOT/scripts/kiro-review.sh" || true)" "0" \
+  "issue 16 静态：模型核对的任何分支都不 die_review（口径是 notice，不是拒绝）"
+
 # ---- 安装档位（KIRO_INSTALL_PROFILE，ADR-0006）：第 1.6 步校验 ----
 # 公共环境里已经把档位设成 latest（既有用例测的都是现装档位的既有行为），所以「变量缺失」要用空值显式覆盖。
 run_case profmissing KIRO_INSTALL_PROFILE=

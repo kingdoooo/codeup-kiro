@@ -1327,6 +1327,36 @@ grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
 # 不支持该参数的版本会先把额度烧掉、再以 clap 退出码 2 失败，MR 上只剩「退出码 2」这种不可行动的信息。
 grep -q -- '--output-format' <<<"$KIRO_CHAT_HELP" \
   || die_review "kiro-cli chat 不支持 --output-format，无法取得结构化评审报告（契约在 runFinished.data.finalText 里），拒绝运行。请升级 kiro-cli（≥ 2.21）"
+# --- 3.1 agent 声明的模型是否在本账号可用清单内（issue 16）---
+# 为什么需要：agent 定义写着 `"model": "gpt-5.6-sol"`，模型 ID 轮换或组织的模型访问策略不再放行时，Kiro 会
+# **静默回落默认模型**——流水线全绿、评审照常产出，但用的是另一个模型。issue 11 的取证确认**事后无法判定**：
+# 事件流里没有任何模型名字段（runStarted.data 只有 payloadSchema/acpProtocolVersion/engine；metadata.data 只有
+# sessionId/contextUsagePercentage/meteringUsage/turnDurationMs），agent 这条路的 stderr 也是空的。
+# 但**事前**可以：`chat --list-models` 零成本（不发起模型调用、不烧 credit）列出本账号实际可用的模型。
+# 口径（issue 11 已定）：**挂 notice、不拒绝评审**——模型换了评审仍然有价值，拒绝是过度反应。
+# **检查自身失败一律 fail-open**（命令失败 / 超时 / 输出形态变了解析不出清单）：只写流水线日志，不挂 notice、
+# 不阻断。一个建议性检查的解析失败去拦评审，方向是反的；而输出格式是会变的（这行本身就是靠形态解析的）。
+# agent 定义里没有 model 字段时**跳过**：那是刻意用默认模型。
+_want_model=$(jq -r '.model // ""' "$INSTALLED_AGENT" 2>/dev/null || true)
+if [[ -z "$_want_model" ]]; then
+  log "agent 未声明 model，跳过模型清单核对（刻意用 Kiro 默认模型）"
+else
+  _lm=$(cd "$KIRO_CWD" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" chat --list-models 2>/dev/null || true)
+  # 解析：真实输出每行形如 `[*] <id>  <倍率>x credits  <说明>`（首行是标题、其后一空行）。只认「行首可选 *、
+  # 接一个 id、再接 <数字>x credits」这个形态；一条都认不出来就当作「解析不出清单」。
+  _models=$(printf '%s\n' "$_lm" | LC_ALL=C sed -n 's/^[[:space:]]*\*\{0,1\}[[:space:]]*\([A-Za-z0-9._-]\{1,\}\)[[:space:]]\{1,\}[0-9.]\{1,\}x[[:space:]]*credits.*/\1/p' || true)
+  if [[ -z "$_models" ]]; then
+    log "警告：kiro-cli chat --list-models 取不到可用模型清单（命令失败或输出形态变了），本次跳过模型核对——这是建议性检查，不阻断评审（issue 16）"
+  elif printf '%s\n' "$_models" | LC_ALL=C grep -qxF -- "$_want_model"; then
+    log "模型核对通过：agent 声明的 ${_want_model} 在本账号可用清单内（共 $(printf '%s\n' "$_models" | grep -c .) 个）"
+  else
+    # 模型 ID 不是敏感值，可以回显；仍过 review_clean_text（它来自 agent 定义，正常是受信的，但评论出口一律清洗）
+    REVIEW_NOTICE="${REVIEW_NOTICE}${REVIEW_NOTICE:+ }⚠️ 受信 agent 声明的模型 \`$(printf '%s' "$_want_model" | review_clean_text)\` 不在本账号/组织当前可用的模型清单内——Kiro 会**静默回落默认模型**，本次评审仍已完成，但产出可能与预期的模型不同。请核对 \`kiro-cli chat --list-models\` 与 agent 定义里的 model（见 setup-guide 第 8 节第 13 项）。"
+    log "警告：agent 声明的模型 ${_want_model} 不在 --list-models 清单内（清单：$(printf '%s\n' "$_models" | paste -sd' ' -)）——挂 notice，不拒绝评审"
+  fi
+  unset _lm _models
+fi
+unset _want_model
 # kiro-cli 版本 vs 探测过的版本（CodeX 2026-09-09 复审 P1-2，推翻 15-fix2 #24 的「名单外只 notice」）：读取边界（allowedPaths 之外的
 # 符号链接、../ 越界、`**/` 形状按 cwd 解析）靠 kiro-cli 的路径解析行为，这是 P1-15 在 KIRO_TESTED_TARGETS 的每个平台 + 版本上**实测**的，不是文档承诺；
 # 官方安装脚本只装 latest 且没有版本开关，Kiro 3.x 的权限模型又是 breaking change，「新版本仍保持已探测版本的安全语义」不能当默认假设。

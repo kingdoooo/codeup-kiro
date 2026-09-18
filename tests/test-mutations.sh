@@ -852,6 +852,28 @@ else
   assert_contains "$(posted_comment "$OUT")" "评审未完成" "M-pin-4 对照：更新后的旧汇总正文是「评审未完成」"
 fi
 
+# --- M-model-notice（issue 16）：模型不在可用清单内时不再挂 notice → 静默用了别的模型，评论上看不出来 ---
+# 这条变异杀的是「事前核对」的唯一出口。事后没有任何信号可查（issue 11 取证：事件流无模型名字段、
+# agent 这条路 stderr 为空），所以这个 notice 就是该盲区的全部可观测性。
+pkg=$(make_mutant m-model-notice 's@^    REVIEW_NOTICE="\${REVIEW_NOTICE}\${REVIEW_NOTICE:+ }⚠️ 受信 agent 声明的模型@    : "不挂 notice" #@')
+run_case m-model-notice "$pkg" MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
+assert_rc "$RC" 0 "M-model-notice：评审照常完成（本来就不拒绝）"
+assert_not_contains "$(posted_comment "$OUT")" "不在本账号" \
+  "M-model-notice：评论里没有 notice——端到端「模型不在清单内 → 挂 notice」断言会失败"
+run_case m-model-notice-control "$ROOT" MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
+assert_rc "$RC" 0 "M-model-notice 对照：原实现同样不拒绝"
+assert_contains "$(posted_comment "$OUT")" "不在本账号" "M-model-notice 对照：原实现挂了 notice"
+
+# --- M-model-none（issue 16）：agent 定义里删掉 model 字段 → 跳过核对那条分支（不是漏洞，是另一条合法路径）---
+# 放在变异套件里是因为 AGENT_FILE 从 PKG_ROOT 硬编码（scripts/kiro-review.sh:140），只有变异包能换掉 agent 定义。
+pkg=$(make_mutant m-model-none 's/^  "model": "gpt-5.6-sol",$//' kiro/agent-codeup-reviewer.json)
+run_case m-model-none "$pkg"
+assert_rc "$RC" 0 "M-model-none：agent 不声明 model → 评审照常完成"
+assert_contains "$OUT" "跳过模型清单核对" "M-model-none：日志说明刻意用默认模型、跳过核对"
+assert_eq "$([[ -f "$MD/calls" ]] && { grep -c -x listmodels "$MD/calls" || true; } || echo 0)" "0" \
+  "M-model-none：不声明 model 时连 --list-models 都不调（省一次外部调用）"
+assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "M-model-none：跳过时不挂 notice"
+
 # --- M5w：被拒的凭证形状名字不再掩码 → 完整名字进失败评论（15-fix3 #6）---
 pkg=$(make_mutant m5w-cred-mask 's/cred+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")（命中 ${rule}）")/cred+=("第 ${idx} 项 ${tok}（命中 ${rule}）")/' scripts/lib/kiro-agent.sh)
 run_case m5w "$pkg" KIRO_ENV_PASSTHROUGH="$(fake_token svc)"

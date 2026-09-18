@@ -100,7 +100,11 @@ if [[ "${1:-}" == "--version" ]]; then
   if [[ "${MOCK_KIRO_VERSION_STDERR:-0}" == "1" ]]; then echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}" >&2; else echo "kiro-cli ${MOCK_KIRO_VERSION-2.21.1}"; fi
   exit 0
 fi
-if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$M/calls"; else printf '%s\n' "${1:-}" >> "$M/calls"; fi
+# `--list-models` 必须记成**独立**的调用名（issue 16）：记成 "chat" 会让所有「chat 被调用几次」的断言
+# （call_count … chat、「kiro-cli 一次都没被执行」那类）凭空多一次，把不相关的用例集体带红。
+if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$M/calls"
+elif [[ "${2:-}" == "--list-models" ]]; then echo "listmodels" >> "$M/calls"
+else printf '%s\n' "${1:-}" >> "$M/calls"; fi
 case "${1:-}" in
   settings)
     shift
@@ -112,6 +116,29 @@ case "${1:-}" in
   chat) ;;
   *) echo "mock kiro-cli: 不支持的子命令: $*" >&2; exit 2 ;;
 esac
+# `chat --list-models`（issue 16）：零成本列出本账号可用模型与倍率，脚本用它核对 agent 声明的 model。
+# 真实输出形态（kiro-cli 2.22.0 实测）：首行 "Available models (* = default):"、空行、然后每行
+# "[*] <id><空格><倍率>x credits<空格><说明>"。默认清单含 gpt-5.6-sol（生产 agent 声明的那个）。
+if [[ "${2:-}" == "--list-models" ]]; then
+  pwd -P > "$M/listmodelscwd"
+  printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-listmodels"
+  # MOCK_LIST_MODELS_RC=<n>  命令失败（脚本必须 fail-open：不挂 notice、不阻断）
+  [[ -z "${MOCK_LIST_MODELS_RC:-}" ]] || { echo "mock: 模拟 --list-models 失败" >&2; exit "$MOCK_LIST_MODELS_RC"; }
+  # MOCK_LIST_MODELS_GARBAGE=1  输出形态变了/解析不出清单（同样必须 fail-open）
+  if [[ "${MOCK_LIST_MODELS_GARBAGE:-0}" == "1" ]]; then
+    echo "some future format nobody parsed"; exit 0
+  fi
+  # MOCK_LIST_MODELS_WITHOUT=<id>  清单里**不含**该 id（模拟 ID 轮换 / 组织策略未放行）
+  echo "Available models (* = default):"
+  echo
+  for _m in "auto 1.00" "gpt-5.6-sol 4.40" "claude-sonnet-5 1.30" "claude-haiku-4.5 0.40"; do
+    set -- $_m
+    [[ "$1" == "${MOCK_LIST_MODELS_WITHOUT:-}" ]] && continue
+    if [[ "$1" == auto ]]; then printf '* %-20s %sx credits      mock model\n' "$1" "$2"
+    else printf '  %-20s %sx credits      mock model\n' "$1" "$2"; fi
+  done
+  exit 0
+fi
 if [[ "${2:-}" == "--help" ]]; then
   pwd -P > "$M/helpcwd"   # 断言 --help 不在业务库目录里跑（四处调用都在 $WORK/cwd 空目录下，15-fix4 #1）
   printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-help"
