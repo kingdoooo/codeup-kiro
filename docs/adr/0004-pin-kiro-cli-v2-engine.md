@@ -17,8 +17,14 @@ Kiro CLI 3.0 目前是 early access：随 2.x 稳定版一起安装，需 `--v3`
   （本机 env -i 许可清单 / 完整环境 × 空 cwd / 业务库 cwd 四种组合一致；`chat --help` 只把 `[INPUT]` 写成
   「The first question to ask」，对 stdin 没有任何说明）。因此集成包自 `06d5028` 起把**运行时提示词与评审输入一起走 stdin、
   不给位置参数**；在那之前的所有真实运行里，模型从未收到 diff，只是自己读工作树、把整个文件当成本次改动来评
-  （见 `.scratch/codeup-kiro-v2/acceptance/NOTES.md` D4 / D4b）。探测脚本仍用位置参数（提示词短、不喂 diff），
-  两者刻意不同，见 `scripts/probe/README.md`。这条只是记录 CLI 的行为事实，v2 引擎的决策不变。
+  （见 `.scratch/codeup-kiro-v2/acceptance/NOTES.md` D4 / D4b）。~~探测脚本仍用位置参数（提示词短、不喂 diff），
+  两者刻意不同~~ → **已于 2026-09-18 修订，见下条**。这条只是记录 CLI 的行为事实，v2 引擎的决策不变。
+
+- **修订（2026-09-18，issue 13）**：探测脚本也改成**提示词走 stdin、不给位置参数**，与生产完全一致。
+  上面那条实测事实同时意味着两种传法在 kiro-cli 内部**不是同一条输入路径**，而已探测名单
+  （`KIRO_TESTED_TARGETS`）的授权依据全靠「这个平台+版本探测过」——探测跑生产不用的那条路径时，名单是在为
+  一个不用的形状背书（验收依据本身不成立）。刻意仍与生产不同的只有 `--trust-*`（T5/T6/T7 的正控与 INFO 用例）。
+  v2 引擎的决策不变。
 
 - **修订（2026-09-10，CodeX 复审 P1-2）**：版本门从「名单外只 notice」（15-fix2 #24）改为**默认拒绝**。`scripts/kiro-review.sh` 的
   `KIRO_TESTED_TARGETS`（2026-09-13 起改成**平台 + 版本**元组，形如 `<os>/<arch>:<版本>`——CodeX 复审指出「探测结论只对

@@ -215,19 +215,28 @@ echo "[probe] 本次探测身份：${PROBE_TARGET}（平台键 ${PROBE_PLATFORM}
 # 事件流里的 path 也是绝对的，所以 read_tried 按文件名子串匹配不受 cwd 影响。
 # 一份实现（票 18 ⑫）：run_case 与 run_case_agent 原先各写一遍「拼命令 + 空目录里跑 + 计时 + stderr 尾部」，
 # 只差 agent 名与额外参数。_probe_run 是那一份，两个名字都是它的薄封装（调用点一个都不用改）。
+#
+# **提示词走 stdin、不给位置参数**（issue 13）：生产（kiro-review.sh 第 6 步）就是这么调的，而 ADR-0004 记着的实测
+# 事实是「2.21.1 一旦收到位置参数就**整个忽略 stdin**」——两种形状在 kiro-cli 内部不是同一条输入路径。探测原先
+# 把提示词作位置参数传，于是**已探测名单的授权依据跑的是生产不用的那条路径**：名单的全部价值来自「探测过」，
+# 形状不对齐，它就是在为一个不用的形状背书。stdin 落盘成 `$KEEP/<名>.stdin`（与生产的 kiro-stdin.txt 同款），
+# 既是喂进去的字节本身、也是这次探测的证据。
+# 刻意**不**跟生产对齐的只有 `--trust-*`：T5/T6 传 `--trust-tools`、T7 传 `--trust-all-tools`，那是正控与 INFO
+# 用例要测的东西（生产绝不传，端到端断言参数里没有任何 --trust-*）。
 # <名> <agent 名> <fullenv|allowenv> <额外参数…> <提示词>
 _probe_run() {
   local name="$1" agent="$2" envmode="$3"; shift 3
   local prompt="${!#}"; local -a extra=("${@:1:$#-1}"); local rc=0 start
   local -a cmd=(kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json --agent "$agent")
-  cmd+=("${extra[@]+"${extra[@]}"}" "$prompt")
+  cmd+=("${extra[@]+"${extra[@]}"}")
+  printf '%s\n' "$prompt" > "$KEEP/$name.stdin"
   start=$(date +%s)
   if [[ "$envmode" == "allowenv" ]]; then
     ( cd "$KIRO_CWD" && "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" env -i "${KIRO_ENV_ALLOW[@]}" "${cmd[@]}" ) \
-      > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
+      < "$KEEP/$name.stdin" > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
   else
     ( cd "$KIRO_CWD" && KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "${cmd[@]}" ) \
-      > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
+      < "$KEEP/$name.stdin" > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
   fi
   echo "[$name] kiro-cli 退出码 ${rc}（124/137=超时），耗时 $(( $(date +%s) - start ))s，agent=${agent} env=${envmode} extra=${extra[*]:-无}" >&2
   # substr 按**字符**截 200（awk-utf8-substr，同 reject_trace）：LC_ALL=C 会按字节截、把中文截成半个字符（15-fix4 #14）

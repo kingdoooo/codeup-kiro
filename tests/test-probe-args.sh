@@ -179,6 +179,33 @@ assert_eq "$(LC_ALL=C grep -c 'kiro_cli_version "\$TIMEOUT_BIN" "\$KIRO_CWD"' "$
 # ④ run_case / run_case_agent 共用一份实现（_probe_run），拼命令与计时只有一处
 assert_eq "$(LC_ALL=C grep -c 'kiro-cli chat --no-interactive --agent-engine v2' "$ROOT/scripts/probe/probe-kiro-allowlist.sh")" "1" \
   "⑫：探测里拼 kiro-cli 命令只有一处（run_case 与 run_case_agent 都走 _probe_run）"
+# ---- issue 13：探测的调用形状必须与生产一致（提示词走 stdin、不给位置参数）----
+# 为什么要守：kiro-cli 收到位置参数就整个忽略 stdin（ADR-0004 实测），两种传法不是同一条输入路径；
+# 而已探测名单的授权依据全靠「探测过」。探测一旦回退成位置参数，名单就在为生产不用的形状背书，
+# 而且这种回退**不会有任何用例失败**——只有静态守卫看得住。README 里原先还写着「别顺手对齐生产」，
+# 所以更要有一条断言把新口径钉住。
+PROBE_SH="$ROOT/scripts/probe/probe-kiro-allowlist.sh"
+assert_eq "$(LC_ALL=C grep -c '"\$prompt" > "\$KEEP/\$name.stdin"' "$PROBE_SH")" "1" \
+  "13：提示词落盘成 <用例>.stdin（与生产 kiro-stdin.txt 同款，也是证据）"
+assert_eq "$(LC_ALL=C grep -c '< "\$KEEP/\$name.stdin"' "$PROBE_SH")" "2" \
+  "13：allowenv 与 fullenv 两条分支都从 stdin 喂提示词"
+assert_eq "$(LC_ALL=C grep -cE 'cmd\+=\(.*"\$prompt"' "$PROBE_SH" || true)" "0" \
+  "13：提示词不再作为位置参数拼进命令（回退成位置参数不会有任何用例失败，只有这条守得住）"
+# 元测试：上面那条「零命中」的断言真能红——把旧写法喂给同一个正则必须命中 1 次
+assert_eq "$(printf '  cmd+=("${extra[@]+"${extra[@]}"}" "$prompt")\n' | LC_ALL=C grep -cE 'cmd\+=\(.*"\$prompt"')" "1" \
+  "13 元测试：旧的位置参数写法确实会被那条守卫命中（否则它永远是 0、什么都守不住）"
+# 刻意仍与生产不同的那部分不能被顺手删掉：T5/T6 的 --trust-tools 与 T7 的 --trust-all-tools 是正控与 INFO 用例
+assert_eq "$([[ "$(LC_ALL=C grep -c -- '--trust-tools=read,grep,glob' "$PROBE_SH")" -ge 1 ]] && echo present)" "present" \
+  "13：T5/T6 的 --trust-tools 保留（正控用例，刻意与生产不同）"
+assert_eq "$([[ "$(LC_ALL=C grep -c -- '--trust-all-tools' "$PROBE_SH")" -ge 1 ]] && echo present)" "present" \
+  "13：T7 的 --trust-all-tools 保留（INFO 用例，刻意与生产不同）"
+# 文档口径同步：README 与 ADR-0004 都要写成「都走 stdin」，且不再留「探测走位置参数」的旧说法
+assert_contains "$(cat "$ROOT/scripts/probe/README.md")" "探测与生产都走 stdin" "13：README 写明两边都走 stdin"
+assert_eq "$(LC_ALL=C grep -c '探测走位置参数、生产走 stdin，两者刻意不同' "$ROOT/scripts/probe/README.md" || true)" "0" \
+  "13：README 里旧的「两者刻意不同」说法已删（否则实现与文档打架）"
+assert_contains "$(cat "$ROOT/docs/adr/0004-pin-kiro-cli-v2-engine.md")" "修订（2026-09-18，issue 13）" \
+  "13：ADR-0004 有对应的修订条目（旧备注不能只留原文）"
+unset PROBE_SH
 assert_rc "$(bash -n "$ROOT/scripts/probe/probe-kiro-headless.sh" && echo 0 || echo 1)" 0 "⑫：probe-kiro-headless.sh 语法合法"
 
 # ============ 票 18 ⑦：run-tests.sh 的 bash 解析诊断守卫（行为测试，不是静态断言）============
