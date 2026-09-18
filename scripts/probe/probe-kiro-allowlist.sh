@@ -42,7 +42,7 @@
 #   2 = 参数错（PROBE_CASES 含未知用例名；零调用）
 #   3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过 kiro_agent_selfcheck）——探测本身不可信，不是 allowedPaths 的结论
 #   4 = 门禁用例未全部运行（PROBE_CASES 子集），已跑的全 PASS，不作发布判定
-#   5 = 环境准备失败（启动环境不可信、缺 kiro-cli/jq/timeout、未登录、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
+#   5 = 环境准备失败（启动环境不可信、**PATH 不可信**、缺 kiro-cli/jq/timeout、未登录、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
 # PROBE_CASES="T1 T2 T4"（空格分隔）只跑子集；默认 = 门禁十二个 + T5 正控（13 次调用）；T6/T7 是 INFO、结论已写在文件头，
 #   要跑得显式列出（15-fix2 #9）。每个用例一次调用（约 0.3 credit、15–55 s）。
 set -euo pipefail
@@ -73,7 +73,12 @@ PKG_ROOT="$(cd -P -- "${SCRIPT_DIR}/../.." && pwd -P)"
 source "${PKG_ROOT}/scripts/lib/path-gate.sh"
 # 探测不在业务库里跑（它自己建临时夹具），所以「业务库」这一维传本次的临时根都可以——
 # 但相对条目与空条目同样致命（探测也调 git / jq / od），所以门照跑。
-review_path_gate_or_die "$PWD"
+# **退出码传 5、前缀传 [probe]**（issue 14）：门默认退 1，而本脚本的分级表里 1 = 「门禁用例 FAIL
+# （allowedPaths 不是边界 / deny 未生效 / ../ 越界未被拒），不得上线」。CI 检出目录里只要 PATH 含
+# node_modules/.bin、.venv/bin 或一个空条目，探测就会以 1 退出，自动化把**PATH 配置问题**读成
+# **读取边界破了 + 告警**（2026-09-18 两种形态本机实测复现）。5 = 环境准备失败，PATH 不可信正属这一类；
+# 前缀换成 [probe]，否则报错写着 [kiro-review] + 「不受信的业务仓库」，排查的人会往评审侧找。
+review_path_gate_or_die "$PWD" "环境准备阶段，未执行任何外部命令；这是**环境问题**，不是读取边界的结论" 5 probe
 # environ 里残留的 `BASH_FUNC_*`（第五轮复审 P1）：`-p` 只让本进程忽略导入的函数，原始变量还在 environ 里，
 # 任何普通 bash 子进程都会重新导入。要跑 env / grep，所以排在 PATH 门之后。只报个数、不报名字。
 _pk_env_fns=$(env | LC_ALL=C grep -c '^BASH_FUNC_' || true)

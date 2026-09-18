@@ -58,7 +58,8 @@
 #   `builtin` 的函数（实测能让 `builtin declare -F` 返回空）。它仍有独立价值——`-p` 只管当前进程，而脚本里
 #   `curl … | bash` 拉起的**子** shell 不是 privileged 的，所以入口脚本还要把 BASH_ENV/ENV 从环境里删掉。
 #
-# 失败时用 `exit 1` 而不是回写 MR 评论：回写要跑 curl 与 jq，而这道门的前提正是「PATH 上的工具不可信」——
+# 失败时直接退出（评审侧退 1，探测侧由调用方指定 5——见 review_path_gate_or_die 的 $3/$4，issue 14）
+# 而不是回写 MR 评论：回写要跑 curl 与 jq，而这道门的前提正是「PATH 上的工具不可信」——
 # 为了发一条评论去执行可能被顶替的二进制，方向是反的。所以这类失败只表现为流水线标红（与脚本里别的
 # 「定位到 MR 之前」的失败一致），setup-guide 第 7 节把「PATH 全绝对且不指向业务库」「启动环境不来自业务库」
 # 写成了执行器接入要求。
@@ -67,32 +68,40 @@
 # kiro-cli 后会往前面插 `$HOME/.local/bin`）都必须**重新过门**（第四轮复审 P1；HOME 相对 / HOME 指向业务库
 # 都会在那里被拦住）。
 
-# review_path_gate_or_die [<业务库目录>]
+# review_path_gate_or_die [<业务库目录>] [<时点说明>] [<退出码>] [<日志前缀>]
 #   不传参数时取 ${REVIEW_REPO_DIR:-$PWD}。只用 builtin。改写 PATH 之后要再调一次。
+#
+# $3 / $4 是给**探测脚本**用的（issue 14）：门原先把 `exit 1` 写死，而探测脚本自己的退出码分级里
+# **1 的语义是「门禁用例 FAIL（allowedPaths 不是边界 / deny 未生效 / `../` 越界未被拒），不得上线」**。
+# 于是 CI 检出目录里只要 PATH 含 `node_modules/.bin`、`.venv/bin` 或一个空条目，探测就以 1 退出，
+# 自动化会把一个**PATH 配置问题**判成**读取边界破了 + 告警**（2026-09-18 两种形态都本机实测复现过）。
+# 探测因此传 `5`（它的分级表里 5 = 环境准备失败，PATH 不可信正属于这一类）与前缀 `[probe]`。
+# **刻意不把函数里的 1 直接改成 5**：那会静默改掉评审侧的退出码语义。评审侧不传这两个参数、行为完全不变。
 review_path_gate_or_die() {
   local repo="${1:-${REVIEW_REPO_DIR:-$PWD}}"
   # $2 = 这一次调用的时点说明，进所有拒绝文案的括号里。默认是第 0 步那次（第一个外部命令之前）；
   # 第 2 步改写 PATH 之后那次会传别的值——同一句「未执行任何外部命令」在那里已经不成立。
   local ctx="${2:-未执行任何外部命令}"
+  local rc="${3:-1}" tag="${4:-kiro-review}"
   local rest entry probe phys bad="" skipped=0 n=0
   local CDPATH=''   # `cd` 的相对参数会走 CDPATH：不清掉它，下面解析业务库的那次 cd 可能落到别处（见顶部说明）
 
   if [[ -z "${PATH-}" ]]; then
-    echo "[kiro-review] 错误：PATH 未设置或为空，拒绝运行：脚本要在不受信的业务仓库目录下执行 git / jq 等外部命令，PATH 必须是一组可信的绝对路径。请检查执行器配置" >&2
-    exit 1
+    echo "[${tag}] 错误：PATH 未设置或为空，拒绝运行：脚本要在不受信的业务仓库目录下执行 git / jq 等外部命令，PATH 必须是一组可信的绝对路径。请检查执行器配置" >&2
+    exit "$rc"
   fi
   # 业务库的物理路径（cd / pwd 都是 builtin）。解析不出来就**拒绝运行**：旧实现在这里回退原字符串，
   # 于是下面每一条「落在业务库内」的比较都不成立 = 整道门 fail-open（第四轮复审 P1 ③）。
   if ! phys=$(cd -P -- "$repo" 2>/dev/null && pwd -P); then
-    echo "[kiro-review] 错误：业务仓库目录解析不出物理路径（不存在 / 进不去 / 不是目录），拒绝运行（${ctx}）：[${repo:0:200}]。这道门要靠业务库的物理路径判断 PATH 条目是否落在业务库内，解析不出来就无法判断——请检查 REVIEW_REPO_DIR（setup-guide 第 5.1 节）" >&2
-    exit 1
+    echo "[${tag}] 错误：业务仓库目录解析不出物理路径（不存在 / 进不去 / 不是目录），拒绝运行（${ctx}）：[${repo:0:200}]。这道门要靠业务库的物理路径判断 PATH 条目是否落在业务库内，解析不出来就无法判断——请检查 REVIEW_REPO_DIR（setup-guide 第 5.1 节）" >&2
+    exit "$rc"
   fi
   repo="$phys"
   # 根目录要显式拒绝：`"$phys" == "$repo"/*` 在 repo=/ 时是 `//*`，匹配不到 `/usr/bin`，于是每个条目都放行
   # （第四轮复审 P1 ④）。语义上 repo=/ 时「不在业务库内的可信目录」根本不存在，只能拒绝。
   if [[ "$repo" == "/" ]]; then
-    echo "[kiro-review] 错误：业务仓库目录解析成根目录 /，拒绝运行（${ctx}）：那样每一个 PATH 条目都落在「业务仓库内」，不存在可信的 PATH。请把 REVIEW_REPO_DIR 指向业务库 checkout 目录（setup-guide 第 5.1 节）" >&2
-    exit 1
+    echo "[${tag}] 错误：业务仓库目录解析成根目录 /，拒绝运行（${ctx}）：那样每一个 PATH 条目都落在「业务仓库内」，不存在可信的 PATH。请把 REVIEW_REPO_DIR 指向业务库 checkout 目录（setup-guide 第 5.1 节）" >&2
+    exit "$rc"
   fi
 
   # 逐条解析：**不能**用 `$(printf … | tr ':' '\n')`——① tr 是外部命令（正是要防的东西），
@@ -132,11 +141,11 @@ review_path_gate_or_die() {
   done
 
   if [[ -n "$bad" ]]; then
-    echo "[kiro-review] 错误：执行器的 PATH 不可信，拒绝运行（${ctx}）。本脚本会在**不受信的业务仓库**目录下运行 git / jq / tr / curl 等外部工具，PATH 决定这些名字解析到哪个文件：空条目与相对条目等于当前目录，指向业务仓库的条目等于让 MR 作者提供这些工具。请把 PATH 改成一组不在业务仓库内的绝对路径（setup-guide 第 7 节）。可疑条目：${bad}" >&2
-    exit 1
+    echo "[${tag}] 错误：执行器的 PATH 不可信，拒绝运行（${ctx}）。本脚本会在**不受信的业务仓库**目录下运行 git / jq / tr / curl 等外部工具，PATH 决定这些名字解析到哪个文件：空条目与相对条目等于当前目录，指向业务仓库的条目等于让 MR 作者提供这些工具。请把 PATH 改成一组不在业务仓库内的绝对路径（setup-guide 第 7 节）。可疑条目：${bad}" >&2
+    exit "$rc"
   fi
   [[ "$skipped" == "0" ]] \
-    || echo "[kiro-review] PATH 里有 ${skipped} 个不存在或进不去的绝对条目（跳过，它们拿不出可执行文件）" >&2
+    || echo "[${tag}] PATH 里有 ${skipped} 个不存在或进不去的绝对条目（跳过，它们拿不出可执行文件）" >&2
   return 0
 }
 

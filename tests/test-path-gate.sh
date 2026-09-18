@@ -109,6 +109,48 @@ OUT=$( ( set -euo pipefail; PATH="$repo/bin:$SAFE"; export PATH; export CDPATH="
 assert_nonzero "$RC" "CDPATH 指向别处时，相对的业务库目录仍按 cwd 解析 → 业务库内的条目照样被拒"
 assert_contains "$OUT" "解析到业务库内" "CDPATH：报的是「解析到业务库内」，不是被 CDPATH 带偏后的放行"
 
+# ---- $3 退出码 / $4 日志前缀由调用方指定（issue 14）----
+# 门原先把 exit 1 写死，而探测脚本的分级表里 1 = 「门禁用例 FAIL、不得上线」，于是一个 PATH 配置问题
+# （CI 检出目录里的 node_modules/.bin、.venv/bin、尾随空条目）会被自动化读成「读取边界破了 + 告警」。
+# 探测改传 5（= 环境准备失败）与前缀 [probe]；**评审侧不传这两个参数、必须一字不变**。
+gate4() {   # <PATH> <业务库> <退出码> <前缀> → OUT/RC
+  RC=0
+  OUT=$( ( set -euo pipefail; PATH="$1"; export PATH; source "$GATE"
+           review_path_gate_or_die "$2" "ctx" "$3" "$4" ) 2>&1 ) || RC=$?
+}
+for _shape in "relbin:$SAFE" "$SAFE:" "$repo/bin:$SAFE"; do
+  gate4 "$_shape" "$repo" 5 probe
+  assert_rc "$RC" 5 "issue 14：传 5 时以 5 退出（PATH 形态 [${_shape:0:24}…]）"
+  assert_contains "$OUT" "[probe]" "issue 14：传 probe 时前缀是 [probe]（[${_shape:0:24}…]）"
+  assert_not_contains "$OUT" "[kiro-review]" "issue 14：不再出现 [kiro-review] 前缀（[${_shape:0:24}…]）"
+done
+unset _shape
+# 另两条早退分支（业务库解析不出物理路径 / 解析成根目录）也要走调用方给的码与前缀
+gate4 "$SAFE" "$tmp/no-such-repo-$$" 5 probe
+assert_rc "$RC" 5 "issue 14：业务库解析不出物理路径时也以 5 退出"
+assert_contains "$OUT" "[probe]" "issue 14：该分支前缀也是 [probe]"
+gate4 "$SAFE:$outside" "/" 5 probe
+assert_rc "$RC" 5 "issue 14：业务库解析成根目录时也以 5 退出"
+assert_contains "$OUT" "[probe]" "issue 14：根目录分支前缀也是 [probe]"
+# PATH 为空那条分支（第一条早退）
+RC=0; OUT=$( ( set -euo pipefail; unset PATH; source "$GATE"
+               review_path_gate_or_die "$repo" "ctx" 5 probe ) 2>&1 ) || RC=$?
+assert_rc "$RC" 5 "issue 14：PATH 未设置时也以 5 退出"
+assert_contains "$OUT" "[probe]" "issue 14：PATH 未设置分支前缀也是 [probe]"
+# 非致命的「跳过并计数」日志行也要用调用方的前缀（否则探测日志里混进 [kiro-review]）
+gate4 "$SAFE:$tmp/no-such-outside-$$" "$repo" 5 probe
+assert_rc "$RC" 0 "issue 14：库外不存在的条目仍只跳过、放行"
+assert_contains "$OUT" "[probe] PATH 里有 1 个不存在" "issue 14：跳过计数那行也用 [probe] 前缀"
+# **评审侧回归**：不传 $3/$4 时退出码与前缀必须还是 1 与 [kiro-review]
+gate "relbin:$SAFE" "$repo"
+assert_rc "$RC" 1 "issue 14 回归：默认（评审侧）仍以 1 退出"
+assert_contains "$OUT" "[kiro-review]" "issue 14 回归：默认前缀仍是 [kiro-review]"
+gate "$SAFE:$tmp/no-such-outside2-$$" "$repo"
+assert_contains "$OUT" "[kiro-review] PATH 里有 1 个不存在" "issue 14 回归：默认跳过计数行仍是 [kiro-review]"
+# 元测试：上面「以 5 退出」的断言真能红——传 1 时必须是 1，不是恒等于期望值
+gate4 "relbin:$SAFE" "$repo" 1 kiro-review
+assert_rc "$RC" 1 "issue 14 元测试：传 1 时确实以 1 退出（说明退出码真的来自参数，不是恒 5）"
+
 # ---- review_dir_not_in_repo_or_die（curl 之前的 HOME 检查，第六轮复审 P0/P1）----
 # gate2 <待检目录> <业务库目录> → OUT 收 stderr，RC 是退出码；固定 ctx 便于断言
 gate2() {

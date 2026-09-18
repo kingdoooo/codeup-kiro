@@ -138,8 +138,17 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
   2 = 参数错（PROBE_CASES 含未知用例名；零调用）
   3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过 kiro_agent_selfcheck）——探测本身不可信，不是 allowedPaths 的结论
   4 = 门禁用例未全部运行（PROBE_CASES 子集），已跑的全 PASS，不作发布判定
-  5 = 环境准备失败（启动环境不可信、缺 kiro-cli/jq/timeout、未登录、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
+  5 = 环境准备失败（启动环境不可信、**PATH 不可信**、缺 kiro-cli/jq/timeout、未登录、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
   ```
+
+  **PATH 不可信归 5、不归 1**（issue 14，2026-09-18）：PATH 门（`scripts/lib/path-gate.sh`）默认以 **1** 退出，
+  而这张表里 1 是「门禁用例 FAIL、不得上线」。CI 检出目录里只要 PATH 含 `node_modules/.bin`、`.venv/bin` 或一个
+  尾随空条目，探测就会以 1 退出，自动化把一个**PATH 配置问题**读成**读取边界破了 + 告警**（两种形态本机实测复现过）。
+  所以本脚本调门时显式传 `5` 与前缀 `[probe]`；**评审侧不传、保持 1 与 `[kiro-review]` 不变**（刻意不把门里的 1
+  改成 5——那会静默改掉评审侧的语义）。看到 `[probe] 错误：执行器的 PATH 不可信` 时查的是**环境**，不是 agent 定义。
+
+  ⚠ `probe-kiro-headless.sh` 不调这道门，但它自己的 `exit 1` 一码多义（缺 jq / agent 装不上 / 隔离失效）。
+  它目前不进自动化，所以本轮**没有**拆它；要把它接进自动化门禁之前必须先拆开（issue 14 的条件项）。
 
   「实际运行」的集合从 `PROBE_CASES ∩ 已知用例` 推导，不手工记账。
   T5 的正控 agent 由安装器的 `--allow-none` 装（唯一合法的第二调用方：file:// 改写、deny 检查、同名旧文件清理照做）；正控 agent

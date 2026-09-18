@@ -205,6 +205,18 @@ assert_eq "$(LC_ALL=C grep -c '探测走位置参数、生产走 stdin，两者�
   "13：README 里旧的「两者刻意不同」说法已删（否则实现与文档打架）"
 assert_contains "$(cat "$ROOT/docs/adr/0004-pin-kiro-cli-v2-engine.md")" "修订（2026-09-18，issue 13）" \
   "13：ADR-0004 有对应的修订条目（旧备注不能只留原文）"
+# ---- issue 14：PATH 门必须以 5（环境准备失败）+ [probe] 前缀退出，不能沿用门默认的 1 ----
+# 1 在本脚本的分级表里是「门禁用例 FAIL、不得上线」，沿用它会把 PATH 配置问题读成读取边界破了。
+assert_eq "$(LC_ALL=C grep -cE '^review_path_gate_or_die "\$PWD" .* 5 probe$' "$PROBE_SH")" "1" \
+  "14：探测调 PATH 门时传退出码 5 与前缀 probe"
+assert_eq "$(LC_ALL=C grep -cE '^review_path_gate_or_die "\$PWD"$' "$PROBE_SH" || true)" "0" \
+  "14：不再用门的默认退出码（默认是 1 = 门禁用例 FAIL，语义撞车）"
+# 元测试：旧写法确实会被上面那条「零命中」守卫抓到
+assert_eq "$(printf 'review_path_gate_or_die "$PWD"\n' | LC_ALL=C grep -cE '^review_path_gate_or_die "\$PWD"$')" "1" \
+  "14 元测试：旧的默认退出码写法确实会被守卫命中"
+# 分级表两处都要把 PATH 不可信归到 5（表本身另有「与 README 逐字一致」的守卫）
+assert_contains "$(cat "$PROBE_SH")" "PATH 不可信" "14：脚本头部分级表把 PATH 不可信归入退出码 5"
+assert_contains "$(cat "$ROOT/scripts/probe/README.md")" "PATH 不可信" "14：README 分级表同步"
 unset PROBE_SH
 assert_rc "$(bash -n "$ROOT/scripts/probe/probe-kiro-headless.sh" && echo 0 || echo 1)" 0 "⑫：probe-kiro-headless.sh 语法合法"
 
