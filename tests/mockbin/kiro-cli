@@ -122,11 +122,23 @@ esac
 if [[ "${2:-}" == "--list-models" ]]; then
   pwd -P > "$M/listmodelscwd"
   printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-listmodels"
-  # MOCK_LIST_MODELS_RC=<n>  命令失败（脚本必须 fail-open：不挂 notice、不阻断）
+  # MOCK_LIST_MODELS_RC=<n>  命令失败（脚本必须 fail-open：不挂 notice、不阻断）；无输出
   [[ -z "${MOCK_LIST_MODELS_RC:-}" ]] || { echo "mock: 模拟 --list-models 失败" >&2; exit "$MOCK_LIST_MODELS_RC"; }
+  # MOCK_LIST_MODELS_PARTIAL_RC=<n>  **先打出部分清单（只有 auto，缺目标模型）再以 <n> 退出**（CodeX 复审 R1）：
+  #   退出码被吞时会误挂「模型回落」notice——脚本必须按退出码 fail-open，不据部分输出下结论
+  if [[ -n "${MOCK_LIST_MODELS_PARTIAL_RC:-}" ]]; then
+    echo "Available models (* = default):"; echo
+    printf '* %-20s %sx credits      mock model\n' auto 1.00
+    exit "$MOCK_LIST_MODELS_PARTIAL_RC"
+  fi
   # MOCK_LIST_MODELS_GARBAGE=1  输出形态变了/解析不出清单（同样必须 fail-open）
   if [[ "${MOCK_LIST_MODELS_GARBAGE:-0}" == "1" ]]; then
     echo "some future format nobody parsed"; exit 0
+  fi
+  # MOCK_LIST_MODELS_BADRATE=1  一条形如 `ERROR .x credits` 的垃圾行（非法倍率）——收紧后的正则不得把它当成模型
+  if [[ "${MOCK_LIST_MODELS_BADRATE:-0}" == "1" ]]; then
+    echo "Available models (* = default):"; echo
+    echo "ERROR .x credits malformed line"; exit 0
   fi
   # MOCK_LIST_MODELS_WITHOUT=<id>  清单里**不含**该 id（模拟 ID 轮换 / 组织策略未放行）
   echo "Available models (* = default):"

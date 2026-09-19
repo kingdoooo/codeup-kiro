@@ -3,7 +3,7 @@
 # 安全前提：本脚本必须从受信集成包仓库（流水线独立代码源，固定分支/tag）执行，
 # 绝不从被评审的业务仓库源分支执行（源分支可被 MR 作者任意修改）。
 # 业务仓库 checkout 目录由 REVIEW_REPO_DIR 指定，仅作为被分析数据：它只出现在受信 agent 的 allowedPaths 里，
-# **四处 kiro-cli 调用都在 $WORK/cwd（空目录）下运行**（15-fix4 #1）——kiro-cli 相对 cwd 发现的每一个面（.kiro/agents 顶替
+# **五处 kiro-cli 调用都在 $WORK/cwd（空目录）下运行**（15-fix4 #1）——kiro-cli 相对 cwd 发现的每一个面（.kiro/agents 顶替
 # 受信 agent、.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、lsp.json…）都落在一个没有文件的目录里；
 # 第 5.5 步对业务库工作树里 AGENTS.md/lsp.json/.kiro/符号链接 的删除保留为**第二道**。Kiro 固定以 v2 引擎运行（ADR-0004）。
 # 输出契约：Kiro 以 --output-format stream-json 输出事件流，评审报告是 runFinished.data.finalText 里
@@ -232,9 +232,13 @@ _validate_err_lib_lines() {
 #   INLINE_NOTICE 只进成功评论。两个合成函数都读全局、各只拼一次。
 REVIEW_NOTICE=""
 DIFF_NOTICE=""   # 第 4.0 步：Git 属性触发的强制文本比较说明（CodeX 2026-09-09 P0-1）
+# MODEL_NOTICE：issue 16 的模型回落提示。**必须与 REVIEW_NOTICE 分开**（CodeX 复审 R2）——版本门 break-glass 那段
+# 用的是 `REVIEW_NOTICE=...`（覆盖赋值，不是追加），排在模型核对之后，会把塞进 REVIEW_NOTICE 的模型提示整条冲掉。
+# 独立变量既避开覆盖，也让「成功/降级评论都带、但用词不假设评审已完成」这件事可控。
+MODEL_NOTICE=""
 all_notice() {
   local out="" n
-  for n in "${REVIEW_NOTICE:-}" "${DIFF_NOTICE:-}" "${INLINE_NOTICE:-}"; do [[ -n "$n" ]] && out="${out}${out:+ }${n}"; done
+  for n in "${REVIEW_NOTICE:-}" "${MODEL_NOTICE:-}" "${DIFF_NOTICE:-}" "${INLINE_NOTICE:-}"; do [[ -n "$n" ]] && out="${out}${out:+ }${n}"; done
   printf '%s' "$out"
 }
 # 降级 / 失败评论该带的那一份：REVIEW_NOTICE + DIFF_NOTICE，**不含** INLINE_NOTICE
@@ -245,7 +249,7 @@ all_notice() {
 # INLINE_NOTICE 仍然排除：它只讲问题分桶（「全部问题都归入未定位」），对没有问题清单的评论没有意义（15-fix4 #3）。
 degrade_notice() {
   local out="" n
-  for n in "${REVIEW_NOTICE:-}" "${DIFF_NOTICE:-}"; do [[ -n "$n" ]] && out="${out}${out:+ }${n}"; done
+  for n in "${REVIEW_NOTICE:-}" "${MODEL_NOTICE:-}" "${DIFF_NOTICE:-}"; do [[ -n "$n" ]] && out="${out}${out:+ }${n}"; done
   printf '%s' "$out"
 }
 
@@ -1163,7 +1167,7 @@ if ! command -v kiro-cli >/dev/null; then
   #   ① `env -i` 把 `BASH_FUNC_*` 一并挡在外面。第 0.1 步已经拒绝了带 `BASH_FUNC_*` 的启动环境，这里是第二道——
   #      门是时点判断，而安装是全脚本唯一「把控制权交给一个新的 bash」的地方，值得自己把环境收干净。
   #   ② 安装脚本 / curl 没有任何理由拿到 KIRO_API_KEY / YUNXIAO_TOKEN / CODEUP_*：固定名单（KIRO_ENV_FIXED_NAMES，
-  #      与四次 kiro-cli 调用同一份）**再去掉 KIRO_API_KEY**，剩下的只有 PATH/HOME/locale/代理/证书/XDG 这些它们真需要的。
+  #      与五处 kiro-cli 调用同一份）**再去掉 KIRO_API_KEY**，剩下的只有 PATH/HOME/locale/代理/证书/XDG 这些它们真需要的。
   #      **curl 也套 env -i**（不只右侧 bash）：否则一个恶意 `.curlrc` 能借 curl 左侧继承的凭证环境做 upload/额外请求，
   #      绕开「右侧不传凭证」的设计目标（第六轮 P0）。
   # 将来官方安装脚本需要别的变量时，把变量名加进 KIRO_ENV_FIXED_NAMES（或在这里显式补一个），
@@ -1254,14 +1258,14 @@ else
   log "未配置 KIRO_CLI_SHA256：不核对 kiro-cli 二进制摘要（版本门只挡版本语义漂移；生产请按 setup-guide 第 7 节钉死入口文件 sha256）"
 fi
 
-# --- 2.2 把「核对过的那个入口」绑定到后面四次真正的执行（CodeX 2026-09-11 复审 P2）---
-# 摘要门核对的是 `command -v kiro-cli` 在**当前 cwd（业务库）**下解析出来的入口，而后面四次调用写的都是裸命令
+# --- 2.2 把「核对过的那个入口」绑定到后面五处真正的执行（CodeX 2026-09-11 复审 P2）---
+# 摘要门核对的是 `command -v kiro-cli` 在**当前 cwd（业务库）**下解析出来的入口，而后面五处调用写的都是裸命令
 # `kiro-cli`、且都在 `$KIRO_CWD`（空目录）里跑——PATH 里只要有一个相对目录，两次解析就可能落到不同文件上：
 # 核对了 `relative-bin/kiro-cli`、执行的是另一个目录下摘要不同的那份，日志照样打「摘要核对通过」（2026-09-11 复现）。
 # 当前 Flow 执行器的 PATH 是绝对路径，不受影响；但「校验 A、执行 B」本身就让 KIRO_CLI_SHA256 的绑定不成立。
 # 固定成一次解析：取 `command -v` 的**绝对路径**（不解引用符号链接——macOS 装的是指向 Kiro CLI.app 内部的链接，
 # 直接执行解引用后的路径会改变 argv[0] 与 bundle 内的相对查找；摘要仍按解引用后的入口文件算，KIRO_CLI_BIN 不变），
-# 四处调用都用它。剩余窗口是「核对之后、执行之前有人重指向那个符号链接」——比 PATH 重解析窄得多，且需要执行器上的写权限。
+# 五处调用都用它。剩余窗口是「核对之后、执行之前有人重指向那个符号链接」——比 PATH 重解析窄得多，且需要执行器上的写权限。
 KIRO_CLI_CMD=$(command -v kiro-cli) || die_review "PATH 里找不到 kiro-cli（安装步骤之后仍然找不到）"
 case "$KIRO_CLI_CMD" in
   /*) ;;
@@ -1270,7 +1274,7 @@ case "$KIRO_CLI_CMD" in
        || die_review "无法把 kiro-cli 的路径转成绝对路径（PATH 里含相对目录？）" ;;
 esac
 [[ -x "$KIRO_CLI_CMD" ]] || die_review "kiro-cli 入口不可执行：${KIRO_CLI_CMD}"
-log "kiro-cli 入口（后续四次调用都用这一个绝对路径）：${KIRO_CLI_CMD}"
+log "kiro-cli 入口（后续五处调用都用这一个绝对路径）：${KIRO_CLI_CMD}"
 
 # --- 3. 安装受信 agent + kiro-cli 能力检查（放在 MR 定位之后：失败用 die_review 回写评论，而不是只让流水线标红）---
 # agent 定义里的 prompt 是相对 file:// 引用（kiro 相对 agent 文件所在目录解析），复制到 ~/.kiro/agents/
@@ -1281,7 +1285,7 @@ log "kiro-cli 入口（后续四次调用都用这一个绝对路径）：${KIRO
 #   第 4 步 build_review_input 对已存在的空目录只 mkdir -p、不会另建一个）。
 # 两条路径是安装函数的必填参数，缺了拒绝落盘（allow 为空在 headless 下等于每次读取都被拒，宁可不跑）；
 # 三个工具的 deniedPaths 缺失/为空/不含 **/.git/** 同样拒装（否则结构化写入会凭空造出只有 allow 没有 deny 的工具）。
-# Kiro 运行目录（15-fix4 #1）：四处 kiro-cli 调用（下面的 --help / --version、第 5.5 步的 settings、第 6 步的 chat）都在这个**空目录**下运行，
+# Kiro 运行目录（15-fix4 #1）：五处 kiro-cli 调用（下面的 --help / --list-models、--version、第 5.5 步的 settings、第 6 步的 chat）都在这个**空目录**下运行，
 # 业务库只在 allowedPaths 里、由模型用绝对路径读取（运行时提示词把 $WS_P 穿进去）。kiro-cli 相对 cwd 发现的每一个面——
 # $CWD/.kiro/agents/<同名>.json 顶替受信 agent（工作区优先于全局）、$CWD/.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、
 # lsp.json——都落在一个没有文件的目录里；第 5.5 步的删除从承重措施变成第二道。
@@ -1306,7 +1310,7 @@ else
 fi
 # 打出安装文件里**实际**的许可路径（不是打参数）：首次联调按 setup-guide §8 核对它们与本次 checkout 一致
 log "受信 agent 许可路径：$(jq -r '.toolsSettings.read.allowedPaths | join("、")' "$INSTALLED_AGENT")（read/grep/glob 三处一致）"
-# 四处 kiro-cli 调用（这里的 --help 与 --version、第 5.5 步的 settings、第 6 步的 chat）都以 env -i + 许可清单启动（15-fix #8）：
+# 五处 kiro-cli 调用（这里的 --help、--list-models 与 --version、第 5.5 步的 settings、第 6 步的 chat）都以 env -i + 许可清单启动（15-fix #8）：
 # 第 2 步可能刚把 ~/.local/bin 加进 PATH，所以许可清单在这里重算一次（第 1.6 步那次只为校验 KIRO_ENV_PASSTHROUGH）。
 env_allowlist_or_die
 # 所有 kiro-cli 子命令都在 $KIRO_CWD（空目录）下执行，绝不在业务库工作树里（15-fix4 #1）
@@ -1341,20 +1345,39 @@ _want_model=$(jq -r '.model // ""' "$INSTALLED_AGENT" 2>/dev/null || true)
 if [[ -z "$_want_model" ]]; then
   log "agent 未声明 model，跳过模型清单核对（刻意用 Kiro 默认模型）"
 else
-  _lm=$(cd "$KIRO_CWD" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" chat --list-models 2>/dev/null || true)
+  # **退出码单独捕获、非零一律 fail-open**（CodeX 复审 R1）：旧写法 `2>/dev/null || true` 把退出码吞了，于是
+  # 「命令先打出**部分**清单再失败 / 被 timeout 杀」这种情况会留下一个非空但不完整的 _models——若 agent 声明的
+  # 模型恰好还没打出来，就会误挂「模型回落」notice。这类失败本该 fail-open。所以：rc≠0（含 124/137 超时）直接跳过，
+  # 连解析都不做，绝不据一份不完整的输出下结论。
+  # `-k 30`（CodeX 复审 R2）：这是**建议性、必须 fail-open** 的检查——绝不能阻塞评审。裸 `timeout 60` 在子进程
+  # 忽略 TERM 时会一直等下去（只发 TERM、不补 KILL），把评审卡到流水线外层超时才结束，直接违背 fail-open 的目的。
+  # 与第 6 步主 chat 调用（`-k 30`）同口径补上 kill-after。（同段的 --help / settings 能力门失败即 die_review，
+  # 不是 fail-open 语义，卡住属另一类问题、且不在本次改动范围——见交付说明。）
+  _lm=""; _lm_rc=0
+  _lm=$(cd "$KIRO_CWD" && "$TIMEOUT_BIN" -k 30 60 env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" chat --list-models 2>/dev/null) || _lm_rc=$?
   # 解析：真实输出每行形如 `[*] <id>  <倍率>x credits  <说明>`（首行是标题、其后一空行）。只认「行首可选 *、
-  # 接一个 id、再接 <数字>x credits」这个形态；一条都认不出来就当作「解析不出清单」。
-  _models=$(printf '%s\n' "$_lm" | LC_ALL=C sed -n 's/^[[:space:]]*\*\{0,1\}[[:space:]]*\([A-Za-z0-9._-]\{1,\}\)[[:space:]]\{1,\}[0-9.]\{1,\}x[[:space:]]*credits.*/\1/p' || true)
-  if [[ -z "$_models" ]]; then
-    log "警告：kiro-cli chat --list-models 取不到可用模型清单（命令失败或输出形态变了），本次跳过模型核对——这是建议性检查，不阻断评审（issue 16）"
+  # 接一个 id、再接一个**真实数字**倍率（`4.40` / `1` 这类，不接受单独的 `.` / `..`——否则一条形如
+  # `ERROR .x credits` 的垃圾行会被当成名叫 ERROR 的模型，CodeX 复审 R1）+ `x credits`」这个形态；
+  # 一条都认不出来就当作「解析不出清单」。
+  _models=""
+  if [[ "$_lm_rc" == "0" ]]; then
+    _models=$(printf '%s\n' "$_lm" | LC_ALL=C sed -n 's/^[[:space:]]*\*\{0,1\}[[:space:]]*\([A-Za-z0-9._-]\{1,\}\)[[:space:]]\{1,\}[0-9]\{1,\}\(\.[0-9]\{1,\}\)\{0,1\}x[[:space:]]*credits.*/\1/p' || true)
+  fi
+  if [[ "$_lm_rc" != "0" ]]; then
+    log "警告：kiro-cli chat --list-models 退出码 ${_lm_rc}（124/137=超时），本次跳过模型核对——这是建议性检查，不阻断评审（issue 16）"
+  elif [[ -z "$_models" ]]; then
+    log "警告：kiro-cli chat --list-models 取不到可用模型清单（输出形态变了、解析不出任何模型行），本次跳过模型核对——这是建议性检查，不阻断评审（issue 16）"
   elif printf '%s\n' "$_models" | LC_ALL=C grep -qxF -- "$_want_model"; then
     log "模型核对通过：agent 声明的 ${_want_model} 在本账号可用清单内（共 $(printf '%s\n' "$_models" | grep -c .) 个）"
   else
     # 模型 ID 不是敏感值，可以回显；仍过 review_clean_text（它来自 agent 定义，正常是受信的，但评论出口一律清洗）
-    REVIEW_NOTICE="${REVIEW_NOTICE}${REVIEW_NOTICE:+ }⚠️ 受信 agent 声明的模型 \`$(printf '%s' "$_want_model" | review_clean_text)\` 不在本账号/组织当前可用的模型清单内——Kiro 会**静默回落默认模型**，本次评审仍已完成，但产出可能与预期的模型不同。请核对 \`kiro-cli chat --list-models\` 与 agent 定义里的 model（见 setup-guide 第 8 节第 13 项）。"
+    # 写进独立的 MODEL_NOTICE（不是 REVIEW_NOTICE）：否则版本门 break-glass 的覆盖赋值会把它冲掉（CodeX 复审 R2）。
+    # 措辞**不假设评审已完成**（去掉原来那句声称本轮评审已跑完的话）：这条 notice 会同时进成功与失败/降级评论，
+    # 而失败评论的结论是「评审未完成」——两者同框会自相矛盾（CodeX 复审 R2 证据二）。只陈述模型事实。
+    MODEL_NOTICE="⚠️ 受信 agent 声明的模型 \`$(printf '%s' "$_want_model" | review_clean_text)\` 不在本账号/组织当前可用的模型清单内——Kiro 会**静默回落默认模型**，产出可能与预期的模型不同。请核对 \`kiro-cli chat --list-models\` 与 agent 定义里的 model（见 setup-guide 第 8 节第 13 项）。"
     log "警告：agent 声明的模型 ${_want_model} 不在 --list-models 清单内（清单：$(printf '%s\n' "$_models" | paste -sd' ' -)）——挂 notice，不拒绝评审"
   fi
-  unset _lm _models
+  unset _lm _lm_rc _models
 fi
 unset _want_model
 # kiro-cli 版本 vs 探测过的版本（CodeX 2026-09-09 复审 P1-2，推翻 15-fix2 #24 的「名单外只 notice」）：读取边界（allowedPaths 之外的
@@ -1501,7 +1524,7 @@ fi
 # 业务库内容一律不受信。删什么、为什么、怎么一次遍历删干净，见 scripts/lib/isolation.sh（review_isolate_workspace）：
 # 任意深度的 AGENTS.md / .kiro（任何类型、不分大小写）/ 符号链接，以及根 lsp.json；任意深度的 .git 目录内部不动。
 # 这一步是**第二道**（15-fix4 #1）：kiro-cli 相对 cwd 发现的面——`.kiro/settings/cli.json` 覆盖全局设置、`$CWD/.kiro/agents/`
-# 顶替同名受信 agent（工作区优先于全局，kiro-cli 2.21 实测）、AGENTS.md steering、lsp.json——第一道是四处 kiro-cli 调用都在
+# 顶替同名受信 agent（工作区优先于全局，kiro-cli 2.21 实测）、AGENTS.md steering、lsp.json——第一道是五处 kiro-cli 调用都在
 # $KIRO_CWD（空目录）下运行，业务库从来不是 cwd。删除仍做：业务库在 allowedPaths 里，AGENTS.md 之类若被 kiro-cli 按别的途径
 # 发现（未来版本、v3 的子目录 steering）仍不该在；且这份清单永远关不上，第一道才是承重的。
 # 符号链接（15-fix #1）：`payload -> /root/.aws/credentials` 的请求路径字面上在 allowedPaths 之内，kiro-cli 是否先解析再比对

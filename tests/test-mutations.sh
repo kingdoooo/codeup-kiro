@@ -855,7 +855,7 @@ fi
 # --- M-model-notice（issue 16）：模型不在可用清单内时不再挂 notice → 静默用了别的模型，评论上看不出来 ---
 # 这条变异杀的是「事前核对」的唯一出口。事后没有任何信号可查（issue 11 取证：事件流无模型名字段、
 # agent 这条路 stderr 为空），所以这个 notice 就是该盲区的全部可观测性。
-pkg=$(make_mutant m-model-notice 's@^    REVIEW_NOTICE="\${REVIEW_NOTICE}\${REVIEW_NOTICE:+ }⚠️ 受信 agent 声明的模型@    : "不挂 notice" #@')
+pkg=$(make_mutant m-model-notice 's@^    MODEL_NOTICE="⚠️ 受信 agent 声明的模型@    : "不挂 notice" #@')
 run_case m-model-notice "$pkg" MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
 assert_rc "$RC" 0 "M-model-notice：评审照常完成（本来就不拒绝）"
 assert_not_contains "$(posted_comment "$OUT")" "不在本账号" \
@@ -873,6 +873,34 @@ assert_contains "$OUT" "跳过模型清单核对" "M-model-none：日志说明�
 assert_eq "$([[ -f "$MD/calls" ]] && { grep -c -x listmodels "$MD/calls" || true; } || echo 0)" "0" \
   "M-model-none：不声明 model 时连 --list-models 都不调（省一次外部调用）"
 assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "M-model-none：跳过时不挂 notice"
+
+# --- M-model-failopen（CodeX 复审 R1）：退出码 fail-open 被**整体**还原成旧行为 → 部分清单 + 命令失败时据不完整输出误挂 notice ---
+# R1 的修复是两层防线：① rc≠0 直接跳过（`if [[ "$_lm_rc" != "0" ]]`）；② 只有 rc==0 才解析（`if [[ "$_lm_rc" == "0" ]]`）。
+# 单杀任一层仍会 fail-open（这正是纵深该有的样子），所以用**双变异**同时拆掉两层，才等价于旧的「吞掉退出码、无条件解析」：
+#   ① 把「rc==0 才解析」改成恒真（无条件解析部分输出）；② 把「rc≠0 跳过」改成恒假（不再因失败跳过）。
+# 配 MOCK_LIST_MODELS_PARTIAL_RC=3（先打 auto 再退 3）：变异体把「清单只有 auto」当真、gpt-5.6-sol 不在其中 → 误挂 notice。
+pkg=$(make_mutant m-model-failopen 's/if \[\[ "\$_lm_rc" == "0" \]\]; then/if [[ "0" == "0" ]]; then/')
+mutate_more "$pkg" 's/if \[\[ "\$_lm_rc" != "0" \]\]; then/if [[ "1" == "0" ]]; then/'
+run_case m-model-failopen "$pkg" MOCK_LIST_MODELS_PARTIAL_RC=3
+assert_rc "$RC" 0 "M-model-failopen：评审仍完成（notice 不拒绝）"
+assert_contains "$(posted_comment "$OUT")" "不在本账号" \
+  "M-model-failopen：还原旧行为后据部分输出误挂 notice——端到端 fail-open③「部分清单+rc=3 不挂 notice」断言会失败"
+run_case m-model-failopen-control "$ROOT" MOCK_LIST_MODELS_PARTIAL_RC=3
+assert_rc "$RC" 0 "M-model-failopen 对照：原实现同样不拒绝"
+assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "M-model-failopen 对照：原实现按退出码 fail-open，不挂 notice"
+
+# --- M-model-notice-overwrite（CodeX 复审 R2-2）：模型提示写回 REVIEW_NOTICE（而不是独立 MODEL_NOTICE）→
+# 版本门 break-glass 的覆盖赋值把它冲掉。配 break-glass（版本 9.9.9 + ACK）+ 模型不在清单：变异体评论里只剩版本 notice、
+# 没有模型 notice——即旧缺陷。 ---
+pkg=$(make_mutant m-model-notice-overwrite 's/    MODEL_NOTICE="⚠️ 受信 agent 声明的模型/    REVIEW_NOTICE="⚠️ 受信 agent 声明的模型/')
+run_case m-model-notice-overwrite "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9" MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
+assert_rc "$RC" 0 "M-model-notice-overwrite：评审仍完成"
+assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-model-notice-overwrite：版本 break-glass notice 在"
+assert_not_contains "$(posted_comment "$OUT")" "不在本账号" \
+  "M-model-notice-overwrite：模型 notice 被 break-glass 覆盖冲掉——端到端 R2-2① 断言会失败"
+run_case m-model-notice-overwrite-control "$ROOT" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9" MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
+assert_contains "$(posted_comment "$OUT")" "不在本账号" "M-model-notice-overwrite 对照：原实现两条 notice 都在"
+assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-model-notice-overwrite 对照：版本 notice 也在"
 
 # --- M5w：被拒的凭证形状名字不再掩码 → 完整名字进失败评论（15-fix3 #6）---
 pkg=$(make_mutant m5w-cred-mask 's/cred+=("第 ${idx} 项 $(_kiro_env_mask_token "$tok")（命中 ${rule}）")/cred+=("第 ${idx} 项 ${tok}（命中 ${rule}）")/' scripts/lib/kiro-agent.sh)

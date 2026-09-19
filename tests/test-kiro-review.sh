@@ -2387,13 +2387,43 @@ assert_eq "$(call_count "$MD/calls" chat)" "1" "模型核对正控：Kiro 照常
 # fail-open ①：--list-models 命令失败
 run_case modellmfail MOCK_LIST_MODELS_RC=3
 assert_rc "$RC" 0 "fail-open①：--list-models 失败 → 评审照常完成"
-assert_contains "$OUT" "取不到可用模型清单" "fail-open①：日志说明跳过核对"
+assert_contains "$OUT" "退出码 3" "fail-open①：命令失败走退出码分支、日志说明跳过核对（R1 后按退出码 fail-open）"
 assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "fail-open①：不挂 notice（建议性检查的失败不该污染评论）"
 # fail-open ②：输出形态变了（将来 kiro-cli 改格式）
 run_case modellmgarbage MOCK_LIST_MODELS_GARBAGE=1
 assert_rc "$RC" 0 "fail-open②：清单解析不出来 → 评审照常完成"
 assert_contains "$OUT" "取不到可用模型清单" "fail-open②：日志说明跳过核对"
 assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "fail-open②：不挂 notice（否则格式一变就每次评审都挂）"
+# fail-open ③（CodeX 复审 R1）：**先打出部分清单（只有 auto，缺 gpt-5.6-sol）再退出 3**。旧写法 `2>/dev/null || true`
+# 吞了退出码，会据这份不完整输出误挂「模型回落」notice。必须按退出码 fail-open。
+run_case modellmpartial MOCK_LIST_MODELS_PARTIAL_RC=3
+assert_rc "$RC" 0 "fail-open③：部分清单 + rc=3 → 评审照常完成"
+assert_contains "$OUT" "退出码 3" "fail-open③：日志按退出码说明跳过（不是「解析不出」）"
+assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "fail-open③：**不挂 notice**——命令失败不据部分输出下结论（这条正是 R1 的洞）"
+# fail-open ④：超时（124）后有部分输出，同样按退出码 fail-open
+run_case modellmpartialto MOCK_LIST_MODELS_PARTIAL_RC=124
+assert_rc "$RC" 0 "fail-open④：部分清单 + 超时 124 → 评审照常完成"
+assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "fail-open④：超时不挂 notice"
+# 解析健壮性（CodeX 复审 R1）：一条形如 `ERROR .x credits` 的垃圾行不得被收紧后的正则当成模型。
+# 若被当成模型，清单 = {ERROR}，agent 声明的 gpt-5.6-sol 不在其中 → 会误挂 notice。收紧后应解析出 0 条 → fail-open。
+run_case modellmbadrate MOCK_LIST_MODELS_BADRATE=1
+assert_rc "$RC" 0 "解析健壮：非法倍率垃圾行 → 评审照常完成"
+assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "解析健壮：垃圾行不被当模型 → 不误挂 notice"
+assert_contains "$OUT" "取不到可用模型清单" "解析健壮：垃圾行解析出 0 条 → 走 fail-open 跳过"
+# R2-2 证据一（CodeX 复审）：模型不在清单 **且** 版本走 break-glass 时，两条 notice 都要在。
+# 旧实现把模型提示塞进 REVIEW_NOTICE，而版本 break-glass 是 `REVIEW_NOTICE=`（覆盖赋值、排在其后）→ 模型提示被冲掉。
+run_case modelnotice_bg MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9" MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
+assert_rc "$RC" 0 "R2-2①：模型缺失 + break-glass → 评审仍完成"
+mk_bg=$(posted_comment "$OUT")
+assert_contains "$mk_bg" "不在本账号" "R2-2①：模型回落 notice **没有**被 break-glass 覆盖掉（独立 MODEL_NOTICE）"
+assert_contains "$mk_bg" "未经 P1-15 探测" "R2-2①：版本 break-glass notice 也在"
+# R2-2 证据二：模型缺失 + 之后某步失败（settings）→ 失败评论不得出现「本次评审仍已完成」这种与「评审未完成」自相矛盾的话
+run_case modelnotice_fail MOCK_SETTINGS_FAIL=1 MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
+assert_nonzero "$RC" "R2-2②：settings 失败 → 拒绝（die_review）"
+mk_fail=$(posted_comment "$OUT")
+assert_contains "$mk_fail" "评审未完成" "R2-2②：失败评论结论是「评审未完成」"
+assert_contains "$mk_fail" "不在本账号" "R2-2②：失败评论带上模型 notice（degrade_notice 合并 MODEL_NOTICE）"
+assert_not_contains "$mk_fail" "本次评审仍已完成" "R2-2②：失败评论里没有「本次评审仍已完成」（正是 R2 证据二那句与「评审未完成」自相矛盾的话）"
 # 「agent 定义里没有 model 字段 → 跳过核对」那条分支要改 kiro/agent-codeup-reviewer.json 才测得到，
 # 而 AGENT_FILE 是从 PKG_ROOT 硬编码的（scripts/kiro-review.sh:140），本套件跑的就是真包。
 # 那条分支放在 test-mutations.sh 里用变异包覆盖（M-model-none），连同「删掉 notice 那行」的变异一起。
@@ -2404,6 +2434,31 @@ assert_eq "$(LC_ALL=C grep -cE '^ *_lm=\$\(cd "\$KIRO_CWD".*chat --list-models' 
   "issue 16 静态：--list-models 只在一处真正调用，且在 \$KIRO_CWD 空目录下走 env -i"
 assert_eq "$(LC_ALL=C grep -c 'die_review.*list-models' "$ROOT/scripts/kiro-review.sh" || true)" "0" \
   "issue 16 静态：模型核对的任何分支都不 die_review（口径是 notice，不是拒绝）"
+# CodeX 复审 R1：退出码必须单独捕获并 fail-open（不能 `|| true` 吞掉后据部分输出下结论）；正则倍率不接受单独的 `.`
+assert_eq "$(LC_ALL=C grep -c '|| _lm_rc=\$?' "$ROOT/scripts/kiro-review.sh")" "1" \
+  "R1 静态：--list-models 退出码单独捕获到 _lm_rc（不再 \`|| true\` 吞码）"
+assert_eq "$(LC_ALL=C grep -c 'if \[\[ "\$_lm_rc" != "0" \]\]' "$ROOT/scripts/kiro-review.sh")" "1" \
+  "R1 静态：rc≠0（含超时 124/137）先于解析 fail-open"
+assert_eq "$(LC_ALL=C grep -cF '[0-9]\{1,\}\(\.[0-9]\{1,\}\)\{0,1\}x' "$ROOT/scripts/kiro-review.sh" || true)" "1" \
+  "R1 静态：倍率正则要求真实数字（不接受单独的 . / ..）"
+# CodeX 复审 R2-1：advisory 的 --list-models 必须 `-k`（TERM-ignore 时不能把评审卡到外层超时才结束）
+assert_eq "$(LC_ALL=C grep -c 'TIMEOUT_BIN" -k 30 60 env -i .* chat --list-models' "$ROOT/scripts/kiro-review.sh")" "1" \
+  "R2-1 静态：--list-models 带 -k 30（fail-open 检查绝不阻塞评审）"
+# CodeX 复审 R2-2：模型提示走独立 MODEL_NOTICE（不能塞进 REVIEW_NOTICE——版本门 break-glass 会覆盖它），
+# 且措辞不得断言「评审已完成」（那条会同时进失败评论、与「评审未完成」自相矛盾）
+assert_eq "$(LC_ALL=C grep -c '  MODEL_NOTICE="⚠️ 受信 agent 声明的模型' "$ROOT/scripts/kiro-review.sh")" "1" \
+  "R2-2 静态：模型提示写进独立 MODEL_NOTICE，不塞进会被 break-glass 覆盖的 REVIEW_NOTICE"
+assert_eq "$(LC_ALL=C grep -c 'MODEL_NOTICE' "$ROOT/scripts/kiro-review.sh" | awk '{print ($1>=3)?"ok":"no"}')" "ok" \
+  "R2-2 静态：MODEL_NOTICE 至少三处（定义 + all_notice + degrade_notice 都合并它）"
+assert_eq "$(LC_ALL=C grep -c '本次评审仍已完成' "$ROOT/scripts/kiro-review.sh" || true)" "0" \
+  "R2-2 静态：模型 notice 不再断言「评审已完成」（否则失败评论会自相矛盾）"
+# CodeX 复审 R2-3：每处直接执行 kiro-cli 入口的行都必须在 \$KIRO_CWD 空目录下、走 env -i（隔离不变式，
+# 新增第 5 处 --list-models 后仍成立；将来加第 6 处若漏了 env -i / cd，这条先红）
+_kexec=$(LC_ALL=C grep -nE '"\$KIRO_CLI_CMD" (chat|settings)' "$ROOT/scripts/kiro-review.sh")
+assert_eq "$(printf '%s\n' "$_kexec" | grep -c .)" "4" "R2-3 静态：直接执行 kiro-cli 入口的行恰好 4 处（help/list-models/settings/chat；version 走 helper）"
+assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'env -i')" "0" "R2-3 静态：每处执行都走 env -i"
+assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'cd "\$KIRO_CWD"')" "0" "R2-3 静态：每处执行都在 \$KIRO_CWD 空目录下"
+unset _kexec
 
 # ---- 安装档位（KIRO_INSTALL_PROFILE，ADR-0006）：第 1.6 步校验 ----
 # 公共环境里已经把档位设成 latest（既有用例测的都是现装档位的既有行为），所以「变量缺失」要用空值显式覆盖。

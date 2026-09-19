@@ -457,7 +457,7 @@ EOL 公告;遇到这类失败别照「回到已探测版本」的常规 runbook(
 3. 启动前能力检查：脚本先跑 `kiro-cli chat --help`，钉引擎的参数（`--agent-engine` **或** `--v2`，任一即可）、
    `--agent`、`--output-format` 三项缺任一即**硬失败**（回写「评审未完成」评论），不再降级运行。`kiro-cli --version` 跑不起来（退出码非零）
    同样硬失败；版本号解析不出来同样拒绝评审（版本门的信任单位是「平台 + 版本」元组，版本未知不放行）。**紧接着的「Kiro 运行目录：<路径>/cwd（空目录；业务库 <路径> 只在 allowedPaths 里…）」**：
-   四处 kiro-cli 调用（`chat --help`、`--version`、`settings`、`chat`）都在本次 `mktemp` 工作目录下的空目录 `cwd` 里运行，**绝不在**
+   五处 kiro-cli 调用（`chat --help`、`--list-models`、`--version`、`settings`、`chat`）都在本次 `mktemp` 工作目录下的空目录 `cwd` 里运行，**绝不在**
    业务库 checkout 里——第一段路径必须与第 1 项第二条许可路径（`…/chunks`）同一个父目录，第二段必须等于第 1 项的第一条许可路径。
 4. 引擎已钉死：日志出现「Kiro 引擎：v2（--agent-engine v2」。原因见第 12 节。
 5. 调用行**没有** `--trust-tools`、更没有 `--trust-all-tools`（第 12 节）：免确认只来自受信 agent 的
@@ -898,7 +898,7 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   （实测验证过的是工作区 `AGENTS.md`）。局限有三点：① **只对 v2 引擎有效**；② 它写在执行账号
   `$HOME` 的**全局**设置里且不回滚（常驻执行器注意事项见第 7 节第 5 条）；
   ③ 工作区级 `.kiro/settings/cli.json` 能把它顶掉——所以 kiro-cli 从不在业务库里运行（下一条）。
-- **kiro-cli 从不在业务库里运行（第一道）**：四处 kiro-cli 调用（`chat --help`、`--version`、`settings`、`chat`）都在本次
+- **kiro-cli 从不在业务库里运行（第一道）**：五处 kiro-cli 调用（`chat --help`、`--list-models`、`--version`、`settings`、`chat`）都在本次
   工作目录下的**空目录** `$WORK/cwd` 里执行，业务库只出现在受信 agent 的 `allowedPaths` 里，模型按运行时提示词给出的
   **绝对路径**读取（相对路径会落在空目录里被拒；提示词缺 `{{REVIEW_WORKSPACE}}` 占位符时脚本拒绝运行）。kiro-cli 相对 cwd
   发现的每一个面——`$CWD/.kiro/agents/<同名>.json` 顶替受信 agent（工作区优先于全局，kiro-cli 2.21 实测）、`.kiro/settings/cli.json`
@@ -948,7 +948,7 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   **业务库里的符号链接在 Kiro 启动前全部删除**（隔离步骤，与 AGENTS.md / `.kiro/` 同一步）：MR 提交一个
   `payload -> /root/.aws/credentials`，请求路径字面上就在 allowedPaths 之内，而 kiro-cli 是否先解析链接再比对未经实测
   （探测 P1-15 T8 记录事实，生产不依赖它）。diff 已从 git 对象算好，删链接不影响评审输入——链接本身的改动在 diff 里照样可见。
-- **Kiro 进程环境只含固定名单变量**：四处 kiro-cli 调用（能力检查 `chat --help` 与 `--version`、隔离 `settings`、评审 `chat`）
+- **Kiro 进程环境只含固定名单变量**：五处 kiro-cli 调用（能力检查 `chat --help`、`--list-models` 与 `--version`、隔离 `settings`、评审 `chat`）
   都以 `env -i` 启动，只透传**固定名单**（下一行与代码 `KIRO_ENV_FIXED_NAMES` 逐名比对，由 `tests/test-agent-config.sh` 守卫；HOME 承载登录态与 agent 目录）：
   固定名单（KIRO_ENV_FIXED_NAMES）：PATH、HOME、USER、TERM、TMPDIR、LANG、LANGUAGE、LC_ALL、LC_CTYPE、LC_MESSAGES、KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY、HTTPS_PROXY、FTP_PROXY、ALL_PROXY、NO_PROXY、http_proxy、https_proxy、ftp_proxy、all_proxy、no_proxy、SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、XDG_CONFIG_HOME、XDG_DATA_HOME、XDG_CACHE_HOME、XDG_STATE_HOME、XDG_RUNTIME_DIR
   **不做形状匹配**（`KIRO_*`、`*_PROXY` 这类模式会放行 `CORP_SECRET_PROXY`、客户自定义的 `KIRO_…`）。自建执行器需要别的变量时
