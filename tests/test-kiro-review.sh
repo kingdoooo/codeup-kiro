@@ -2459,15 +2459,26 @@ assert_eq "$(printf '%s\n' "$_kexec" | grep -c .)" "4" "R2-3 静态：直接执�
 assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'env -i')" "0" "R2-3 静态：每处执行都走 env -i"
 assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'cd "\$KIRO_CWD"')" "0" "R2-3 静态：每处执行都在 \$KIRO_CWD 空目录下"
 unset _kexec
-# CodeX 复审 R3-1：手册不得再留「本次评审仍已完成」——R2 删掉这句是因为它会随模型 notice 进失败评论、自相矛盾
-assert_eq "$(LC_ALL=C grep -rc '本次评审仍已完成' "$ROOT/pipeline/setup-guide.md" "$ROOT/scripts/kiro-review.sh" | LC_ALL=C awk -F: '{s+=$2} END{print s}')" "0" \
-  "R3-1 静态：手册与脚本都不含「本次评审仍已完成」（该措辞与失败评论的「评审未完成」冲突）"
-# CodeX 复审 R3-2：全仓库不得再有当前时态的过时计数（加了第 5 处 list-models 后「四处/四次 kiro-cli 调用」都过时）。
-# 针对 kiro-cli 语境的四种措辞；needle 用 $'…' 从片段拼出，避免本守卫自身的源码命中自己（否则永远红）。
-# 历史叙述（「原先四次」）与无关的 diff-compress「四处调用（直传/枚举/…）」不匹配这些形态，不在此列。
-_stale_re="四处 kiro-cli"$'\n'"四次 kiro-cli"$'\n'"生产四处调用"$'\n'"生产四次调用"
-assert_eq "$(LC_ALL=C grep -rlF "$_stale_re" "$ROOT/scripts" "$ROOT/tests" "$ROOT/pipeline" "$ROOT/README.md" 2>/dev/null | LC_ALL=C grep -v '/test-kiro-review\.sh$' | LC_ALL=C grep -c . || true)" "0" \
-  "R3-2 静态：没有过时的 kiro-cli 调用计数（新增 list-models 后应为五处；本守卫文件自身除外）"
+# CodeX 复审 R3-1 / R4：**发布出去的文本**（脚本、手册、文档、agent 定义）都不得再留那句「声称本轮评审已跑完」
+# 的话——R2 删掉它，因为它会随模型 notice 进失败评论、与「评审未完成」自相矛盾。
+# 扫描范围刻意**不含 tests/**：R2-2② 的用例与守卫必须写出这句话才能断言它「不出现在评论里」，那是测试的正当引用，
+# 不是发布文本里的残留。R4 指出旧版只看两个文件太窄，这里扩到全部发布文本目录。needle 用变量拼避免自匹配。
+_gscan_ship=("$ROOT/scripts" "$ROOT/pipeline" "$ROOT/docs" "$ROOT/README.md" "$ROOT/kiro")
+_done_phrase="本次评审仍"$'\n'"已完成"; _done_re="$(printf '%s' "$_done_phrase" | tr -d '\n')"
+assert_eq "$(LC_ALL=C grep -rlF "$_done_re" "${_gscan_ship[@]}" 2>/dev/null | LC_ALL=C grep -c . || true)" "0" \
+  "R3-1 静态：发布文本（不含 tests/）不含那句「声称本轮已完成」的话（与失败评论的「评审未完成」冲突）"
+# CodeX 复审 R3-2 / R4：全仓库不得再有当前时态的过时 kiro-cli 调用计数（加了第 5 处 list-models 后应为五处）。
+_gscan=("$ROOT/scripts" "$ROOT/tests" "$ROOT/pipeline" "$ROOT/docs" "$ROOT/README.md" "$ROOT/kiro")
+# R4 指出旧守卫三处缺陷并已修：① 排除了整个自身文件 → 漏掉本文件里的真残留（那条「…绝对路径，X 处共用」修复前是四处）；
+# ② 未扫 docs/；③ needle 只认「生产四处调用」等，漏掉「四处共用」这类措辞、且 -F 会误伤历史「原先四次」。
+# 改法：needle 两半（计数词 / 语境词）用变量拼、且**分行**，本守卫任何单行源码都不同时含两半 → 不自匹配，
+# 不必排除自身文件；扫 docs/；排除含「五处/五次/原先」的行（历史叙述保留）。diff-compress 的「四处调用（直传…）」
+# 既无 kiro-cli 也无「共用」，不命中。
+_cnt='(四处|四次)'
+_ctx='(kiro-cli|共用)'
+assert_eq "$(LC_ALL=C grep -rnE "${_cnt}.*${_ctx}" "${_gscan[@]}" 2>/dev/null | LC_ALL=C grep -v '五处\|五次\|原先' | LC_ALL=C grep -c . || true)" "0" \
+  "R3-2 静态：没有过时的 kiro-cli 调用计数（应为五处；覆盖 docs/ 与本文件、放行历史「原先四次」）"
+unset _gscan _gscan_ship _cnt _ctx _done_phrase _done_re
 unset _stale_re
 
 # ---- 安装档位（KIRO_INSTALL_PROFILE，ADR-0006）：第 1.6 步校验 ----
@@ -2772,7 +2783,7 @@ assert_not_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "�
 
 # ---- CodeX 2026-09-11 P2：摘要门核对的入口必须就是后面真正执行的那个入口 ----
 # 摘要门在业务库 cwd 下用 `command -v kiro-cli` 解析入口，而五处调用原先都是裸命令 `kiro-cli`、且在 $WORK/cwd 里跑：
-# PATH 里有相对目录时两次解析落到不同文件上，日志照样打「摘要核对通过」。修复后第 2.2 步一次解析成绝对路径，四处共用。
+# PATH 里有相对目录时两次解析落到不同文件上，日志照样打「摘要核对通过」。修复后第 2.2 步一次解析成绝对路径，五处共用。
 if command -v timeout >/dev/null || command -v gtimeout >/dev/null; then
   relcase="$tmp/relpath"; mkdir -p "$relcase/relbin"
   # relbin/kiro-cli 是替身的副本；PATH 里放**相对**目录名 relbin，换 cwd 后它就解析不到了
