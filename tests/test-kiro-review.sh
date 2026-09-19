@@ -2459,26 +2459,32 @@ assert_eq "$(printf '%s\n' "$_kexec" | grep -c .)" "4" "R2-3 静态：直接执�
 assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'env -i')" "0" "R2-3 静态：每处执行都走 env -i"
 assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'cd "\$KIRO_CWD"')" "0" "R2-3 静态：每处执行都在 \$KIRO_CWD 空目录下"
 unset _kexec
-# CodeX 复审 R3-1 / R4：**发布出去的文本**（脚本、手册、文档、agent 定义）都不得再留那句「声称本轮评审已跑完」
-# 的话——R2 删掉它，因为它会随模型 notice 进失败评论、与「评审未完成」自相矛盾。
-# 扫描范围刻意**不含 tests/**：R2-2② 的用例与守卫必须写出这句话才能断言它「不出现在评论里」，那是测试的正当引用，
-# 不是发布文本里的残留。R4 指出旧版只看两个文件太窄，这里扩到全部发布文本目录。needle 用变量拼避免自匹配。
-_gscan_ship=("$ROOT/scripts" "$ROOT/pipeline" "$ROOT/docs" "$ROOT/README.md" "$ROOT/kiro")
-_done_phrase="本次评审仍"$'\n'"已完成"; _done_re="$(printf '%s' "$_done_phrase" | tr -d '\n')"
-assert_eq "$(LC_ALL=C grep -rlF "$_done_re" "${_gscan_ship[@]}" 2>/dev/null | LC_ALL=C grep -c . || true)" "0" \
-  "R3-1 静态：发布文本（不含 tests/）不含那句「声称本轮已完成」的话（与失败评论的「评审未完成」冲突）"
-# CodeX 复审 R3-2 / R4：全仓库不得再有当前时态的过时 kiro-cli 调用计数（加了第 5 处 list-models 后应为五处）。
-_gscan=("$ROOT/scripts" "$ROOT/tests" "$ROOT/pipeline" "$ROOT/docs" "$ROOT/README.md" "$ROOT/kiro")
-# R4 指出旧守卫三处缺陷并已修：① 排除了整个自身文件 → 漏掉本文件里的真残留（那条「…绝对路径，X 处共用」修复前是四处）；
-# ② 未扫 docs/；③ needle 只认「生产四处调用」等，漏掉「四处共用」这类措辞、且 -F 会误伤历史「原先四次」。
-# 改法：needle 两半（计数词 / 语境词）用变量拼、且**分行**，本守卫任何单行源码都不同时含两半 → 不自匹配，
-# 不必排除自身文件；扫 docs/；排除含「五处/五次/原先」的行（历史叙述保留）。diff-compress 的「四处调用（直传…）」
-# 既无 kiro-cli 也无「共用」，不命中。
+# CodeX 复审 R3-1 / R4 / R5：**发布出去的文本**（脚本、手册、文档、agent 定义、提示词）都不得再留那句
+# 「声称本轮评审已跑完」的话——R2 删掉它，因为它会随模型 notice 进失败评论、与「评审未完成」自相矛盾。
+# 扫描范围刻意**不含 tests/**：R2-2② 的用例与守卫必须写出这句话才能断言它「不出现在评论里」，那是测试的正当引用。
+# R5 收口：① 补上 prompts/（生产提示词也是发布文本）；② **按空白归一化后再匹配**，堵住「短语被换行拆开」的漏报。
+# needle 用变量拼、避免本守卫源码里出现该完整短语而自匹配。
+_gscan_ship=("$ROOT/scripts" "$ROOT/pipeline" "$ROOT/docs" "$ROOT/README.md" "$ROOT/kiro" "$ROOT/prompts")
+_done_re="$(printf '%s' "本次评审仍"$'\n'"已完成" | tr -d '[:space:]')"   # 拼出的 needle 本身不含完整短语
+_done_hits=0
+while IFS= read -r _f; do
+  # 逐文件把空白（含换行）全部删掉再找该短语：单行与跨行拆分都能抓到；短语是纯中文、不会因删空白误合成别的词
+  LC_ALL=C tr -d '[:space:]' < "$_f" | LC_ALL=C grep -qF "$_done_re" && _done_hits=$((_done_hits+1))
+done < <(find "${_gscan_ship[@]}" -type f 2>/dev/null)
+assert_eq "$_done_hits" "0" \
+  "R3-1 静态：发布文本（含 prompts/、空白归一化、不含 tests/）不含那句「声称本轮已完成」的话（与「评审未完成」冲突）"
+# CodeX 复审 R3-2 / R4 / R5：全仓库不得再有当前时态的过时 kiro-cli 调用计数（加了第 5 处 list-models 后应为五处）。
+# 本守卫的说明文字**刻意不写任何计数词与语境词相邻的例子**——否则注释会命中守卫自己（前几轮反复踩到）。
+# R5 收口三点：① needle 用变量 _cnt / _ctx 拼成**双向**匹配（无论计数词在语境词前还是后都算），堵住反序漏报；
+# ② **不再整行按历史词过滤**（那会把「历史词 … present-tense 真残留」的行一并放过）——已核查全仓库没有任何
+# 「历史词 + 计数词 + 语境词」同现的合法句（codeup-api.sh 那处历史计数不含语境词，不命中），故不豁免、全抓；
+# ③ 扫描补上 prompts/。只放行已更新为「五处/五次」的行。
+_gscan=("$ROOT/scripts" "$ROOT/tests" "$ROOT/pipeline" "$ROOT/docs" "$ROOT/README.md" "$ROOT/kiro" "$ROOT/prompts")
 _cnt='(四处|四次)'
 _ctx='(kiro-cli|共用)'
-assert_eq "$(LC_ALL=C grep -rnE "${_cnt}.*${_ctx}" "${_gscan[@]}" 2>/dev/null | LC_ALL=C grep -v '五处\|五次\|原先' | LC_ALL=C grep -c . || true)" "0" \
-  "R3-2 静态：没有过时的 kiro-cli 调用计数（应为五处；覆盖 docs/ 与本文件、放行历史「原先四次」）"
-unset _gscan _gscan_ship _cnt _ctx _done_phrase _done_re
+assert_eq "$(LC_ALL=C grep -rnE "${_cnt}.*${_ctx}|${_ctx}.*${_cnt}" "${_gscan[@]}" 2>/dev/null | LC_ALL=C grep -v '五处\|五次' | LC_ALL=C grep -c . || true)" "0" \
+  "R3-2 静态：没有过时的 kiro-cli 调用计数（双向匹配、覆盖 docs/ prompts/ 与本文件、只放行已更新为五处的行）"
+unset _gscan _gscan_ship _cnt _ctx _done_re _done_hits _f
 unset _stale_re
 
 # ---- 安装档位（KIRO_INSTALL_PROFILE，ADR-0006）：第 1.6 步校验 ----
