@@ -227,8 +227,9 @@ _validate_err_lib_lines() {
 # 汇总评论里的一句话 notice（与行内评论的 INLINE_NOTICE 并列；评论比日志可见范围大，I10）。
 # 归属（15-fix4 #3）：REVIEW_NOTICE 是版本 / 环境类提示，三种评论都带；INLINE_NOTICE 是关于分桶的提示（「全部问题都归入未定位」），
 # 只对带问题清单的汇总评论有意义。三种评论各带哪些（CodeX 2026-09-13 复审 P2 指出注释停在修复前的状态）：
-#   成功（结构化）评论 = all_notice() = REVIEW_NOTICE + DIFF_NOTICE + INLINE_NOTICE
-#   降级 / 失败评论     = degrade_notice() = REVIEW_NOTICE + DIFF_NOTICE（**含** DIFF_NOTICE：里面可能有「二进制改动未覆盖」）
+#   成功（结构化）评论 = all_notice() = REVIEW_NOTICE + MODEL_NOTICE + DIFF_NOTICE + INLINE_NOTICE
+#   降级 / 失败评论     = degrade_notice() = REVIEW_NOTICE + MODEL_NOTICE + DIFF_NOTICE（**含** DIFF_NOTICE：里面可能有「二进制改动未覆盖」）
+#   MODEL_NOTICE（issue 16，CodeX 复审 R2）：模型回落提示，成功/降级/失败三种评论都带，措辞不声明评审是否完成
 #   INLINE_NOTICE 只进成功评论。两个合成函数都读全局、各只拼一次。
 REVIEW_NOTICE=""
 DIFF_NOTICE=""   # 第 4.0 步：Git 属性触发的强制文本比较说明（CodeX 2026-09-09 P0-1）

@@ -173,7 +173,7 @@ assert_eq "$(LC_ALL=C grep -c 'CASES=""; recalc_ran' "$ROOT/scripts/probe/probe-
   "⑫：清空 CASES 的地方紧跟一次 recalc_ran（否则汇总会声称门禁用例都跑过）"
 assert_eq "$(LC_ALL=C grep -cE '^CASES=""$|^ *CASES=""$' "$ROOT/scripts/probe/probe-kiro-allowlist.sh" || true)" "0" \
   "⑫：没有「清空 CASES 却不重算 RAN」的写法"
-# ③ kiro_cli_version 在空目录（$KIRO_CWD）下跑，与生产四处调用一致
+# ③ kiro_cli_version 在空目录（$KIRO_CWD）下跑，与生产五处调用一致
 assert_eq "$(LC_ALL=C grep -c 'kiro_cli_version "\$TIMEOUT_BIN" "\$KIRO_CWD"' "$ROOT/scripts/probe/probe-kiro-allowlist.sh")" "1" \
   "⑫：probe-kiro-allowlist.sh 的 kiro_cli_version 在 \$KIRO_CWD 下跑"
 # ④ run_case / run_case_agent 共用一份实现（_probe_run），拼命令与计时只有一处

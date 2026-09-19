@@ -383,7 +383,7 @@ kiro_cli_sha256_check() {
 # KIRO_LOG_NO_COLOR=1 固定追加（用户设成别的值也被覆盖）。只透传**已导出**的变量：未导出的本来也到不了子进程。
 #   导出判定看 `declare -p` 的属性段里有没有 x（`declare -rx` / `-ix` / `-ax` 都算，15-fix2 #12——只认 `declare -x` 前缀会把
 #   `declare -rx TMPDIR` 这类丢掉，env -i 起 kiro 时没有 TMPDIR/PATH/HOME）。
-# 四处 kiro-cli 调用（chat --help / --version / settings / chat）都用同一份清单；探测脚本 probe-kiro-allowlist.sh 也复用——规则只有一份。
+# 五处 kiro-cli 调用（chat --help / --list-models / --version / settings / chat）都用同一份清单；探测脚本 probe-kiro-allowlist.sh 也复用——规则只有一份。
 KIRO_ENV_FIXED_NAMES=(PATH HOME USER TERM TMPDIR LANG LANGUAGE LC_ALL LC_CTYPE LC_MESSAGES KIRO_API_KEY KIRO_LOG_NO_COLOR HTTP_PROXY HTTPS_PROXY FTP_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy ftp_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR CURL_CA_BUNDLE XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR)
 KIRO_ENV_ALLOW=()
 KIRO_ENV_ALLOW_ERROR=""

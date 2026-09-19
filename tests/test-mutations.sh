@@ -617,7 +617,7 @@ run_case m5h "$pkg"
 assert_rc "$RC" 0 "M5h：变异体仍能跑完"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-settings")" "1" "M5h：settings 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-settings 没有 YUNXIAO_TOKEN」断言会失败"
 
-# --- M5gv：第四处 kiro-cli 调用（--version，在库函数 kiro_cli_version 里）去掉 env -i → 那次调用继承完整环境（15-fix4 #18）---
+# --- M5gv：kiro-cli 的 --version 调用（在库函数 kiro_cli_version 里）去掉 env -i → 那次调用继承完整环境（15-fix4 #18）---
 pkg=$(make_mutant m5gv-version-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" "\${KIRO_CLI_CMD:-kiro-cli}" --version/"${KIRO_CLI_CMD:-kiro-cli}" --version/' scripts/lib/kiro-agent.sh)
 run_case m5gv "$pkg"
 assert_rc "$RC" 0 "M5gv：变异体仍能跑完"

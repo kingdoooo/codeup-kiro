@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 工作区隔离：在业务库 checkout（cwd）里一次遍历删除 Kiro 会自动读取 / 可被借道的注入面，Kiro 启动之前执行。
-# 这是**第二道**（15-fix4 #1）：第一道是四处 kiro-cli 调用都在 $WORK/cwd 空目录下运行，业务库从来不是 kiro-cli 的 cwd——
+# 这是**第二道**（15-fix4 #1）：第一道是五处 kiro-cli 调用都在 $WORK/cwd 空目录下运行，业务库从来不是 kiro-cli 的 cwd——
 # 它相对 cwd 发现的每一个面（.kiro/agents 顶替、.kiro/settings/cli.json 覆盖全局设置、AGENTS.md steering、lsp.json）都落在没有文件的目录里。
 # 删除仍做：业务库在 allowedPaths 里，这些文件被 kiro-cli 按别的途径发现时（未来版本、v3 子目录 steering）仍不该在。
 #

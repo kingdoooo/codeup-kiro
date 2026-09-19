@@ -101,7 +101,7 @@ assert_contains "$out" "受信 agent 自检通过" "第 3 步自检通过并留�
 assert_contains "$out" "在 P1-15 探测过的平台 + 版本名单内" "kiro-cli 版本核对：名单内"
 assert_not_contains "$out" "未经 P1-15 探测" "kiro-cli 版本核对：名单内时无警告"
 # 另三处 kiro-cli 调用（chat --help、--version、settings）同样走 env -i + 许可清单（15-fix #8 / 15-fix4 #18）：README 与指南的
-# 「Kiro 进程看不到…」才是绝对表述。替身把四次调用各自收到的环境变量名分别记在 env-help / env-version / env-settings / env。
+# 「Kiro 进程看不到…」才是绝对表述。替身把五处调用各自收到的环境变量名分别记在 env-help / env-listmodels / env-version / env-settings / env。
 for f in env-help env-version env-settings; do
   names_f=$(cat "$MD/$f")
   for v in YUNXIAO_TOKEN YUNXIAO_ORG_ID CODEUP_REPO_ID KIRO_ENV_PASSTHROUGH; do
@@ -197,7 +197,7 @@ assert_eq "$([[ -n "$diff_ln" && -n "$iso_ln" && "$iso_ln" -gt "$diff_ln" ]] && 
 assert_contains "$(cat "$MD/settings")" "chat.disableInheritingDefaultResources true" "Kiro 启动前设置 chat.disableInheritingDefaultResources=true"
 assert_eq "$(awk '/^settings$/{s=NR} /^chat$/{c=NR} END{print (s && c && s<c) ? "ok" : "bad"}' "$MD/calls")" "ok" \
   "调用顺序：settings 先于 chat"
-# 15-fix4 #1：四处 kiro-cli 调用（--help / --version / settings / chat）都在 $WORK/cwd 空目录下运行——kiro-cli 相对 cwd 发现的每一个面
+# 15-fix4 #1：五处 kiro-cli 调用（--help / --list-models / --version / settings / chat）都在 $WORK/cwd 空目录下运行——kiro-cli 相对 cwd 发现的每一个面
 # （$CWD/.kiro/agents 顶替同名受信 agent、.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、lsp.json）都落在没有文件的目录里；
 # 业务库只在 allowedPaths 里。三个 cwd 记录必须相同、名为 cwd、与 chunks 同父目录（同一个 $WORK）、不是业务库也不是集成包、chat 时为空。
 ws_p=$(cd "$CASE/work" && pwd -P)
@@ -2459,6 +2459,16 @@ assert_eq "$(printf '%s\n' "$_kexec" | grep -c .)" "4" "R2-3 静态：直接执�
 assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'env -i')" "0" "R2-3 静态：每处执行都走 env -i"
 assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'cd "\$KIRO_CWD"')" "0" "R2-3 静态：每处执行都在 \$KIRO_CWD 空目录下"
 unset _kexec
+# CodeX 复审 R3-1：手册不得再留「本次评审仍已完成」——R2 删掉这句是因为它会随模型 notice 进失败评论、自相矛盾
+assert_eq "$(LC_ALL=C grep -rc '本次评审仍已完成' "$ROOT/pipeline/setup-guide.md" "$ROOT/scripts/kiro-review.sh" | LC_ALL=C awk -F: '{s+=$2} END{print s}')" "0" \
+  "R3-1 静态：手册与脚本都不含「本次评审仍已完成」（该措辞与失败评论的「评审未完成」冲突）"
+# CodeX 复审 R3-2：全仓库不得再有当前时态的过时计数（加了第 5 处 list-models 后「四处/四次 kiro-cli 调用」都过时）。
+# 针对 kiro-cli 语境的四种措辞；needle 用 $'…' 从片段拼出，避免本守卫自身的源码命中自己（否则永远红）。
+# 历史叙述（「原先四次」）与无关的 diff-compress「四处调用（直传/枚举/…）」不匹配这些形态，不在此列。
+_stale_re="四处 kiro-cli"$'\n'"四次 kiro-cli"$'\n'"生产四处调用"$'\n'"生产四次调用"
+assert_eq "$(LC_ALL=C grep -rlF "$_stale_re" "$ROOT/scripts" "$ROOT/tests" "$ROOT/pipeline" "$ROOT/README.md" 2>/dev/null | LC_ALL=C grep -v '/test-kiro-review\.sh$' | LC_ALL=C grep -c . || true)" "0" \
+  "R3-2 静态：没有过时的 kiro-cli 调用计数（新增 list-models 后应为五处；本守卫文件自身除外）"
+unset _stale_re
 
 # ---- 安装档位（KIRO_INSTALL_PROFILE，ADR-0006）：第 1.6 步校验 ----
 # 公共环境里已经把档位设成 latest（既有用例测的都是现装档位的既有行为），所以「变量缺失」要用空值显式覆盖。
@@ -2761,7 +2771,7 @@ assert_not_contains "$(posted_comment "$OUT")" "Git 判为二进制" "无二进�
 assert_not_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "无二进制：汇总里没有未覆盖说明"
 
 # ---- CodeX 2026-09-11 P2：摘要门核对的入口必须就是后面真正执行的那个入口 ----
-# 摘要门在业务库 cwd 下用 `command -v kiro-cli` 解析入口，而四次调用原先都是裸命令 `kiro-cli`、且在 $WORK/cwd 里跑：
+# 摘要门在业务库 cwd 下用 `command -v kiro-cli` 解析入口，而五处调用原先都是裸命令 `kiro-cli`、且在 $WORK/cwd 里跑：
 # PATH 里有相对目录时两次解析落到不同文件上，日志照样打「摘要核对通过」。修复后第 2.2 步一次解析成绝对路径，四处共用。
 if command -v timeout >/dev/null || command -v gtimeout >/dev/null; then
   relcase="$tmp/relpath"; mkdir -p "$relcase/relbin"

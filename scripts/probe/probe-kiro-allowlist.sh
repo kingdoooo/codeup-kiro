@@ -198,7 +198,7 @@ kiro_env_allowlist_names > "$KEEP/env-allowlist-names.txt"      # 按数组元�
 echo "[probe] env -i 许可清单变量：$(tr '\n' ' ' < "$KEEP/env-allowlist-names.txt")" >&2
 # kiro-cli 版本：与执行器第 3 步同一函数（kiro_cli_version：stdout / stderr 分开、按程序名锚定、同一 env -i 许可清单，15-fix4 #7 / A6）——
 # summary.json 的 kiro_cli 字段正是人工抄进 KIRO_TESTED_TARGETS 的来源，`2>/dev/null | head -1` 会把版本打到 stderr 的 CLI 记成空串。
-# 运行目录用 $KIRO_CWD（空目录）而不是 $WORK（票 18 ⑫）：生产的四处 kiro-cli 调用都在空目录下跑，--version 也是其中一处；
+# 运行目录用 $KIRO_CWD（空目录）而不是 $WORK（票 18 ⑫）：生产的五处 kiro-cli 调用都在空目录下跑，--version 也是其中一处；
 # $WORK 里有 agent 定义与夹具，cwd 相对发现面（.kiro/settings/cli.json 之类）与生产不一致时，探到的行为就不是生产的行为。
 kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" || { echo "${KIRO_CLI_VERSION_ERROR}（环境准备失败，退出码 5）" >&2; exit 5; }
 # **身份（平台 + 版本）必须在跑任何耗额度用例之前就确定**（CodeX 2026-09-13 复审 P1）：
