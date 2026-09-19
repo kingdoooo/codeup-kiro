@@ -766,4 +766,12 @@ rm -f "$shabin/real/deep/kiro-cli-real"
 assert_eq "$(sha_probe "$shabin/bin" "$want" | cut -d'|' -f1)" "2" "sha 钉死：符号链接断了 → rc 2"
 rm -rf "$shabin"
 
+# ---- CodeX 复审 R6：agent description 的模型回落说明必须与 issue 11 实测一致 ----
+# issue 11 实测：模型 ID 不匹配时 Kiro **静默**回退（stderr 空、事件流无模型名字段），没有原生「打警告」。
+# 旧 description 写「自动回退默认模型并打警告」会误导使用者以为看 Kiro 原生日志就能发现回落。精确禁旧句、要求提到 --list-models。
+assert_eq "$(LC_ALL=C grep -c '自动回退默认模型并打警告' "$A")" "0" \
+  "R6：agent description 不再写「打警告」（issue 11 实测是静默回退，无原生警告）"
+assert_contains "$(cat "$A")" "静默" "R6：description 说明模型回落是「静默」的"
+assert_contains "$(cat "$A")" "list-models" "R6：description 指明由脚本 --list-models 事前核对并挂 notice"
+
 report
