@@ -105,7 +105,11 @@ from stacks.executor_stack import ExecutorStack  # noqa: E402
 def _disp_template():
     app = cdk.App()
     state = StateStack(app, "S", cfg={"region": "us-west-2"})
-    return Template.from_stack(DispatcherStack(app, "D", cfg=_full_cfg(), state=state))
+    # PassRole 收紧到 ExecutorStack 实际持有的两个角色（见 review 修复），所以 DispatcherStack
+    # 现在离不开一个真实的 ExecutorStack 实例，不能再只给它一堆字符串 cfg。
+    executor = ExecutorStack(app, "E", cfg=_full_cfg(), state=state)
+    return Template.from_stack(
+        DispatcherStack(app, "D", cfg=_full_cfg(), state=state, executor=executor))
 
 
 def _exec_template():
@@ -187,6 +191,24 @@ def test_dispatcher_has_pass_role_scoped_to_ecs_service():
         == "ecs-tasks.amazonaws.com"
         for s in pass_role_stmts
     ), "iam:PassRole 必须用 iam:PassedToService 收紧到 ECS，不能是无条件通配"
+
+
+def test_dispatcher_pass_role_resource_is_not_wildcard():
+    # review 发现：条件收紧不能替代 resource 收紧——resources=["*"] 配合条件仍然是
+    # 「能递给 ECS 的任意角色」，必须点名 ExecutorStack 实际持有的那两个角色 ARN。
+    t = _disp_template()
+    policies = t.find_resources("AWS::IAM::Policy")
+    pass_role_stmts = [
+        s for p in policies.values()
+        for s in p["Properties"]["PolicyDocument"]["Statement"]
+        if "iam:PassRole" in (s["Action"] if isinstance(s["Action"], list) else [s["Action"]])
+    ]
+    assert pass_role_stmts, "缺 iam:PassRole"
+    for s in pass_role_stmts:
+        resources = s["Resource"] if isinstance(s["Resource"], list) else [s["Resource"]]
+        assert len(resources) == 2, resources
+        for r in resources:
+            assert json.dumps(r) != '"*"', "iam:PassRole 的 Resource 不能是 *"
 
 
 def test_dispatcher_dynamodb_grant_is_put_and_delete_only():

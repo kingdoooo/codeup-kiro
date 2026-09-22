@@ -44,7 +44,8 @@ if os.path.exists(_config_path):
     dispatcher_cfg["subnets"] = [s.subnet_id for s in executor.vpc.public_subnets]
     dispatcher_cfg["security_groups"] = [executor.task_security_group.security_group_id]
 
-    dispatcher = DispatcherStack(app, "CodeupKiroDispatcher", cfg=dispatcher_cfg, state=state)
+    dispatcher = DispatcherStack(
+        app, "CodeupKiroDispatcher", cfg=dispatcher_cfg, state=state, executor=executor)
     dispatcher.add_stack_dependency(executor)
 
 app.synth()

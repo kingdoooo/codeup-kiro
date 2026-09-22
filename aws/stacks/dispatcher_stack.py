@@ -31,7 +31,7 @@ class DispatcherStack(cdk.Stack):
     见下方 CfnOutput：把 CloudFront 域名亮出来，注册留作部署后的手动接入步骤。
     """
 
-    def __init__(self, scope: Construct, cid: str, *, cfg: dict, state, **kw):
+    def __init__(self, scope: Construct, cid: str, *, cfg: dict, state, executor, **kw):
         super().__init__(scope, cid, **kw)
 
         yunxiao_token = secretsmanager.Secret.from_secret_name_v2(
@@ -98,13 +98,13 @@ class DispatcherStack(cdk.Stack):
                 f":cluster/{cfg['cluster']}")}},
         ))
         # RunTask 还得能把任务角色/执行角色「递」给 ECS——这是最容易被漏掉的权限，缺了
-        # 只在运行时报错，synth/单测都测不出来。resource 用 "*" 但用
-        # iam:PassedToService 条件收紧到"只能递给 ECS 任务"，不知道具体角色 ARN
-        # 时这是标准的窄化写法（DispatcherStack 拿到的 cfg 里没有角色 ARN，只有
-        # ExecutorStack 内部才持有那两个 Role 对象）。
+        # 只在运行时报错，synth/单测都测不出来。收紧到 ExecutorStack 实际持有的那两个
+        # 角色（跨栈引用，state.lock_table.grant 已经在用同一种手法），resource 不再是
+        # "*"；iam:PassedToService 条件仍然保留做纵深防御，不因为已经点名角色就撤掉。
         dispatcher_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["iam:PassRole"],
-            resources=["*"],
+            resources=[executor.task_role.role_arn,
+                       executor.task_definition.execution_role.role_arn],
             conditions={"StringEquals": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}},
         ))
 
