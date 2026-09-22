@@ -36,3 +36,21 @@ def _full_cfg(**over):
 
 import builtins  # noqa: E402  — 让三个测试文件都能直接用，不必各自导入
 builtins._full_cfg = _full_cfg
+
+
+import importlib.util  # noqa: E402
+
+
+def load_lambda(module_name, path):
+    """按文件路径加载 Lambda 模块，模块名由调用方指定。
+
+    绝不用 importlib.import_module("handler")：两个 Lambda 的入口文件都叫 handler.py，
+    裸名导入会命中 sys.modules 缓存、静默测到另一个 Lambda。
+    """
+    spec = importlib.util.spec_from_file_location(module_name, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+builtins.load_lambda = load_lambda

@@ -1,6 +1,6 @@
-import importlib, sys, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lambda" / "dispatcher"))
-handler_mod = importlib.import_module("handler")
+import pathlib
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+handler_mod = load_lambda("dispatcher_handler", ROOT / "lambda" / "dispatcher" / "handler.py")
 
 
 def test_missing_token_header_is_rejected():

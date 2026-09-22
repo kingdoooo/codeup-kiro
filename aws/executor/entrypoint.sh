@@ -52,4 +52,14 @@ export MR_TARGET_BRANCH
 export KIRO_INSTALL_PROFILE=pinned
 export KIRO_PINNED_ARTIFACT=/opt/kiro/kirocli-x86_64-linux-musl.zip
 
-exec /bin/bash -p "$PKG/scripts/kiro-review.sh"
+rc=0
+/bin/bash -p "$PKG/scripts/kiro-review.sh" || rc=$?
+# 脚本在 MR 定位之后的任何失败都必定写过评论（Phase 1 的 I10 契约），所以
+# 只要脚本自己跑完了收尾，就置位标记，兜底 Lambda 便不再重复回写。
+/usr/local/bin/aws dynamodb update-item --region "$AWS_REGION" \
+  --table-name "$LOCK_TABLE" \
+  --key "{\"pk\":{\"S\":\"${CODEUP_REPO_ID}#${MR_LOCAL_ID}#${HEAD_SHA}\"}}" \
+  --update-expression 'SET #p = :t' \
+  --expression-attribute-names '{"#p":"posted"}' \
+  --expression-attribute-values '{":t":{"BOOL":true}}' >/dev/null 2>&1 || true
+exit "$rc"
