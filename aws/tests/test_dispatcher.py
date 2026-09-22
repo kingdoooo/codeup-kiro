@@ -1,5 +1,7 @@
 import pathlib
+from unittest import mock
 
+import botocore.exceptions as bexc
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -25,9 +27,6 @@ def test_uses_constant_time_comparison():
     assert "compare_digest" in src
     assert "hmac" in src
 
-
-from unittest import mock
-import botocore.exceptions as bexc
 
 F = {"repo_id": "r1", "mr_local_id": "7", "head_sha": "abc123", "dedupe_extra": ""}
 
