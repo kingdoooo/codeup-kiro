@@ -26,7 +26,10 @@ def load_config(path):
         if name not in cfg:
             cfg[name] = 0
             continue
-        if cfg[name] not in (0, 1):
+        # type(x) is not int（而非 isinstance）：bool 是 int 的子类，True == 1 / False == 0，
+        # isinstance(True, int) 为真——用 isinstance 会放过 YAML 里未加引号的 yes/no/true/on/off
+        # （PyYAML 解析成 bool），恰好是人手写配置时最常见的写法，也是这条校验本该拦住的那种错。
+        if type(cfg[name]) is not int or cfg[name] not in (0, 1):
             raise ValueError(
                 f"{name} 取值 {cfg[name]!r} 非法：必须严格为 0 或 1（缺省即关闭）。"
                 "刻意不回落默认——拼错的取值静默关闭功能是最难排查的失败")

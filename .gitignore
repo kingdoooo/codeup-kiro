@@ -16,5 +16,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# aws/ 的真实配置不进版本库（含 codeup_token 等敏感值），只提交 config.example.yaml。
+# aws/ 的真实配置是按部署环境各自不同的非敏密值（区域、org_id 等），只提交示例
+# config.example.yaml；config.yaml 本身不允许写密钥——codeup_token 不是 config.yaml 的字段，
+# 调度器运行时从 Lambda/ECS 环境变量取值，那些变量由 Secrets Manager 灌入（I3）。
 /aws/config.yaml

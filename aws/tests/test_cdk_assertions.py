@@ -38,6 +38,26 @@ def test_absent_toggle_defaults_to_off(write_cfg):
     assert load_config(write_cfg(cfg))["inline_comment"] == 0
 
 
+@pytest.mark.parametrize("bad", [True, False])
+def test_toggle_rejects_genuine_yaml_boolean(bad, write_cfg):
+    # True == 1 / False == 0 in Python，isinstance(True, int) 也为真——只有严格的
+    # type(x) is int 才能拦住 PyYAML 把无引号 yes/no/true/on/off 解析出来的真布尔值。
+    with pytest.raises(ValueError, match="inline_comment"):
+        load_config(write_cfg(_cfg(inline_comment=bad)))
+
+
+def test_toggle_rejects_unquoted_yaml_yes(tmp_path):
+    # write_cfg 走 yaml.safe_dump，Python str "yes" 会被加引号、往返仍是字符串；
+    # 这里直接手写 YAML 文本，复现人手改配置时最常见的无引号写法。
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "region: us-west-2\norg_id: o1\nbot_username: aliyun:bot\n"
+        "inline_comment: yes\nreview_command: 0\n"
+    )
+    with pytest.raises(ValueError, match="inline_comment"):
+        load_config(str(p))
+
+
 def test_global_inference_regions_are_flagged(write_cfg, capsys):
     load_config(write_cfg(_cfg(region="ap-southeast-1")))
     assert "any commercial" in capsys.readouterr().out
