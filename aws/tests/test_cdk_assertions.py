@@ -61,3 +61,35 @@ def test_toggle_rejects_unquoted_yaml_yes(tmp_path):
 def test_global_inference_regions_are_flagged(write_cfg, capsys):
     load_config(write_cfg(_cfg(region="ap-southeast-1")))
     assert "any commercial" in capsys.readouterr().out
+
+
+import aws_cdk as cdk
+from aws_cdk.assertions import Template
+from stacks.state_stack import StateStack
+
+def _state_template():
+    app = cdk.App()
+    return Template.from_stack(StateStack(app, "S", cfg={"region": "us-west-2"}))
+
+def test_lock_table_has_ttl_enabled():
+    t = _state_template()
+    tables = t.find_resources("AWS::DynamoDB::Table")
+    lock = [v for v in tables.values()
+            if v["Properties"].get("TimeToLiveSpecification", {}).get("Enabled")]
+    assert len(lock) == 1, "恰好一张表启用 TTL（幂等锁）"
+
+def test_mapping_table_must_never_enable_ttl():
+    # 单独守卫：映射表被 TTL 清掉后，每次扫描都会新建 code review 资源，
+    # 慢慢烧掉「1,000 个项目/账号/区域」的配额——静默且延迟数周发作。
+    t = _state_template()
+    tables = t.find_resources("AWS::DynamoDB::Table")
+    mapping = [v for k, v in tables.items() if "Mapping" in k]
+    assert len(mapping) == 1
+    ttl = mapping[0]["Properties"].get("TimeToLiveSpecification")
+    assert ttl is None or ttl.get("Enabled") is False, \
+        "映射表绝不允许开启 TTL"
+
+def test_both_tables_retain_on_delete():
+    t = _state_template()
+    for v in t.find_resources("AWS::DynamoDB::Table").values():
+        assert v.get("DeletionPolicy") == "Retain"
