@@ -1,4 +1,5 @@
 import pathlib
+import re
 
 DOCKERFILE = pathlib.Path(__file__).resolve().parents[1] / "executor" / "Dockerfile"
 
@@ -16,9 +17,20 @@ def test_uses_musl_variant_not_glibc():
     assert "glibc" not in src
 
 
-def test_verifies_artifact_sha256_at_build_time():
+def test_artifact_digest_is_a_full_64_char_sha256_not_a_truncated_value():
+    # 截断摘要（如 8 位）会让 `sha256sum -c` 只发 WARNING 就 exit 0，
+    # 门形同虚设——必须是完整 64 位十六进制值才有约束力。
     src = DOCKERFILE.read_text()
-    assert "sha256sum" in src or "sha256" in src
+    m = re.search(r"^ARG KIRO_PINNED_ARTIFACT_SHA256=([0-9a-fA-F]*)\s*$", src, re.MULTILINE)
+    assert m, "找不到 ARG KIRO_PINNED_ARTIFACT_SHA256= 这一行"
+    digest = m.group(1)
+    assert len(digest) == 64, f"摘要长度是 {len(digest)}，不是 64（截断摘要=门形同虚设）"
+
+
+def test_sha256sum_check_uses_strict_mode():
+    # --strict 让格式错误的摘要行本身也让 sha256sum -c 失败，而不是只发警告后放行。
+    src = DOCKERFILE.read_text()
+    assert re.search(r"sha256sum\s+--strict\s+-c", src), "缺 --strict：格式错误的摘要行会被放过"
 
 
 def test_contains_no_secret_material():

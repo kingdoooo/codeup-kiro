@@ -10,14 +10,17 @@ RUN apt-get update -qq \
 # aws-cli v2：entrypoint 收尾时要写一次 DynamoDB「已回写」标记（Task 10）。
 # 用它而不是手写 SigV4：整个执行器只需要这一个 AWS 调用，而在 bash 里签名比多 100 MB 糟得多。
 # Debian 的 apt awscli 是 v1 且过旧，所以走官方安装器。装到 /usr/local/bin/aws。
-RUN curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
+RUN curl -sSf "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip \
  && unzip -q /tmp/awscliv2.zip -d /tmp \
  && /tmp/aws/install \
  && rm -rf /tmp/awscliv2.zip /tmp/aws \
  && /usr/local/bin/aws --version
 
 ARG KIRO_CLI_VERSION=2.21.4
-ARG KIRO_PINNED_ARTIFACT_SHA256=bbb0a221
+# 完整 64 位十六进制摘要（安装包，非入口文件）——见 docs/adr/0006-flow-pinned-install-profile.md
+# 与 pipeline/setup-guide.md 的集成包发布值。截断值会让 `sha256sum -c` 只发警告而 exit 0，
+# 门形同虚设，故此处必须是完整值，并配 --strict 让格式错误本身也让构建失败。
+ARG KIRO_PINNED_ARTIFACT_SHA256=bbb0a22161d5aea045919cc75e9210e61b63b8c877525f123a30610911b6c44d
 
 # 烤进去的是**安装包 zip**，不是安装好的二进制：pinned 档位的既有代码路径正好接受
 # 「一个本地路径 + 两个摘要」，于是 scripts/ 零改动（ADR-0006 明言此意图）。
@@ -26,7 +29,7 @@ ARG KIRO_PINNED_ARTIFACT_SHA256=bbb0a221
 # 所以 COPY 的源路径必须带 aws/executor/ 前缀。
 COPY aws/executor/kirocli-x86_64-linux-musl.zip /opt/kiro/kirocli-x86_64-linux-musl.zip
 RUN echo "${KIRO_PINNED_ARTIFACT_SHA256}  /opt/kiro/kirocli-x86_64-linux-musl.zip" \
-      | sha256sum -c - \
+      | sha256sum --strict -c - \
  || { echo "安装包摘要不符，拒绝构建"; exit 1; }
 
 # 集成包（scripts/ prompts/ kiro/）进镜像。AWS 档位下镜像摘要因此成为
