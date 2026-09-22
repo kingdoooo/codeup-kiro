@@ -4,6 +4,8 @@ import time
 
 import botocore.exceptions
 
+import codeup_min
+
 TOKEN_HEADER = "x-codeup-token"
 
 
@@ -66,3 +68,48 @@ def claim(table, key, ttl_seconds):
 def release(table, key):
     """RunTask 失败后释放锁——否则一次限流会让那个 MR 永远评不了（N4）。"""
     table.delete_item(Key={"pk": key})
+
+
+def run_task(ecs, cfg, fields):
+    """拉起 Fargate 评审任务，返回 task ARN。
+
+    只往 containerOverrides.environment 塞非敏感标量（I3）：RunTask 的入参会进
+    CloudTrail，密钥必须走任务定义的 secrets 块（Secrets Manager ARN），绝不能出现在这里。
+    """
+    env = [{"name": k, "value": str(v)} for k, v in (
+        ("CODEUP_REPO_ID", fields["repo_id"]),
+        ("MR_LOCAL_ID", fields["mr_local_id"]),
+        ("MR_TARGET_BRANCH", fields["target_branch"]),
+        ("CI_COMMIT_REF_NAME", fields["source_branch"]),
+        ("HEAD_SHA", fields["head_sha"]),
+        ("BUSINESS_REPO_URL", fields["clone_url"]),
+    )]
+    resp = ecs.run_task(
+        cluster=cfg["cluster"], taskDefinition=cfg["task_definition"],
+        launchType="FARGATE", count=1,
+        networkConfiguration={"awsvpcConfiguration": {
+            "subnets": cfg["subnets"], "securityGroups": cfg["security_groups"],
+            "assignPublicIp": "ENABLED"}},
+        overrides={"containerOverrides": [
+            {"name": cfg["container_name"], "environment": env}]})
+    return resp["tasks"][0]["taskArn"]
+
+
+def dispatch(ecs, table, cfg, fields):
+    """抢锁 → 拉起任务；RunTask 失败时释放锁并在 MR 上留痕（I10），HTTP 仍返回 200
+    以免 Codeup 因为我们的内部失败重投同一个 webhook。
+    """
+    key = lock_key(fields)
+    if not claim(table, key, cfg.get("lock_ttl_seconds", 86400)):
+        return {"statusCode": 200, "body": "duplicate"}
+    try:
+        run_task(ecs, cfg, fields)
+    except Exception as exc:  # noqa: BLE001 — 拉起任务的失败面很杂（限流/无容量/瞬时网络错误），
+                               # 都要落到同一条「释放锁 + 留痕」的兜底路径上，不能只挑几种已知异常
+        release(table, key)
+        codeup_min.post_comment(
+            cfg["org_id"], fields["repo_id"], fields["mr_local_id"], cfg["codeup_token"],
+            "## 🤖 Kiro 代码评审\n\n**评审未启动**：调度器无法拉起评审任务。\n\n"
+            f"原因：`{type(exc).__name__}`。稍后重新推送可再次触发。")
+        return {"statusCode": 200, "body": "runtask-failed"}
+    return {"statusCode": 200, "body": "dispatched"}

@@ -1,10 +1,15 @@
+import json
 import pathlib
+import sys
 from unittest import mock
 
 import botocore.exceptions as bexc
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# codeup_min 与本文件的 handler 同目录，但 load_lambda 按文件路径加载、不会自动把
+# 那个目录搬上 sys.path——handler.py 里的 `import codeup_min` 得靠这行才能解析。
+sys.path.insert(0, str(ROOT / "lambda" / "dispatcher"))
 handler_mod = load_lambda("dispatcher_handler", ROOT / "lambda" / "dispatcher" / "handler.py")
 
 
@@ -28,7 +33,9 @@ def test_uses_constant_time_comparison():
     assert "hmac" in src
 
 
-F = {"repo_id": "r1", "mr_local_id": "7", "head_sha": "abc123", "dedupe_extra": ""}
+F = {"repo_id": "r1", "mr_local_id": "7", "head_sha": "abc123", "dedupe_extra": "",
+     "target_branch": "main", "source_branch": "feature/x",
+     "clone_url": "https://codeup.aliyun.com/o1/r1.git"}
 
 def test_lock_key_includes_repo_mr_and_head_sha():
     k = handler_mod.lock_key(F)
@@ -76,3 +83,35 @@ def test_claim_reraises_non_conditional_check_client_errors():
         {"Error": {"Code": "ProvisionedThroughputExceededException"}}, "PutItem")
     with pytest.raises(bexc.ClientError):
         handler_mod.claim(table, "k", 86400)
+
+
+def test_run_task_passes_scalars_as_env_overrides():
+    ecs = mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "arn:task/1"}]}
+    handler_mod.run_task(ecs, {"cluster": "c", "task_definition": "td",
+                               "subnets": ["s1"], "security_groups": ["sg1"],
+                               "container_name": "review"}, F)
+    env = ecs.run_task.call_args.kwargs["overrides"]["containerOverrides"][0]["environment"]
+    names = {e["name"] for e in env}
+    assert {"CODEUP_REPO_ID", "MR_LOCAL_ID", "HEAD_SHA"} <= names
+
+def test_run_task_never_passes_secrets_in_overrides():
+    # RunTask 入参进 CloudTrail（I3）。密钥只能走任务定义的 secrets 块。
+    ecs = mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "a"}]}
+    handler_mod.run_task(ecs, {"cluster": "c", "task_definition": "td", "subnets": ["s"],
+                               "security_groups": ["sg"], "container_name": "review"}, F)
+    blob = json.dumps(ecs.run_task.call_args.kwargs)
+    for forbidden in ("KIRO_API_KEY", "YUNXIAO_TOKEN", "WEBHOOK_SECRET", "secret"):
+        assert forbidden not in blob
+
+def test_run_task_failure_releases_lock_and_posts_to_mr(monkeypatch):
+    posted = []
+    monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
+                        lambda *a, **k: posted.append(k or a) or True)
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.side_effect = RuntimeError("Throttled")
+    rc = handler_mod.dispatch(ecs, table, _full_cfg(), F)
+    assert rc["statusCode"] == 200, "webhook 不该因为我们的内部失败而被重投"
+    assert table.delete_item.called, "必须释放锁（N4）"
+    assert posted, "必须在 MR 上留痕（I10）"
