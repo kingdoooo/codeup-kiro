@@ -10,3 +10,11 @@
 
 # 本地 markdown issue tracker（见 docs/agents/issue-tracker.md），不随公开仓库分发。
 /.scratch/
+
+# Task 2 引入 Python（aws/）：解释器与 pytest 生成的缓存，不进版本库。
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# aws/ 的真实配置不进版本库（含 codeup_token 等敏感值），只提交 config.example.yaml。
+/aws/config.yaml

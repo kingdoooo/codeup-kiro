@@ -1,0 +1,12 @@
+# AWS 档位配置示例。复制为 config.yaml 并填入真实值——config.yaml 不进版本库。
+#
+# 密钥（如 codeup_token）不要写进这个文件，也不要写进 config.yaml：
+# 这两个文件都不是密钥的存放位置，真正接入时改走 Secrets Manager / SSM。
+
+region: us-west-2       # 必须是 aws/config.py::VALID_REGIONS 里九个区域之一
+org_id: your-org-id
+bot_username: aliyun:kirobot
+
+# 开关缺省即关闭；非空值必须严格是 0 或 1，写错会直接报错而不是静默生效/失效。
+inline_comment: 0
+review_command: 0
