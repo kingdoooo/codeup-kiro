@@ -7,9 +7,13 @@
 本档位新增的只是 `aws/` 下的调度、执行与基础设施代码。见
 [docs/adr/0001-aws-profile-as-target-architecture.md](../docs/adr/0001-aws-profile-as-target-architecture.md)。
 
-**当前实现状态（写文档时点）**：CDK 出的执行器镜像与 State Stack（DynamoDB 幂等锁 + 映射表）
-已实现；Lambda 调度器目前只有 webhook 签名校验一段代码。**调度器其余逻辑、Dispatcher/Executor
-的完整 CDK 栈、兜底回写 Lambda、评论命令触发（Task 10、11、13）都还没写。** 本手册涉及这些部分时，
+**当前实现状态（写文档时点）**：执行器镜像（`docker build`，不经 CDK，见第 5 节）与 State Stack
+的资源定义（`aws/stacks/state_stack.py`，DynamoDB 幂等锁 + 映射表）已实现；Lambda 调度器目前
+只有 webhook 签名校验一段代码。**但 `aws/app.py` 此刻不挂载任何 stack**（源码原话：「目前不挂载
+任何 stack」）——State Stack 这个类只在单元测试（`aws/tests/test_cdk_assertions.py`）里被直接
+构造过，从未接到 CDK app 入口上，所以此刻跑 `cdk synth`/`cdk deploy` 会得到**零个** stack，
+不是「只有 State Stack」。调度器其余逻辑、Dispatcher/Executor 的完整 CDK 栈、State Stack 挂载到
+app、兜底回写 Lambda、评论命令触发（Task 10、11、13）都还没写。本手册涉及这些部分时，
 只描述运维应当观察到的**行为**，不给具体的资源名、CLI 命令或构造 ID——那些要等对应任务落地后再补。
 
 ## 1. 前提条件与数据治理确认
@@ -202,16 +206,23 @@ docker inspect --format='{{index .RepoDigests 0}}' codeup-kiro-executor:2.21.4
 
 ## 6. CDK 部署
 
-**当前只有 State Stack（`aws/stacks/state_stack.py`）已实现**：两张 DynamoDB 表（评审幂等锁
-`ReviewLock`，TTL 24h；`repo → codeReviewId` 映射表 `CodeReviewMapping`，2a 建表但不使用，留给
-2b），两张表的删除策略都是 `RETAIN`。Dispatcher（Lambda）与 Executor（ECS/Fargate/VPC/任务定义）
-对应的 CDK 栈**尚未实现（Task 11）**，本节暂不给出 `cdk deploy` 的具体子命令或栈名——那些要等
-Task 11 落地后再补，避免文档写出一个此刻并不存在的部署拓扑。
+**`cdk deploy`/`cdk synth` 此刻会产出零个 stack——不是「只有 State Stack」。** `aws/app.py`
+目前只做一件事：`config.yaml` 存在就跑一遍 `load_config` 校验（下一段），然后直接 `app.synth()`，
+**不构造任何 stack 实例**。State Stack 的资源定义已经写好（`aws/stacks/state_stack.py`：
+两张 DynamoDB 表——评审幂等锁 `ReviewLock`，TTL 24h；`repo → codeReviewId` 映射表
+`CodeReviewMapping`，2a 建表但不使用，留给 2b；两张表删除策略都是 `RETAIN`），并且有单元测试
+（`aws/tests/test_cdk_assertions.py`）直接 `StateStack(app, "S", cfg=...)` 构造它、断言生成的
+CloudFormation 模板——**但那是测试代码自己实例化的，不是 `aws/app.py` 挂载的**。这个类要接入
+CDK app 入口、连同 Dispatcher（Lambda）与 Executor（ECS/Fargate/VPC/任务定义）对应的栈一起，
+都是 Task 11 的工作。**此刻在这台机器上跑 `cdk deploy` 不会创建任何 AWS 资源**，看到空的部署
+结果是预期现象，不是故障；本节暂不给出 `cdk deploy` 的具体子命令或栈名，等 Task 11 落地后再补，
+避免文档写出一个此刻并不存在的部署拓扑。
 
 `aws/config.yaml`（不进版本库，复制 `aws/config.example.yaml` 并填入真实值）在 `cdk synth` 阶段
 就会被 `aws/app.py` 读取校验：区域不在九个有效区域内、`org_id`/`bot_username` 缺失、或
-`inline_comment`/`review_command` 取值不严格是 `0`/`1`，都会在 synth 阶段直接报错并中止，
-不会带着错误配置继续往前跑。
+`inline_comment`/`review_command` 取值不严格是 `0`/`1`，都会在 synth 阶段直接报错并中止——
+这一步校验现在就生效，与上面「零个 stack」的事实并不矛盾：校验发生在 `app.synth()` 之前，
+不依赖任何 stack 已挂载。
 
 ## 7. 本地测试
 
