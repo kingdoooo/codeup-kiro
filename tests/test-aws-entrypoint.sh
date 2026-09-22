@@ -37,4 +37,15 @@ for forbidden in dynamodb DynamoDB ECS_CONTAINER_METADATA secretsmanager; do
   assert_eq "$hits" "" "I9：scripts/ 不得引用 $forbidden"
 done
 
+# ⑦ N1 摘要必须来自【容器级】端点的顶层 .ImageID，不是【任务级】/task 端点的 .Containers[0].ImageID
+# （task 级端点返回本任务下全部容器、无自证身份、无顺序保证——加一个 sidecar 就可能读错容器）。
+# 只看真正取值的那几行（curl/jq/self_digest=），绕开解释这件事本身的注释行，避免注释里出现
+# 反例词汇（比如解释「为什么不能用 .Containers[0]」时提到它）把断言带偏。
+digest_lines=$(LC_ALL=C grep -E 'curl -sf|jq -r|self_digest=' "$ENTRY")
+assert_not_contains "$digest_lines" '/task"' "N1：容器级端点不得带 /task 后缀（那是任务级端点）"
+assert_contains "$digest_lines" '.ImageID' "N1：必须读取顶层 .ImageID"
+assert_not_contains "$digest_lines" 'Containers[0]' "N1：不得从 .Containers[0].ImageID 取值（任务级端点的产物）"
+# ⑧ ECS 返回的 ImageID 带 sha256: 前缀，比对 KIRO_IMAGE_DIGESTS（约定存裸十六进制）之前必须剥掉
+assert_contains "$digest_lines" '#sha256:' "N1：摘要口径必须剥离 ECS 返回值的 sha256: 前缀"
+
 report

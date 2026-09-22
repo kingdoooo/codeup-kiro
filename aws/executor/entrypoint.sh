@@ -12,9 +12,15 @@ WORKROOT=/tmp/review
 : "${BUSINESS_REPO_URL:?缺少 BUSINESS_REPO_URL}"
 
 # ── N1 镜像摘要门：在任何评审动作之前 ────────────────────────────────
+# 查【容器级】端点、取顶层 .ImageID——不是 `${...}/task`（任务级，返回本任务下全部容器的列表，
+# 无自证身份、无顺序保证）。任务里一旦加一个日志路由/X-Ray sidecar，`.Containers[0]` 就可能读到
+# 别的容器，N1 会悄悄校验错误的镜像而评审容器本身的摘要从未被核对——这就废了本任务唯一要守的不变式。
 : "${KIRO_IMAGE_DIGESTS:?缺少 KIRO_IMAGE_DIGESTS（已探测镜像摘要名单，必配无默认）}"
-meta=$(/usr/bin/curl -sf "${ECS_CONTAINER_METADATA_URI_V4}/task" || true)
-self_digest=$(printf '%s' "$meta" | /usr/bin/jq -r '.Containers[0].ImageID // empty')
+meta=$(/usr/bin/curl -sf "${ECS_CONTAINER_METADATA_URI_V4}" || true)
+raw_digest=$(printf '%s' "$meta" | /usr/bin/jq -r '.ImageID // empty')
+# ECS 返回的 ImageID 带 `sha256:` 前缀（如 `sha256:25f3...`）；约定 KIRO_IMAGE_DIGESTS 里存的是
+# 去掉这个前缀之后的裸十六进制串，所以这里核对前也剥一次前缀，两边口径才对得上。
+self_digest="${raw_digest#sha256:}"
 case " $KIRO_IMAGE_DIGESTS " in
   *" $self_digest "*) : ;;
   *) echo "镜像摘要不在已探测名单内，拒绝评审：${self_digest:-<读不到>}" >&2; exit 90 ;;
