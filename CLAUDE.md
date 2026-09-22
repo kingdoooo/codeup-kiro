@@ -28,6 +28,10 @@ single-context：根目录一份 `CONTEXT.md` 加一个 `docs/adr/`（两者按�
 `scripts/kiro-review.sh` 把 `timeout`/`gtimeout` 当强制依赖，macOS 需要
 `brew install coreutils`，否则 `tests/test-kiro-review.sh` 会整体跳过。
 
+AWS 档位的 Python 测试（`tests/test-aws-cdk.sh`）需要
+`python3 -m venv aws/.venv && aws/.venv/bin/pip install -r aws/requirements.txt`
+（`aws/.venv` 已 gitignore，不要提交），否则同样整体跳过并打印原因。
+
 ## 不进版本库的目录
 
 `docs/blog/`（客户材料）、`docs/superpowers/`（设计过程文档）与 `.scratch/`（issue 与 spec）

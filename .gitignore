@@ -15,6 +15,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+/aws/.venv/
 
 # aws/ 的真实配置是按部署环境各自不同的非敏密值（区域、org_id 等），只提交示例
 # config.example.yaml；config.yaml 本身不允许写密钥——codeup_token 不是 config.yaml 的字段，

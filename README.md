@@ -83,6 +83,19 @@
 - 哪些数据会离开客户网络（diff、评审员读取的上下文文件、MR 元信息）、哪些不会（令牌），
   以及提示词注入的残余风险，见 [pipeline/setup-guide.md](pipeline/setup-guide.md) 第 1.2 节与第 12 节。
 
+## 两个部署档位
+
+本仓库以两种形态部署，共用完全相同的评审引擎（`scripts/`、`prompts/`、`kiro/`，spec 不变式 I9）：
+
+- **Flow 档位**——[pipeline/setup-guide.md](pipeline/setup-guide.md)。云效 Flow 既是调度器又是执行器，
+  只做 Kiro 代码评审。客户没有 AWS 账号时的退路，也是目前唯一已完整落地并验收过的档位。
+- **AWS 档位**——[aws/setup-guide.md](aws/setup-guide.md)。Lambda 调度器 + Fargate 执行器 + CDK，
+  是目标架构（见 [docs/adr/0001](docs/adr/0001-aws-profile-as-target-architecture.md)），业务库会
+  被完整 clone 到客户 AWS 账号里的临时容器（数据治理条款见该指南第 1.3 节）。
+
+**安全扫描（Security Agent）属于 AWS 档位，且是后续里程碑（2b）才引入的能力**——本仓库现在两个档位
+都只做 Kiro 代码评审，不要在当前版本里找安全扫描相关的配置或输出。
+
 ## 快速开始
 
 部署与验收全流程见 **[pipeline/setup-guide.md](pipeline/setup-guide.md)**：
