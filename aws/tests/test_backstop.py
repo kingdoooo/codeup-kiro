@@ -43,3 +43,25 @@ def test_ignores_events_without_our_env_overrides():
     ev = _ev(overrides=[])
     table = mock.Mock(); table.get_item.return_value = {}
     assert backstop.should_post(ev, table) is False
+
+def test_multi_container_picks_review_container_by_name_not_index():
+    # sidecar 排在 index 0 且干净退出；真正的 review 容器（我们的环境变量所在的那个
+    # override 报的 name）排在 index 1 且死了。用下标取会读到 sidecar 的 exitCode=0，
+    # 误判成功从而沉默——这正是上一个任务修 N1 时踩过的同一类坑。
+    ev = _ev(exit_code=137)
+    ev["detail"]["containers"] = [{"name": "sidecar", "exitCode": 0},
+                                   {"name": "review", "exitCode": 137}]
+    ev["detail"]["overrides"]["containerOverrides"][0]["name"] = "review"
+    table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "x"}}
+    assert backstop.should_post(ev, table) is True
+
+def test_multi_container_no_name_match_defers_to_posted_mark_not_blind_post():
+    # 多容器、且没有一个容器名字对得上 override 的 name——退出码判不出来（既不能当 0
+    # 也不能当非 0），但如果「已回写」标记确实已经置位（脚本其实跑完并发布成功），
+    # 不该因为身份判不出来就盲目再发一条。
+    ev = _ev(exit_code=1)
+    ev["detail"]["containers"] = [{"name": "sidecar", "exitCode": 0},
+                                   {"name": "other", "exitCode": 0}]
+    ev["detail"]["overrides"]["containerOverrides"][0]["name"] = "review"
+    table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "x", "posted": True}}
+    assert backstop.should_post(ev, table) is False

@@ -54,12 +54,21 @@ export KIRO_PINNED_ARTIFACT=/opt/kiro/kirocli-x86_64-linux-musl.zip
 
 rc=0
 /bin/bash -p "$PKG/scripts/kiro-review.sh" || rc=$?
-# 脚本在 MR 定位之后的任何失败都必定写过评论（Phase 1 的 I10 契约），所以
-# 只要脚本自己跑完了收尾，就置位标记，兜底 Lambda 便不再重复回写。
-/usr/local/bin/aws dynamodb update-item --region "$AWS_REGION" \
-  --table-name "$LOCK_TABLE" \
-  --key "{\"pk\":{\"S\":\"${CODEUP_REPO_ID}#${MR_LOCAL_ID}#${HEAD_SHA}\"}}" \
-  --update-expression 'SET #p = :t' \
-  --expression-attribute-names '{"#p":"posted"}' \
-  --expression-attribute-values '{":t":{"BOOL":true}}' >/dev/null 2>&1 || true
+# 标记只在脚本干净退出（rc=0）时才置位——不能不分退出码都置位。脚本在 MR 定位
+# 之前有三类路径会以非零退出却什么评论都没写：path-gate 的裸 exit、die() 里的
+# 依赖/环境校验、MR 定位歧义（Phase 1 的 I10 契约只保证「MR 定位之后」的失败必定
+# 写过评论，定位之前这几类根本没保证）。不分退出码都置位的话，兜底 Lambda 会被
+# 这些「没发过评论」的失败静默拦下——这正是本任务要堵住的 I10 缺口，不能自己开一个。
+# rc=0 时脚本已经跑完：要么真的发了评论，要么是空 diff 跳过（这种情况 should_post
+# 自己会靠容器 exitCode==0 挡住，不依赖这个标记），置位是安全的。rc 非零一律不置位，
+# 宁可让兜底 Lambda 在「脚本其实已经发过评论」的失败上多发一条重复评论——这是已知
+# 可接受的权衡（重复好于沉默）——也不要在那三类沉默失败上再次沉默。
+if [[ "$rc" -eq 0 ]]; then
+  /usr/local/bin/aws dynamodb update-item --region "$AWS_REGION" \
+    --table-name "$LOCK_TABLE" \
+    --key "{\"pk\":{\"S\":\"${CODEUP_REPO_ID}#${MR_LOCAL_ID}#${HEAD_SHA}\"}}" \
+    --update-expression 'SET #p = :t' \
+    --expression-attribute-names '{"#p":"posted"}' \
+    --expression-attribute-values '{":t":{"BOOL":true}}' >/dev/null 2>&1 || true
+fi
 exit "$rc"

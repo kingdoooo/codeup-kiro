@@ -11,13 +11,36 @@ import codeup_min  # noqa: E402
 WANT = ("CODEUP_REPO_ID", "MR_LOCAL_ID", "HEAD_SHA")
 
 
-def _fields(event):
+def _matched_override(event):
+    """找到真正带着我们这套环境变量的那个 containerOverride——整个字典，含 name，
+    不只是环境变量表。多容器任务里要判断该看哪个容器的退出码，得靠这个 override
+    自带的 name，不能靠数组下标（ECS 事件里容器顺序不保证；上一个任务修 N1
+    镜像摘要门时已经踩过同一个坑：加一个 sidecar，index 0 就可能指向别的容器）。
+    """
     for ov in (event.get("detail", {}).get("overrides", {})
                .get("containerOverrides") or []):
         env = {e.get("name"): e.get("value") for e in (ov.get("environment") or [])}
         if all(env.get(k) for k in WANT):
-            return env
-    return None
+            return ov, env
+    return None, None
+
+
+def _fields(event):
+    return _matched_override(event)[1]
+
+
+def _exit_code(event, container_name):
+    """按容器名字（不是数组下标）取退出码。只有一个容器时天然无歧义，直接用它；
+    多容器且找不到匹配名字的容器时返回 (None, False)——调用方不能把这当「退出码是 0」，
+    只能退回「已回写」标记去判断，宁可多发一条评论也不要因为看错容器而沉默。
+    """
+    containers = event.get("detail", {}).get("containers") or [{}]
+    if len(containers) == 1:
+        return containers[0].get("exitCode"), True
+    for c in containers:
+        if c.get("name") == container_name:
+            return c.get("exitCode"), True
+    return None, False
 
 
 def should_post(event, table):
@@ -25,12 +48,11 @@ def should_post(event, table):
 
     覆盖 die_review 管不到的盲区：拉镜像失败、OOM、任务超时、entrypoint 在脚本启动前就死。
     """
-    env = _fields(event)
+    ov, env = _matched_override(event)
     if not env:
         return False
-    containers = event.get("detail", {}).get("containers") or [{}]
-    code = containers[0].get("exitCode")
-    if code == 0:
+    code, determined = _exit_code(event, ov.get("name"))
+    if determined and code == 0:
         return False
     key = "#".join(env[k] for k in WANT)
     item = (table.get_item(Key={"pk": key}).get("Item") or {})
