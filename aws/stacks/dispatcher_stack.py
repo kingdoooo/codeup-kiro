@@ -142,10 +142,16 @@ class DispatcherStack(cdk.Stack):
         state.lock_table.grant(backstop_fn, "dynamodb:GetItem")
         yunxiao_token.grant_read(backstop_fn)
 
+        # 只要本集群、已 STOPPED 的任务：ECS 每次状态迁移都发这个事件，不筛 lastStatus 会在任务
+        # 还在跑时就触发兜底（backstop/handler.py 的 should_post 另有同一道判断）；不筛 clusterArn，
+        # 账号里别的 ECS 负载也会调用兜底，按保留并发把它挤满，恰好在我们的任务死掉时丢评论。
+        # EventBridge 至少一次投递：重复的 STOPPED 会产生重复的兜底评论，属 spec 已接受的「重复好于沉默」。
         events.Rule(
             self, "TaskStateChangeRule",
             event_pattern=events.EventPattern(
-                source=["aws.ecs"], detail_type=["ECS Task State Change"]),
+                source=["aws.ecs"], detail_type=["ECS Task State Change"],
+                detail={"lastStatus": ["STOPPED"],
+                        "clusterArn": [executor.cluster.cluster_arn]}),
             targets=[targets.LambdaFunction(backstop_fn)],
         )
 

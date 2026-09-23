@@ -241,10 +241,27 @@ def test_backstop_layer_supplies_codeup_min_at_opt_dispatcher():
     assert backstop[0]["Properties"].get("Layers"), "backstop 必须挂 codeup_min 所在的 layer"
 
 
-def test_eventbridge_rule_watches_ecs_task_state_change():
-    t = _disp_template()
-    t.has_resource_properties("AWS::Events::Rule", {
-        "EventPattern": {"source": ["aws.ecs"], "detail-type": ["ECS Task State Change"]}})
+def test_eventbridge_rule_watches_only_stopped_tasks_of_our_cluster():
+    # 精确比对整个 EventPattern，不用 has_resource_properties——后者按子集匹配，规则里完全没有
+    # detail 时照样通过（C2 就是这样溜过去的）。lastStatus 只放 STOPPED：否则任务还在跑时就触发兜底；
+    # clusterArn 只放本集群：否则账号里别的 ECS 负载每次状态迁移都调用兜底，按保留并发把它挤满（I9）。
+    app = cdk.App()
+    state = StateStack(app, "S", cfg={"region": "us-west-2"})
+    executor = ExecutorStack(app, "E", cfg=_full_cfg(), state=state)
+    disp = DispatcherStack(app, "D", cfg=_full_cfg(), state=state, executor=executor)
+    rules = Template.from_stack(disp).find_resources("AWS::Events::Rule")
+    assert len(rules) == 1, rules
+    pattern = next(iter(rules.values()))["Properties"]["EventPattern"]
+    cluster_arn = pattern.get("detail", {}).get("clusterArn")
+    assert pattern == {
+        "source": ["aws.ecs"], "detail-type": ["ECS Task State Change"],
+        "detail": {"lastStatus": ["STOPPED"], "clusterArn": cluster_arn}}, pattern
+    # 集群 ARN 是 ExecutorStack 那个集群的跨栈导出，不是随手写的字符串
+    assert len(cluster_arn) == 1 and "Fn::ImportValue" in cluster_arn[0], cluster_arn
+    exported = [o["Value"] for o in Template.from_stack(executor).to_json()["Outputs"].values()
+                if o.get("Export", {}).get("Name") == cluster_arn[0]["Fn::ImportValue"]]
+    cluster_id = next(iter(Template.from_stack(executor).find_resources("AWS::ECS::Cluster")))
+    assert exported == [{"Fn::GetAtt": [cluster_id, "Arn"]}], exported
 
 
 def test_webhook_registration_is_documented_as_manual_output_not_fabricated_automation():

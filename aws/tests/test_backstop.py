@@ -2,6 +2,8 @@ import pathlib
 import sys
 from unittest import mock
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # codeup_min 与 backstop 的 handler 不同目录，import codeup_min 要能解析
 sys.path.insert(0, str(ROOT / "lambda" / "dispatcher"))
@@ -64,4 +66,22 @@ def test_multi_container_no_name_match_defers_to_posted_mark_not_blind_post():
                                    {"name": "other", "exitCode": 0}]
     ev["detail"]["overrides"]["containerOverrides"][0]["name"] = "review"
     table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "x", "posted": True}}
+    assert backstop.should_post(ev, table) is False
+
+
+@pytest.mark.parametrize("status", ["PROVISIONING", "PENDING", "ACTIVATING", "RUNNING",
+                                    "DEACTIVATING", "STOPPING", "DEPROVISIONING"])
+def test_does_not_post_on_a_non_stopped_transition(status):
+    # ECS 在每次状态迁移都发 Task State Change；任务还在跑时容器没有 exitCode（官方示例事件
+    # 就是 lastStatus=RUNNING、overrides 齐全、无 exitCode）。只看 exitCode 会把「还没结束」
+    # 当成「异常结束」，每个 MR 在评审开始几秒后就收到一条假的「评审未完成」。
+    # table 故意返回「无已回写标记」——判定必须在读锁之前就结束。
+    table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "r1#7#abc"}}
+    assert backstop.should_post(_ev(status=status, exit_code=None), table) is False
+    assert not table.get_item.called, "非 STOPPED 事件不该走到读锁那一步"
+
+
+def test_does_not_post_when_last_status_is_missing():
+    ev = _ev(exit_code=None); del ev["detail"]["lastStatus"]
+    table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "r1#7#abc"}}
     assert backstop.should_post(ev, table) is False

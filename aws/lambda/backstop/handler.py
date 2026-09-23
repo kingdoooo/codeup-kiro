@@ -47,7 +47,13 @@ def should_post(event, table):
     """任务非正常结束、且评审脚本没留下「已回写」标记时，由我们补一条。
 
     覆盖 die_review 管不到的盲区：拉镜像失败、OOM、任务超时、entrypoint 在脚本启动前就死。
+
+    第一句先看 lastStatus：ECS 在每次状态迁移（PROVISIONING/PENDING/RUNNING/…）都发这个事件，
+    任务还在跑时容器没有 exitCode，不挡住的话每次评审开始几秒就会收到一条假的「评审未完成」。
+    EventBridge 规则也只放 STOPPED，但规则是运维可改的配置，这里是这条不变式的最后一道。
     """
+    if event.get("detail", {}).get("lastStatus") != "STOPPED":
+        return False
     ov, env = _matched_override(event)
     if not env:
         return False
