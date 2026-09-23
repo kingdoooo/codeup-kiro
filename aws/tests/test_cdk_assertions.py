@@ -118,14 +118,7 @@ def _exec_template():
     return Template.from_stack(ExecutorStack(app, "E", cfg=_full_cfg(), state=state))
 
 
-def test_function_url_auth_type_is_aws_iam():
-    # CloudFront 之外不可匿名调用；对齐 Security Hub 控制项 CloudFront.16
-    _disp_template().has_resource_properties("AWS::Lambda::Url", {"AuthType": "AWS_IAM"})
-
-
-def test_distribution_uses_origin_access_control():
-    t = _disp_template()
-    assert t.find_resources("AWS::CloudFront::OriginAccessControl"), "必须有 OAC"
+# 入口（CloudFront → VPC origin → 内网 ALB）的断言在 tests/test_ingress.py，参数化到生产与探测两份模板。
 
 
 def test_no_security_agent_or_inspector_resources_exist_in_2a():
@@ -256,9 +249,13 @@ def test_eventbridge_rule_watches_ecs_task_state_change():
 
 def test_webhook_registration_is_documented_as_manual_output_not_fabricated_automation():
     # Codeup 不是 AWS 服务，AwsCustomResource 调不到它的 OpenAPI；这里断言我们没有假装
-    # 自动化了这一步（没有 Custom::AWS 资源），而是把域名亮成一个 Output。
+    # 自动化了这一步，而是把域名亮成一个 Output。模板里唯一允许的 Custom::AWS 是入口查
+    # CloudFront 前缀列表 ID 的那一个（EC2 describeManagedPrefixLists，见 stacks/ingress.py）。
     t = _disp_template()
-    assert t.find_resources("Custom::AWS") == {}, "不能用 AwsCustomResource 冒充调用 Codeup"
+    calls = [json.loads(v["Properties"]["Create"])
+             for v in t.find_resources("Custom::AWS").values()]
+    assert [(c["service"], c["action"]) for c in calls] == \
+        [("EC2", "describeManagedPrefixLists")], calls
     outputs = t.to_json().get("Outputs", {})
     assert any("webhook" in k.lower() for k in outputs), "必须有一个手动接入用的 Output"
 

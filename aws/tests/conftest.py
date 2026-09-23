@@ -54,3 +54,22 @@ def load_lambda(module_name, path):
 
 
 builtins.load_lambda = load_lambda
+
+
+def assert_alb_response(r, status, body):
+    """ALB Lambda target 的完整响应形状（G5）。调度器每条返回路径、回显 Lambda 都用它断言。
+
+    逐字段断言类型而不只断言「键存在」：isBase64Encoded 写成字符串 "false"、headers 写成列表，
+    ALB 同样按畸形响应回 502。
+    """
+    from http import HTTPStatus
+    assert set(r) == {"statusCode", "statusDescription", "isBase64Encoded", "headers", "body"}, r
+    assert r["statusCode"] == status and type(r["statusCode"]) is int, r
+    assert r["statusDescription"] == f"{status} {HTTPStatus(status).phrase}", r
+    assert r["isBase64Encoded"] is False, r
+    assert isinstance(r["headers"], dict) and r["headers"].get("Content-Type"), r
+    assert all(isinstance(k, str) and isinstance(v, str) for k, v in r["headers"].items()), r
+    assert r["body"] == body and isinstance(r["body"], str), r
+
+
+builtins.assert_alb_response = assert_alb_response

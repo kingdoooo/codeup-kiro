@@ -5,6 +5,9 @@ import time
 import botocore.exceptions
 
 import codeup_min
+# 入口是内网 ALB 的 Lambda target：每条返回路径都走 _resp（G5），正文一律经 _body_text 取（G6）。
+from http_shape import body_text as _body_text  # noqa: F401 — Task 5 的 handler 用它取正文
+from http_shape import resp as _resp
 
 TOKEN_HEADER = "x-codeup-token"
 
@@ -30,8 +33,8 @@ def verify_token(headers, expected):
 def handler(event, context):
     expected = os.environ.get("WEBHOOK_SECRET", "")
     if not verify_token(event.get("headers"), expected):
-        return {"statusCode": 401}
-    return {"statusCode": 200}
+        return _resp(401)
+    return _resp(200)
 
 
 def lock_key(fields):
@@ -101,7 +104,7 @@ def dispatch(ecs, table, cfg, fields):
     """
     key = lock_key(fields)
     if not claim(table, key, cfg.get("lock_ttl_seconds", 86400)):
-        return {"statusCode": 200, "body": "duplicate"}
+        return _resp(200, "duplicate")
     try:
         run_task(ecs, cfg, fields)
     except Exception as exc:  # noqa: BLE001 — 拉起任务的失败面很杂（限流/无容量/瞬时网络错误），
@@ -111,5 +114,5 @@ def dispatch(ecs, table, cfg, fields):
             cfg["org_id"], fields["repo_id"], fields["mr_local_id"], cfg["codeup_token"],
             "## 🤖 Kiro 代码评审\n\n**评审未启动**：调度器无法拉起评审任务。\n\n"
             f"原因：`{type(exc).__name__}`。稍后重新推送可再次触发。")
-        return {"statusCode": 200, "body": "runtask-failed"}
-    return {"statusCode": 200, "body": "dispatched"}
+        return _resp(200, "runtask-failed")
+    return _resp(200, "dispatched")

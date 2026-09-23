@@ -115,3 +115,54 @@ def test_run_task_failure_releases_lock_and_posts_to_mr(monkeypatch):
     assert rc["statusCode"] == 200, "webhook 不该因为我们的内部失败而被重投"
     assert table.delete_item.called, "必须释放锁（N4）"
     assert posted, "必须在 MR 上留痕（I10）"
+
+
+# ── G5：每条返回路径都是 ALB 可接受的完整响应 ─────────────────────────────────
+def test_handler_401_is_a_full_alb_response():
+    assert_alb_response(handler_mod.handler({"headers": {}}, None), 401, "")
+
+
+def test_handler_accepted_is_a_full_alb_response(monkeypatch):
+    monkeypatch.setenv("WEBHOOK_SECRET", "s3cret")
+    r = handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None)
+    assert_alb_response(r, 200, "")
+
+
+def test_dispatch_duplicate_is_a_full_alb_response():
+    table, ecs = mock.Mock(), mock.Mock()
+    table.put_item.side_effect = bexc.ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException"}}, "PutItem")
+    assert_alb_response(handler_mod.dispatch(ecs, table, _full_cfg(), F), 200, "duplicate")
+    assert not ecs.run_task.called, "重复投递不得拉起任务（N3）"
+
+
+def test_dispatch_runtask_failed_is_a_full_alb_response(monkeypatch):
+    monkeypatch.setattr(handler_mod.codeup_min, "post_comment", lambda *a, **k: True)
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.side_effect = RuntimeError("Throttled")
+    assert_alb_response(handler_mod.dispatch(ecs, table, _full_cfg(), F), 200, "runtask-failed")
+
+
+def test_dispatch_dispatched_is_a_full_alb_response():
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "arn:task/1"}]}
+    assert_alb_response(handler_mod.dispatch(ecs, table, _full_cfg(), F), 200, "dispatched")
+
+
+def test_every_return_in_handler_and_dispatch_goes_through_resp():
+    # 静态守卫，管住以后新增的返回路径（Task 5 会加 unparseable/ignored 两条）：handler()/dispatch()
+    # 里每一个 return 都必须是 `_resp(...)`；handler 另允许 `return dispatch(...)`（它自己也受这条约束）。
+    # 行为用例只覆盖今天存在的路径，新路径写成裸 dict 时只有这条会先红。
+    import ast
+    tree = ast.parse(pathlib.Path(handler_mod.__file__).read_text())
+    allowed = {"handler": {"_resp", "dispatch"}, "dispatch": {"_resp"}}
+    seen = set()
+    for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in allowed):
+        seen.add(fn.name)
+        for ret in (n for n in ast.walk(fn) if isinstance(n, ast.Return)):
+            call = ret.value
+            name = (call.func.id if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    else None)
+            assert name in allowed[fn.name], \
+                f"{fn.name}() 第 {ret.lineno} 行的 return 没有经过 _resp（G5：ALB 会回 502）"
+    assert seen == set(allowed), seen

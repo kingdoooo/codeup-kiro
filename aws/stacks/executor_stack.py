@@ -21,6 +21,9 @@ class ExecutorStack(cdk.Stack):
 
     调度器用 assignPublicIp=ENABLED 拉起任务（见 lambda/dispatcher/handler.py::run_task），
     所以这里的子网必须是公有子网，不建 NAT——没有出网需求要靠 NAT 转发的理由。
+
+    同一个 VPC 另有两个隔离子网（无 NAT、无 IGW 路由），只放 webhook 入口的内网 ALB
+    （stacks/ingress.py，spec「入口修订」G1）。VPC origin 要求 VPC 挂着 IGW——公有子网已提供。
     """
 
     def __init__(self, scope: Construct, cid: str, *, cfg: dict, state, **kw):
@@ -34,8 +37,12 @@ class ExecutorStack(cdk.Stack):
 
         self.vpc = ec2.Vpc(
             self, "Vpc", max_azs=2, nat_gateways=0,
-            subnet_configuration=[ec2.SubnetConfiguration(
-                name="public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24)],
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24),
+                ec2.SubnetConfiguration(
+                    name="isolated", subnet_type=ec2.SubnetType.PRIVATE_ISOLATED, cidr_mask=24),
+            ],
         )
 
         self.cluster = ecs.Cluster(

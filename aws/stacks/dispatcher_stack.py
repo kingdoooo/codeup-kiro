@@ -2,8 +2,6 @@ import os
 
 import aws_cdk as cdk
 from aws_cdk import (
-    aws_cloudfront as cloudfront,
-    aws_cloudfront_origins as origins,
     aws_events as events,
     aws_events_targets as targets,
     aws_iam as iam,
@@ -12,16 +10,19 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+from stacks.ingress import WebhookIngress
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 LAMBDA_ROOT = os.path.join(REPO_ROOT, "aws", "lambda")
 
 
 class DispatcherStack(cdk.Stack):
-    """调度 Lambda（CloudFront + OAC 前置的 Function URL）+ 兜底 Lambda + webhook 出口。
+    """调度 Lambda + webhook 入口 + 兜底 Lambda。
 
-    Codeup webhook → CloudFront（唯一对外入口）→ Function URL（AuthType=AWS_IAM，只认
-    CloudFront OAC 的 SigV4 签名）→ 调度器 Lambda → ecs:RunTask。EventBridge 另外盯着
-    ECS 任务状态变化，喂给兜底 Lambda 补发「任务死在脚本能自己回写之前」的评论（I10）。
+    Codeup webhook → CloudFront（唯一对公网开放的面）→ VPC origin → 执行器 VPC 隔离子网里的
+    内网 ALB → 调度器 Lambda → ecs:RunTask。入口的不变式（G1–G4）全在 stacks/ingress.py 的
+    WebhookIngress 里，P2a-08 探测栈复用同一个构造。EventBridge 另外盯着本集群任务的 STOPPED，
+    喂给兜底 Lambda 补发「任务死在脚本能自己回写之前」的评论（I10）。
 
     Codeup 的 webhook 注册**不**用 AwsCustomResource 实现：那个构造专门用来调 AWS SDK 的
     服务动作（service/action 映射到某个 AWS 客户端方法），Codeup OpenAPI 根本不是 AWS
@@ -44,7 +45,9 @@ class DispatcherStack(cdk.Stack):
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="handler.handler",
             code=lambda_.Code.from_asset(os.path.join(LAMBDA_ROOT, "dispatcher")),
-            timeout=cdk.Duration.seconds(29),  # Function URL 同步调用硬上限是 29s
+            # 早于 CloudFront 回源读超时（VPC origin 默认 30s）返回：否则 CloudFront 先给 Codeup 回 504，
+            # 请求其实还在处理，Codeup 却记投递失败（可能重投，由抢锁挡住）。
+            timeout=cdk.Duration.seconds(29),
             # reserved concurrency 是支出闸门：webhook 重放或异常流量下，账号级 Lambda
             # 并发配额不会被这一个函数吃满，也顺带给这条链路的意外账单设了个天花板。
             reserved_concurrent_executions=cfg["reserved_concurrency"],
@@ -108,18 +111,8 @@ class DispatcherStack(cdk.Stack):
             conditions={"StringEquals": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}},
         ))
 
-        fn_url = dispatcher_fn.add_function_url(auth_type=lambda_.FunctionUrlAuthType.AWS_IAM)
-
-        distribution = cloudfront.Distribution(
-            self, "WebhookDistribution",
-            default_behavior=cloudfront.BehaviorOptions(
-                origin=origins.FunctionUrlOrigin.with_origin_access_control(fn_url),
-                allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
-                cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
-                origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
-            ),
-        )
+        # ALB 放进执行器 VPC 的隔离子网（跨栈引用），不为入口单独再建一个 VPC。
+        ingress = WebhookIngress(self, "WebhookIngress", vpc=executor.vpc, target_fn=dispatcher_fn)
 
         # codeup_min 与 backstop/handler.py 不同目录；handler.py 按约定从 /opt/dispatcher
         # 导入它（见该文件顶部注释），所以这里把整个 lambda/ 目录铺成一层 Layer——
@@ -157,7 +150,7 @@ class DispatcherStack(cdk.Stack):
         )
 
         cdk.CfnOutput(
-            self, "WebhookUrl", value=f"https://{distribution.distribution_domain_name}/",
+            self, "WebhookUrl", value=ingress.url,
             description=(
                 "Codeup webhook 手动接入地址（AwsCustomResource 调不到非 AWS 的 Codeup "
                 "OpenAPI，注册留作部署后手动步骤）：在 Codeup 仓库的 Webhook 设置里创建一个 "
@@ -167,4 +160,4 @@ class DispatcherStack(cdk.Stack):
 
         self.dispatcher_fn = dispatcher_fn
         self.backstop_fn = backstop_fn
-        self.distribution = distribution
+        self.ingress = ingress
