@@ -78,8 +78,12 @@ class ExecutorStack(cdk.Stack):
             # 当成构建上下文原样拷贝一份——cdk.out 又刚好在仓库根之内，前一次 synth 留下的
             # cdk.out 会被下一次 synth 递归拷进新的 cdk.out，实测直接拷出 ENAMETOOLONG。
             # Dockerfile 只 COPY scripts/ prompts/ kiro/ aws/executor/ 这几处，其余都不需要。
+            # aws/config.yaml 与 aws/cdk.context.json 也必须排除：它们在两次部署之间会变（手册 5.2 的
+            # 摘要引导就是改 config.yaml 再部署），留在上下文里会改变资产哈希、触发重新构建，
+            # 刚登记进 kiro_image_digests 的摘要随即对应的是上一个镜像。
             exclude=["aws/cdk.out", "aws/.venv", ".git", "**/__pycache__", "**/*.pyc",
-                     ".pytest_cache", ".scratch", "docs/blog", "docs/superpowers"],
+                     ".pytest_cache", ".scratch", "docs/blog", "docs/superpowers",
+                     "aws/config.yaml", "aws/cdk.context.json"],
         )
 
         log_group = logs.LogGroup(

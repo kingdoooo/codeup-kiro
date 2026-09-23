@@ -511,3 +511,33 @@ def test_every_config_key_the_code_reads_is_documented_in_the_example():
     documented = set(re.findall(r"^#?\s*(\w+):", example, re.M))
     missing = sorted(read - NOT_CONFIG_KEYS - documented)
     assert not missing, f"这些键被代码读取，却没写进 config.example.yaml：{missing}"
+
+
+# ── I4 引导流程的前提：改 config.yaml 不得改变镜像 ──────────────────────────────
+def _image_asset_hash(monkeypatch, root, app):
+    import stacks.executor_stack as es
+    monkeypatch.setattr(es, "REPO_ROOT", str(root))
+    cdk.AssetStaging.clear_asset_hash_cache()
+    state = StateStack(app, "S", cfg={"region": "us-west-2"})
+    stack = ExecutorStack(app, "E", cfg=_full_cfg(), state=state)
+    return stack.node.find_child("ExecutorImage").asset_hash
+
+
+def test_editing_config_yaml_does_not_change_the_image(monkeypatch, tmp_path):
+    # 手册 5.2 的引导：先用占位摘要部署 → 读出真实镜像摘要 → 追加进 config.yaml → 再部署。
+    # 构建上下文是仓库根；config.yaml 若在上下文里，第二次部署的资产哈希就变了，CDK 重新构建、推送，
+    # 刚登记的摘要对应的是上一个镜像——N1 拒绝，引导永远收敛不了。
+    (tmp_path / "aws" / "executor").mkdir(parents=True)
+    (tmp_path / "aws" / "executor" / "Dockerfile").write_text("FROM scratch\n")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "kiro-review.sh").write_text("v1\n")
+    cfg_file = tmp_path / "aws" / "config.yaml"
+    cfg_file.write_text("kiro_image_digests: '0000'\n")
+    h1 = _image_asset_hash(monkeypatch, tmp_path, cdk.App())
+    cfg_file.write_text("kiro_image_digests: '0000 1111'\n")
+    (tmp_path / "aws" / "cdk.context.json").write_text("{}\n")
+    h2 = _image_asset_hash(monkeypatch, tmp_path, cdk.App())
+    assert h1 == h2, "config.yaml / cdk.context.json 改动不得改变镜像资产哈希"
+    # 正向对照：集成包本身变了，哈希必须跟着变——否则上面那条等式什么也没证明
+    (tmp_path / "scripts" / "kiro-review.sh").write_text("v2\n")
+    assert _image_asset_hash(monkeypatch, tmp_path, cdk.App()) != h1
