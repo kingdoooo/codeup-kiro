@@ -4,10 +4,10 @@
 config.yaml 存在才挂载三个 stack（State/Executor/Dispatcher）；不存在时直接 synth 出零个 stack——
 本地/CI 没放它时仍要能正常跑通 `cdk synth`，不能因为文件缺失就崩。
 
-config.yaml 的强校验（区域门、必填字段、开关取值）全部在 aws/config.py::load_config
+config.yaml 的强校验（区域门、必填字段、开关取值、三个摘要）全部在 aws/config.py::load_config
 里，这里不重复。Dispatcher/Executor 用到的其余部署级静态值（reserved_concurrency、cpu、
 ephemeral_storage_gib 等）不在 load_config 的必填字段里，这里与各 stack 统一用
-cfg.get(key, 默认值) 读。
+cfg.get(key, 默认值) 读——每个键、默认值与是否必填都列在 config.example.yaml。
 
 三个 stack 都钉到 cfg["region"]：不钉的话 stack 与环境无关，CloudFormation 按 CDK CLI 解析到的
 区域（CDK_DEFAULT_REGION / AWS_REGION / profile）部署，区域门校验的就是一个决定不了部署位置的值。

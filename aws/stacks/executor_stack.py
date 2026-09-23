@@ -15,6 +15,17 @@ from constructs import Construct
 # 这里必须给出同一个根，否则 DockerImageAsset 的目录内容与 Dockerfile 里的 COPY 源路径对不上。
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+# 评审行为变量：config.yaml 键 → (容器环境变量名, 缺省值)。缺省值与 scripts/ 里的 `${VAR:-默认}`
+# 逐项一致（tests/test_cdk_assertions.py 读脚本比对），写进任务定义是为了让取值在任务定义里看得见，
+# 而不是隐含在脚本里。取值语义归共享评审引擎，本档位不另做校验（与 Flow 档位同一套规则）。
+BEHAVIOUR_VARS = {
+    "inline_profile": ("INLINE_PROFILE", "quiet"),
+    "max_inline_comments": ("MAX_INLINE_COMMENTS", 10),
+    "kiro_timeout": ("KIRO_TIMEOUT", 900),
+    "diff_size_limit": ("DIFF_SIZE_LIMIT", 307200),
+    "max_comment_bytes": ("MAX_COMMENT_BYTES", 60000),
+}
+
 
 class ExecutorStack(cdk.Stack):
     """Fargate 执行器：ECS Cluster + 任务定义 + 执行器镜像资产。
@@ -105,14 +116,20 @@ class ExecutorStack(cdk.Stack):
             # image_asset 的内容哈希派生——ADR-0006 明确这三个值必须由「使用方环境」声明，
             # 集成包/CDK 自己填等于自己出题自己判。真正的镜像摘要要在构建、推送之后由操作者
             # 读出来（setup-guide 第 5.2 节），写进 config.yaml 再重新部署这一层。
+            # 三个都是必配、无默认（load_config 校验），这里用 cfg[...]，不给空串兜底。
             environment={
-                "KIRO_IMAGE_DIGESTS": cfg.get("kiro_image_digests", ""),
-                "KIRO_PINNED_ARTIFACT_SHA256": cfg.get("kiro_pinned_artifact_sha256", ""),
-                "KIRO_CLI_SHA256": cfg.get("kiro_cli_sha256", ""),
+                "KIRO_IMAGE_DIGESTS": cfg["kiro_image_digests"],
+                "KIRO_PINNED_ARTIFACT_SHA256": cfg["kiro_pinned_artifact_sha256"],
+                "KIRO_CLI_SHA256": cfg["kiro_cli_sha256"],
                 "YUNXIAO_ORG_ID": cfg["org_id"],
                 "CODEUP_BOT_USERNAME": cfg["bot_username"],
                 "LOCK_TABLE": state.lock_table.table_name,
                 "AWS_REGION": cfg["region"],
+                # 开关与行为变量必须真的进容器：config.py 校验通过、却从没传给评审脚本的开关，
+                # 表现就是「配对了也不生效」且毫无报错（I2）。
+                "INLINE_COMMENT": str(cfg["inline_comment"]),
+                **{var: str(cfg.get(key, default))
+                   for key, (var, default) in BEHAVIOUR_VARS.items()},
             },
             secrets={
                 "KIRO_API_KEY": ecs.Secret.from_secrets_manager(kiro_api_key),

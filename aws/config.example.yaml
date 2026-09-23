@@ -1,12 +1,47 @@
 # AWS 档位配置示例。复制为 config.yaml 并填入真实值——config.yaml 不进版本库。
 #
-# 密钥（如 codeup_token）不要写进这个文件，也不要写进 config.yaml：
-# 这两个文件都不是密钥的存放位置，真正接入时改走 Secrets Manager / SSM。
+# 密钥（云效令牌、Kiro API Key、webhook 共享密钥）不要写进这个文件，也不要写进 config.yaml：
+# 它们在 Secrets Manager 里（见 setup-guide.md 第 3 节），codeup_token 从来不是这里的字段。
+#
+# 下面列出 app.py / stacks/ 读取的每一个键（tests/test_cdk_assertions.py 有守卫：新增的键不写进
+# 本文件就红）。标「必配」的没有默认值，缺了 cdk synth 直接报错；其余注释掉的行给出的就是默认值。
 
-region: us-west-2       # 必须是 aws/config.py::VALID_REGIONS 里九个区域之一
-org_id: your-org-id
+# ── 必配 ────────────────────────────────────────────────────────────────
+region: us-west-2       # 必须是 aws/config.py::VALID_REGIONS 里九个区域之一；三个 stack 都钉到这里
+org_id: your-org-id     # 云效组织 ID（YUNXIAO_ORG_ID）
+# 机器人账号用户名（单数）：执行器靠它原地更新汇总评论、按作者去重行内评论（CODEUP_BOT_USERNAME）。
+# 与下面「可选」里的 bot_usernames（复数）是两个键：那一个是调度器忽略哪些作者的评论（防自触发）。
 bot_username: aliyun:kirobot
 
-# 开关缺省即关闭；非空值必须严格是 0 或 1，写错会直接报错而不是静默生效/失效。
-inline_comment: 0
-review_command: 0
+# 已探测镜像摘要名单（KIRO_IMAGE_DIGESTS，N1）：空白分隔，每项 64 位小写十六进制、不带 sha256: 前缀。
+# 首次部署时真实摘要还不存在（推送之后才有），先填这个 64 个 0 的占位值——失败方向是关闭
+# （entrypoint 以退出码 90 拒绝评审），部署后读出真实摘要追加进来再部署，见 setup-guide.md 第 5.2 节。
+# 必须加引号：全是数字的值不加引号会被 YAML 解析成整数。
+kiro_image_digests: "0000000000000000000000000000000000000000000000000000000000000000"
+# 两个 kiro-cli 摘要（安装包 zip / 装好后的入口文件），当前集成包的发布值，见 pipeline/setup-guide.md。
+kiro_pinned_artifact_sha256: "bbb0a22161d5aea045919cc75e9210e61b63b8c877525f123a30610911b6c44d"
+kiro_cli_sha256: "940b47e51692c5ccb65f50a5036cb658b284bc824c2932e5b34460189c0ce4a9"
+
+# ── 开关：缺省即关闭；非空值必须严格是 0 或 1，写错会直接报错而不是静默生效/失效 ──
+inline_comment: 0       # 执行器：INLINE_COMMENT
+review_command: 0       # 调度器：评论命令触发（REVIEW_COMMAND）
+
+# ── 可选：评审行为（执行器环境；默认值与 scripts/ 里的缺省值逐项一致，取值语义同 Flow 档位）──
+# inline_profile: quiet         # INLINE_PROFILE：quiet / balanced / critical
+# max_inline_comments: 10       # MAX_INLINE_COMMENTS
+# kiro_timeout: 900             # KIRO_TIMEOUT（秒，只收纯数字）
+# diff_size_limit: 307200       # DIFF_SIZE_LIMIT（字节，只收纯数字）
+# max_comment_bytes: 60000      # MAX_COMMENT_BYTES
+
+# ── 可选：调度器 ────────────────────────────────────────────────────────
+# bot_usernames: [aliyun:kirobot]   # 忽略其评论的机器人账号列表；默认只有 bot_username 一个
+# command_phrase: /kiro review      # REVIEW_COMMAND_PHRASE
+# target_branch_filter: ""          # TARGET_BRANCH_FILTER，正则；空 = 全部 MR
+# lock_ttl_seconds: 86400           # 幂等锁 TTL（N4）
+# reserved_concurrency: 5           # 调度器与兜底 Lambda 各自的保留并发（支出闸门）
+
+# ── 可选：执行器任务定义（暂定值，待 issue 19 的实测上限反推）──────────
+# cpu: 2048
+# memory_mib: 8192
+# ephemeral_storage_gib: 25         # 必须大于 20（Fargate 默认值）
+# container_name: review

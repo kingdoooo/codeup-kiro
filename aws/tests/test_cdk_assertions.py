@@ -4,9 +4,14 @@ import pytest
 from config import load_config, VALID_REGIONS
 
 
+D1, D2 = "a" * 64, "b" * 64
+
+
 def _cfg(**over):
     base = {"region": "us-west-2", "org_id": "o1", "bot_username": "aliyun:bot",
-            "inline_comment": 0, "review_command": 0}
+            "inline_comment": 0, "review_command": 0,
+            "kiro_image_digests": f"{D1} {D2}",
+            "kiro_pinned_artifact_sha256": "c" * 64, "kiro_cli_sha256": "d" * 64}
     base.update(over)
     return base
 
@@ -63,6 +68,77 @@ def test_toggle_rejects_unquoted_yaml_yes(tmp_path):
 def test_global_inference_regions_are_flagged(write_cfg, capsys):
     load_config(write_cfg(_cfg(region="ap-southeast-1")))
     assert "any commercial" in capsys.readouterr().out
+
+
+# ── 必配字段与三个摘要（I4：spec「无默认，必配」，N7 不允许隐式默认）────────────
+REQUIRED = ("org_id", "bot_username", "kiro_image_digests",
+            "kiro_pinned_artifact_sha256", "kiro_cli_sha256")
+
+
+@pytest.mark.parametrize("name", REQUIRED)
+def test_required_key_missing_is_rejected(name, write_cfg):
+    cfg = _cfg(); del cfg[name]
+    with pytest.raises(ValueError, match=name):
+        load_config(write_cfg(cfg))
+
+
+@pytest.mark.parametrize("name", REQUIRED)
+def test_required_key_empty_is_rejected(name, write_cfg):
+    with pytest.raises(ValueError, match=name):
+        load_config(write_cfg(_cfg(**{name: ""})))
+
+
+@pytest.mark.parametrize("bad", [
+    "   \n\t ",                 # 只有空白：split 之后是空名单
+    "a" * 63,                   # 截断
+    "A" * 64,                   # 大写
+    "sha256:" + "a" * 64,       # 带前缀（setup-guide 5.2 反复提醒的那个坑，现在 synth 就拦住）
+    f"{'a' * 64},{'b' * 64}",   # 逗号分隔
+    "z" * 64])
+def test_image_digest_list_entries_must_be_bare_lowercase_hex64(bad, write_cfg):
+    with pytest.raises(ValueError, match="kiro_image_digests"):
+        load_config(write_cfg(_cfg(kiro_image_digests=bad)))
+
+
+def test_image_digest_with_sha256_prefix_says_so_in_the_error(write_cfg):
+    # 这个坑原先要等评审被 N1 拒绝、再对着日志里打印的摘要才猜得出来；报错必须直接点名前缀。
+    with pytest.raises(ValueError, match="sha256: 前缀"):
+        load_config(write_cfg(_cfg(kiro_image_digests=f"{D1} sha256:{D2}")))
+
+
+def test_image_digest_list_whitespace_is_normalised_to_single_spaces(write_cfg):
+    cfg = load_config(write_cfg(_cfg(kiro_image_digests=f"  {D1}\n\t{D2}  ")))
+    assert cfg["kiro_image_digests"] == f"{D1} {D2}"
+
+
+def test_unquoted_all_zero_placeholder_is_rejected_with_a_quoting_hint(tmp_path):
+    # 64 个 0 不加引号，YAML 把它解析成整数 0——落进「falsy 但有意义」那一类坑。直接写 YAML 文本复现。
+    p = tmp_path / "config.yaml"
+    p.write_text("region: us-west-2\norg_id: o1\nbot_username: aliyun:bot\n"
+                 f"kiro_image_digests: {'0' * 64}\n"
+                 f"kiro_pinned_artifact_sha256: \"{'c' * 64}\"\nkiro_cli_sha256: \"{'d' * 64}\"\n")
+    with pytest.raises(ValueError, match="加引号"):
+        load_config(str(p))
+
+
+@pytest.mark.parametrize("name", ["kiro_pinned_artifact_sha256", "kiro_cli_sha256"])
+@pytest.mark.parametrize("bad", ["c" * 63, "C" * 64, "sha256:" + "c" * 64, f"{'c' * 64} {'d' * 64}"])
+def test_kiro_cli_digests_must_each_be_one_lowercase_hex64(name, bad, write_cfg):
+    with pytest.raises(ValueError, match=name):
+        load_config(write_cfg(_cfg(**{name: bad})))
+
+
+def test_example_config_passes_load_config_and_matches_the_dockerfile(tmp_path):
+    # config.example.yaml 必须能直接过 load_config（手册让人从它复制），且它给的安装包摘要就是
+    # Dockerfile 构建期核对的那个值——两处不一致时镜像能构建、评审却在 die_review 里失败。
+    import re
+    aws_dir = pathlib.Path(__file__).resolve().parents[1]
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text((aws_dir / "config.example.yaml").read_text())
+    cfg = load_config(str(cfg_path))
+    dockerfile = (aws_dir / "executor" / "Dockerfile").read_text()
+    arg = re.search(r"^ARG KIRO_PINNED_ARTIFACT_SHA256=([0-9a-f]{64})$", dockerfile, re.M).group(1)
+    assert cfg["kiro_pinned_artifact_sha256"] == arg
 
 
 import aws_cdk as cdk
@@ -351,3 +427,87 @@ def test_all_stacks_are_pinned_to_the_configured_region():
     assert [(s.stack_name, s.region) for s in stacks] == [
         ("CodeupKiroState", "eu-central-1"), ("CodeupKiroExecutor", "eu-central-1"),
         ("CodeupKiroDispatcher", "eu-central-1")]
+
+
+# ── I2：开关与评审行为变量必须真的进到某个函数/容器的环境里 ────────────────────
+def _all_envs(cfg):
+    """{来源: {变量名: 值}}：每个 Lambda 函数的环境与执行器容器的环境。"""
+    app = cdk.App()
+    state = StateStack(app, "S", cfg={"region": "us-west-2"})
+    executor = ExecutorStack(app, "E", cfg=cfg, state=state)
+    disp = DispatcherStack(app, "D", cfg=cfg, state=state, executor=executor)
+    envs = {k: v["Properties"].get("Environment", {}).get("Variables", {})
+            for k, v in Template.from_stack(disp).find_resources("AWS::Lambda::Function").items()}
+    td = next(iter(Template.from_stack(executor).find_resources("AWS::ECS::TaskDefinition").values()))
+    envs["container"] = {e["Name"]: e["Value"]
+                         for e in td["Properties"]["ContainerDefinitions"][0]["Environment"]}
+    return envs
+
+
+def test_every_validated_toggle_reaches_a_function_or_container_env():
+    # 遍历 config.TOGGLES 而不是写死两个名字：以后新增开关、忘了接线，这条先红。
+    # 两个开关取不同值，确认进去的是各自的值（review_command 属调度器，inline_comment 属执行器）。
+    from config import TOGGLES
+    cfg = _full_cfg(inline_comment=1, review_command=0)
+    envs = _all_envs(cfg)
+    for name in TOGGLES:
+        where = {src: env[name.upper()] for src, env in envs.items() if name.upper() in env}
+        assert where, f"开关 {name} 通过了 config 校验，却没有进任何函数/容器的环境（I2）"
+        assert set(where.values()) == {str(cfg[name])}, where
+    assert envs["container"]["INLINE_COMMENT"] == "1"
+    assert any(env.get("REVIEW_COMMAND") == "0" for src, env in envs.items() if "DispatcherFn" in src)
+
+
+def _script_default(var):
+    """从 scripts/ 读 `VAR="${VAR:-默认}"` 的缺省值；默认值本身是 `$OTHER` 时再解一层。只读不改。"""
+    import re
+    scripts = pathlib.Path(__file__).resolve().parents[2] / "scripts"
+    src = "\n".join(p.read_text() for p in (scripts / "kiro-review.sh",
+                                             scripts / "lib" / "diff-compress.sh"))
+    hits = re.findall(rf'^{var}="\$\{{{var}:-([^}}]*)\}}"', src, re.M)
+    assert len(hits) == 1, (var, hits)
+    value = hits[0]
+    if value.startswith("$"):
+        value = re.search(rf"^{value[1:]}=(\S+)$", src, re.M).group(1)
+    return value
+
+
+def test_behaviour_vars_default_to_exactly_what_the_scripts_default_to():
+    # 缺省值写进任务定义是为了看得见，前提是它们与共享评审引擎自己的缺省值逐项一致——
+    # 否则 AWS 档位与 Flow 档位在同一份 config 下行为不同，Task 14 的逐字节判据会以渲染差异的面目失败。
+    from stacks.executor_stack import BEHAVIOUR_VARS
+    env = _all_envs(_full_cfg())["container"]
+    for key, (var, _default) in BEHAVIOUR_VARS.items():
+        assert env[var] == _script_default(var), (var, env[var])
+    # INLINE_COMMENT 取自 cfg["inline_comment"]，load_config 缺省补 0（test_absent_toggle_defaults_to_off）
+    assert _script_default("INLINE_COMMENT") == "0"
+
+
+def test_behaviour_vars_pass_configured_values_through():
+    from stacks.executor_stack import BEHAVIOUR_VARS
+    over = {"inline_profile": "critical", "max_inline_comments": 3, "kiro_timeout": 1200,
+            "diff_size_limit": 100000, "max_comment_bytes": 30000}
+    assert set(over) == set(BEHAVIOUR_VARS)
+    env = _all_envs(_full_cfg(**over))["container"]
+    for key, (var, _default) in BEHAVIOUR_VARS.items():
+        assert env[var] == str(over[key]), (var, env[var])
+
+
+# ── I7：app.py / stacks/ 读取的每一个 config 键都写在 config.example.yaml 里 ─────
+# 由 app.py 用 ExecutorStack 的真实资源填入、不是 config.yaml 字段的键（见 app.py 的注释），
+# 以及只存在于运行时 cfg 的 codeup_token（密钥，永远不是 config.yaml 的字段）。
+NOT_CONFIG_KEYS = {"cluster", "task_definition", "subnets", "security_groups", "codeup_token"}
+
+
+def test_every_config_key_the_code_reads_is_documented_in_the_example():
+    import re
+    aws_dir = pathlib.Path(__file__).resolve().parents[1]
+    src = "\n".join(p.read_text() for p in [aws_dir / "app.py", *sorted((aws_dir / "stacks").glob("*.py"))])
+    read = set(re.findall(r'''cfg(?:\[|\.get\(|\.setdefault\()["'](\w+)["']''', src))
+    from stacks.executor_stack import BEHAVIOUR_VARS
+    read |= set(BEHAVIOUR_VARS)                     # 经字典间接读取，正则看不见
+    assert {"region", "kiro_image_digests", "inline_profile"} <= read, read  # 正则确实抓到了东西
+    example = (aws_dir / "config.example.yaml").read_text()
+    documented = set(re.findall(r"^#?\s*(\w+):", example, re.M))
+    missing = sorted(read - NOT_CONFIG_KEYS - documented)
+    assert not missing, f"这些键被代码读取，却没写进 config.example.yaml：{missing}"
