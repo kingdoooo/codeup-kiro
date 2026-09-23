@@ -8,6 +8,7 @@ if os.path.isdir("/opt/dispatcher"):
     sys.path.insert(0, "/opt/dispatcher")
 import codeup_min  # noqa: E402
 
+# 认出「这是我们的评审任务」靠这三个变量；读「已回写」标记只用调度器传进来的 LOCK_KEY（I1）。
 WANT = ("CODEUP_REPO_ID", "MR_LOCAL_ID", "HEAD_SHA")
 
 
@@ -60,7 +61,12 @@ def should_post(event, table):
     code, determined = _exit_code(event, ov.get("name"))
     if determined and code == 0:
         return False
-    key = "#".join(env[k] for k in WANT)
+    # 锁键原样取调度器抢锁时写入的那个字符串，不用 WANT 自己拼——评论命令的键多一段评论 id，
+    # 自己拼会读到另一条记录（被别的评审置过位就沉默，I10）。读不到 LOCK_KEY 就无从确认
+    # 「已回写」，宁可多发一条也不沉默。
+    key = env.get("LOCK_KEY")
+    if not key:
+        return True
     item = (table.get_item(Key={"pk": key}).get("Item") or {})
     return not item.get("posted")
 

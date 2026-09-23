@@ -90,7 +90,7 @@ def test_run_task_passes_scalars_as_env_overrides():
     ecs.run_task.return_value = {"tasks": [{"taskArn": "arn:task/1"}]}
     handler_mod.run_task(ecs, {"cluster": "c", "task_definition": "td",
                                "subnets": ["s1"], "security_groups": ["sg1"],
-                               "container_name": "review"}, F)
+                               "container_name": "review"}, F, "r1#7#abc123")
     env = ecs.run_task.call_args.kwargs["overrides"]["containerOverrides"][0]["environment"]
     names = {e["name"] for e in env}
     assert {"CODEUP_REPO_ID", "MR_LOCAL_ID", "HEAD_SHA"} <= names
@@ -100,7 +100,8 @@ def test_run_task_never_passes_secrets_in_overrides():
     ecs = mock.Mock()
     ecs.run_task.return_value = {"tasks": [{"taskArn": "a"}]}
     handler_mod.run_task(ecs, {"cluster": "c", "task_definition": "td", "subnets": ["s"],
-                               "security_groups": ["sg"], "container_name": "review"}, F)
+                               "security_groups": ["sg"], "container_name": "review"}, F,
+                          "r1#7#abc123")
     blob = json.dumps(ecs.run_task.call_args.kwargs)
     for forbidden in ("KIRO_API_KEY", "YUNXIAO_TOKEN", "WEBHOOK_SECRET", "secret"):
         assert forbidden not in blob

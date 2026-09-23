@@ -60,4 +60,36 @@ assert_eq "$([ -n "$guard_line" ] && [ -n "$mark_line" ] && [ -n "$close_line" ]
   && echo yes)" "yes" \
   "I10：update-item 置位标记必须在 rc=0 的 if 块内，容器最终仍以脚本原始 rc 退出"
 
+# ⑩ I1 锁键单一来源：entrypoint 只用调度器传进来的 LOCK_KEY，绝不自己用 repo#MR#sha 重建
+#   （评论命令的键多一段评论 id，重建出来的是另一条记录）；LOCK_KEY 只给 entrypoint 自己用，不导出
+#   给评审脚本（I9 的裁判比较的是导出集合）。
+assert_contains "$(cat "$ENTRY")" ': "${LOCK_KEY:?' "I1：LOCK_KEY 缺失必须硬失败"
+code_lines=$(LC_ALL=C grep -vE '^[[:space:]]*#' "$ENTRY")
+assert_not_contains "$code_lines" '${CODEUP_REPO_ID}#' "I1：不得自己拼锁键"
+assert_not_contains "$code_lines" 'export LOCK_KEY' "I1：LOCK_KEY 不导出给评审脚本"
+
+# ⑪ 置位请求的真实形状（不是只看源码里有没有某个词）：把 rc=0 那段原样抽出来，只把
+#   /usr/local/bin/aws 换成记录 argv 的替身，断言发出去的 --key 与 --condition-expression。
+#   条件 attribute_exists(pk) 缺了，锁记录不在时 update-item 会新建一条没有 expires_at 的记录，永不过期（N4）。
+if [[ -x /usr/bin/jq ]]; then
+  mtmp=$(mktemp -d)
+  printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/argv"\n' "$mtmp" > "$mtmp/aws"; chmod +x "$mtmp/aws"
+  mark_block=$(awk '/^if \[\[ "\$rc" -eq 0 \]\]; then$/{f=1} f{print} f&&/^fi$/{exit}' "$ENTRY" \
+               | sed "s#/usr/local/bin/aws#$mtmp/aws#")
+  assert_contains "$mark_block" "$mtmp/aws dynamodb update-item" "⑪ 抽到了置位那一段"
+  after() { awk -v f="$1" 'p{print; exit} $0==f{p=1}' "$mtmp/argv"; }
+  for key in 'r1#7#abc123#1244' 'r1#7#ab"c'; do
+    rm -f "$mtmp/argv"
+    LOCK_KEY="$key" AWS_REGION=us-west-2 LOCK_TABLE=t \
+      /bin/bash -c "set -euo pipefail; rc=0; $mark_block" </dev/null
+    want=$(/usr/bin/jq -cn --arg k "$key" '{pk: {S: $k}}')
+    assert_eq "$(after --key)" "$want" "⑪ 置位用的键就是 LOCK_KEY 原样（${key}）"
+    assert_eq "$(after --condition-expression)" "attribute_exists(pk)" \
+      "⑪ 置位带 attribute_exists(pk) 条件，绝不新建无 TTL 的锁记录"
+  done
+  rm -rf "$mtmp"
+else
+  echo "SKIP: 无 /usr/bin/jq，跳过 ⑪ 置位请求形状断言" >&2
+fi
+
 report

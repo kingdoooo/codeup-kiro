@@ -73,11 +73,14 @@ def release(table, key):
     table.delete_item(Key={"pk": key})
 
 
-def run_task(ecs, cfg, fields):
+def run_task(ecs, cfg, fields, key):
     """拉起 Fargate 评审任务，返回 task ARN。
 
     只往 containerOverrides.environment 塞非敏感标量（I3）：RunTask 的入参会进
     CloudTrail，密钥必须走任务定义的 secrets 块（Secrets Manager ARN），绝不能出现在这里。
+
+    LOCK_KEY 是 dispatch 抢锁用的同一个字符串，原样传进容器：执行器置「已回写」标记、兜底
+    Lambda 读标记都只认它，任何别处都不重建（I1）——评论命令的键多一段评论 id，重建必然对不上。
     """
     env = [{"name": k, "value": str(v)} for k, v in (
         ("CODEUP_REPO_ID", fields["repo_id"]),
@@ -86,6 +89,7 @@ def run_task(ecs, cfg, fields):
         ("CI_COMMIT_REF_NAME", fields["source_branch"]),
         ("HEAD_SHA", fields["head_sha"]),
         ("BUSINESS_REPO_URL", fields["clone_url"]),
+        ("LOCK_KEY", key),
     )]
     resp = ecs.run_task(
         cluster=cfg["cluster"], taskDefinition=cfg["task_definition"],
@@ -106,7 +110,7 @@ def dispatch(ecs, table, cfg, fields):
     if not claim(table, key, cfg.get("lock_ttl_seconds", 86400)):
         return _resp(200, "duplicate")
     try:
-        run_task(ecs, cfg, fields)
+        run_task(ecs, cfg, fields, key)
     except Exception as exc:  # noqa: BLE001 — 拉起任务的失败面很杂（限流/无容量/瞬时网络错误），
                                # 都要落到同一条「释放锁 + 留痕」的兜底路径上，不能只挑几种已知异常
         release(table, key)

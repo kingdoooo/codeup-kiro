@@ -10,6 +10,8 @@ WORKROOT=/tmp/review
 : "${MR_LOCAL_ID:?缺少 MR_LOCAL_ID}"
 : "${CI_COMMIT_REF_NAME:?缺少 CI_COMMIT_REF_NAME（业务库源分支）}"
 : "${BUSINESS_REPO_URL:?缺少 BUSINESS_REPO_URL}"
+# 锁键由调度器算好传进来，与抢锁时写入的是同一个字符串（评论命令还多一段评论 id）——本文件绝不自己拼（I1）。
+: "${LOCK_KEY:?缺少 LOCK_KEY（由调度器经 RunTask 环境覆盖传入，与抢锁写入的键是同一个字符串）}"
 
 # ── N1 镜像摘要门：在任何评审动作之前 ────────────────────────────────
 # 查【容器级】端点、取顶层 .ImageID——不是 `${...}/task`（任务级，返回本任务下全部容器的列表，
@@ -63,10 +65,14 @@ rc=0
 # 自己会靠容器 exitCode==0 挡住，不依赖这个标记），置位是安全的。rc 非零一律不置位，
 # 宁可让兜底 Lambda 在「脚本其实已经发过评论」的失败上多发一条重复评论——这是已知
 # 可接受的权衡（重复好于沉默）——也不要在那三类沉默失败上再次沉默。
+# 条件 attribute_exists(pk)：只给调度器抢锁时建好的那条记录置位。记录不在（TTL 已清、键不对）时条件
+# 失败、什么也不写——绝不新建一条没有 expires_at 的记录：锁表的 TTL 看 expires_at，缺了它永不过期，
+# 这个 MR 之后的每次投递都会被当成重复（N4）。键的 JSON 交给 jq 生成，不手拼引号。
 if [[ "$rc" -eq 0 ]]; then
   /usr/local/bin/aws dynamodb update-item --region "$AWS_REGION" \
     --table-name "$LOCK_TABLE" \
-    --key "{\"pk\":{\"S\":\"${CODEUP_REPO_ID}#${MR_LOCAL_ID}#${HEAD_SHA}\"}}" \
+    --key "$(/usr/bin/jq -cn --arg k "$LOCK_KEY" '{pk: {S: $k}}')" \
+    --condition-expression 'attribute_exists(pk)' \
     --update-expression 'SET #p = :t' \
     --expression-attribute-names '{"#p":"posted"}' \
     --expression-attribute-values '{":t":{"BOOL":true}}' >/dev/null 2>&1 || true

@@ -17,7 +17,8 @@ def _ev(exit_code=1, status="STOPPED", overrides=None):
     env = overrides if overrides is not None else [
         {"name": "CODEUP_REPO_ID", "value": "r1"},
         {"name": "MR_LOCAL_ID", "value": "7"},
-        {"name": "HEAD_SHA", "value": "abc"}]
+        {"name": "HEAD_SHA", "value": "abc"},
+        {"name": "LOCK_KEY", "value": "r1#7#abc"}]
     return {"detail": {"lastStatus": status, "containers": [{"exitCode": exit_code}],
                        "overrides": {"containerOverrides": [
                            {"environment": env}]}}}
@@ -85,3 +86,22 @@ def test_does_not_post_when_last_status_is_missing():
     ev = _ev(exit_code=None); del ev["detail"]["lastStatus"]
     table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "r1#7#abc"}}
     assert backstop.should_post(ev, table) is False
+
+
+def test_reads_the_mark_under_lock_key_verbatim_not_a_rebuilt_key():
+    # 评论命令的锁键多一段评论 id。兜底若用 CODEUP_REPO_ID#MR_LOCAL_ID#HEAD_SHA 自己拼，会读到
+    # push 触发的那条记录：它被置过位，这次评论触发的任务 OOM 了也沉默（I1 / I10）。
+    ev = _ev(exit_code=137)
+    ev["detail"]["overrides"]["containerOverrides"][0]["environment"][-1]["value"] = "r1#7#abc#1244"
+    table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "r1#7#abc#1244"}}
+    assert backstop.should_post(ev, table) is True
+    table.get_item.assert_called_once_with(Key={"pk": "r1#7#abc#1244"})
+
+
+def test_posts_without_reading_the_table_when_lock_key_is_absent():
+    # 读不到 LOCK_KEY 就无从确认「已回写」——宁可多发一条也不沉默。
+    ev = _ev(exit_code=137)
+    ev["detail"]["overrides"]["containerOverrides"][0]["environment"].pop()
+    table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "r1#7#abc", "posted": True}}
+    assert backstop.should_post(ev, table) is True
+    assert not table.get_item.called
