@@ -12,21 +12,32 @@ WORKROOT=/tmp/review
 : "${BUSINESS_REPO_URL:?缺少 BUSINESS_REPO_URL}"
 # 锁键由调度器算好传进来，与抢锁时写入的是同一个字符串（评论命令还多一段评论 id）——本文件绝不自己拼（I1）。
 : "${LOCK_KEY:?缺少 LOCK_KEY（由调度器经 RunTask 环境覆盖传入，与抢锁写入的键是同一个字符串）}"
+# 目标分支可选（调度器对缺失值不传；未设置时评审脚本按源分支经 OpenAPI 反查），缺省必须在任何使用之前——
+# `set -u` 下 `|| true` 救不了未绑定变量的展开，放在使用之后的缺省是死代码。
+: "${MR_TARGET_BRANCH:=}"
 
 # ── N1 镜像摘要门：在任何评审动作之前 ────────────────────────────────
 # 查【容器级】端点、取顶层 .ImageID——不是 `${...}/task`（任务级，返回本任务下全部容器的列表，
 # 无自证身份、无顺序保证）。任务里一旦加一个日志路由/X-Ray sidecar，`.Containers[0]` 就可能读到
 # 别的容器，N1 会悄悄校验错误的镜像而评审容器本身的摘要从未被核对——这就废了本任务唯一要守的不变式。
 : "${KIRO_IMAGE_DIGESTS:?缺少 KIRO_IMAGE_DIGESTS（已探测镜像摘要名单，必配无默认）}"
+: "${ECS_CONTAINER_METADATA_URI_V4:?缺少 ECS_CONTAINER_METADATA_URI_V4（ECS 容器级元数据端点），无法核对镜像摘要}"
 meta=$(/usr/bin/curl -sf "${ECS_CONTAINER_METADATA_URI_V4}" || true)
-raw_digest=$(printf '%s' "$meta" | /usr/bin/jq -r '.ImageID // empty')
+raw_digest=$(printf '%s' "$meta" | /usr/bin/jq -r '.ImageID // empty' 2>/dev/null || true)
 # ECS 返回的 ImageID 带 `sha256:` 前缀（如 `sha256:25f3...`）；约定 KIRO_IMAGE_DIGESTS 里存的是
 # 去掉这个前缀之后的裸十六进制串，所以这里核对前也剥一次前缀，两边口径才对得上。
 self_digest="${raw_digest#sha256:}"
-case " $KIRO_IMAGE_DIGESTS " in
-  *" $self_digest "*) : ;;
-  *) echo "镜像摘要不在已探测名单内，拒绝评审：${self_digest:-<读不到>}" >&2; exit 90 ;;
-esac
+# 读不到摘要（端点瞬时失败、返回形状变了）必须当场拒绝，不交给下面的名单比对去「碰巧」拒绝：原先的
+# `case " $名单 " in *" $self_digest "*)` 在摘要为空时退化成「名单里有两个连续空格」，名单首尾多一个
+# 空格就放行——N1 失败在放行方向（全分支复审 I3 在 shell 里复现过）。
+[[ -n "$self_digest" ]] || { echo "读不到本容器镜像摘要（ECS 容器级元数据端点），拒绝评审" >&2; exit 90; }
+# 名单按空白切成数组后逐项全等比较：空格、制表符、换行怎么混都不改变名单的含义。
+read -r -a allowed_digests -d '' <<< "$KIRO_IMAGE_DIGESTS" || true
+digest_ok=0
+for d in ${allowed_digests[@]+"${allowed_digests[@]}"}; do
+  if [[ "$d" == "$self_digest" ]]; then digest_ok=1; fi
+done
+[[ "$digest_ok" -eq 1 ]] || { echo "镜像摘要不在已探测名单内，拒绝评审：${self_digest}" >&2; exit 90; }
 
 # ── clone 业务库（受信代码决定不受信的树落在哪里）────────────────────
 /bin/rm -rf "$WORKROOT"; /bin/mkdir -p "$WORKROOT"
@@ -40,16 +51,15 @@ cred_helper='!f() { echo "username=oauth2"; echo "password=$YUNXIAO_TOKEN"; }; f
   clone --no-tags "https://${BUSINESS_REPO_URL#https://}" \
   "$WORKROOT/business" >/dev/null 2>&1 \
   || { echo "clone 业务库失败（凭证、网络或仓库权限）" >&2; exit 91; }
-/usr/bin/git -C "$WORKROOT/business" -c credential.helper="$cred_helper" \
+[[ -z "$MR_TARGET_BRANCH" ]] || /usr/bin/git -C "$WORKROOT/business" -c credential.helper="$cred_helper" \
   fetch --no-tags origin "$MR_TARGET_BRANCH" >/dev/null 2>&1 || true
 
 # ── 与 Flow run block 完全相同的环境变量契约（I9 的裁判就看这一段）──
 export REVIEW_REPO_DIR="$WORKROOT/business"
 export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME"
-# 两条语句分开写（而不是 `: "...:="; export ...` 一行两句）：这段的 `export` 必须单独占一行、
-# 顶格出现，才能被 tests/test-aws-entrypoint.sh 断言 ① 的锚定正则（`^[[:space:]]*export`）当作
-# “本文件导出的变量”收进 entry_vars——那条正则就是 I9 的裁判，写成一行会让它读不到 MR_TARGET_BRANCH。
-: "${MR_TARGET_BRANCH:=}"
+# `:=` 缺省在文件顶部（使用之前）；这里的 `export` 必须单独占一行、顶格出现，才能被
+# tests/test-aws-entrypoint.sh 断言 ① 的锚定正则（`^[[:space:]]*export`）当作「本文件导出的变量」
+# 收进 entry_vars——那条正则就是 I9 的裁判，和别的语句写在一行会让它读不到 MR_TARGET_BRANCH。
 export MR_TARGET_BRANCH
 export KIRO_INSTALL_PROFILE=pinned
 export KIRO_PINNED_ARTIFACT=/opt/kiro/kirocli-x86_64-linux-musl.zip

@@ -167,3 +167,63 @@ def test_every_return_in_handler_and_dispatch_goes_through_resp():
             assert name in allowed[fn.name], \
                 f"{fn.name}() 第 {ret.lineno} 行的 return 没有经过 _resp（G5：ALB 会回 502）"
     assert seen == set(allowed), seen
+
+
+# ── I5 / Task 6 遗留：None 与 "" 行为一致，None 绝不变成字面量 "None" ─────────────
+def test_lock_key_treats_none_and_empty_dedupe_extra_the_same():
+    no_key = {k: v for k, v in F.items() if k != "dedupe_extra"}
+    assert handler_mod.lock_key(dict(F, dedupe_extra=None)) == "r1#7#abc123"
+    assert handler_mod.lock_key(dict(F, dedupe_extra="")) == "r1#7#abc123"
+    assert handler_mod.lock_key(no_key) == "r1#7#abc123"
+
+
+def test_dispatch_with_none_dedupe_extra_claims_and_passes_the_three_part_key():
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "a"}]}
+    handler_mod.dispatch(ecs, table, _full_cfg(), dict(F, dedupe_extra=None))
+    env = {e["name"]: e["value"] for e in
+           ecs.run_task.call_args.kwargs["overrides"]["containerOverrides"][0]["environment"]}
+    assert table.put_item.call_args.kwargs["Item"]["pk"] == env["LOCK_KEY"] == "r1#7#abc123"
+
+
+@pytest.mark.parametrize("field", ["target_branch", "source_branch", "clone_url",
+                                   "repo_id", "mr_local_id", "head_sha"])
+def test_run_task_never_emits_the_literal_string_none(field):
+    # str(None) == "None"：MR_TARGET_BRANCH=None 非空，脚本就不走「按源分支反查目标分支」，
+    # 而是拿一个叫 None 的分支当目标分支评审。值为 None 的字段一律不传，缺省由 entrypoint 处理。
+    ecs = mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "a"}]}
+    handler_mod.run_task(ecs, _full_cfg(), dict(F, **{field: None}), "k")
+    env = ecs.run_task.call_args.kwargs["overrides"]["containerOverrides"][0]["environment"]
+    assert all(e["value"] != "None" for e in env), env
+    assert len(env) == 6, "值为 None 的那一项不传，其余照传"
+
+
+# ── M7：评论里的原因是 AWS 错误码，不是异常正文 ─────────────────────────────────
+def _posted_reason(monkeypatch, exc):
+    posted = []
+    monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
+                        lambda *a, **k: posted.append(a[4]) or True)
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.side_effect = exc
+    handler_mod.dispatch(ecs, table, _full_cfg(), F)
+    assert len(posted) == 1
+    return posted[0]
+
+
+def test_runtask_client_error_comment_names_the_aws_error_code_only(monkeypatch):
+    # 错误码是固定枚举，能区分限流 / 权限 / 集群不存在；错误正文是自由文本（含 ARN、账号 ID），
+    # 不得进 MR 评论。
+    exc = bexc.ClientError({"Error": {"Code": "AccessDeniedException",
+                                      "Message": "arn:aws:iam::123456789012:role/x is not authorized"}},
+                           "RunTask")
+    body = _posted_reason(monkeypatch, exc)
+    assert "`AccessDeniedException`" in body
+    assert "123456789012" not in body and "not authorized" not in body, body
+    assert "ClientError" not in body, "ClientError 本身区分不了限流与权限"
+
+
+def test_runtask_other_error_comment_names_the_type_only(monkeypatch):
+    body = _posted_reason(monkeypatch, RuntimeError("internal detail 10.0.0.12"))
+    assert "`RuntimeError`" in body
+    assert "internal detail" not in body and "10.0.0.12" not in body, body

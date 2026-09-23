@@ -92,4 +92,52 @@ else
   echo "SKIP: 无 /usr/bin/jq，跳过 ⑪ 置位请求形状断言" >&2
 fi
 
+# ⑫ I3：N1 门不得在「读不到摘要」时放行。静态：元数据端点有 :? 守卫、非空判断排在名单比对之前；
+#   行为：把 N1 那一段原样抽出来跑（元数据端点指向本地 file://），覆盖复审在 shell 里复现的放行组合。
+nonempty_line=$(LC_ALL=C grep -n '\[\[ -n "\$self_digest" \]\]' "$ENTRY" | head -1 | cut -d: -f1)
+member_line=$(LC_ALL=C grep -n 'digest_ok=1' "$ENTRY" | head -1 | cut -d: -f1)
+guard_meta=$(LC_ALL=C grep -n ': "${ECS_CONTAINER_METADATA_URI_V4:?' "$ENTRY" | head -1 | cut -d: -f1)
+curl_line=$(LC_ALL=C grep -n 'curl -sf' "$ENTRY" | head -1 | cut -d: -f1)
+assert_eq "$([ -n "$nonempty_line" ] && [ -n "$member_line" ] && [ "$nonempty_line" -lt "$member_line" ] && echo yes)" \
+  "yes" "I3：空摘要的显式拒绝必须排在名单比对之前"
+assert_eq "$([ -n "$guard_meta" ] && [ -n "$curl_line" ] && [ "$guard_meta" -lt "$curl_line" ] && echo yes)" \
+  "yes" "I3：ECS_CONTAINER_METADATA_URI_V4 必须有 :? 守卫且在读取之前"
+if [[ -x /usr/bin/jq && -x /usr/bin/curl ]]; then
+  gtmp=$(mktemp -d)
+  gate_block=$(awk '/^# ── N1 镜像摘要门/{f=1} /^# ── clone 业务库/{exit} f{print}' "$ENTRY")
+  assert_contains "$gate_block" 'exit 90' "⑫ 抽到了 N1 那一段"
+  A=$(printf 'a%.0s' {1..64}); B=$(printf 'b%.0s' {1..64}); C=$(printf 'c%.0s' {1..64})
+  run_gate() {  # 元数据文件内容（空 = 不建文件，模拟端点读取失败） 名单 → 打印 "rc 输出"
+    rm -f "$gtmp/meta.json"; [[ -z "$1" ]] || printf '%s' "$1" > "$gtmp/meta.json"
+    local out rc=0
+    out=$(KIRO_IMAGE_DIGESTS="$2" ECS_CONTAINER_METADATA_URI_V4="file://$gtmp/meta.json" \
+          /bin/bash -c "set -euo pipefail; $gate_block
+echo GATE_PASSED" </dev/null 2>&1) || rc=$?
+    printf '%s %s' "$rc" "$out"
+  }
+  assert_eq "$(run_gate "{\"ImageID\":\"sha256:$B\"}" "$A $B")" "0 GATE_PASSED" "⑫ 名单内的摘要放行"
+  assert_contains "$(run_gate "{\"ImageID\":\"sha256:$C\"}" "$A $B")" "90 镜像摘要不在已探测名单内" "⑫ 名单外的摘要拒绝"
+  for lst in "$A " " $A" "$A  $B"; do   # 复审复现的三种放行组合：摘要为空 + 名单里有多余空格
+    assert_contains "$(run_gate '{}' "$lst")" "90 读不到本容器镜像摘要" "⑫ 读不到摘要时拒绝（名单 [${lst}]）"
+  done
+  assert_contains "$(run_gate '' "$A ")" "90 读不到本容器镜像摘要" "⑫ 元数据端点读取失败时拒绝"
+  assert_contains "$(run_gate '<html>502</html>' "$A ")" "90 读不到本容器镜像摘要" "⑫ 元数据不是 JSON 时拒绝"
+  assert_eq "$(run_gate "{\"ImageID\":\"sha256:$B\"}" $'  '"$A"$'\n\t'"$B"$'  ')" "0 GATE_PASSED" \
+    "⑫ 名单里混用空格/制表符/换行不改变含义"
+  assert_contains "$(run_gate "{\"ImageID\":\"sha256:$A\"}" "   ")" "90 镜像摘要不在已探测名单内" "⑫ 全空白名单拒绝"
+  out=$(KIRO_IMAGE_DIGESTS="$A" /bin/bash -c "set -euo pipefail; $gate_block
+echo GATE_PASSED" </dev/null 2>&1) && rc=0 || rc=$?
+  assert_nonzero "$rc" "⑫ 缺 ECS_CONTAINER_METADATA_URI_V4 时硬失败"
+  assert_not_contains "$out" "GATE_PASSED" "⑫ 缺元数据端点变量时不放行"
+  rm -rf "$gtmp"
+else
+  echo "SKIP: 无 /usr/bin/jq 或 /usr/bin/curl，跳过 ⑫ N1 门行为断言" >&2
+fi
+
+# ⑬ I5：MR_TARGET_BRANCH 的 `:=` 缺省必须排在任何使用之前（set -u 下 `|| true` 救不了未绑定变量）
+default_line=$(LC_ALL=C grep -n ': "${MR_TARGET_BRANCH:=}"' "$ENTRY" | head -1 | cut -d: -f1)
+first_use=$(LC_ALL=C grep -nE '^[^#]*\$\{?MR_TARGET_BRANCH' "$ENTRY" | grep -v ':=' | head -1 | cut -d: -f1)
+assert_eq "$([ -n "$default_line" ] && [ -n "$first_use" ] && [ "$default_line" -lt "$first_use" ] && echo yes)" \
+  "yes" "I5：MR_TARGET_BRANCH 的缺省必须在第一次使用之前"
+
 report

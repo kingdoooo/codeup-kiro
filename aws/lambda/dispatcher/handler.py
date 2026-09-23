@@ -81,6 +81,10 @@ def run_task(ecs, cfg, fields, key):
 
     LOCK_KEY 是 dispatch 抢锁用的同一个字符串，原样传进容器：执行器置「已回写」标记、兜底
     Lambda 读标记都只认它，任何别处都不重建（I1）——评论命令的键多一段评论 id，重建必然对不上。
+
+    fields 的约定：缺失的可选值是 ""。值为 None 的字段不传——str(None) 会变成字面量 "None"：
+    MR_TARGET_BRANCH=None 非空，脚本就不走「按源分支反查目标分支」，而是评审一个叫 None 的分支。
+    不传时由 entrypoint 的 `:=` 缺省（可选项）或 `:?` 守卫（必填项）处理。
     """
     env = [{"name": k, "value": str(v)} for k, v in (
         ("CODEUP_REPO_ID", fields["repo_id"]),
@@ -90,7 +94,7 @@ def run_task(ecs, cfg, fields, key):
         ("HEAD_SHA", fields["head_sha"]),
         ("BUSINESS_REPO_URL", fields["clone_url"]),
         ("LOCK_KEY", key),
-    )]
+    ) if v is not None]
     resp = ecs.run_task(
         cluster=cfg["cluster"], taskDefinition=cfg["task_definition"],
         launchType="FARGATE", count=1,
@@ -100,6 +104,19 @@ def run_task(ecs, cfg, fields, key):
         overrides={"containerOverrides": [
             {"name": cfg["container_name"], "environment": env}]})
     return resp["tasks"][0]["taskArn"]
+
+
+def _failure_reason(exc):
+    """MR 评论里给的失败原因：AWS 错误码（ThrottlingException、AccessDeniedException…）或异常类型名。
+
+    错误码是固定枚举，能区分限流、权限、集群不存在——从没部署过的环境里最先出现的就是这几类，
+    这条评论是运维唯一的信号。绝不用 str(exc)：错误正文是自由文本，带 ARN、账号 ID 甚至内网地址。
+    """
+    if isinstance(exc, botocore.exceptions.ClientError):
+        code = exc.response.get("Error", {}).get("Code")
+        if code:
+            return code
+    return type(exc).__name__
 
 
 def dispatch(ecs, table, cfg, fields):
@@ -117,6 +134,6 @@ def dispatch(ecs, table, cfg, fields):
         codeup_min.post_comment(
             cfg["org_id"], fields["repo_id"], fields["mr_local_id"], cfg["codeup_token"],
             "## 🤖 Kiro 代码评审\n\n**评审未启动**：调度器无法拉起评审任务。\n\n"
-            f"原因：`{type(exc).__name__}`。稍后重新推送可再次触发。")
+            f"原因：`{_failure_reason(exc)}`。稍后重新推送可再次触发。")
         return _resp(200, "runtask-failed")
     return _resp(200, "dispatched")
