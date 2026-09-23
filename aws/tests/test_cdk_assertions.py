@@ -1,3 +1,5 @@
+import pathlib
+
 import pytest
 from config import load_config, VALID_REGIONS
 
@@ -322,28 +324,30 @@ def test_container_secrets_reference_secrets_manager_arns_not_plaintext():
     assert "KIRO_API_KEY" in blob and "secretsmanager" in blob.lower()
 
 
-def test_app_mounts_all_three_stacks():
-    # 回归 setup-guide.md 记录的「此刻 0 个 stack」事实：这个测试证明它已经不成立。
-    import importlib
-    import pathlib
-    import sys
+_app_mod = load_lambda("cdk_app", pathlib.Path(__file__).resolve().parents[1] / "app.py")
 
-    aws_dir = pathlib.Path(__file__).resolve().parents[1]
-    example_cfg = aws_dir / "config.example.yaml"
-    config_path = aws_dir / "config.yaml"
-    created = not config_path.exists()
-    if created:
-        config_path.write_text(example_cfg.read_text())
-    try:
-        sys.path.insert(0, str(aws_dir))
-        if "app" in sys.modules:
-            del sys.modules["app"]
-        app_module = importlib.import_module("app")
-        stack_names = [s.stack_name for s in app_module.app.node.children
-                       if isinstance(s, cdk.Stack)]
-        assert len(stack_names) == 3, stack_names
-    finally:
-        if created:
-            config_path.unlink()
-        sys.path.remove(str(aws_dir))
-        sys.modules.pop("app", None)
+
+def test_app_mounts_all_three_stacks_when_config_exists(tmp_path):
+    # 走 app.py 真正的入口 main()，但把 config.yaml 放在 tmp_path——不往仓库里的 aws/ 写文件
+    # （原先写 aws/config.yaml 再在 finally 里删，进程被杀时会留下一份按示例值生效的配置）。
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text((pathlib.Path(__file__).resolve().parents[1]
+                         / "config.example.yaml").read_text())
+    app = _app_mod.main(str(cfg_path))
+    names = sorted(s.stack_name for s in app.node.children if isinstance(s, cdk.Stack))
+    assert names == ["CodeupKiroDispatcher", "CodeupKiroExecutor", "CodeupKiroState"], names
+
+
+def test_app_mounts_nothing_without_config(tmp_path):
+    app = _app_mod.main(str(tmp_path / "absent.yaml"))
+    assert [s for s in app.node.children if isinstance(s, cdk.Stack)] == []
+
+
+def test_all_stacks_are_pinned_to_the_configured_region():
+    # 区域门（config.VALID_REGIONS）校验的是 cfg["region"]；只有每个 stack 都钉到它，这道门才决定
+    # 部署位置——否则 CloudFormation 按 CLI 解析到的区域放，operator 的 AWS_REGION 说了算（C3）。
+    # 用一个与 conftest 默认值（us-west-2）不同的区域，免得「碰巧等于默认」掩盖漏钉。
+    stacks = _app_mod.build_stacks(cdk.App(), _full_cfg(region="eu-central-1"))
+    assert [(s.stack_name, s.region) for s in stacks] == [
+        ("CodeupKiroState", "eu-central-1"), ("CodeupKiroExecutor", "eu-central-1"),
+        ("CodeupKiroDispatcher", "eu-central-1")]
