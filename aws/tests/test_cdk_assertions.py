@@ -541,3 +541,16 @@ def test_editing_config_yaml_does_not_change_the_image(monkeypatch, tmp_path):
     # 正向对照：集成包本身变了，哈希必须跟着变——否则上面那条等式什么也没证明
     (tmp_path / "scripts" / "kiro-review.sh").write_text("v2\n")
     assert _image_asset_hash(monkeypatch, tmp_path, cdk.App()) != h1
+
+
+# ── I6：接入手册不得再次与代码脱节 ────────────────────────────────────────────
+def test_setup_guide_matches_the_landed_stacks_and_ingress():
+    # 手册曾在三个 stack 已经挂载之后仍写着「cdk deploy 不会创建任何资源」、且没有部署步骤。
+    # 这里钉住会随代码变的几处事实：stack 名、入口输出名、摘要键名、探测栈、G7 的两个可用区 ID。
+    guide = (pathlib.Path(__file__).resolve().parents[1] / "setup-guide.md").read_text()
+    for stale in ("不挂载任何 stack", "零个 stack", "产出零个", "调度器尚未实现（Task 11）"):
+        assert stale not in guide, f"手册仍有过时说法：{stale}"
+    names = [s.stack_name for s in _app_mod.build_stacks(cdk.App(), _full_cfg())]
+    for fact in [*names, "WebhookUrl", "kiro_image_digests", "CodeupKiroIngressProbe",
+                 "use1-az3", "apne1-az3", "cdk bootstrap", "mergeRequestsEvents", "noteEvents"]:
+        assert fact in guide, f"手册缺少：{fact}"

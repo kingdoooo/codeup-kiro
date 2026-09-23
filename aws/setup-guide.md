@@ -1,20 +1,20 @@
 # Codeup + Kiro 自动评审：AWS 档位接入手册
 
-本档位把调度与执行搬到客户自己的 AWS 账号：Codeup Webhook → Lambda 调度器（校验、过滤、幂等）
-→ ECS Fargate 临时任务（镜像内置钉死版本的 kiro-cli）。Flow 档位（见
+本档位把调度与执行搬到客户自己的 AWS 账号：Codeup Webhook → CloudFront → VPC origin → 内网 ALB
+→ Lambda 调度器（校验、过滤、幂等）→ ECS Fargate 临时任务（镜像内置钉死版本的 kiro-cli）。Flow 档位（见
 [pipeline/setup-guide.md](../pipeline/setup-guide.md)）不因此退场，是客户没有 AWS 账号时的
 退路；两者共用完全相同的评审引擎（`scripts/`、`prompts/`、`kiro/`，spec 不变式 **I9**），
 本档位新增的只是 `aws/` 下的调度、执行与基础设施代码。见
 [docs/adr/0001-aws-profile-as-target-architecture.md](../docs/adr/0001-aws-profile-as-target-architecture.md)。
 
-**当前实现状态（写文档时点）**：执行器镜像（`docker build`，不经 CDK，见第 5 节）与 State Stack
-的资源定义（`aws/stacks/state_stack.py`，DynamoDB 幂等锁 + 映射表）已实现；Lambda 调度器目前
-只有 webhook 签名校验一段代码。**但 `aws/app.py` 此刻不挂载任何 stack**（源码原话：「目前不挂载
-任何 stack」）——State Stack 这个类只在单元测试（`aws/tests/test_cdk_assertions.py`）里被直接
-构造过，从未接到 CDK app 入口上，所以此刻跑 `cdk synth`/`cdk deploy` 会得到**零个** stack，
-不是「只有 State Stack」。调度器其余逻辑、Dispatcher/Executor 的完整 CDK 栈、State Stack 挂载到
-app、兜底回写 Lambda、评论命令触发（Task 10、11、13）都还没写。本手册涉及这些部分时，
-只描述运维应当观察到的**行为**，不给具体的资源名、CLI 命令或构造 ID——那些要等对应任务落地后再补。
+**当前实现状态（写文档时点）**：`aws/app.py` 在 `aws/config.yaml` 存在时挂载三个 stack——
+`CodeupKiroState`（DynamoDB 幂等锁 + 映射表）、`CodeupKiroExecutor`（VPC、ECS 集群、Fargate 任务定义、
+执行器镜像）、`CodeupKiroDispatcher`（webhook 入口、调度 Lambda、兜底 Lambda），`cdk deploy` 会真的创建
+这些资源（第 6 节）。已实现的代码路径：webhook 共享密钥校验、幂等抢锁、`RunTask` 与失败回写、执行器
+entrypoint（N1 镜像摘要门、clone、调用评审脚本、「已回写」标记）、任务异常结束的兜底回写。**尚未实现**：
+调度器的事件过滤与把 webhook 接到「抢锁 → `RunTask`」这一步（实现计划 Task 5，依赖第 6.1 节的真实报文
+探测），以及评论命令（Task 13）。所以**此刻部署后，合法的 webhook 只会得到 200，不会拉起评审任务**——
+这是预期现象，不是故障；Task 5 落地后本段与第 4.3 节对应两行要随之更新。
 
 ## 1. 前提条件与数据治理确认
 
@@ -139,6 +139,7 @@ aws secretsmanager create-secret \
 | `MR_TARGET_BRANCH` | webhook 载荷里的目标分支 |
 | `CI_COMMIT_REF_NAME` | webhook 载荷里的源分支（`aws/executor/entrypoint.sh` 直接要求这四项，缺一硬失败） |
 | `HEAD_SHA` | webhook 载荷里本次评审的提交 |
+| `LOCK_KEY` | 调度器抢锁时写入的幂等锁键（仓库#MR#提交，评论命令再加评论 id），原样传给执行器——执行器置「已回写」标记、兜底 Lambda 读标记都只认它，不自己重建。只供 entrypoint 使用，不导出给评审脚本 |
 
 ### 4.2 部署级静态（同一部署下所有业务库共用，随 CDK 部署一次性配置）
 
@@ -146,22 +147,28 @@ aws secretsmanager create-secret \
 |---|---|
 | `YUNXIAO_ORG_ID` | 云效组织 ID |
 | `CODEUP_BOT_USERNAME` | 机器人账号用户名（原地更新汇总评论、行内评论按作者去重的前提，同 Flow 档位） |
-| 部署区域 | 第 1.1 节的九选一，`aws/config.yaml` 的 `region` 字段 |
+| 部署区域 | 第 1.1 节的九选一，`aws/config.yaml` 的 `region` 字段；三个 stack 都钉到这个区域 |
+
+`aws/config.yaml` 的**全部**键（含默认值与是否必配）列在 [aws/config.example.yaml](config.example.yaml)，
+代码读取而示例里没写的键会让测试失败。注意 `bot_username`（单数，执行器用来原地更新汇总评论）与
+`bot_usernames`（复数，调度器忽略哪些作者的评论，默认只含前者）是两个键。
 
 ### 4.3 行为开关
 
-| 变量 | 说明 |
-|---|---|
-| `INLINE_COMMENT` | 是否发行内评论。共享评审引擎（`scripts/`）的既有语义：只收 `0`/`1`，非法取值拒绝运行；详见 `pipeline/setup-guide.md` 第 11.2 节，本档位不改这条语义 |
-| `INLINE_PROFILE` | 行内档位：`quiet`（默认）/ `balanced` / `critical`，同上共享语义，**不是** 0/1 布尔值 |
-| `MAX_INLINE_COMMENTS` | 单次行内评论上限，非负整数，默认 `10`，同上共享语义 |
-| `KIRO_TIMEOUT` | Kiro 超时秒数，默认 `900`，只收纯数字，同上共享语义 |
-| `DIFF_SIZE_LIMIT` | diff 直传阈值字节数，默认 `307200`，只收纯数字，同上共享语义 |
-| `TARGET_BRANCH_FILTER` | 目标分支过滤（对应 `aws/config.py` 的 `target_branch_filter`）。**调度器尚未实现（Task 11）**：这里只能描述预期行为——配置后只有匹配目标分支的 MR 会触发评审，不匹配的 webhook 请求被静默忽略；具体取值形态（正则 / glob）以 Task 11 落地时的实现为准 |
-| `REVIEW_COMMAND_PHRASE` | 评论命令触发短语（对应 `aws/config.py` 的 `review_command` 开关 + 短语文本）。**评论命令触发尚未实现（Task 13）**：预期行为是在 MR 上评论一句配置的短语（如 `/kiro review`）可触发重新评审，取代 Flow 档位「只能重跑流水线」的限制（`REVIEW_RERUN_HINT` 在本档位下会改写成这句话，见 `pipeline/setup-guide.md` 第 11.2 节该行）；具体接口以 Task 13 落地时的实现为准 |
+执行器的开关与评审行为变量由 `config.yaml` 写进任务定义的容器环境（默认值与 `scripts/` 里的缺省值
+逐项一致，有测试比对）；取值语义归共享评审引擎（`scripts/`），与 Flow 档位同一套规则，详见
+`pipeline/setup-guide.md` 第 11.2 节，本档位不改这些语义。
 
-> `TARGET_BRANCH_FILTER` 与 `REVIEW_COMMAND_PHRASE` 两项因为背后的调度逻辑还没写，这里刻意只写
-> 「运维应当观察到的行为」，不写具体的环境变量语法或校验规则——避免文档先于代码把接口定死。
+| 变量 | `config.yaml` 键 | 说明 |
+|---|---|---|
+| `INLINE_COMMENT` | `inline_comment` | 是否发行内评论，只收 `0`/`1`（`config.py` 在 synth 时就拒绝别的取值，包括 YAML 里未加引号的 `yes`/`true`） |
+| `INLINE_PROFILE` | `inline_profile` | 行内档位：`quiet`（默认）/ `balanced` / `critical`，**不是** 0/1 布尔值 |
+| `MAX_INLINE_COMMENTS` | `max_inline_comments` | 单次行内评论上限，非负整数，默认 `10` |
+| `KIRO_TIMEOUT` | `kiro_timeout` | Kiro 超时秒数，默认 `900`，只收纯数字 |
+| `DIFF_SIZE_LIMIT` | `diff_size_limit` | diff 直传阈值字节数，默认 `307200`，只收纯数字 |
+| `MAX_COMMENT_BYTES` | `max_comment_bytes` | 单条评论字节上限，默认 `60000` |
+| `TARGET_BRANCH_FILTER` | `target_branch_filter` | 调度器：目标分支正则，空 = 全部 MR。环境变量已随调度 Lambda 部署，**过滤逻辑随 Task 5 落地**——此刻它还不生效 |
+| `REVIEW_COMMAND` / `REVIEW_COMMAND_PHRASE` | `review_command` / `command_phrase` | 调度器：评论命令开关（`0`/`1`）与触发短语（默认 `/kiro review`）。**评论命令触发尚未实现（Task 13）**：预期行为是在 MR 上评论这句短语即可重新评审，取代 Flow 档位「只能重跑流水线」的限制 |
 
 ## 5. 镜像构建与摘要登记
 
@@ -184,20 +191,34 @@ docker build -f aws/executor/Dockerfile -t codeup-kiro-executor:2.21.4 .
 
 ### 5.2 摘要登记（KIRO_IMAGE_DIGESTS）
 
-构建完成后读出镜像摘要并加进 `KIRO_IMAGE_DIGESTS`——entrypoint 在第一步（clone 业务库之前）
-就核对自己所在容器的镜像摘要是否在这个名单里，不在名单里直接拒绝评审（`aws/executor/entrypoint.sh`
-的 N1 门，退出码 90）：
+名单在 `config.yaml` 里的键是 **`kiro_image_digests`**（写进任务定义的 `KIRO_IMAGE_DIGESTS`）：空白分隔，
+每项 64 位小写十六进制。entrypoint 在第一步（clone 业务库之前）就核对自己所在容器的镜像摘要是否在这个
+名单里，不在名单里、或读不到自身摘要，都直接拒绝评审（`aws/executor/entrypoint.sh` 的 N1 门，退出码 90）。
+它与两个 kiro-cli 摘要（`kiro_pinned_artifact_sha256`、`kiro_cli_sha256`）一样是**必配、无默认**，
+缺失或格式不对时 `cdk synth` 就报错。
 
-```bash
-docker inspect --format='{{index .RepoDigests 0}}' codeup-kiro-executor:2.21.4
-# 或部署后从 ECS 任务的容器级元数据端点读 .ImageID
-```
+**摘要格式约定**：ECS 容器级元数据端点返回的 `ImageID` 带 `sha256:` 前缀（形如 `sha256:25f3…`），
+entrypoint 核对前会剥掉它，所以名单里存的**必须是裸十六进制**。把带前缀的形式粘进 `config.yaml`，
+`cdk synth` 会直接报错并点名前缀；全是数字的值必须加引号（否则 YAML 把它解析成整数，同样报错）。
 
-**摘要格式约定必须显式说明，不能靠默契**：ECS 容器级元数据端点返回的 `ImageID` 带 `sha256:`
-前缀（形如 `sha256:25f3…`），entrypoint 在核对前会剥掉这个前缀（`self_digest="${raw_digest#sha256:}"`），
-所以 `KIRO_IMAGE_DIGESTS` 里存的**必须是裸十六进制**，不带 `sha256:` 前缀。操作者若把
-`docker inspect` 或控制台上带前缀的完整形式原样粘进去，entrypoint 两边比对不上，评审会被
-无声地拒绝——错误信息里只会打印读到的摘要，不会提示「你把前缀也粘进来了」，排查时先检查这一点。
+**首次部署的引导**：真实镜像摘要要等镜像构建、推送之后才有，所以第一次部署时名单里还没有它。按这个
+顺序走（失败方向始终是关闭——占位值不可能匹配任何真实镜像，entrypoint 以退出码 90 拒绝评审）：
+
+1. `kiro_image_digests` 先填 64 个 `0` 的占位值（`config.example.yaml` 里就是它），照第 6 节部署。
+2. 读出执行器镜像的真实摘要。首选 ECR：任务定义里的镜像地址形如
+   `<账号>.dkr.ecr.<区域>.amazonaws.com/cdk-<qualifier>-container-assets-<账号>-<区域>:<标签>`，
+   ```bash
+   aws ecr describe-images --region <区域> \
+     --repository-name cdk-<qualifier>-container-assets-<账号>-<区域> \
+     --image-ids imageTag=<标签> --query 'imageDetails[0].imageDigest' --output text
+   ```
+   输出形如 `sha256:…`，去掉 `sha256:` 前缀。或者等第一次真实评审被拒：执行器日志（日志组名以
+   `CodeupKiroExecutor-ExecutorLogs` 开头，流前缀 `executor`）里有一行
+   「镜像摘要不在已探测名单内，拒绝评审：<摘要>」，MR 上同时会出现一条兜底的「评审未完成」。
+   ECR 的 `imageDigest` 与 ECS 元数据的 `ImageID` 是否逐字一致由真实运行确认（spec 待取事实 P2a-04），
+   两者不一致时以执行器日志里打印的值为准。
+3. 把真实摘要**追加**进 `kiro_image_digests`（占位值可以同时删掉），再 `cdk deploy CodeupKiroExecutor`。
+   `config.yaml` 不在镜像构建上下文里，改它不会触发重新构建，镜像与摘要保持不变（有测试守着这一条）。
 
 升级 kiro-cli 版本时要重新走一遍：重新探测（新平台/版本要在 `scripts/probe/README.md` 走一遍
 「升级 kiro-cli 之后」流程）→ 改 `Dockerfile` 的 `ARG KIRO_CLI_VERSION` 与 `KIRO_PINNED_ARTIFACT_SHA256`
@@ -206,23 +227,87 @@ docker inspect --format='{{index .RepoDigests 0}}' codeup-kiro-executor:2.21.4
 
 ## 6. CDK 部署
 
-**`cdk deploy`/`cdk synth` 此刻会产出零个 stack——不是「只有 State Stack」。** `aws/app.py`
-目前只做一件事：`config.yaml` 存在就跑一遍 `load_config` 校验（下一段），然后直接 `app.synth()`，
-**不构造任何 stack 实例**。State Stack 的资源定义已经写好（`aws/stacks/state_stack.py`：
-两张 DynamoDB 表——评审幂等锁 `ReviewLock`，TTL 24h；`repo → codeReviewId` 映射表
-`CodeReviewMapping`，2a 建表但不使用，留给 2b；两张表删除策略都是 `RETAIN`），并且有单元测试
-（`aws/tests/test_cdk_assertions.py`）直接 `StateStack(app, "S", cfg=...)` 构造它、断言生成的
-CloudFormation 模板——**但那是测试代码自己实例化的，不是 `aws/app.py` 挂载的**。这个类要接入
-CDK app 入口、连同 Dispatcher（Lambda）与 Executor（ECS/Fargate/VPC/任务定义）对应的栈一起，
-都是 Task 11 的工作。**此刻在这台机器上跑 `cdk deploy` 不会创建任何 AWS 资源**，看到空的部署
-结果是预期现象，不是故障；本节暂不给出 `cdk deploy` 的具体子命令或栈名，等 Task 11 落地后再补，
-避免文档写出一个此刻并不存在的部署拓扑。
+### 6.1 前置：P2a-08 入口探测（阻塞）
 
-`aws/config.yaml`（不进版本库，复制 `aws/config.example.yaml` 并填入真实值）在 `cdk synth` 阶段
-就会被 `aws/app.py` 读取校验：区域不在九个有效区域内、`org_id`/`bot_username` 缺失、或
-`inline_comment`/`review_command` 取值不严格是 `0`/`1`，都会在 synth 阶段直接报错并中止——
-这一步校验现在就生效，与上面「零个 stack」的事实并不矛盾：校验发生在 `app.synth()` 之前，
-不依赖任何 stack 已挂载。
+webhook 入口是 **CloudFront → VPC origin → 私有隔离子网里的内网 ALB → 调度 Lambda**（`aws/stacks/ingress.py`）。
+静态断言只能证明形状，证明不了 CloudFront 真的把 Codeup 的 POST 原样送进 Lambda——上一版入口
+（CloudFront + OAC → `AWS_IAM` Function URL）就是被一套全绿的静态断言放过去的：AWS 要求经 OAC 向
+Function URL 发 POST 的发送方自己算正文 SHA256，Codeup 不会发，每次投递都会被静默拒绝。所以正式部署前，
+先在**同一个区域**部署探测栈，真跑一遍（对应实现计划 Task 1 / 待取事实 P2a-08）：
+
+```bash
+cd aws
+cdk --app "python3 probe_app.py" -c region=<区域> deploy CodeupKiroIngressProbe
+```
+
+探测栈与生产栈复用同一个入口构造，只把目标换成回显 Lambda（`aws/lambda/probe_echo/handler.py`：把请求头
+与解码后的正文写进 CloudWatch，`X-Codeup-Token` 打码；响应正文是解码后正文字节的 SHA256）。四条判据全过
+才算通过：① 含中文的 JSON 正文用 `application/json`、`application/json; charset=UTF-8`、
+`application/octet-stream`（最后一种会让 ALB 改走 base64）三种 `Content-Type` POST 到输出 `ProbeUrl`，
+响应都等于本地算的 SHA256；② `GET` 得 404；③ 输出 `AlbDnsName` 从公网连不上；④ 在 Codeup 注册一个指向
+`ProbeUrl` 的 webhook（一次性的 Secret Token），它的投递记录是 2xx 且回显日志里有对应报文。做完删掉：
+
+```bash
+cdk --app "python3 probe_app.py" -c region=<区域> destroy CodeupKiroIngressProbe
+```
+
+### 6.2 区域、可用区与费用
+
+- **区域**：`config.yaml` 的 `region`，三个 stack 都钉到这个区域（不受 `AWS_REGION` 或 profile 默认区域
+  影响）；`cdk bootstrap` 因此是**按区域**的，换区域要在新区域重新 bootstrap。
+- **可用区（G7）**：VPC origin 在九个区域都可用，但 `us-east-1` 的 `use1-az3` 与 `ap-northeast-1` 的
+  `apne1-az3` 两个可用区不支持。执行器 VPC 取该区域的**前两个**可用区，而可用区名（`us-east-1a`…）到
+  ID（`use1-az3`…）的映射**按账号而异**，所以在这两个区域部署前先核对：
+  ```bash
+  aws ec2 describe-availability-zones --region us-east-1 \
+    --query 'AvailabilityZones[].[ZoneName,ZoneId]' --output text
+  ```
+  前两行里若出现 `use1-az3`（`ap-northeast-1` 为 `apne1-az3`），本版本不能直接部署到该账号的这个区域
+  ——当前没有可用区选择配置。
+- **CloudFront→ALB 走 HTTP 80（G3）**：ALB 的默认域名 `*.elb.amazonaws.com` 申请不到 ACM 证书，HTTPS 源站
+  需要自有域名，本版本不引入。这一段走 VPC origin 的私有连接、不经公网；Codeup→CloudFront 一段仍是 HTTPS。
+  ALB 安全组只放 CloudFront 源站托管前缀列表（`com.amazonaws.global.cloudfront.origin-facing`）的 80 端口，
+  执行器任务虽在同一个 VPC 里也连不上它。
+- **费用与耗时**：内网 ALB 按小时计固定费用（与流量无关，没有评审也在计费）；VPC origin 的创建与删除
+  各需约 15 分钟，`cdk deploy`/`cdk destroy` 会在这一步停留较久，属正常现象；执行器 VPC 另有两个隔离子网，
+  不需要 NAT。
+
+### 6.3 部署
+
+前提：第 3 节的三个密钥已在**同一区域**创建；第 5.1 节的安装包已放到 `aws/executor/`（`cdk deploy` 会从
+仓库根构建执行器镜像并推到 CDK 的资产 ECR 仓库）；本机有 Docker 与 CDK CLI。
+
+```bash
+set -euo pipefail
+cd aws
+cp config.example.yaml config.yaml          # 按 config.example.yaml 的注释填真实值（config.yaml 不进版本库）
+cdk bootstrap aws://<账号>/<区域>             # 每个账号 + 区域一次
+cdk deploy --all                            # CodeupKiroState → CodeupKiroExecutor → CodeupKiroDispatcher
+```
+
+`config.yaml` 在 `cdk synth` 阶段就被 `aws/config.py::load_config` 校验：区域不在九个有效区域内、必配键
+（`org_id`、`bot_username`、三个摘要）缺失或格式不对、`inline_comment`/`review_command` 取值不严格是
+`0`/`1`，都会直接报错并中止。`cdk.out/`、`cdk.context.json`（CDK 查询可用区时会连同账号 ID 一起写进去）
+与安装包 zip 都已 gitignore——本仓库是公开仓库，不要把它们提交上去。
+
+首次部署后照第 5.2 节登记真实镜像摘要，再部署一次 `CodeupKiroExecutor`。
+
+### 6.4 在 Codeup 注册 webhook（部署后手动）
+
+webhook 注册**不**自动化：Codeup 不是 AWS 服务，CDK 的 `AwsCustomResource` 调不到它的 OpenAPI，手写一个
+自定义资源 Lambda 又是一块没有任何测试覆盖的生产代码。所以部署完成后手动接入。先读出入口地址：
+
+```bash
+aws cloudformation describe-stacks --region <区域> --stack-name CodeupKiroDispatcher \
+  --query "Stacks[0].Outputs[?OutputKey=='WebhookUrl'].OutputValue" --output text
+```
+
+然后在**每个**要接入的业务库（一套部署服务多个仓库，都指向同一个地址）的 Codeup 设置 → Webhooks 里新建：
+
+- URL：上面读出的 `WebhookUrl`（`https://<CloudFront 域名>/`）；
+- Secret Token：`codeup-kiro/webhook-secret` 的值（调度器按 `X-Codeup-Token` 头常量时间比对，不符即 401）；
+- 触发事件：勾选**合并请求事件**（`mergeRequestsEvents`）与**评论事件**（`noteEvents`）；
+- SSL 校验：开启（`enableSslVerification: true`）。
 
 ## 7. 本地测试
 
@@ -244,12 +329,17 @@ aws/.venv/bin/pip install -r aws/requirements.txt
 
 | 现象 | 排查 |
 |---|---|
-| 评审被拒绝，日志/退出码指向「镜像摘要不在已探测名单内」（entrypoint 退出码 90） | 镜像重新构建过、但没有把新摘要登记进 `KIRO_IMAGE_DIGESTS`（第 5.2 节）。核对当前任务实际跑的镜像摘要与名单是否一致；也检查是不是把带 `sha256:` 前缀的完整形式粘进了名单——名单里必须是裸十六进制 |
+| 评审被拒绝，日志/退出码指向「镜像摘要不在已探测名单内」（entrypoint 退出码 90） | 镜像重新构建过、但没有把新摘要登记进 `kiro_image_digests`（第 5.2 节；首次部署时名单里只有占位值，这是引导流程的正常一步）。核对日志里打印的摘要与名单是否一致 |
+| 评审被拒绝，日志指向「读不到本容器镜像摘要」（entrypoint 退出码 90） | ECS 容器级元数据端点读取失败或返回形状变了。N1 门在读不到摘要时一律拒绝，不会放行；偶发时重新推送即可，持续出现时核对 P2a-04 记录的元数据形状 |
 | 评审被拒绝，日志/退出码指向「clone 业务库失败」（entrypoint 退出码 91） | 云效令牌（`codeup-kiro/yunxiao-token-kiro`）过期或权限不足（需代码只读 + 合并请求读写）；执行器网络不通（VPC/子网/安全组配置，或出网路径）；业务库 URL/仓库权限本身有问题。三者从同一条报错信息区分不开，需要逐个排除 |
 | 同一个 MR 短时间内被评审两次，或看到「抢锁」相关的提示（幂等锁 `ReviewLock` 表） | **预期行为，不是错误**：webhook 被重放，或 Codeup 的「批准」事件与「新建/更新」事件都触发了调度器。幂等锁按「仓库#MR#提交」这个键去重，重复请求会被挡在真正拉起 Fargate 任务之前 |
 | MR 上出现调度器写的「评审未启动」类评论 | 调度器判定收到了合法请求，但 `RunTask` 本身被节流或调用失败——多为 Fargate 任务并发数/账号级限流，或任务定义/网络配置有误导致 `RunTask` 直接报错。这条评论意味着 Fargate 任务从未真正跑起来，评审引擎本身没有机会失败 |
 | MR 上出现「兜底」类回写评论（评审没有正常结论，也没有评审引擎自己的失败原因） | 与上一条不同：`RunTask` 成功了，任务真的起来过，但没能跑到评审脚本自己汇报结果那一步就死掉了——常见原因是镜像拉取失败（registry 权限、镜像被删）、容器 OOM（`ephemeral_storage`/内存配置不够大 diff 的仓库）、或任务在 `KIRO_TIMEOUT` 之外的更外层超时（任务本身的运行时长上限）被杀。这条评论是任务级的兜底，不经过评审脚本自己的失败评论路径，所以看不到评审脚本给出的具体原因 |
 
-以上「抢锁冲突」「评审未启动」「兜底回写」三行描述的是调度器/兜底 Lambda（Task 10、11）尚未实现
-时**预期上线后**的行为，不是当前代码里能复现的现象——落地后请对照真实日志核对措辞是否一致，
-不一致时以代码为准并更新本表。
+| Codeup 的 webhook 投递记录显示 401 | Codeup 里填的 Secret Token 与 `codeup-kiro/webhook-secret` 的值不一致（或密钥改过而调度 Lambda 未重新部署） |
+| Codeup 的 webhook 投递记录显示 404 或连接超时，调度 Lambda 没有任何日志 | 请求没有到达 Lambda：方法不是 `POST`（监听器默认动作固定返回 404，只有 `POST` 转发给调度器），或 URL 填成了 ALB 域名（内网 ALB 从公网连不上，只能经 CloudFront 访问）——URL 必须是 `WebhookUrl` |
+| Codeup 的 webhook 投递记录显示 502/504 | 502：调度 Lambda 抛了异常或返回了不完整的响应（查 Lambda 日志）；504：Lambda 超过 CloudFront 回源读超时（30 秒）仍未返回。两种情况下请求可能已被处理，Codeup 却记为失败并可能重投，重投会被幂等锁挡住 |
+
+「抢锁冲突」「评审未启动」「兜底回写」三行对应的代码已经实现（`aws/lambda/dispatcher/handler.py`、
+`aws/lambda/backstop/handler.py`），但调度器接到 webhook 后走到抢锁这一步要等 Task 5 落地（见本文开头），
+在那之前真实部署上复现不出这三类现象；落地后请对照真实日志核对措辞，不一致时以代码为准并更新本表。

@@ -17,7 +17,13 @@ __pycache__/
 .pytest_cache/
 /aws/.venv/
 
-# aws/ 的真实配置是按部署环境各自不同的非敏密值（区域、org_id 等），只提交示例
+# aws/ 的真实配置是按部署环境各自不同的非敏感值（区域、org_id 等），只提交示例
 # config.example.yaml；config.yaml 本身不允许写密钥——codeup_token 不是 config.yaml 的字段，
 # 调度器运行时从 Lambda/ECS 环境变量取值，那些变量由 Secrets Manager 灌入（I3）。
 /aws/config.yaml
+
+# 公开仓库：cdk synth 的产物（含整份执行器镜像构建上下文的拷贝）、CDK 查询可用区时写下的缓存
+# （stack 钉了具体账号后会带上账号 ID），以及 Kiro 安装包（不在本仓库再分发，见 setup-guide 5.1）。
+/aws/cdk.out/
+/aws/cdk.context.json
+/aws/executor/*.zip
