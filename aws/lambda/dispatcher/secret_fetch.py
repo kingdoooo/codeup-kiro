@@ -8,12 +8,9 @@
 兜底 Lambda 与本文件不同目录：靠 CodeupMinLayer 把整个 `lambda/` 铺到 `/opt`、按
 `/opt/dispatcher` 导入，与 codeup_min 同一手法，不另建 layer（见 backstop/handler.py 顶部）。
 
-文件名与标准库 `secrets` 同名，而 Lambda 把函数根目录放在 sys.path 最前——进程内
-`import secrets` 会一律命中本文件。已审计过这层遮蔽：给 `builtins.__import__` 打桩跑
-`import boto3`，整个导入图里唯一导入标准库 `secrets` 的是 `multiprocessing.shared_memory`，
-它只在 `_make_filename()`（创建共享内存段）里用 `secrets.token_hex`，两个 Lambda 都不走
-那条路；boto3/botocore/urllib3 自身没有任何一处 `import secrets`。故遮蔽无害。
-将来若引入会用标准库 `secrets` 的依赖（JWT、随机 nonce 之类），这个文件必须改名。
+文件名刻意**不叫** `secrets.py`：`/var/task` 与 `/opt/dispatcher` 都排在标准库之前，同名文件会
+在整个 Lambda 进程里遮蔽标准库的 `secrets` 模块——今天没有依赖会踩到，但将来任何一处
+`import secrets`（boto3/botocore 或标准库自身的变化）都会拿到这份，而 synth 与单测都接不住。
 """
 import os
 

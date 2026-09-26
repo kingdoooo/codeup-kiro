@@ -130,14 +130,14 @@ DENIED = bexc.ClientError(
 
 
 def _stub_secrets(monkeypatch, *responses):
-    """让 handler 走**真实**的 secrets.py，只把它内部那句 `import boto3` 换掉。
+    """让 handler 走**真实**的 secret_fetch.py，只把它内部那句 `import boto3` 换掉。
 
-    不直接把 handler_mod.secrets.secret_from_env 整个替换成桩——那样就只测到自己的桩，
+    不直接把 handler_mod.secret_fetch.secret_from_env 整个替换成桩——那样就只测到自己的桩，
     连「SecretId 传的是不是环境变量里那个 ARN」都测不出来。_CACHE 每个用例换一份新字典
     （monkeypatch 用完自动还原），免得跨用例把值带过去。
     """
     monkeypatch.setenv("WEBHOOK_SECRET_ARN", SECRET_ARN)
-    monkeypatch.setattr(handler_mod.secrets, "_CACHE", {})
+    monkeypatch.setattr(handler_mod.secret_fetch, "_CACHE", {})
     client = mock.Mock()
     client.get_secret_value.side_effect = list(responses)
     boto3 = mock.Mock()
@@ -177,7 +177,7 @@ def test_the_503_response_leaks_neither_the_account_id_nor_the_aws_message(monke
 def test_handler_rejects_when_the_secret_arn_env_var_is_missing_or_empty(arn, monkeypatch):
     # falsy 但有意义：ARN 为空串是配置错误，不能退化成「expected 是空的」那条 401 路径——
     # 结果同样是拒，但状态码会把我们的配置错误显示成对方令牌不对。
-    monkeypatch.setattr(handler_mod.secrets, "_CACHE", {})
+    monkeypatch.setattr(handler_mod.secret_fetch, "_CACHE", {})
     monkeypatch.delenv("WEBHOOK_SECRET_ARN", raising=False)
     if arn is not None:
         monkeypatch.setenv("WEBHOOK_SECRET_ARN", arn)

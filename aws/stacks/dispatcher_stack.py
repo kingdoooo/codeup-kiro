@@ -65,7 +65,7 @@ class DispatcherStack(cdk.Stack):
                 "REVIEW_COMMAND_PHRASE": cfg["command_phrase"],
                 "TARGET_BRANCH_FILTER": cfg.get("target_branch_filter", ""),
                 # 两个密钥只注入 **ARN**，值由 handler 在调用时自己向 Secrets Manager 取
-                # （lambda/dispatcher/secrets.py）。这里绝不注入明文：CloudFormation 动态引用
+                # （lambda/dispatcher/secret_fetch.py）。这里绝不注入明文：CloudFormation 动态引用
                 # 能让模板里不出现明文，但部署后的函数配置里存的仍是明文，任何能
                 # `lambda:GetFunctionConfiguration` 的主体都读得到——与 ECS 的 `secrets{}` 块
                 # （值从不进任务定义）不是同一档安全性（Ruling 16）。
@@ -80,7 +80,7 @@ class DispatcherStack(cdk.Stack):
                 "YUNXIAO_TOKEN_ARN": yunxiao_token.secret_arn,
             },
         )
-        # 这条授权现在是真在用的代码路径：调度器每次调用都经 secrets.py 读 webhook 密钥
+        # 这条授权现在是真在用的代码路径：调度器每次调用都经 secret_fetch.py 读 webhook 密钥
         # （云效令牌由 Task 5 的 _runtime_cfg() 读，ARN 已注入，一并授权）。缺了它
         # GetSecretValue 会抛 AccessDeniedException，handler 按 fail-closed 回 503。
         # 不用 grant_read：那会连 secretsmanager:DescribeSecret 一起给上，两个 Lambda 都不调它
@@ -126,16 +126,16 @@ class DispatcherStack(cdk.Stack):
         # ALB 放进执行器 VPC 的隔离子网（跨栈引用），不为入口单独再建一个 VPC。
         ingress = WebhookIngress(self, "WebhookIngress", vpc=executor.vpc, target_fn=dispatcher_fn)
 
-        # codeup_min 与 secrets 都与 backstop/handler.py 不同目录；handler.py 按约定从
+        # codeup_min 与 secret_fetch 都与 backstop/handler.py 不同目录；handler.py 按约定从
         # /opt/dispatcher 导入它们（见该文件顶部注释），所以这里把整个 lambda/ 目录铺成一层
         # Layer——铺开后 layer 内容根就是 lambda/ 的内容，挂载到 /opt/ 之后正好落在
-        # /opt/dispatcher/codeup_min.py 与 /opt/dispatcher/secrets.py，与既有代码的路径假设
+        # /opt/dispatcher/codeup_min.py 与 /opt/dispatcher/secret_fetch.py，与既有代码的路径假设
         # 完全对齐（取密钥的助手因此只有一份实现，不为兜底再抄一遍）。
         codeup_min_layer = lambda_.LayerVersion(
             self, "CodeupMinLayer",
             code=lambda_.Code.from_asset(LAMBDA_ROOT),
             compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
-            description="共享 codeup_min.py 与 secrets.py，供 backstop 按 /opt/dispatcher 的既有路径假设导入",
+            description="共享 codeup_min.py 与 secret_fetch.py，供 backstop 按 /opt/dispatcher 的既有路径假设导入",
         )
 
         backstop_fn = lambda_.Function(
@@ -149,7 +149,7 @@ class DispatcherStack(cdk.Stack):
             environment={
                 "LOCK_TABLE": state.lock_table.table_name,
                 "YUNXIAO_ORG_ID": cfg["org_id"],
-                # 同调度器：只给 ARN，值由 handler.py 在真要发评论时经 secrets.py 取。
+                # 同调度器：只给 ARN，值由 handler.py 在真要发评论时经 secret_fetch.py 取。
                 "YUNXIAO_TOKEN_ARN": yunxiao_token.secret_arn,
             },
         )

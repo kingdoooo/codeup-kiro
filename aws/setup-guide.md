@@ -92,7 +92,7 @@ Flow 档位靠「受保护分支」当集成包的信任锚；本档位没有这
 |---|---|---|
 | `codeup-kiro/yunxiao-token-kiro` | Kiro 评审员使用的云效令牌（代码只读 + 合并请求读写） | 是 |
 | `codeup-kiro/kiro-api-key` | Kiro API Key | 是 |
-| `codeup-kiro/webhook-secret` | Lambda 调度器校验 Codeup webhook 共享密钥用（调度器在每次调用时按注入的 `WEBHOOK_SECRET_ARN` 向 Secrets Manager 取值，见 `aws/lambda/dispatcher/secrets.py`） | 是 |
+| `codeup-kiro/webhook-secret` | Lambda 调度器校验 Codeup webhook 共享密钥用（调度器在每次调用时按注入的 `WEBHOOK_SECRET_ARN` 向 Secrets Manager 取值，见 `aws/lambda/dispatcher/secret_fetch.py`） | 是 |
 | `codeup-kiro/yunxiao-token-security` | Security Agent 机器人账号的云效令牌 | **否，2b 才用**，先不要创建 |
 
 创建命令（值本身在命令行历史与终端 scrollback 里可见，生产环境建议改用 `--cli-input-json`

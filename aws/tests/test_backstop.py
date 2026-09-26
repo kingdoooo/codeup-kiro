@@ -123,7 +123,7 @@ DENIED = bexc.ClientError(
 def _stub_boto3(monkeypatch, *secret_responses, item=None):
     """打桩 handler() 用到的两条 boto3 出口（DynamoDB 资源 + Secrets Manager 客户端）。
 
-    走**真实**的 secrets.py，只把它内部那句 `import boto3` 换掉——这样 SecretId 的请求形状
+    走**真实**的 secret_fetch.py，只把它内部那句 `import boto3` 换掉——这样 SecretId 的请求形状
     才是真被断言到的东西，而不是我们自己的桩。
     """
     table = mock.Mock()
@@ -137,7 +137,7 @@ def _stub_boto3(monkeypatch, *secret_responses, item=None):
     monkeypatch.setenv("LOCK_TABLE", "lock")
     monkeypatch.setenv("YUNXIAO_ORG_ID", "o1")
     monkeypatch.setenv("YUNXIAO_TOKEN_ARN", TOKEN_ARN)
-    monkeypatch.setattr(backstop.secrets, "_CACHE", {})
+    monkeypatch.setattr(backstop.secret_fetch, "_CACHE", {})
     return client
 
 
@@ -168,7 +168,7 @@ def test_handler_raises_instead_of_silently_reporting_success_when_the_token_is_
     posted = []
     monkeypatch.setattr(backstop.codeup_min, "post_comment",
                         lambda *a, **k: posted.append(a) or True)
-    with pytest.raises(backstop.secrets.SecretUnavailable) as ei:
+    with pytest.raises(backstop.secret_fetch.SecretUnavailable) as ei:
         backstop.handler(_ev(exit_code=137), None)
     assert client.get_secret_value.call_args.kwargs == {"SecretId": TOKEN_ARN}
     assert not posted, "取不到令牌时不该拿着空令牌去发评论"
@@ -188,7 +188,7 @@ def test_handler_fails_closed_when_the_token_arn_env_var_is_missing_or_empty(arn
     posted = []
     monkeypatch.setattr(backstop.codeup_min, "post_comment",
                         lambda *a, **k: posted.append(a) or True)
-    with pytest.raises(backstop.secrets.SecretUnavailable):
+    with pytest.raises(backstop.secret_fetch.SecretUnavailable):
         backstop.handler(_ev(exit_code=137), None)
     assert not client.get_secret_value.called and not posted
 

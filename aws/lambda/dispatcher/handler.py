@@ -4,7 +4,7 @@ import time
 import botocore.exceptions
 
 import codeup_min
-import secrets  # 本目录下的 secrets.py（调用时取密钥），**不是**标准库同名模块；见该文件顶部
+import secret_fetch  # 本目录下的 secret_fetch.py：调用时向 Secrets Manager 取密钥
 # 入口是内网 ALB 的 Lambda target：每条返回路径都走 _resp（G5），正文一律经 _body_text 取（G6）。
 from http_shape import body_text as _body_text  # noqa: F401 — Task 5 的 handler 用它取正文
 from http_shape import resp as _resp
@@ -32,8 +32,8 @@ def verify_token(headers, expected):
 
 def handler(event, context):
     try:
-        expected = secrets.secret_from_env("WEBHOOK_SECRET_ARN")
-    except secrets.SecretUnavailable:
+        expected = secret_fetch.secret_from_env("WEBHOOK_SECRET_ARN")
+    except secret_fetch.SecretUnavailable:
         # fail closed：取不到共享密钥就无从判断「这是不是我们的 webhook」，一律不放行。
         # 关键在于给一个**显式响应**而不是让异常逃出 handler——未捕获异常对 ALB 就是 502，
         # Codeup 只看到投递失败，与 C1 同属静默失败。

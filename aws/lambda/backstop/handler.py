@@ -7,7 +7,7 @@ import sys
 if os.path.isdir("/opt/dispatcher"):
     sys.path.insert(0, "/opt/dispatcher")
 import codeup_min  # noqa: E402
-import secrets  # noqa: E402 — 同上，dispatcher 目录下的 secrets.py，不是标准库同名模块
+import secret_fetch  # noqa: E402 — 同上，dispatcher 目录下的 secret_fetch.py
 
 # 认出「这是我们的评审任务」靠这三个变量；读「已回写」标记只用调度器传进来的 LOCK_KEY（I1）。
 WANT = ("CODEUP_REPO_ID", "MR_LOCAL_ID", "HEAD_SHA")
@@ -78,14 +78,14 @@ def handler(event, context):
     if not should_post(event, table):
         return {"ok": True, "posted": False}
     env = _fields(event)
-    # 令牌在真要发评论时才取（见 secrets.py）：绝大多数 Task State Change 事件都被 should_post
+    # 令牌在真要发评论时才取（见 secret_fetch.py）：绝大多数 Task State Change 事件都被 should_post
     # 挡掉，提前取只会给每一次状态迁移都加一次 GetSecretValue 调用（配额与延迟）。
     # 取不到就让 SecretUnavailable 抛出去：这是 EventBridge 的异步调用，抛出会走 Lambda 自己的
     # 重试（密钥限流这类瞬时失败能自愈），吞掉返回 {"posted": False} 才是真正的沉默——兜底的
     # 整个存在理由就是「宁可多发一条也不沉默」（I10）。
     codeup_min.post_comment(
         os.environ["YUNXIAO_ORG_ID"], env["CODEUP_REPO_ID"], env["MR_LOCAL_ID"],
-        secrets.secret_from_env("YUNXIAO_TOKEN_ARN"),
+        secret_fetch.secret_from_env("YUNXIAO_TOKEN_ARN"),
         "## 🤖 Kiro 代码评审\n\n**评审未完成**：评审任务异常结束（可能是拉取镜像失败、"
         "内存不足或任务超时），脚本没有机会回写失败原因。重新推送可再次触发。")
     return {"ok": True, "posted": True}
