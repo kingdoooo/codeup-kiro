@@ -218,9 +218,12 @@ def test_lambda_has_reserved_concurrency_as_a_spend_gate():
     assert any("ReservedConcurrentExecutions" in v["Properties"] for v in fns.values())
 
 
-# ── Ruling 16：任何 Lambda 的环境里都不得出现密钥的值，只能出现 ARN ────────────────
-# 裸名。带 "_ARN" 后缀的变量存的是 ARN，是本波要求的写法，不在禁止名单里。
+# ── Ruling 16：任何 Lambda 的环境里都不得出现密钥的值，只能出现 SecretId ────────────
+# 裸名。带 "_ID" 后缀的变量存的是 SecretId（密钥名），是本波要求的写法，不在禁止名单里。
 PLAINTEXT_SECRET_ENV = ("WEBHOOK_SECRET", "YUNXIAO_TOKEN", "KIRO_API_KEY")
+# `*_ID` 变量应有的**确切**取值：密钥名本身。
+EXPECTED_SECRET_IDS = {"WEBHOOK_SECRET_ID": "codeup-kiro/webhook-secret",
+                       "YUNXIAO_TOKEN_ID": "codeup-kiro/yunxiao-token-kiro"}
 
 
 def test_no_lambda_function_carries_a_secret_value_in_its_environment():
@@ -245,7 +248,7 @@ def test_no_lambda_function_carries_a_secret_value_in_its_environment():
             f"任何能 lambda:GetFunctionConfiguration 的主体都读得到")
 
 
-def test_both_lambdas_get_secret_arns_so_the_absence_assertion_is_not_vacuous():
+def test_both_lambdas_get_secret_ids_so_the_absence_assertion_is_not_vacuous():
     # 正向对照：上面那条「不得出现」若因为密钥根本没接线而通过，就什么也没证明。
     t = _disp_template()
     envs = {k: v["Properties"].get("Environment", {}).get("Variables", {})
@@ -253,14 +256,41 @@ def test_both_lambdas_get_secret_arns_so_the_absence_assertion_is_not_vacuous():
     disp = [e for k, e in envs.items() if "DispatcherFn" in k]
     back = [e for k, e in envs.items() if "BackstopFn" in k]
     assert len(disp) == 1 and len(back) == 1, envs.keys()
-    assert {"WEBHOOK_SECRET_ARN", "YUNXIAO_TOKEN_ARN"} <= set(disp[0]), disp[0].keys()
-    assert "YUNXIAO_TOKEN_ARN" in back[0], back[0].keys()
-    # 值必须是指向 Secrets Manager 的 ARN（跨账号/分区用 Ref 拼出来），不是名字也不是明文
-    for env in (disp[0], back[0]):
-        for name in (k for k in env if k.endswith("_ARN")):
-            blob = json.dumps(env[name])
-            assert "secretsmanager" in blob, (name, blob)
-            assert "codeup-kiro/" in blob, (name, blob)
+    assert {"WEBHOOK_SECRET_ID", "YUNXIAO_TOKEN_ID"} <= set(disp[0]), disp[0].keys()
+    assert "YUNXIAO_TOKEN_ID" in back[0], back[0].keys()
+
+
+def test_secret_id_env_vars_are_plain_secret_names_not_arns():
+    """`*_ID` 的值必须**恰好**是密钥名字符串，不是 ARN、不是动态引用、不是 Fn::Join。
+
+    传 partial ARN 会踩 AWS 文档
+    （secretsmanager/latest/userguide/troubleshoot.html，「An AWS CLI or AWS SDK operation can't
+    find my secret from a partial ARN」）说的那个坑：密钥名以「连字符 + 六个字符」结尾时——
+    `codeup-kiro/webhook-secret` 的末段 `secret` 正好是六个字符——partial ARN 会被当成完整 ARN
+    解析，GetSecretValue 找不到密钥；文档建议用完整 ARN 或密钥名，而完整 ARN 的六位后缀在 synth
+    期拿不到（要调 AWS API）。
+
+    这条只有在模板层面才接得住：Lambda 单测里助手拿到什么就问什么，看不出传进去的是名字还是 ARN。
+    也做遍历，不按逻辑 ID 点名。
+    """
+    t = _disp_template()
+    seen = 0
+    for logical_id, fn in t.find_resources("AWS::Lambda::Function").items():
+        env = fn["Properties"].get("Environment", {}).get("Variables", {})
+        for name, want in EXPECTED_SECRET_IDS.items():
+            if name not in env:
+                continue
+            seen += 1
+            value = env[name]
+            assert isinstance(value, str), (
+                f"{logical_id}.{name} 不是纯字符串（动态引用或按 ARN 拼出来的 Fn::Join？）："
+                f"{json.dumps(value)}")
+            assert not value.startswith("arn:"), (
+                f"{logical_id}.{name} 给的是 ARN：{value}——partial ARN 对末段六字符的名字会解析错")
+            assert "{{resolve:" not in value, f"{logical_id}.{name} 是 CFN 动态引用：{value}"
+            assert value == want, (logical_id, name, value)
+    # 调度器两个 + 兜底一个；数量对不上说明有函数漏接或多接了密钥
+    assert seen == 3, seen
 
 
 def _arn_literal(resource):
@@ -275,8 +305,10 @@ def _arn_literal(resource):
 
 
 def test_get_secret_value_is_granted_per_function_only_on_the_secrets_it_reads():
-    # 调度器读两个（webhook 密钥现在就在用，云效令牌给 Task 5 的 _runtime_cfg 预留且已注入 ARN），
-    # 兜底只读云效令牌。资源不得是 "*"，也不得互相多给。
+    # 调度器读两个（webhook 密钥现在就在用，云效令牌给 Task 5 的 _runtime_cfg 预留且已注入
+    # SecretId），兜底只读云效令牌。资源不得是 "*"，也不得互相多给。
+    # 注意请求与授权两侧用的形式不同：请求传密钥名（见 test_secret_id_env_vars_...），IAM 策略
+    # 的 Resource 只接受 ARN，比对的是 Secrets Manager 解析出来的完整 ARN，所以要 "-??????"。
     t = _disp_template()
     policies = t.find_resources("AWS::IAM::Policy")
     want = {"DispatcherFn": {"webhook-secret", "yunxiao-token-kiro"},

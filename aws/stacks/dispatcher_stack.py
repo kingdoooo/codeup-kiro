@@ -64,20 +64,29 @@ class DispatcherStack(cdk.Stack):
                 "REVIEW_COMMAND": str(cfg["review_command"]),
                 "REVIEW_COMMAND_PHRASE": cfg["command_phrase"],
                 "TARGET_BRANCH_FILTER": cfg.get("target_branch_filter", ""),
-                # 两个密钥只注入 **ARN**，值由 handler 在调用时自己向 Secrets Manager 取
+                # 两个密钥只注入 **SecretId**（GetSecretValue 的入参名，接受 ARN 或密钥名），
+                # 值由 handler 在调用时自己向 Secrets Manager 取
                 # （lambda/dispatcher/secret_fetch.py）。这里绝不注入明文：CloudFormation 动态引用
                 # 能让模板里不出现明文，但部署后的函数配置里存的仍是明文，任何能
                 # `lambda:GetFunctionConfiguration` 的主体都读得到——与 ECS 的 `secrets{}` 块
                 # （值从不进任务定义）不是同一档安全性（Ruling 16）。
-                # 用 secret_arn 而不是 secret_full_arn：按名导入（from_secret_name_v2）的密钥
-                # 拿不到 AWS 追加的六位随机后缀，secret_full_arn 恒为 None（aws_cdk/
-                # aws_secretsmanager/__init__.py 的 secretFullArn 文档：“undefined when a full
-                # ARN is not available (e.g., secrets imported by name)”），secret_arn 则是不带
-                # 后缀的 partial ARN，GetSecretValue 接受它。
-                "WEBHOOK_SECRET_ARN": webhook_secret.secret_arn,
+                #
+                # 给的是**密钥名**（secret_name）而不是 ARN，理由是 from_secret_name_v2 能拿到的
+                # 只有 partial ARN：secret_full_arn 对按名导入的密钥恒为 None（aws_cdk/
+                # aws_secretsmanager/__init__.py:4767 的 secretFullArn 文档：“undefined when a full
+                # ARN is not available (e.g., secrets imported by name)”），而六位随机后缀要调
+                # AWS API 才知道、synth 期拿不到。AWS 文档
+                # （secretsmanager/latest/userguide/troubleshoot.html，“An AWS CLI or AWS SDK
+                # operation can't find my secret from a partial ARN”）明确说：密钥名以「连字符 +
+                # 六个字符」结尾时，partial ARN 会被当成完整 ARN 解析、从而找不到密钥，建议用
+                # 完整 ARN **或密钥名**。`codeup-kiro/webhook-secret` 的末段 `secret` 正好是六个
+                # 字符，正中这个坑；密钥名没有这个歧义，所以传名字。
+                # secret_name 对按名导入的密钥就是传进去的那个字面量（同文件 :4728，且已实测
+                # 不是 Token），不会在模板里变成 Fn::Join。
+                "WEBHOOK_SECRET_ID": webhook_secret.secret_name,
                 # 调度器对云效令牌的消费在 Task 5 的 _runtime_cfg() 里才出现；现在就注入是为了让
-                # 下面按函数收紧的 GetSecretValue 授权与对应断言同时成立（注入 ARN 不构成暴露面）。
-                "YUNXIAO_TOKEN_ARN": yunxiao_token.secret_arn,
+                # 下面按函数收紧的 GetSecretValue 授权与对应断言同时成立（注入密钥名不是暴露面）。
+                "YUNXIAO_TOKEN_ID": yunxiao_token.secret_name,
             },
         )
         # 这条授权现在是真在用的代码路径：调度器每次调用都经 secret_fetch.py 读 webhook 密钥
@@ -85,11 +94,11 @@ class DispatcherStack(cdk.Stack):
         # GetSecretValue 会抛 AccessDeniedException，handler 按 fail-closed 回 503。
         # 不用 grant_read：那会连 secretsmanager:DescribeSecret 一起给上，两个 Lambda 都不调它
         # （与上面 lock_table 不用 grant_read_write_data 同一条理由）。
-        # Resource 末尾的 "-??????" 不能省：请求里传的是 partial ARN，IAM 授权比对的却是
-        # Secrets Manager 解析出来的完整 ARN（带六位随机后缀），不通配这六位会一律
-        # AccessDenied——CDK 自己的 grant_read 对按名导入的密钥也正是这么拼的（arnForPolicies
-        # = `${secretArn}-??????`）。这类错误只在部署后的运行时暴露，所以 tests 里有一条断言
-        # 专门钉住这个后缀。
+        # IAM 这侧仍然按 ARN 授权（策略的 Resource 不接受密钥名），且末尾的 "-??????" 不能省：
+        # 请求里传的是密钥名，IAM 授权比对的却是 Secrets Manager 解析出来的完整 ARN（带六位随机
+        # 后缀），不通配这六位会一律 AccessDenied——CDK 自己的 grant_read 对按名导入的密钥也正是
+        # 这么拼的（arnForPolicies = `${secretArn}-??????`）。这类错误只在部署后的运行时暴露，
+        # 所以 tests 里有一条断言专门钉住这个后缀。
         dispatcher_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["secretsmanager:GetSecretValue"],
             resources=[f"{webhook_secret.secret_arn}-??????",
@@ -149,8 +158,9 @@ class DispatcherStack(cdk.Stack):
             environment={
                 "LOCK_TABLE": state.lock_table.table_name,
                 "YUNXIAO_ORG_ID": cfg["org_id"],
-                # 同调度器：只给 ARN，值由 handler.py 在真要发评论时经 secret_fetch.py 取。
-                "YUNXIAO_TOKEN_ARN": yunxiao_token.secret_arn,
+                # 同调度器：只给密钥名（理由见上），值由 handler.py 在真要发评论时经
+                # secret_fetch.py 取。
+                "YUNXIAO_TOKEN_ID": yunxiao_token.secret_name,
             },
         )
         state.lock_table.grant(backstop_fn, "dynamodb:GetItem")

@@ -92,7 +92,7 @@ Flow 档位靠「受保护分支」当集成包的信任锚；本档位没有这
 |---|---|---|
 | `codeup-kiro/yunxiao-token-kiro` | Kiro 评审员使用的云效令牌（代码只读 + 合并请求读写） | 是 |
 | `codeup-kiro/kiro-api-key` | Kiro API Key | 是 |
-| `codeup-kiro/webhook-secret` | Lambda 调度器校验 Codeup webhook 共享密钥用（调度器在每次调用时按注入的 `WEBHOOK_SECRET_ARN` 向 Secrets Manager 取值，见 `aws/lambda/dispatcher/secret_fetch.py`） | 是 |
+| `codeup-kiro/webhook-secret` | Lambda 调度器校验 Codeup webhook 共享密钥用（调度器在每次调用时按注入的 `WEBHOOK_SECRET_ID`——即这里的密钥名——向 Secrets Manager 取值，见 `aws/lambda/dispatcher/secret_fetch.py`） | 是 |
 | `codeup-kiro/yunxiao-token-security` | Security Agent 机器人账号的云效令牌 | **否，2b 才用**，先不要创建 |
 
 创建命令（值本身在命令行历史与终端 scrollback 里可见，生产环境建议改用 `--cli-input-json`
@@ -336,7 +336,7 @@ aws/.venv/bin/pip install -r aws/requirements.txt
 | MR 上出现调度器写的「评审未启动」类评论 | 调度器判定收到了合法请求，但 `RunTask` 本身被节流或调用失败——多为 Fargate 任务并发数/账号级限流，或任务定义/网络配置有误导致 `RunTask` 直接报错。这条评论意味着 Fargate 任务从未真正跑起来，评审引擎本身没有机会失败 |
 | MR 上出现「兜底」类回写评论（评审没有正常结论，也没有评审引擎自己的失败原因） | 与上一条不同：`RunTask` 成功了，任务真的起来过，但没能跑到评审脚本自己汇报结果那一步就死掉了——常见原因是镜像拉取失败（registry 权限、镜像被删）、容器 OOM（`ephemeral_storage`/内存配置不够大 diff 的仓库）、或任务在 `KIRO_TIMEOUT` 之外的更外层超时（任务本身的运行时长上限）被杀。这条评论是任务级的兜底，不经过评审脚本自己的失败评论路径，所以看不到评审脚本给出的具体原因 |
 
-| Codeup 的 webhook 投递记录显示 401 | Codeup 里填的 Secret Token 与 `codeup-kiro/webhook-secret` 的值不一致。**改密钥不需要重新部署**：两个 Lambda 的环境变量里只有密钥 ARN，值在调用时取，按执行环境缓存，旧值最多留到该执行环境被回收（几分钟到几十分钟）；要立刻生效就改一次函数配置（任何无害改动）触发换环境 |
+| Codeup 的 webhook 投递记录显示 401 | Codeup 里填的 Secret Token 与 `codeup-kiro/webhook-secret` 的值不一致。**改密钥的值不需要重新部署**：两个 Lambda 的环境变量里只有密钥名，值在调用时取，按执行环境缓存，旧值最多留到该执行环境被回收（几分钟到几十分钟）；要立刻生效就改一次函数配置（任何无害改动）触发换环境 |
 | Codeup 的 webhook 投递记录显示 503，正文 `secret-unavailable` | 调度器取不到 `codeup-kiro/webhook-secret`：密钥不存在或名字不符、Lambda 角色缺 `secretsmanager:GetSecretValue`、或密钥值为空。这是 fail-closed 的显式响应（绝不放行），查调度 Lambda 日志里的 `SecretUnavailable` |
 | Codeup 的 webhook 投递记录显示 404 或连接超时，调度 Lambda 没有任何日志 | 请求没有到达 Lambda：方法不是 `POST`（监听器默认动作固定返回 404，只有 `POST` 转发给调度器），或 URL 填成了 ALB 域名（内网 ALB 从公网连不上，只能经 CloudFront 访问）——URL 必须是 `WebhookUrl` |
 | Codeup 的 webhook 投递记录显示 502/504 | 502：调度 Lambda 抛了异常或返回了不完整的响应（查 Lambda 日志）；504：Lambda 超过 CloudFront 回源读超时（30 秒）仍未返回。两种情况下请求可能已被处理，Codeup 却记为失败并可能重投，重投会被幂等锁挡住 |

@@ -119,13 +119,15 @@ def test_run_task_failure_releases_lock_and_posts_to_mr(monkeypatch):
 
 
 # ── Ruling 16：共享密钥在调用时向 Secrets Manager 取，环境变量里只有 ARN ──────────
-SECRET_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:codeup-kiro/webhook-secret"
+# 注入的是**密钥名**（SecretId），不是 partial ARN——理由见 lambda/dispatcher/secret_fetch.py 顶部。
+SECRET_ID = "codeup-kiro/webhook-secret"
+FULL_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:" + SECRET_ID + "-AbCdEf"
 # 真的 ClientError（不是裸 Mock 的 side_effect）：只用 Mock 造异常只能验证我们写的 except 分支，
 # 验不到 botocore 真抛出来的那种异常也被同一条 fail-closed 路径接住。正文刻意带账号 ID。
 DENIED = bexc.ClientError(
     {"Error": {"Code": "AccessDeniedException",
                "Message": ("User: arn:aws:sts::111122223333:assumed-role/DispatcherRole/x is not "
-                           f"authorized to perform: secretsmanager:GetSecretValue on {SECRET_ARN}")}},
+                           f"authorized to perform: secretsmanager:GetSecretValue on {FULL_ARN}")}},
     "GetSecretValue")
 
 
@@ -136,7 +138,7 @@ def _stub_secrets(monkeypatch, *responses):
     连「SecretId 传的是不是环境变量里那个 ARN」都测不出来。_CACHE 每个用例换一份新字典
     （monkeypatch 用完自动还原），免得跨用例把值带过去。
     """
-    monkeypatch.setenv("WEBHOOK_SECRET_ARN", SECRET_ARN)
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     monkeypatch.setattr(handler_mod.secret_fetch, "_CACHE", {})
     client = mock.Mock()
     client.get_secret_value.side_effect = list(responses)
@@ -149,7 +151,7 @@ def _stub_secrets(monkeypatch, *responses):
 def test_handler_fetches_the_secret_by_the_arn_in_the_env_and_accepts_a_valid_token(monkeypatch):
     client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
     assert_alb_response(handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None), 200, "")
-    assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ARN}
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ID}
 
 
 def test_handler_rejects_with_503_when_the_secret_cannot_be_fetched(monkeypatch):
@@ -161,7 +163,7 @@ def test_handler_rejects_with_503_when_the_secret_cannot_be_fetched(monkeypatch)
         handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None),
         503, "secret-unavailable")
     # 同时钉住请求形状：只断言错误处理不算，还要证明它真的拿环境变量里那个 ARN 去问了。
-    assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ARN}
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ID}
 
 
 def test_the_503_response_leaks_neither_the_account_id_nor_the_aws_message(monkeypatch):
@@ -178,9 +180,9 @@ def test_handler_rejects_when_the_secret_arn_env_var_is_missing_or_empty(arn, mo
     # falsy 但有意义：ARN 为空串是配置错误，不能退化成「expected 是空的」那条 401 路径——
     # 结果同样是拒，但状态码会把我们的配置错误显示成对方令牌不对。
     monkeypatch.setattr(handler_mod.secret_fetch, "_CACHE", {})
-    monkeypatch.delenv("WEBHOOK_SECRET_ARN", raising=False)
+    monkeypatch.delenv("WEBHOOK_SECRET_ID", raising=False)
     if arn is not None:
-        monkeypatch.setenv("WEBHOOK_SECRET_ARN", arn)
+        monkeypatch.setenv("WEBHOOK_SECRET_ID", arn)
     client = mock.Mock()
     boto3 = mock.Mock()
     boto3.client.return_value = client
@@ -192,7 +194,7 @@ def test_handler_rejects_when_the_secret_arn_env_var_is_missing_or_empty(arn, mo
 
 def test_handler_never_reads_a_bare_plaintext_secret_env_var():
     # 静态守卫：裸名 WEBHOOK_SECRET / YUNXIAO_TOKEN 不得再作为环境变量名出现在源码里
-    # （"WEBHOOK_SECRET_ARN" 里紧跟的是下划线，所以只查带引号收尾的那种字面量）。
+    # （"WEBHOOK_SECRET_ID" 里紧跟的是下划线，所以只查带引号收尾的那种字面量）。
     src = pathlib.Path(handler_mod.__file__).read_text()
     for bare in ('WEBHOOK_SECRET"', "WEBHOOK_SECRET'", 'YUNXIAO_TOKEN"', "YUNXIAO_TOKEN'"):
         assert bare not in src, f"handler.py 仍在读明文环境变量 {bare}"

@@ -110,13 +110,15 @@ def test_posts_without_reading_the_table_when_lock_key_is_absent():
 
 
 # ── Ruling 16：云效令牌在调用时向 Secrets Manager 取，环境变量里只有 ARN ──────────
-TOKEN_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:codeup-kiro/yunxiao-token-kiro"
+# 注入的是**密钥名**（SecretId），不是 partial ARN——理由见 lambda/dispatcher/secret_fetch.py 顶部。
+TOKEN_ID = "codeup-kiro/yunxiao-token-kiro"
+FULL_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:" + TOKEN_ID + "-AbCdEf"
 # 真的 ClientError，不是裸 Mock 的 side_effect：只用 Mock 造异常只能验证我们写的分支，
 # 验不到 botocore 真抛出来的那种异常也走同一条路径。正文刻意带账号 ID。
 DENIED = bexc.ClientError(
     {"Error": {"Code": "AccessDeniedException",
                "Message": ("User: arn:aws:sts::111122223333:assumed-role/BackstopRole/x is not "
-                           f"authorized to perform: secretsmanager:GetSecretValue on {TOKEN_ARN}")}},
+                           f"authorized to perform: secretsmanager:GetSecretValue on {FULL_ARN}")}},
     "GetSecretValue")
 
 
@@ -136,7 +138,7 @@ def _stub_boto3(monkeypatch, *secret_responses, item=None):
     monkeypatch.setitem(sys.modules, "boto3", boto3)
     monkeypatch.setenv("LOCK_TABLE", "lock")
     monkeypatch.setenv("YUNXIAO_ORG_ID", "o1")
-    monkeypatch.setenv("YUNXIAO_TOKEN_ARN", TOKEN_ARN)
+    monkeypatch.setenv("YUNXIAO_TOKEN_ID", TOKEN_ID)
     monkeypatch.setattr(backstop.secret_fetch, "_CACHE", {})
     return client
 
@@ -147,7 +149,7 @@ def test_handler_posts_with_the_token_it_fetched_at_invoke_time(monkeypatch):
     monkeypatch.setattr(backstop.codeup_min, "post_comment",
                         lambda *a, **k: posted.append(a) or True)
     assert backstop.handler(_ev(exit_code=137), None) == {"ok": True, "posted": True}
-    assert client.get_secret_value.call_args.kwargs == {"SecretId": TOKEN_ARN}
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": TOKEN_ID}
     assert posted[0][3] == "pt-t0ken", posted  # post_comment 的第 4 个位置参数是令牌
 
 
@@ -170,10 +172,10 @@ def test_handler_raises_instead_of_silently_reporting_success_when_the_token_is_
                         lambda *a, **k: posted.append(a) or True)
     with pytest.raises(backstop.secret_fetch.SecretUnavailable) as ei:
         backstop.handler(_ev(exit_code=137), None)
-    assert client.get_secret_value.call_args.kwargs == {"SecretId": TOKEN_ARN}
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": TOKEN_ID}
     assert not posted, "取不到令牌时不该拿着空令牌去发评论"
     # 异常消息只有变量名：AWS 错误正文带角色 ARN 与账号 ID，不进日志（M7 的同一条理由）
-    assert str(ei.value) == "YUNXIAO_TOKEN_ARN", str(ei.value)
+    assert str(ei.value) == "YUNXIAO_TOKEN_ID", str(ei.value)
     assert "111122223333" not in json.dumps(str(ei.value))
 
 
@@ -182,9 +184,9 @@ def test_handler_fails_closed_when_the_token_arn_env_var_is_missing_or_empty(arn
     # falsy 但有意义：空串不得退化成任何默认值，更不能拿空令牌去调 Codeup（那会 401，
     # 却在日志里看起来像「令牌过期」）。
     client = _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
-    monkeypatch.delenv("YUNXIAO_TOKEN_ARN", raising=False)
+    monkeypatch.delenv("YUNXIAO_TOKEN_ID", raising=False)
     if arn is not None:
-        monkeypatch.setenv("YUNXIAO_TOKEN_ARN", arn)
+        monkeypatch.setenv("YUNXIAO_TOKEN_ID", arn)
     posted = []
     monkeypatch.setattr(backstop.codeup_min, "post_comment",
                         lambda *a, **k: posted.append(a) or True)
@@ -194,7 +196,7 @@ def test_handler_fails_closed_when_the_token_arn_env_var_is_missing_or_empty(arn
 
 
 def test_backstop_never_reads_a_bare_plaintext_secret_env_var():
-    # 静态守卫：裸名 YUNXIAO_TOKEN 不得再作为环境变量名出现（"_ARN" 后缀的那个不算）。
+    # 静态守卫：裸名 YUNXIAO_TOKEN 不得再作为环境变量名出现（"_ID" 后缀的那个不算）。
     src = pathlib.Path(backstop.__file__).read_text()
     for bare in ('YUNXIAO_TOKEN"', "YUNXIAO_TOKEN'", 'WEBHOOK_SECRET"', "WEBHOOK_SECRET'"):
         assert bare not in src, f"backstop/handler.py 仍在读明文环境变量 {bare}"

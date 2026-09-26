@@ -19,21 +19,25 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lambda" / "dispatcher"))
 fetch = load_lambda("secret_fetch_helper", ROOT / "lambda" / "dispatcher" / "secret_fetch.py")
 
-ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:codeup-kiro/webhook-secret"
+# 环境变量里放的是**密钥名**（GetSecretValue 的 SecretId 接受 ARN 或名字），不是 partial ARN
+# ——理由见 secret_fetch.py 顶部（名字以「连字符 + 六字符」结尾时 partial ARN 会解析错）。
+SECRET_ID = "codeup-kiro/webhook-secret"
+# AWS 的错误正文里回显的是完整 ARN，下面那条「消息不得泄露账号 ID」的断言要的就是这种真实形状。
+FULL_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:" + SECRET_ID + "-AbCdEf"
 # 真的 ClientError，不是裸 Mock 的 side_effect：只用 Mock 造异常只能验证我们的 except 分支，
 # 验不到「botocore 真抛出来的那种异常」也被同一条路径接住。正文刻意带账号 ID 与自由文本，
 # 供下面那条「错误消息不得泄露它们」的断言使用。
 DENIED = bexc.ClientError(
     {"Error": {"Code": "AccessDeniedException",
                "Message": ("User: arn:aws:sts::111122223333:assumed-role/DispatcherRole/x is not "
-                           f"authorized to perform: secretsmanager:GetSecretValue on {ARN}")}},
+                           f"authorized to perform: secretsmanager:GetSecretValue on {FULL_ARN}")}},
     "GetSecretValue")
 
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     fetch._CACHE.clear()
-    monkeypatch.delenv("WEBHOOK_SECRET_ARN", raising=False)
+    monkeypatch.delenv("WEBHOOK_SECRET_ID", raising=False)
     yield
     fetch._CACHE.clear()
 
@@ -49,31 +53,31 @@ def _boto3(monkeypatch, *responses):
 
 
 def test_returns_the_secret_string_and_asks_for_exactly_the_arn_in_the_env(monkeypatch):
-    monkeypatch.setenv("WEBHOOK_SECRET_ARN", ARN)
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     client = _boto3(monkeypatch, {"SecretString": "s3cret"})
-    assert fetch.secret_from_env("WEBHOOK_SECRET_ARN") == "s3cret"
-    # 断言请求形状，不只断言「抛/不抛」：把 ARN 拼错、或把变量名本身当 SecretId 传进去，
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "s3cret"
+    # 断言请求形状，不只断言「抛/不抛」：把 SECRET_ID 拼错、或把变量名本身当 SecretId 传进去，
     # 都只会在部署后报 ResourceNotFound，单测里除了这条没有别的地方能接住。
-    assert client.get_secret_value.call_args.kwargs == {"SecretId": ARN}
-    assert fetch._CACHE == {ARN: "s3cret"}
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ID}
+    assert fetch._CACHE == {SECRET_ID: "s3cret"}
 
 
 def test_value_is_cached_per_process_so_a_warm_invocation_does_not_call_aws(monkeypatch):
-    monkeypatch.setenv("WEBHOOK_SECRET_ARN", ARN)
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     client = _boto3(monkeypatch, {"SecretString": "s3cret"}, {"SecretString": "changed"})
-    assert fetch.secret_from_env("WEBHOOK_SECRET_ARN") == "s3cret"
-    assert fetch.secret_from_env("WEBHOOK_SECRET_ARN") == "s3cret"
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "s3cret"
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "s3cret"
     assert client.get_secret_value.call_count == 1
 
 
 def test_a_failed_fetch_is_not_cached_so_the_next_invocation_retries(monkeypatch):
     # 控制器裁决 1：失败不入缓存。第一次失败、第二次成功必须真的拿到值。
-    monkeypatch.setenv("WEBHOOK_SECRET_ARN", ARN)
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     client = _boto3(monkeypatch, DENIED, {"SecretString": "s3cret"})
     with pytest.raises(fetch.SecretUnavailable):
-        fetch.secret_from_env("WEBHOOK_SECRET_ARN")
+        fetch.secret_from_env("WEBHOOK_SECRET_ID")
     assert fetch._CACHE == {}, "失败绝不入缓存"
-    assert fetch.secret_from_env("WEBHOOK_SECRET_ARN") == "s3cret"
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "s3cret"
     assert client.get_secret_value.call_count == 2
 
 
@@ -81,70 +85,70 @@ def test_a_failed_fetch_is_not_cached_so_the_next_invocation_retries(monkeypatch
 def test_empty_or_binary_only_secret_fails_closed_and_is_not_cached(resp, monkeypatch):
     # 空 SecretString、根本没有 SecretString、只有 SecretBinary——三种都算「没取到」。
     # 让空值往下走会把「密钥建错了」显示成「对方令牌不对」。
-    monkeypatch.setenv("WEBHOOK_SECRET_ARN", ARN)
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     client = _boto3(monkeypatch, resp, {"SecretString": "s3cret"})
     with pytest.raises(fetch.SecretUnavailable):
-        fetch.secret_from_env("WEBHOOK_SECRET_ARN")
+        fetch.secret_from_env("WEBHOOK_SECRET_ID")
     assert fetch._CACHE == {}
-    assert fetch.secret_from_env("WEBHOOK_SECRET_ARN") == "s3cret"
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "s3cret"
     assert client.get_secret_value.call_count == 2
 
 
 @pytest.mark.parametrize("value", [None, ""])
 def test_missing_or_empty_env_var_fails_closed_without_calling_aws(value, monkeypatch):
-    # 「falsy 但有意义」（控制器裁决 3）：WEBHOOK_SECRET_ARN="" 是配置错误，不得退化成任何默认值，
+    # 「falsy 但有意义」（控制器裁决 3）：WEBHOOK_SECRET_ID="" 是配置错误，不得退化成任何默认值，
     # 也不该白跑一次 GetSecretValue。
     if value is not None:
-        monkeypatch.setenv("WEBHOOK_SECRET_ARN", value)
+        monkeypatch.setenv("WEBHOOK_SECRET_ID", value)
     client = _boto3(monkeypatch, {"SecretString": "s3cret"})
     with pytest.raises(fetch.SecretUnavailable):
-        fetch.secret_from_env("WEBHOOK_SECRET_ARN")
+        fetch.secret_from_env("WEBHOOK_SECRET_ID")
     assert not client.get_secret_value.called, "变量缺失或为空串时连 API 都不该调"
     assert fetch._CACHE == {}
 
 
 def test_a_blank_but_non_empty_arn_still_fails_closed(monkeypatch):
-    # 只有空白字符的 ARN 是真值，会被送去 GetSecretValue（AWS 自己拒）；这里钉住它最终仍然拒绝，
+    # 只有空白字符的 SECRET_ID 是真值，会被送去 GetSecretValue（AWS 自己拒）；这里钉住它最终仍然拒绝，
     # 不会因为「API 调过了」就被当成取到了密钥。
-    monkeypatch.setenv("WEBHOOK_SECRET_ARN", "   ")
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", "   ")
     _boto3(monkeypatch, bexc.ClientError(
         {"Error": {"Code": "ValidationException"}}, "GetSecretValue"))
     with pytest.raises(fetch.SecretUnavailable):
-        fetch.secret_from_env("WEBHOOK_SECRET_ARN")
+        fetch.secret_from_env("WEBHOOK_SECRET_ID")
     assert fetch._CACHE == {}
 
 
 def test_never_writes_the_value_into_os_environ(monkeypatch):
-    monkeypatch.setenv("WEBHOOK_SECRET_ARN", ARN)
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     _boto3(monkeypatch, {"SecretString": "s3cret"})
     before = dict(os.environ)
-    assert fetch.secret_from_env("WEBHOOK_SECRET_ARN") == "s3cret"
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "s3cret"
     assert dict(os.environ) == before, "回写环境变量等于把刚消除的暴露面原地重建"
     assert "s3cret" not in " ".join(os.environ.values())
 
 
 def test_the_error_carries_only_the_var_name_never_the_aws_message(monkeypatch):
     # 与 handler.py 的 _failure_reason 同一条理由：GetSecretValue 的错误正文是自由文本，
-    # 带调用方角色 ARN 与账号 ID。异常消息会进日志、也可能被调用方拼进响应。
-    monkeypatch.setenv("WEBHOOK_SECRET_ARN", ARN)
+    # 带调用方角色 SECRET_ID 与账号 ID。异常消息会进日志、也可能被调用方拼进响应。
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     _boto3(monkeypatch, DENIED)
     with pytest.raises(fetch.SecretUnavailable) as ei:
-        fetch.secret_from_env("WEBHOOK_SECRET_ARN")
+        fetch.secret_from_env("WEBHOOK_SECRET_ID")
     msg = str(ei.value)
-    assert msg == "WEBHOOK_SECRET_ARN", msg
+    assert msg == "WEBHOOK_SECRET_ID", msg
     assert "111122223333" not in msg and "not authorized" not in msg, msg
     # 原始异常仍挂在 __cause__ 上供排查，且仍是那个真实的 ClientError
     assert isinstance(ei.value.__cause__, bexc.ClientError)
 
 
 def test_two_different_arns_do_not_share_one_cache_entry(monkeypatch):
-    other = ARN.replace("webhook-secret", "yunxiao-token-kiro")
-    monkeypatch.setenv("WEBHOOK_SECRET_ARN", ARN)
-    monkeypatch.setenv("YUNXIAO_TOKEN_ARN", other)
+    other = SECRET_ID.replace("webhook-secret", "yunxiao-token-kiro")
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
+    monkeypatch.setenv("YUNXIAO_TOKEN_ID", other)
     _boto3(monkeypatch, {"SecretString": "s3cret"}, {"SecretString": "pt-t0ken"})
-    assert fetch.secret_from_env("WEBHOOK_SECRET_ARN") == "s3cret"
-    assert fetch.secret_from_env("YUNXIAO_TOKEN_ARN") == "pt-t0ken"
-    assert fetch._CACHE == {ARN: "s3cret", other: "pt-t0ken"}
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "s3cret"
+    assert fetch.secret_from_env("YUNXIAO_TOKEN_ID") == "pt-t0ken"
+    assert fetch._CACHE == {SECRET_ID: "s3cret", other: "pt-t0ken"}
 
 
 def test_no_lambda_source_writes_into_os_environ():

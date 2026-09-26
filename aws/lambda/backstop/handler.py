@@ -85,7 +85,7 @@ def handler(event, context):
     # 整个存在理由就是「宁可多发一条也不沉默」（I10）。
     codeup_min.post_comment(
         os.environ["YUNXIAO_ORG_ID"], env["CODEUP_REPO_ID"], env["MR_LOCAL_ID"],
-        secret_fetch.secret_from_env("YUNXIAO_TOKEN_ARN"),
+        secret_fetch.secret_from_env("YUNXIAO_TOKEN_ID"),
         "## 🤖 Kiro 代码评审\n\n**评审未完成**：评审任务异常结束（可能是拉取镜像失败、"
         "内存不足或任务超时），脚本没有机会回写失败原因。重新推送可再次触发。")
     return {"ok": True, "posted": True}

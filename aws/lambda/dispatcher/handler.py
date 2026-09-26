@@ -32,13 +32,13 @@ def verify_token(headers, expected):
 
 def handler(event, context):
     try:
-        expected = secret_fetch.secret_from_env("WEBHOOK_SECRET_ARN")
+        expected = secret_fetch.secret_from_env("WEBHOOK_SECRET_ID")
     except secret_fetch.SecretUnavailable:
         # fail closed：取不到共享密钥就无从判断「这是不是我们的 webhook」，一律不放行。
         # 关键在于给一个**显式响应**而不是让异常逃出 handler——未捕获异常对 ALB 就是 502，
         # Codeup 只看到投递失败，与 C1 同属静默失败。
         # 选 503 而不是 401：401 会把我们自己的配置/权限问题（少 secretsmanager:GetSecretValue、
-        # ARN 写错、密钥没建）伪装成「对方令牌不对」，运维照着 401 去查 Codeup 那侧的密钥，
+        # 密钥名写错、密钥没建）伪装成「对方令牌不对」，运维照着 401 去查 Codeup 那侧的密钥，
         # 永远查不到真正的原因；503 是「我这边没就绪」，语义正确，且 Codeup 重投时若密钥已就绪
         # 就能自愈。正文只给一个固定代号，不带任何 AWS 错误正文（含角色 ARN 与账号 ID，
         # 与 _failure_reason 同一条理由）。

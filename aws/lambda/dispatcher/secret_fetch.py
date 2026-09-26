@@ -3,7 +3,14 @@
 为什么不把值注入环境变量：CloudFormation 动态引用能让**模板**里不出现明文，但部署后的函数
 配置里存的仍是明文，任何能 `lambda:GetFunctionConfiguration` 的主体都读得到——与 ECS 任务
 定义的 `secrets{}` 块（值从不出现在任务定义里）不是同一档安全性。Lambda 环境变量没有对应的
-运行时机制，只能自己在调用时取（Ruling 16）。所以环境变量里只放密钥 **ARN**。
+运行时机制，只能自己在调用时取（Ruling 16）。所以环境变量里只放密钥的 **SecretId**。
+
+SecretId 是 GetSecretValue 的入参名，接受完整 ARN 或密钥名；这里放的是**密钥名**。不放
+partial ARN 的理由见 AWS 文档 secretsmanager/latest/userguide/troubleshoot.html 的
+「An AWS CLI or AWS SDK operation can't find my secret from a partial ARN」：密钥名以
+「连字符 + 六个字符」结尾时（`codeup-kiro/webhook-secret` 的末段 `secret` 正好如此），
+partial ARN 会被当成完整 ARN 解析、从而找不到密钥，文档建议用完整 ARN 或密钥名；而完整 ARN
+的六位后缀要调 AWS API 才知道，CDK 在 synth 期给不出来（见 stacks/dispatcher_stack.py 的注释）。
 
 兜底 Lambda 与本文件不同目录：靠 CodeupMinLayer 把整个 `lambda/` 铺到 `/opt`、按
 `/opt/dispatcher` 导入，与 codeup_min 同一手法，不另建 layer（见 backstop/handler.py 顶部）。
@@ -14,7 +21,7 @@
 """
 import os
 
-# 按进程缓存：Lambda 执行环境跨调用复用，冷启动取一次就够。键用 ARN，同一个函数里的两个
+# 按进程缓存：Lambda 执行环境跨调用复用，冷启动取一次就够。键用 SecretId，同一个函数里的两个
 # 密钥不会互相串。**只缓存取到的非空值**——失败绝不入缓存，否则一次限流会把这个执行环境
 # 钉死在失败态直到它被回收，期间每个 webhook 都被拒。下一次调用必须能重试。
 _CACHE = {}
@@ -30,22 +37,22 @@ class SecretUnavailable(RuntimeError):
 
 
 def secret_from_env(var_name):
-    """读环境变量 `var_name` 里的密钥 ARN，返回该密钥的值；任何取不到的情形都抛 SecretUnavailable。
+    """读环境变量 `var_name` 里的 SecretId（密钥名），返回该密钥的值；取不到一律抛 SecretUnavailable。
 
-    入参是**变量名**而不是 ARN 本身：调用点因此不可能把值当 ARN 传进来，也让「变量没配好」与
-    「密钥取不到」落在同一条 fail-closed 路径上，由调用方一处处理。
+    入参是**变量名**而不是 SecretId 本身：调用点因此不可能把密钥值当 SecretId 传进来，也让
+    「变量没配好」与「密钥取不到」落在同一条 fail-closed 路径上，由调用方一处处理。
     """
-    arn = os.environ.get(var_name) or ""
+    secret_id = os.environ.get(var_name) or ""
     # 空串按配置错误处理，不退化成任何默认值：`os.environ.get(var, default)` 那种写法会让
-    # WEBHOOK_SECRET_ARN="" 静默走进「没配就用默认」，正是本轮要消灭的一类静默失败
+    # WEBHOOK_SECRET_ID="" 静默走进「没配就用默认」，正是本轮要消灭的一类静默失败
     # （falsy 但有意义）。
-    if not arn:
+    if not secret_id:
         raise SecretUnavailable(var_name)
-    if arn in _CACHE:
-        return _CACHE[arn]
+    if secret_id in _CACHE:
+        return _CACHE[secret_id]
     import boto3  # 沿用本仓库写法：boto3 在函数内部 import（见 backstop/handler.py 的 handler）
     try:
-        resp = boto3.client("secretsmanager").get_secret_value(SecretId=arn)
+        resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_id)
     except Exception as exc:  # noqa: BLE001 — 权限、限流、密钥不存在、瞬时网络错误都要落到同一条
                               # fail-closed 路径；只挑几种已知异常会让其余的逃成 Lambda 500
         raise SecretUnavailable(var_name) from exc
@@ -55,5 +62,5 @@ def secret_from_env(var_name):
     # 去查 Codeup 那侧，永远查不到真正的原因。
     if not value:
         raise SecretUnavailable(var_name)
-    _CACHE[arn] = value
+    _CACHE[secret_id] = value
     return value
