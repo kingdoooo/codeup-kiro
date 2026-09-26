@@ -1,10 +1,10 @@
 import hmac
-import os
 import time
 
 import botocore.exceptions
 
 import codeup_min
+import secrets  # 本目录下的 secrets.py（调用时取密钥），**不是**标准库同名模块；见该文件顶部
 # 入口是内网 ALB 的 Lambda target：每条返回路径都走 _resp（G5），正文一律经 _body_text 取（G6）。
 from http_shape import body_text as _body_text  # noqa: F401 — Task 5 的 handler 用它取正文
 from http_shape import resp as _resp
@@ -31,7 +31,18 @@ def verify_token(headers, expected):
 
 
 def handler(event, context):
-    expected = os.environ.get("WEBHOOK_SECRET", "")
+    try:
+        expected = secrets.secret_from_env("WEBHOOK_SECRET_ARN")
+    except secrets.SecretUnavailable:
+        # fail closed：取不到共享密钥就无从判断「这是不是我们的 webhook」，一律不放行。
+        # 关键在于给一个**显式响应**而不是让异常逃出 handler——未捕获异常对 ALB 就是 502，
+        # Codeup 只看到投递失败，与 C1 同属静默失败。
+        # 选 503 而不是 401：401 会把我们自己的配置/权限问题（少 secretsmanager:GetSecretValue、
+        # ARN 写错、密钥没建）伪装成「对方令牌不对」，运维照着 401 去查 Codeup 那侧的密钥，
+        # 永远查不到真正的原因；503 是「我这边没就绪」，语义正确，且 Codeup 重投时若密钥已就绪
+        # 就能自愈。正文只给一个固定代号，不带任何 AWS 错误正文（含角色 ARN 与账号 ID，
+        # 与 _failure_reason 同一条理由）。
+        return _resp(503, "secret-unavailable")
     if not verify_token(event.get("headers"), expected):
         return _resp(401)
     return _resp(200)

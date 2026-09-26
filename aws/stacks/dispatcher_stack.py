@@ -64,24 +64,36 @@ class DispatcherStack(cdk.Stack):
                 "REVIEW_COMMAND": str(cfg["review_command"]),
                 "REVIEW_COMMAND_PHRASE": cfg["command_phrase"],
                 "TARGET_BRANCH_FILTER": cfg.get("target_branch_filter", ""),
-                # 两个密钥经 CloudFormation 动态引用注入——部署期由 CFN 自己的凭据解析，
-                # 从不落进本模板的明文（I3）。handler.py 现有契约是直接读同名环境变量的
-                # 明文值（Task 7 已定，不在本任务改动范围内），所以不能走 ECS `secrets{}`
-                # 那种「运行时向 Secrets Manager 发 API 调用」的路子——Lambda 环境变量没有
-                # 那个机制，动态引用是唯一能让「模板里不出现明文」这条要求同时成立的写法。
-                # 已知代价：部署后这两个值会以明文形式留在函数配置里，`lambda:GetFunctionConfiguration`
-                # 能读到——与 ECS secrets 块（值从不出现在任务定义里）不是同一档安全性；
-                # 更彻底的做法是改 handler.py 换成 Parameters and Secrets Lambda 扩展在运行时取，
-                # 但那要改 Task 7 的既有契约，超出本任务范围，留作后续加固项。
-                "WEBHOOK_SECRET": webhook_secret.secret_value.unsafe_unwrap(),
-                "YUNXIAO_TOKEN": yunxiao_token.secret_value.unsafe_unwrap(),
+                # 两个密钥只注入 **ARN**，值由 handler 在调用时自己向 Secrets Manager 取
+                # （lambda/dispatcher/secrets.py）。这里绝不注入明文：CloudFormation 动态引用
+                # 能让模板里不出现明文，但部署后的函数配置里存的仍是明文，任何能
+                # `lambda:GetFunctionConfiguration` 的主体都读得到——与 ECS 的 `secrets{}` 块
+                # （值从不进任务定义）不是同一档安全性（Ruling 16）。
+                # 用 secret_arn 而不是 secret_full_arn：按名导入（from_secret_name_v2）的密钥
+                # 拿不到 AWS 追加的六位随机后缀，secret_full_arn 恒为 None（aws_cdk/
+                # aws_secretsmanager/__init__.py 的 secretFullArn 文档：“undefined when a full
+                # ARN is not available (e.g., secrets imported by name)”），secret_arn 则是不带
+                # 后缀的 partial ARN，GetSecretValue 接受它。
+                "WEBHOOK_SECRET_ARN": webhook_secret.secret_arn,
+                # 调度器对云效令牌的消费在 Task 5 的 _runtime_cfg() 里才出现；现在就注入是为了让
+                # 下面按函数收紧的 GetSecretValue 授权与对应断言同时成立（注入 ARN 不构成暴露面）。
+                "YUNXIAO_TOKEN_ARN": yunxiao_token.secret_arn,
             },
         )
-        # 下面两条 grant 当前没有代码路径会真的触发（上面用的是动态引用，Lambda 自己从不
-        # 调 Secrets Manager API）——按本任务的环境契约（"Secrets Manager reads on specific
-        # ARNs"）显式给上，范围仅限这两个 ARN，为将来切到运行时读取的加固项预留，无害。
-        yunxiao_token.grant_read(dispatcher_fn)
-        webhook_secret.grant_read(dispatcher_fn)
+        # 这条授权现在是真在用的代码路径：调度器每次调用都经 secrets.py 读 webhook 密钥
+        # （云效令牌由 Task 5 的 _runtime_cfg() 读，ARN 已注入，一并授权）。缺了它
+        # GetSecretValue 会抛 AccessDeniedException，handler 按 fail-closed 回 503。
+        # 不用 grant_read：那会连 secretsmanager:DescribeSecret 一起给上，两个 Lambda 都不调它
+        # （与上面 lock_table 不用 grant_read_write_data 同一条理由）。
+        # Resource 末尾的 "-??????" 不能省：请求里传的是 partial ARN，IAM 授权比对的却是
+        # Secrets Manager 解析出来的完整 ARN（带六位随机后缀），不通配这六位会一律
+        # AccessDenied——CDK 自己的 grant_read 对按名导入的密钥也正是这么拼的（arnForPolicies
+        # = `${secretArn}-??????`）。这类错误只在部署后的运行时暴露，所以 tests 里有一条断言
+        # 专门钉住这个后缀。
+        dispatcher_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[f"{webhook_secret.secret_arn}-??????",
+                       f"{yunxiao_token.secret_arn}-??????"]))
 
         # claim/release 只做 PutItem/DeleteItem（见 handler.py），不用 grant_read_write_data——
         # 那会连 Query/Scan/GetItem 都给上，超出这两个函数实际动的写路径。
@@ -114,15 +126,16 @@ class DispatcherStack(cdk.Stack):
         # ALB 放进执行器 VPC 的隔离子网（跨栈引用），不为入口单独再建一个 VPC。
         ingress = WebhookIngress(self, "WebhookIngress", vpc=executor.vpc, target_fn=dispatcher_fn)
 
-        # codeup_min 与 backstop/handler.py 不同目录；handler.py 按约定从 /opt/dispatcher
-        # 导入它（见该文件顶部注释），所以这里把整个 lambda/ 目录铺成一层 Layer——
-        # 铺开后 layer 内容根就是 lambda/ 的内容，挂载到 /opt/ 之后正好落在
-        # /opt/dispatcher/codeup_min.py，与既有代码的路径假设完全对齐。
+        # codeup_min 与 secrets 都与 backstop/handler.py 不同目录；handler.py 按约定从
+        # /opt/dispatcher 导入它们（见该文件顶部注释），所以这里把整个 lambda/ 目录铺成一层
+        # Layer——铺开后 layer 内容根就是 lambda/ 的内容，挂载到 /opt/ 之后正好落在
+        # /opt/dispatcher/codeup_min.py 与 /opt/dispatcher/secrets.py，与既有代码的路径假设
+        # 完全对齐（取密钥的助手因此只有一份实现，不为兜底再抄一遍）。
         codeup_min_layer = lambda_.LayerVersion(
             self, "CodeupMinLayer",
             code=lambda_.Code.from_asset(LAMBDA_ROOT),
             compatible_runtimes=[lambda_.Runtime.PYTHON_3_12],
-            description="共享 codeup_min.py，供 backstop 按 /opt/dispatcher 的既有路径假设导入",
+            description="共享 codeup_min.py 与 secrets.py，供 backstop 按 /opt/dispatcher 的既有路径假设导入",
         )
 
         backstop_fn = lambda_.Function(
@@ -136,11 +149,16 @@ class DispatcherStack(cdk.Stack):
             environment={
                 "LOCK_TABLE": state.lock_table.table_name,
                 "YUNXIAO_ORG_ID": cfg["org_id"],
-                "YUNXIAO_TOKEN": yunxiao_token.secret_value.unsafe_unwrap(),
+                # 同调度器：只给 ARN，值由 handler.py 在真要发评论时经 secrets.py 取。
+                "YUNXIAO_TOKEN_ARN": yunxiao_token.secret_arn,
             },
         )
         state.lock_table.grant(backstop_fn, "dynamodb:GetItem")
-        yunxiao_token.grant_read(backstop_fn)
+        # 兜底只读云效令牌这一个密钥（发那条「评审未完成」评论用），不给它 webhook 密钥——
+        # 两个函数各自只拿到自己真正会读的那些 ARN。
+        backstop_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[f"{yunxiao_token.secret_arn}-??????"]))
 
         # 只要本集群、已 STOPPED 的任务：ECS 每次状态迁移都发这个事件，不筛 lastStatus 会在任务
         # 还在跑时就触发兜底（backstop/handler.py 的 should_post 另有同一道判断）；不筛 clusterArn，

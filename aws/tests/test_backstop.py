@@ -1,7 +1,9 @@
+import json
 import pathlib
 import sys
 from unittest import mock
 
+import botocore.exceptions as bexc
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -105,3 +107,94 @@ def test_posts_without_reading_the_table_when_lock_key_is_absent():
     table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "r1#7#abc", "posted": True}}
     assert backstop.should_post(ev, table) is True
     assert not table.get_item.called
+
+
+# ── Ruling 16：云效令牌在调用时向 Secrets Manager 取，环境变量里只有 ARN ──────────
+TOKEN_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:codeup-kiro/yunxiao-token-kiro"
+# 真的 ClientError，不是裸 Mock 的 side_effect：只用 Mock 造异常只能验证我们写的分支，
+# 验不到 botocore 真抛出来的那种异常也走同一条路径。正文刻意带账号 ID。
+DENIED = bexc.ClientError(
+    {"Error": {"Code": "AccessDeniedException",
+               "Message": ("User: arn:aws:sts::111122223333:assumed-role/BackstopRole/x is not "
+                           f"authorized to perform: secretsmanager:GetSecretValue on {TOKEN_ARN}")}},
+    "GetSecretValue")
+
+
+def _stub_boto3(monkeypatch, *secret_responses, item=None):
+    """打桩 handler() 用到的两条 boto3 出口（DynamoDB 资源 + Secrets Manager 客户端）。
+
+    走**真实**的 secrets.py，只把它内部那句 `import boto3` 换掉——这样 SecretId 的请求形状
+    才是真被断言到的东西，而不是我们自己的桩。
+    """
+    table = mock.Mock()
+    table.get_item.return_value = {"Item": item if item is not None else {"pk": "r1#7#abc"}}
+    client = mock.Mock()
+    client.get_secret_value.side_effect = list(secret_responses)
+    boto3 = mock.Mock()
+    boto3.resource.return_value.Table.return_value = table
+    boto3.client.return_value = client
+    monkeypatch.setitem(sys.modules, "boto3", boto3)
+    monkeypatch.setenv("LOCK_TABLE", "lock")
+    monkeypatch.setenv("YUNXIAO_ORG_ID", "o1")
+    monkeypatch.setenv("YUNXIAO_TOKEN_ARN", TOKEN_ARN)
+    monkeypatch.setattr(backstop.secrets, "_CACHE", {})
+    return client
+
+
+def test_handler_posts_with_the_token_it_fetched_at_invoke_time(monkeypatch):
+    client = _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
+    posted = []
+    monkeypatch.setattr(backstop.codeup_min, "post_comment",
+                        lambda *a, **k: posted.append(a) or True)
+    assert backstop.handler(_ev(exit_code=137), None) == {"ok": True, "posted": True}
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": TOKEN_ARN}
+    assert posted[0][3] == "pt-t0ken", posted  # post_comment 的第 4 个位置参数是令牌
+
+
+def test_no_secret_is_fetched_when_there_is_nothing_to_post(monkeypatch):
+    # 绝大多数 Task State Change 都被 should_post 挡掉；提前取令牌等于给每次状态迁移
+    # 都加一次 GetSecretValue（配额与延迟）。
+    client = _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"},
+                         item={"pk": "r1#7#abc", "posted": True})
+    assert backstop.handler(_ev(exit_code=1), None) == {"ok": True, "posted": False}
+    assert not client.get_secret_value.called
+
+
+def test_handler_raises_instead_of_silently_reporting_success_when_the_token_is_unavailable(
+        monkeypatch):
+    # 兜底是异步（EventBridge）调用：抛出会走 Lambda 自己的重试，限流这类瞬时失败能自愈。
+    # 吞掉返回 {"posted": False} 才是真正的沉默——兜底的整个存在理由就是「宁可多发也不沉默」。
+    client = _stub_boto3(monkeypatch, DENIED)
+    posted = []
+    monkeypatch.setattr(backstop.codeup_min, "post_comment",
+                        lambda *a, **k: posted.append(a) or True)
+    with pytest.raises(backstop.secrets.SecretUnavailable) as ei:
+        backstop.handler(_ev(exit_code=137), None)
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": TOKEN_ARN}
+    assert not posted, "取不到令牌时不该拿着空令牌去发评论"
+    # 异常消息只有变量名：AWS 错误正文带角色 ARN 与账号 ID，不进日志（M7 的同一条理由）
+    assert str(ei.value) == "YUNXIAO_TOKEN_ARN", str(ei.value)
+    assert "111122223333" not in json.dumps(str(ei.value))
+
+
+@pytest.mark.parametrize("arn", ["", None])
+def test_handler_fails_closed_when_the_token_arn_env_var_is_missing_or_empty(arn, monkeypatch):
+    # falsy 但有意义：空串不得退化成任何默认值，更不能拿空令牌去调 Codeup（那会 401，
+    # 却在日志里看起来像「令牌过期」）。
+    client = _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
+    monkeypatch.delenv("YUNXIAO_TOKEN_ARN", raising=False)
+    if arn is not None:
+        monkeypatch.setenv("YUNXIAO_TOKEN_ARN", arn)
+    posted = []
+    monkeypatch.setattr(backstop.codeup_min, "post_comment",
+                        lambda *a, **k: posted.append(a) or True)
+    with pytest.raises(backstop.secrets.SecretUnavailable):
+        backstop.handler(_ev(exit_code=137), None)
+    assert not client.get_secret_value.called and not posted
+
+
+def test_backstop_never_reads_a_bare_plaintext_secret_env_var():
+    # 静态守卫：裸名 YUNXIAO_TOKEN 不得再作为环境变量名出现（"_ARN" 后缀的那个不算）。
+    src = pathlib.Path(backstop.__file__).read_text()
+    for bare in ('YUNXIAO_TOKEN"', "YUNXIAO_TOKEN'", 'WEBHOOK_SECRET"', "WEBHOOK_SECRET'"):
+        assert bare not in src, f"backstop/handler.py 仍在读明文环境变量 {bare}"

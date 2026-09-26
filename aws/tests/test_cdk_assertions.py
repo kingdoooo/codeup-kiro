@@ -218,18 +218,96 @@ def test_lambda_has_reserved_concurrency_as_a_spend_gate():
     assert any("ReservedConcurrentExecutions" in v["Properties"] for v in fns.values())
 
 
-def test_webhook_secret_comes_from_secrets_manager_not_plaintext():
-    # 原版断言扫的是整份模板的 blob——只要模板里任何地方出现过一次 "{{resolve:"
-    # （哪怕是别的密钥留下的），这条断言就会不分青红皂白地通过，就算
-    # WEBHOOK_SECRET 自己被换成硬编码明文也测不出来（已用临时改动验证过：见任务报告）。
-    # 收紧成只看 DispatcherFn 这个资源自己的 WEBHOOK_SECRET 环境变量值。
+# ── Ruling 16：任何 Lambda 的环境里都不得出现密钥的值，只能出现 ARN ────────────────
+# 裸名。带 "_ARN" 后缀的变量存的是 ARN，是本波要求的写法，不在禁止名单里。
+PLAINTEXT_SECRET_ENV = ("WEBHOOK_SECRET", "YUNXIAO_TOKEN", "KIRO_API_KEY")
+
+
+def test_no_lambda_function_carries_a_secret_value_in_its_environment():
+    """遍历模板里**全部** AWS::Lambda::Function，不按逻辑 ID 点名任何一个。
+
+    点名式断言会随新函数加入而失效：原版只看 DispatcherFn，兜底 Lambda 的明文令牌因此在
+    原地留了一整轮而断言照样通过。遍历式还天然覆盖 AwsCustomResource 带进来的 Node.js 函数。
+    也不扫整份模板的 blob——那种形状里只要别处出现过一次 "{{resolve:" 就算过，连把密钥硬编码
+    成明文都测不出来（这个坑本计划已经踩过一次）。
+    """
     t = _disp_template()
     fns = t.find_resources("AWS::Lambda::Function")
-    dispatcher = [v for k, v in fns.items() if "DispatcherFn" in k]
-    assert len(dispatcher) == 1
-    value = dispatcher[0]["Properties"]["Environment"]["Variables"]["WEBHOOK_SECRET"]
-    blob = json.dumps(value)
-    assert "resolve:secretsmanager" in blob, blob
+    # 调度器 + 兜底 + 入口查前缀列表的 AwsCustomResource 那个 Node 函数
+    assert len(fns) >= 3, fns
+    for logical_id, fn in fns.items():
+        env = fn["Properties"].get("Environment", {}).get("Variables", {})
+        for name in PLAINTEXT_SECRET_ENV:
+            assert name not in env, f"{logical_id} 的环境里出现明文密钥变量 {name}"
+        blob = json.dumps(env)
+        assert "resolve:secretsmanager" not in blob, (
+            f"{logical_id} 用了 CFN 动态引用：模板里看不到明文，但部署后的函数配置里就是明文，"
+            f"任何能 lambda:GetFunctionConfiguration 的主体都读得到")
+
+
+def test_both_lambdas_get_secret_arns_so_the_absence_assertion_is_not_vacuous():
+    # 正向对照：上面那条「不得出现」若因为密钥根本没接线而通过，就什么也没证明。
+    t = _disp_template()
+    envs = {k: v["Properties"].get("Environment", {}).get("Variables", {})
+            for k, v in t.find_resources("AWS::Lambda::Function").items()}
+    disp = [e for k, e in envs.items() if "DispatcherFn" in k]
+    back = [e for k, e in envs.items() if "BackstopFn" in k]
+    assert len(disp) == 1 and len(back) == 1, envs.keys()
+    assert {"WEBHOOK_SECRET_ARN", "YUNXIAO_TOKEN_ARN"} <= set(disp[0]), disp[0].keys()
+    assert "YUNXIAO_TOKEN_ARN" in back[0], back[0].keys()
+    # 值必须是指向 Secrets Manager 的 ARN（跨账号/分区用 Ref 拼出来），不是名字也不是明文
+    for env in (disp[0], back[0]):
+        for name in (k for k in env if k.endswith("_ARN")):
+            blob = json.dumps(env[name])
+            assert "secretsmanager" in blob, (name, blob)
+            assert "codeup-kiro/" in blob, (name, blob)
+
+
+def _arn_literal(resource):
+    """把 Fn::Join 形式的 IAM 资源还原成「字面量部分拼起来」的字符串，Ref 段丢掉。
+
+    断言只关心密钥名与六位后缀通配这两段字面量，partition/region/account 由 Ref 提供、
+    与本条不变式无关；直接 json.dumps 整个 Fn::Join 会把它们混进来，endswith 之类就失效了。
+    """
+    if isinstance(resource, str):
+        return resource
+    return "".join(p for p in resource.get("Fn::Join", ["", []])[1] if isinstance(p, str))
+
+
+def test_get_secret_value_is_granted_per_function_only_on_the_secrets_it_reads():
+    # 调度器读两个（webhook 密钥现在就在用，云效令牌给 Task 5 的 _runtime_cfg 预留且已注入 ARN），
+    # 兜底只读云效令牌。资源不得是 "*"，也不得互相多给。
+    t = _disp_template()
+    policies = t.find_resources("AWS::IAM::Policy")
+    want = {"DispatcherFn": {"webhook-secret", "yunxiao-token-kiro"},
+            "BackstopFn": {"yunxiao-token-kiro"}}
+    for fn, want_secrets in want.items():
+        sm_actions, resources = set(), []
+        for k, p in policies.items():
+            if fn not in k:
+                continue
+            for s in p["Properties"]["PolicyDocument"]["Statement"]:
+                actions = s["Action"] if isinstance(s["Action"], list) else [s["Action"]]
+                sm_actions.update(a for a in actions if a.startswith("secretsmanager:"))
+                if "secretsmanager:GetSecretValue" not in actions:
+                    continue
+                res = s["Resource"] if isinstance(s["Resource"], list) else [s["Resource"]]
+                resources.extend(res)
+        assert sm_actions == {"secretsmanager:GetSecretValue"}, (fn, sm_actions)
+        assert resources, f"{fn} 缺 secretsmanager:GetSecretValue——运行时取密钥会 AccessDenied"
+        got = set()
+        for r in resources:
+            lit = _arn_literal(r)
+            assert lit != "*", f"{fn} 的 GetSecretValue 不能对 * 放行"
+            assert ":secretsmanager:" in lit, (fn, lit)
+            # "-??????" 不能省：请求里给的是 from_secret_name_v2 的 partial ARN，IAM 授权比对的
+            # 却是 Secrets Manager 解析出来的完整 ARN（带六位随机后缀）。少了它一律 AccessDenied，
+            # 而这只在部署后的运行时暴露——synth 与行为用例都接不住，只有这条能。
+            assert lit.endswith("-??????"), f"{fn} 的 Resource 少了六位后缀通配：{lit}"
+            got.update(n for n in ("webhook-secret", "yunxiao-token-kiro")
+                       if f"codeup-kiro/{n}-??????" in lit)
+        assert got == want_secrets, (fn, got)
+        assert len(resources) == len(want_secrets), (fn, resources)
 
 
 def test_dispatcher_run_task_iam_is_scoped_not_wildcard():

@@ -118,15 +118,90 @@ def test_run_task_failure_releases_lock_and_posts_to_mr(monkeypatch):
     assert posted, "必须在 MR 上留痕（I10）"
 
 
+# ── Ruling 16：共享密钥在调用时向 Secrets Manager 取，环境变量里只有 ARN ──────────
+SECRET_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:codeup-kiro/webhook-secret"
+# 真的 ClientError（不是裸 Mock 的 side_effect）：只用 Mock 造异常只能验证我们写的 except 分支，
+# 验不到 botocore 真抛出来的那种异常也被同一条 fail-closed 路径接住。正文刻意带账号 ID。
+DENIED = bexc.ClientError(
+    {"Error": {"Code": "AccessDeniedException",
+               "Message": ("User: arn:aws:sts::111122223333:assumed-role/DispatcherRole/x is not "
+                           f"authorized to perform: secretsmanager:GetSecretValue on {SECRET_ARN}")}},
+    "GetSecretValue")
+
+
+def _stub_secrets(monkeypatch, *responses):
+    """让 handler 走**真实**的 secrets.py，只把它内部那句 `import boto3` 换掉。
+
+    不直接把 handler_mod.secrets.secret_from_env 整个替换成桩——那样就只测到自己的桩，
+    连「SecretId 传的是不是环境变量里那个 ARN」都测不出来。_CACHE 每个用例换一份新字典
+    （monkeypatch 用完自动还原），免得跨用例把值带过去。
+    """
+    monkeypatch.setenv("WEBHOOK_SECRET_ARN", SECRET_ARN)
+    monkeypatch.setattr(handler_mod.secrets, "_CACHE", {})
+    client = mock.Mock()
+    client.get_secret_value.side_effect = list(responses)
+    boto3 = mock.Mock()
+    boto3.client.return_value = client
+    monkeypatch.setitem(sys.modules, "boto3", boto3)
+    return client
+
+
+def test_handler_fetches_the_secret_by_the_arn_in_the_env_and_accepts_a_valid_token(monkeypatch):
+    client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
+    assert_alb_response(handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None), 200, "")
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ARN}
+
+
+def test_handler_rejects_with_503_when_the_secret_cannot_be_fetched(monkeypatch):
+    # fail closed，而且必须是**显式响应**：未捕获异常 → Lambda 报错 → ALB 502，Codeup 只看到
+    # 投递失败，与 C1 同属静默失败。503 而不是 401：401 会把我们自己的权限/配置问题伪装成
+    # 「对方令牌不对」，运维照着 401 去查 Codeup 那侧，永远查不到 Lambda 少了 GetSecretValue。
+    client = _stub_secrets(monkeypatch, DENIED)
+    assert_alb_response(
+        handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None),
+        503, "secret-unavailable")
+    # 同时钉住请求形状：只断言错误处理不算，还要证明它真的拿环境变量里那个 ARN 去问了。
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ARN}
+
+
+def test_the_503_response_leaks_neither_the_account_id_nor_the_aws_message(monkeypatch):
+    # M7 的同一条理由：AWS 错误正文是自由文本，带角色 ARN 与账号 ID，绝不进返回给 Codeup 的响应。
+    _stub_secrets(monkeypatch, DENIED)
+    blob = json.dumps(handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None))
+    assert "111122223333" not in blob, blob
+    assert "not authorized" not in blob and "assumed-role" not in blob, blob
+    assert "secretsmanager" not in blob.lower(), blob
+
+
+@pytest.mark.parametrize("arn", ["", None])
+def test_handler_rejects_when_the_secret_arn_env_var_is_missing_or_empty(arn, monkeypatch):
+    # falsy 但有意义：ARN 为空串是配置错误，不能退化成「expected 是空的」那条 401 路径——
+    # 结果同样是拒，但状态码会把我们的配置错误显示成对方令牌不对。
+    monkeypatch.setattr(handler_mod.secrets, "_CACHE", {})
+    monkeypatch.delenv("WEBHOOK_SECRET_ARN", raising=False)
+    if arn is not None:
+        monkeypatch.setenv("WEBHOOK_SECRET_ARN", arn)
+    client = mock.Mock()
+    boto3 = mock.Mock()
+    boto3.client.return_value = client
+    monkeypatch.setitem(sys.modules, "boto3", boto3)
+    assert_alb_response(handler_mod.handler({"headers": {"x-codeup-token": "s"}}, None),
+                        503, "secret-unavailable")
+    assert not client.get_secret_value.called
+
+
+def test_handler_never_reads_a_bare_plaintext_secret_env_var():
+    # 静态守卫：裸名 WEBHOOK_SECRET / YUNXIAO_TOKEN 不得再作为环境变量名出现在源码里
+    # （"WEBHOOK_SECRET_ARN" 里紧跟的是下划线，所以只查带引号收尾的那种字面量）。
+    src = pathlib.Path(handler_mod.__file__).read_text()
+    for bare in ('WEBHOOK_SECRET"', "WEBHOOK_SECRET'", 'YUNXIAO_TOKEN"', "YUNXIAO_TOKEN'"):
+        assert bare not in src, f"handler.py 仍在读明文环境变量 {bare}"
+
+
 # ── G5：每条返回路径都是 ALB 可接受的完整响应 ─────────────────────────────────
-def test_handler_401_is_a_full_alb_response():
+def test_handler_401_is_a_full_alb_response(monkeypatch):
+    _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
     assert_alb_response(handler_mod.handler({"headers": {}}, None), 401, "")
-
-
-def test_handler_accepted_is_a_full_alb_response(monkeypatch):
-    monkeypatch.setenv("WEBHOOK_SECRET", "s3cret")
-    r = handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None)
-    assert_alb_response(r, 200, "")
 
 
 def test_dispatch_duplicate_is_a_full_alb_response():
