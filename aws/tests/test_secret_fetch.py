@@ -52,7 +52,7 @@ def _boto3(monkeypatch, *responses):
     return client
 
 
-def test_returns_the_secret_string_and_asks_for_exactly_the_arn_in_the_env(monkeypatch):
+def test_returns_the_secret_string_and_asks_for_exactly_the_secret_id_in_the_env(monkeypatch):
     monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     client = _boto3(monkeypatch, {"SecretString": "s3cret"})
     assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "s3cret"
@@ -107,7 +107,7 @@ def test_missing_or_empty_env_var_fails_closed_without_calling_aws(value, monkey
     assert fetch._CACHE == {}
 
 
-def test_a_blank_but_non_empty_arn_still_fails_closed(monkeypatch):
+def test_a_blank_but_non_empty_secret_id_still_fails_closed(monkeypatch):
     # 只有空白字符的 SECRET_ID 是真值，会被送去 GetSecretValue（AWS 自己拒）；这里钉住它最终仍然拒绝，
     # 不会因为「API 调过了」就被当成取到了密钥。
     monkeypatch.setenv("WEBHOOK_SECRET_ID", "   ")
@@ -129,7 +129,7 @@ def test_never_writes_the_value_into_os_environ(monkeypatch):
 
 def test_the_error_carries_only_the_var_name_never_the_aws_message(monkeypatch):
     # 与 handler.py 的 _failure_reason 同一条理由：GetSecretValue 的错误正文是自由文本，
-    # 带调用方角色 SECRET_ID 与账号 ID。异常消息会进日志、也可能被调用方拼进响应。
+    # 带调用方角色 ARN 与账号 ID。异常消息会进日志、也可能被调用方拼进响应。
     monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     _boto3(monkeypatch, DENIED)
     with pytest.raises(fetch.SecretUnavailable) as ei:
@@ -141,7 +141,7 @@ def test_the_error_carries_only_the_var_name_never_the_aws_message(monkeypatch):
     assert isinstance(ei.value.__cause__, bexc.ClientError)
 
 
-def test_two_different_arns_do_not_share_one_cache_entry(monkeypatch):
+def test_two_different_secret_ids_do_not_share_one_cache_entry(monkeypatch):
     other = SECRET_ID.replace("webhook-secret", "yunxiao-token-kiro")
     monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     monkeypatch.setenv("YUNXIAO_TOKEN_ID", other)

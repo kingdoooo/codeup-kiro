@@ -90,7 +90,7 @@ class DispatcherStack(cdk.Stack):
             },
         )
         # 这条授权现在是真在用的代码路径：调度器每次调用都经 secret_fetch.py 读 webhook 密钥
-        # （云效令牌由 Task 5 的 _runtime_cfg() 读，ARN 已注入，一并授权）。缺了它
+        # （云效令牌由 Task 5 的 _runtime_cfg() 读，SecretId 已注入，一并授权）。缺了它
         # GetSecretValue 会抛 AccessDeniedException，handler 按 fail-closed 回 503。
         # 不用 grant_read：那会连 secretsmanager:DescribeSecret 一起给上，两个 Lambda 都不调它
         # （与上面 lock_table 不用 grant_read_write_data 同一条理由）。

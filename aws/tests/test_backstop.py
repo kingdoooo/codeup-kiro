@@ -109,7 +109,7 @@ def test_posts_without_reading_the_table_when_lock_key_is_absent():
     assert not table.get_item.called
 
 
-# ── Ruling 16：云效令牌在调用时向 Secrets Manager 取，环境变量里只有 ARN ──────────
+# ── Ruling 16：云效令牌在调用时向 Secrets Manager 取，环境变量里只有密钥名 ──────────
 # 注入的是**密钥名**（SecretId），不是 partial ARN——理由见 lambda/dispatcher/secret_fetch.py 顶部。
 TOKEN_ID = "codeup-kiro/yunxiao-token-kiro"
 FULL_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:" + TOKEN_ID + "-AbCdEf"
@@ -179,14 +179,14 @@ def test_handler_raises_instead_of_silently_reporting_success_when_the_token_is_
     assert "111122223333" not in json.dumps(str(ei.value))
 
 
-@pytest.mark.parametrize("arn", ["", None])
-def test_handler_fails_closed_when_the_token_arn_env_var_is_missing_or_empty(arn, monkeypatch):
+@pytest.mark.parametrize("secret_id", ["", None])
+def test_handler_fails_closed_when_the_token_id_env_var_is_missing_or_empty(secret_id, monkeypatch):
     # falsy 但有意义：空串不得退化成任何默认值，更不能拿空令牌去调 Codeup（那会 401，
     # 却在日志里看起来像「令牌过期」）。
     client = _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
     monkeypatch.delenv("YUNXIAO_TOKEN_ID", raising=False)
-    if arn is not None:
-        monkeypatch.setenv("YUNXIAO_TOKEN_ID", arn)
+    if secret_id is not None:
+        monkeypatch.setenv("YUNXIAO_TOKEN_ID", secret_id)
     posted = []
     monkeypatch.setattr(backstop.codeup_min, "post_comment",
                         lambda *a, **k: posted.append(a) or True)

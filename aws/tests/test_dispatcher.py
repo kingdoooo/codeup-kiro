@@ -118,7 +118,7 @@ def test_run_task_failure_releases_lock_and_posts_to_mr(monkeypatch):
     assert posted, "必须在 MR 上留痕（I10）"
 
 
-# ── Ruling 16：共享密钥在调用时向 Secrets Manager 取，环境变量里只有 ARN ──────────
+# ── Ruling 16：共享密钥在调用时向 Secrets Manager 取，环境变量里只有密钥名 ──────────
 # 注入的是**密钥名**（SecretId），不是 partial ARN——理由见 lambda/dispatcher/secret_fetch.py 顶部。
 SECRET_ID = "codeup-kiro/webhook-secret"
 FULL_ARN = "arn:aws:secretsmanager:us-west-2:111122223333:secret:" + SECRET_ID + "-AbCdEf"
@@ -135,7 +135,7 @@ def _stub_secrets(monkeypatch, *responses):
     """让 handler 走**真实**的 secret_fetch.py，只把它内部那句 `import boto3` 换掉。
 
     不直接把 handler_mod.secret_fetch.secret_from_env 整个替换成桩——那样就只测到自己的桩，
-    连「SecretId 传的是不是环境变量里那个 ARN」都测不出来。_CACHE 每个用例换一份新字典
+    连「SecretId 传的是不是环境变量里那个密钥名」都测不出来。_CACHE 每个用例换一份新字典
     （monkeypatch 用完自动还原），免得跨用例把值带过去。
     """
     monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
@@ -162,7 +162,7 @@ def test_handler_rejects_with_503_when_the_secret_cannot_be_fetched(monkeypatch)
     assert_alb_response(
         handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None),
         503, "secret-unavailable")
-    # 同时钉住请求形状：只断言错误处理不算，还要证明它真的拿环境变量里那个 ARN 去问了。
+    # 同时钉住请求形状：只断言错误处理不算，还要证明它真的拿环境变量里那个密钥名去问了。
     assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ID}
 
 
@@ -175,14 +175,14 @@ def test_the_503_response_leaks_neither_the_account_id_nor_the_aws_message(monke
     assert "secretsmanager" not in blob.lower(), blob
 
 
-@pytest.mark.parametrize("arn", ["", None])
-def test_handler_rejects_when_the_secret_arn_env_var_is_missing_or_empty(arn, monkeypatch):
-    # falsy 但有意义：ARN 为空串是配置错误，不能退化成「expected 是空的」那条 401 路径——
+@pytest.mark.parametrize("secret_id", ["", None])
+def test_handler_rejects_when_the_secret_id_env_var_is_missing_or_empty(secret_id, monkeypatch):
+    # falsy 但有意义：SecretId 为空串是配置错误，不能退化成「expected 是空的」那条 401 路径——
     # 结果同样是拒，但状态码会把我们的配置错误显示成对方令牌不对。
     monkeypatch.setattr(handler_mod.secret_fetch, "_CACHE", {})
     monkeypatch.delenv("WEBHOOK_SECRET_ID", raising=False)
-    if arn is not None:
-        monkeypatch.setenv("WEBHOOK_SECRET_ID", arn)
+    if secret_id is not None:
+        monkeypatch.setenv("WEBHOOK_SECRET_ID", secret_id)
     client = mock.Mock()
     boto3 = mock.Mock()
     boto3.client.return_value = client
@@ -190,6 +190,92 @@ def test_handler_rejects_when_the_secret_arn_env_var_is_missing_or_empty(arn, mo
     assert_alb_response(handler_mod.handler({"headers": {"x-codeup-token": "s"}}, None),
                         503, "secret-unavailable")
     assert not client.get_secret_value.called
+
+
+# ── M3：没带令牌的请求在取密钥之前就被拒 ───────────────────────────────────────
+@pytest.mark.parametrize("headers", [{}, None, {"x-codeup-token": ""},
+                                     {"X-Codeup-Token": ""}, {"other": "v"}])
+def test_a_request_without_a_token_is_rejected_before_any_secret_fetch(headers, monkeypatch):
+    # 两个理由：①没带令牌的请求一定被拒，为它跑一次 GetSecretValue 纯属白费配额；
+    # ②取密钥正在失败时，任意公网调用者会拿到 503 secret-unavailable——那是在向外泄露内部状态。
+    client = _stub_secrets(monkeypatch, DENIED)
+    assert_alb_response(handler_mod.handler({"headers": headers}, None), 401, "")
+    assert not client.get_secret_value.called, "没带令牌就不该去取密钥"
+
+
+def test_a_present_but_wrong_token_is_still_rejected_after_fetching(monkeypatch):
+    # 正向对照：上面那条提前返回不能把「带了令牌但值不对」也短路掉——那会变成不校验。
+    client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
+    assert_alb_response(handler_mod.handler({"headers": {"x-codeup-token": "nope"}}, None), 401, "")
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ID}
+
+
+@pytest.mark.parametrize("headers,want", [
+    ({"x-codeup-token": "t"}, "t"), ({"X-Codeup-Token": "t"}, "t"),
+    ({"X-CODEUP-TOKEN": "t"}, "t"), ({}, ""), (None, ""),
+    ({"x-codeup-token": ""}, ""), ({"x-codeup-token": None}, "")])
+def test_token_header_is_case_insensitive_and_maps_absent_and_empty_to_the_same_thing(headers, want):
+    # handler 与 verify_token 共用这一份取头逻辑；空值与缺头必须同一结果，否则
+    # 「没带令牌」的判断会和 verify_token 分叉（ALB 转发的头名大小写不保证）。
+    assert handler_mod.token_header(headers) == want
+
+
+# ── I1：fail-closed 路径必须留一行固定形状的日志 ────────────────────────────────
+def _log_of_503(monkeypatch, capsys, *responses, env=SECRET_ID):
+    monkeypatch.setattr(handler_mod.secret_fetch, "_CACHE", {})
+    monkeypatch.delenv("WEBHOOK_SECRET_ID", raising=False)
+    if env is not None:
+        monkeypatch.setenv("WEBHOOK_SECRET_ID", env)
+    client = mock.Mock()
+    client.get_secret_value.side_effect = list(responses) or [DENIED]
+    boto3 = mock.Mock()
+    boto3.client.return_value = client
+    monkeypatch.setitem(sys.modules, "boto3", boto3)
+    r = handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None)
+    assert_alb_response(r, 503, "secret-unavailable")
+    return capsys.readouterr().out
+
+
+def test_the_503_path_logs_the_var_name_and_the_aws_error_code(monkeypatch, capsys):
+    # 这条路径在 Lambda 看来是成功调用（Errors 指标为 0），响应正文对四种成因完全一样：
+    # 不打这行日志，全新部署一旦配错就只剩一个查不下去的 503（I1）。
+    out = _log_of_503(monkeypatch, capsys, DENIED)
+    assert "secret-unavailable var=WEBHOOK_SECRET_ID code=AccessDeniedException" in out, out
+    assert out.count("\n") == 1, f"只留一行，不要每次调用刷一屏：{out!r}"
+
+
+@pytest.mark.parametrize("responses,env,code", [
+    ([DENIED], SECRET_ID, "AccessDeniedException"),
+    ([bexc.ClientError({"Error": {"Code": "ThrottlingException"}}, "GetSecretValue")],
+     SECRET_ID, "ThrottlingException"),
+    ([bexc.ClientError({"Error": {"Code": "ResourceNotFoundException"}}, "GetSecretValue")],
+     SECRET_ID, "ResourceNotFoundException"),
+    ([TimeoutError("10.0.0.12 timed out")], SECRET_ID, "TimeoutError"),
+    ([{"SecretString": ""}], SECRET_ID, "empty-value"),
+    ([{}], SECRET_ID, "empty-value"),
+    ([DENIED], None, "env-unset"),
+    ([DENIED], "", "env-unset"),
+])
+def test_the_503_log_code_distinguishes_every_cause(responses, env, code, monkeypatch, capsys):
+    # 运维要分清的四类成因（缺 IAM 授权 / 密钥不存在或名字不符 / 密钥值为空 / 限流）加上
+    # 「变量根本没配」，每一类都要有自己的代号；全部是固定枚举，没有自由文本。
+    out = _log_of_503(monkeypatch, capsys, *responses, env=env)
+    assert f"code={code}" in out, (out, code)
+
+
+def test_the_503_log_line_leaks_neither_the_account_id_nor_the_aws_message(monkeypatch, capsys):
+    # 与响应正文同一条要求（M7 的理由）：错误正文是自由文本，带角色 ARN 与账号 ID。
+    out = _log_of_503(monkeypatch, capsys, DENIED)
+    for leak in ("111122223333", "not authorized", "assumed-role", "arn:", FULL_ARN):
+        assert leak not in out, (leak, out)
+
+
+def test_the_success_path_logs_nothing(monkeypatch, capsys):
+    # 正向对照：这行日志只在 fail-closed 路径出现。否则每个正常 webhook 都会刷一行，
+    # 上面那条「按 code= 过滤」的排错指引就没法用了。
+    _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
+    handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None)
+    assert capsys.readouterr().out == ""
 
 
 def test_handler_never_reads_a_bare_plaintext_secret_env_var():

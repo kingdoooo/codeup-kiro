@@ -1,3 +1,4 @@
+import fnmatch
 import pathlib
 
 import pytest
@@ -304,42 +305,119 @@ def _arn_literal(resource):
     return "".join(p for p in resource.get("Fn::Join", ["", []])[1] if isinstance(p, str))
 
 
-def test_get_secret_value_is_granted_per_function_only_on_the_secrets_it_reads():
-    # 调度器读两个（webhook 密钥现在就在用，云效令牌给 Task 5 的 _runtime_cfg 预留且已注入
-    # SecretId），兜底只读云效令牌。资源不得是 "*"，也不得互相多给。
-    # 注意请求与授权两侧用的形式不同：请求传密钥名（见 test_secret_id_env_vars_...），IAM 策略
-    # 的 Resource 只接受 ARN，比对的是 Secrets Manager 解析出来的完整 ARN，所以要 "-??????"。
-    t = _disp_template()
+def _as_list(v):
+    return v if isinstance(v, list) else [v]
+
+
+# 允许出现在 Lambda 角色 ManagedPolicyArns 里的托管策略（CDK 给每个函数加的基础执行权限；
+# 挂进 VPC 的函数还会多一个）。别的托管策略一律不允许：它的内容不在模板里，等于把一整片
+# 权限从断言的视野里挪走——`SecretsManagerReadWrite` 就是这样溜进来的。
+ALLOWED_MANAGED_POLICIES = ("service-role/AWSLambdaBasicExecutionRole",
+                            "service-role/AWSLambdaVPCAccessExecutionRole")
+KNOWN_SECRETS = ("webhook-secret", "yunxiao-token-kiro")
+
+
+def _covers_get_secret_value(action):
+    """IAM 动作通配是否覆盖 secretsmanager:GetSecretValue。
+
+    用 fnmatch 而不是「等于 GetSecretValue」：`*`、`secretsmanager:*`、`secretsmanager:Get*`
+    都覆盖它，而只比对字面量的写法会把这三种放行——复审的 P5/P6 就是这么溜过去的。
+    IAM 的通配符是 `*` 与 `?`，与 fnmatch 一致；动作名里不会出现 `[`。
+    """
+    return fnmatch.fnmatchcase("secretsmanager:GetSecretValue", action)
+
+
+def _secret_grants_by_function(t):
+    """{Lambda 函数逻辑 ID: {它实际能读的密钥名或通配标记}}，外加它角色上的托管策略。
+
+    遍历模板里**全部** AWS::Lambda::Function，顺着 Role 解析到角色，再把三个来源合起来看：
+    独立的 AWS::IAM::Policy（按 Roles 引用匹配）、角色自己的内联 Policies、以及
+    ManagedPolicyArns。原来的写法只扫「逻辑 ID 里含函数名」的 AWS::IAM::Policy，于是
+    ①第三个主体（AwsCustomResource 的 Node 函数）拿到 GetSecretValue on * 照样绿，
+    ②`{Action:"*", Resource:"*"}` 照样绿，③托管策略从不进视野。
+    """
+    roles = t.find_resources("AWS::IAM::Role")
     policies = t.find_resources("AWS::IAM::Policy")
+    grants, managed = {}, {}
+    for fn_id, fn in t.find_resources("AWS::Lambda::Function").items():
+        role_ref = fn["Properties"].get("Role")
+        role_id = (role_ref or {}).get("Fn::GetAtt", [None])[0] if isinstance(role_ref, dict) else None
+        # 角色不是本模板里的资源（导入的 ARN）时权限查不到，只能当断言失效——宁可红，不要假绿。
+        assert role_id in roles, f"{fn_id} 的 Role 不是本模板里的 AWS::IAM::Role：{role_ref}"
+        role = roles[role_id]["Properties"]
+        managed[fn_id] = [_arn_literal(a) for a in role.get("ManagedPolicyArns", [])]
+        docs = [p["PolicyDocument"] for p in role.get("Policies", [])]
+        docs += [p["Properties"]["PolicyDocument"] for p in policies.values()
+                 if any((r or {}).get("Ref") == role_id for r in _as_list(p["Properties"].get("Roles", [])))]
+        got = set()
+        for doc in docs:
+            for st in _as_list(doc["Statement"]):
+                if st.get("Effect", "Allow") != "Allow":
+                    continue  # Deny 不是授权，不能算进「它能读什么」
+                if not any(_covers_get_secret_value(a) for a in _as_list(st["Action"])):
+                    continue
+                for r in _as_list(st["Resource"]):
+                    lit = _arn_literal(r)
+                    named = [n for n in KNOWN_SECRETS
+                             if lit.endswith(f":secret:codeup-kiro/{n}-??????")]
+                    # 认不出是哪个密钥的资源（"*"、少了六位后缀通配、或别的密钥）一律记成通配标记，
+                    # 让下面的集合相等断言带着它红出来，而不是被静默忽略（M9：用 endswith 而不是
+                    # 子串匹配，否则 `...:secret:evilcodeup-kiro/webhook-secret-??????` 也算过）。
+                    got.update(named or [f"<unrecognised:{lit}>"])
+        grants[fn_id] = got
+    return grants, managed
+
+
+def test_get_secret_value_is_granted_per_function_only_on_the_secrets_it_reads():
+    """遍历每个 Lambda 函数经它的角色实际拿到的 Secrets Manager 读权限。
+
+    调度器读两个（webhook 密钥现在就在用，云效令牌给 Task 5 的 _runtime_cfg 预留且已注入
+    SecretId），兜底只读云效令牌，**其余任何函数都必须是空集**——包括入口查前缀列表的
+    AwsCustomResource 那个 Node 函数。
+
+    请求与授权两侧用的形式不同：请求传密钥名（见 test_secret_id_env_vars_...），IAM 策略的
+    Resource 只接受 ARN，且 IAM 比对的是 Secrets Manager 解析出来的完整 ARN（带六位随机后缀），
+    所以资源必须以 `:secret:codeup-kiro/<名字>-??????` 结尾。少了后缀只会在部署后的运行时报
+    AccessDenied，synth 与行为用例都接不住，只有这条能。
+    """
+    t = _disp_template()
+    grants, managed = _secret_grants_by_function(t)
+    assert len(grants) >= 3, grants  # 调度器 + 兜底 + AwsCustomResource 的 Node 函数
     want = {"DispatcherFn": {"webhook-secret", "yunxiao-token-kiro"},
             "BackstopFn": {"yunxiao-token-kiro"}}
-    for fn, want_secrets in want.items():
-        sm_actions, resources = set(), []
-        for k, p in policies.items():
-            if fn not in k:
-                continue
-            for s in p["Properties"]["PolicyDocument"]["Statement"]:
-                actions = s["Action"] if isinstance(s["Action"], list) else [s["Action"]]
-                sm_actions.update(a for a in actions if a.startswith("secretsmanager:"))
-                if "secretsmanager:GetSecretValue" not in actions:
+    for fn_id, got in grants.items():
+        expected = next((v for k, v in want.items() if k in fn_id), set())
+        assert got == expected, f"{fn_id} 能读的密钥不是 {expected or '∅'}：{got}"
+    # 两个该有权限的函数确实各被匹配到一次，否则上面那圈可能因为改名而全部按 ∅ 通过
+    assert sum(1 for fn_id in grants if any(k in fn_id for k in want)) == len(want), grants
+    for fn_id, arns in managed.items():
+        for arn in arns:
+            assert any(arn.endswith(a) for a in ALLOWED_MANAGED_POLICIES), \
+                f"{fn_id} 的角色挂了未知托管策略（内容不在模板里，断言看不见）：{arn}"
+
+
+def test_no_lambda_role_grants_any_secretsmanager_action_beyond_get_secret_value():
+    # 与上面那条互补：上面管「能读哪些密钥」，这条管「动作面」。DescribeSecret、
+    # PutSecretValue 之类一个都不需要（所以没用 grant_read）。
+    t = _disp_template()
+    roles = t.find_resources("AWS::IAM::Role")
+    policies = t.find_resources("AWS::IAM::Policy")
+    lambda_role_ids = {
+        fn["Properties"]["Role"]["Fn::GetAtt"][0]
+        for fn in t.find_resources("AWS::Lambda::Function").values()}
+    actions = set()
+    for role_id in lambda_role_ids:
+        docs = [p["PolicyDocument"] for p in roles[role_id]["Properties"].get("Policies", [])]
+        docs += [p["Properties"]["PolicyDocument"] for p in policies.values()
+                 if any((r or {}).get("Ref") == role_id
+                        for r in _as_list(p["Properties"].get("Roles", [])))]
+        for doc in docs:
+            for st in _as_list(doc["Statement"]):
+                if st.get("Effect", "Allow") != "Allow":
                     continue
-                res = s["Resource"] if isinstance(s["Resource"], list) else [s["Resource"]]
-                resources.extend(res)
-        assert sm_actions == {"secretsmanager:GetSecretValue"}, (fn, sm_actions)
-        assert resources, f"{fn} 缺 secretsmanager:GetSecretValue——运行时取密钥会 AccessDenied"
-        got = set()
-        for r in resources:
-            lit = _arn_literal(r)
-            assert lit != "*", f"{fn} 的 GetSecretValue 不能对 * 放行"
-            assert ":secretsmanager:" in lit, (fn, lit)
-            # "-??????" 不能省：请求里给的是 from_secret_name_v2 的 partial ARN，IAM 授权比对的
-            # 却是 Secrets Manager 解析出来的完整 ARN（带六位随机后缀）。少了它一律 AccessDenied，
-            # 而这只在部署后的运行时暴露——synth 与行为用例都接不住，只有这条能。
-            assert lit.endswith("-??????"), f"{fn} 的 Resource 少了六位后缀通配：{lit}"
-            got.update(n for n in ("webhook-secret", "yunxiao-token-kiro")
-                       if f"codeup-kiro/{n}-??????" in lit)
-        assert got == want_secrets, (fn, got)
-        assert len(resources) == len(want_secrets), (fn, resources)
+                actions.update(a for a in _as_list(st["Action"])
+                               if a.startswith("secretsmanager:") or a == "*")
+    assert actions == {"secretsmanager:GetSecretValue"}, actions
 
 
 def test_dispatcher_run_task_iam_is_scoped_not_wildcard():
@@ -651,6 +729,32 @@ def test_editing_config_yaml_does_not_change_the_image(monkeypatch, tmp_path):
     # 正向对照：集成包本身变了，哈希必须跟着变——否则上面那条等式什么也没证明
     (tmp_path / "scripts" / "kiro-review.sh").write_text("v2\n")
     assert _image_asset_hash(monkeypatch, tmp_path, cdk.App()) != h1
+
+
+# ── I1：手册排错表里那行日志必须与 handler 真的打出来的一致 ──────────────────────
+def test_setup_guide_documents_the_exact_secret_unavailable_log_line():
+    """复审记下的原始缺陷：手册让运维去日志里找 `SecretUnavailable`，而那条路径当时一行都不打。
+
+    所以这条断言两头都钉：handler.py 里那句 print 的字面量前缀，与手册排错表里写的形状，
+    必须是同一个字符串；手册列出的每一个代号也必须真的在代码里出现（固定枚举来自
+    secret_fetch.py 的 reason 与 _failure_reason 的 AWS 错误码）。
+    """
+    aws_dir = pathlib.Path(__file__).resolve().parents[1]
+    handler = (aws_dir / "lambda" / "dispatcher" / "handler.py").read_text()
+    fetch = (aws_dir / "lambda" / "dispatcher" / "secret_fetch.py").read_text()
+    guide = (aws_dir / "setup-guide.md").read_text()
+    prefix = "secret-unavailable var="
+    assert f'print(f"{prefix}' in handler, "handler.py 不再打那行日志，手册的排错指引就成了空指引"
+    assert "code={_secret_unavailable_code(exc)}" in handler, \
+        "日志里的代号必须经 _secret_unavailable_code 取（固定枚举），不能换成异常正文"
+    assert f"`{prefix}WEBHOOK_SECRET_ID code=" in guide, "手册没有按真实形状写这行日志"
+    for code in ("env-unset", "empty-value"):
+        assert f'"{code}"' in fetch, f"手册里的代号 {code} 在 secret_fetch.py 里不存在"
+        assert f"`{code}`" in guide, code
+    # 兜底那侧确实不打这行（它抛异常走 EventBridge 重试），手册也照实这么写
+    backstop = (aws_dir / "lambda" / "backstop" / "handler.py").read_text()
+    assert prefix not in backstop
+    assert "不打调度器那行固定格式的日志" in guide
 
 
 # ── I6：接入手册不得再次与代码脱节 ────────────────────────────────────────────

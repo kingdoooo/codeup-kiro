@@ -12,6 +12,18 @@ from http_shape import resp as _resp
 TOKEN_HEADER = "x-codeup-token"
 
 
+def token_header(headers):
+    """按大小写不敏感取 `x-codeup-token`；没有这个头、或它的值为空都返回 ""。
+
+    verify_token 与 handler 都要判断「这次请求带没带令牌」，这里只写一份：两处各自遍历一遍
+    headers，迟早会在大小写或空值的处理上分叉（ALB 转发的头名大小写不保证）。
+    """
+    for k, v in (headers or {}).items():
+        if k.lower() == TOKEN_HEADER:
+            return v or ""
+    return ""
+
+
 def verify_token(headers, expected):
     """常量时间比对 Codeup webhook 的共享密钥。
 
@@ -20,28 +32,48 @@ def verify_token(headers, expected):
     """
     if not expected:
         return False  # 密钥未配置时拒绝一切，绝不退化成放行
-    got = None
-    for k, v in (headers or {}).items():
-        if k.lower() == TOKEN_HEADER:
-            got = v
-            break
+    got = token_header(headers)
     if not got:
         return False
     return hmac.compare_digest(str(got), str(expected))
 
 
+def _secret_unavailable_code(exc):
+    """写进日志的固定代号：AWS 错误码，或没走到 AWS 调用时的固定枚举值。
+
+    固定枚举（`env-unset` / `empty-value` / AWS 错误码 / 异常类型名）而不是异常正文：正文是自由
+    文本，带调用方角色 ARN 与账号 ID。这是 _failure_reason 已经确立的做法，直接复用它。
+    """
+    if exc.__cause__ is not None:
+        return _failure_reason(exc.__cause__)
+    return exc.reason or "unknown"
+
+
 def handler(event, context):
+    # 先看请求带没带令牌，再取密钥（M3）：没带令牌的请求一定会被拒，为它跑一次 GetSecretValue
+    # 只是白费配额；更要紧的是取密钥正在失败时，任意公网调用者都会收到 503 secret-unavailable，
+    # 那是在向外泄露我们这边的内部状态。没带令牌一律 401，不给它任何区分度。
+    if not token_header(event.get("headers")):
+        return _resp(401)
     try:
         expected = secret_fetch.secret_from_env("WEBHOOK_SECRET_ID")
-    except secret_fetch.SecretUnavailable:
+    except secret_fetch.SecretUnavailable as exc:
         # fail closed：取不到共享密钥就无从判断「这是不是我们的 webhook」，一律不放行。
         # 关键在于给一个**显式响应**而不是让异常逃出 handler——未捕获异常对 ALB 就是 502，
         # Codeup 只看到投递失败，与 C1 同属静默失败。
         # 选 503 而不是 401：401 会把我们自己的配置/权限问题（少 secretsmanager:GetSecretValue、
         # 密钥名写错、密钥没建）伪装成「对方令牌不对」，运维照着 401 去查 Codeup 那侧的密钥，
-        # 永远查不到真正的原因；503 是「我这边没就绪」，语义正确，且 Codeup 重投时若密钥已就绪
-        # 就能自愈。正文只给一个固定代号，不带任何 AWS 错误正文（含角色 ARN 与账号 ID，
-        # 与 _failure_reason 同一条理由）。
+        # 永远查不到真正的原因；503 是「我这边没就绪」，语义正确。（Codeup 对 503 是否重投未经
+        # 核实，所以不把「重投即自愈」当作这个选择的依据。）
+        # 正文只给一个固定代号，不带任何 AWS 错误正文（含角色 ARN 与账号 ID，与 _failure_reason
+        # 同一条理由）。
+        #
+        # 必须**留一行日志**（I1）：这条路径在 Lambda 看来是成功调用（Errors 指标为 0），
+        # 响应正文对四种成因（缺 IAM 授权、密钥不存在/名字不符、密钥值为空、限流）完全一样，
+        # 不打日志的话全新部署一旦配错就只剩一个查不下去的 503。形状固定、只有变量名与代号，
+        # 便于按 code= 过滤；setup-guide 排错表按这个形状写。
+        print(f"secret-unavailable var={exc.var_name} code={_secret_unavailable_code(exc)}",
+              flush=True)
         return _resp(503, "secret-unavailable")
     if not verify_token(event.get("headers"), expected):
         return _resp(401)

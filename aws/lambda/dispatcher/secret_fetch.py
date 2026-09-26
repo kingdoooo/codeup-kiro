@@ -33,7 +33,17 @@ class SecretUnavailable(RuntimeError):
     消息里只有环境变量名，绝不带原始异常正文——GetSecretValue 的错误正文是自由文本，带调用方
     角色 ARN 与账号 ID（与 handler.py 的 _failure_reason 同一条理由）。原始异常挂在 `__cause__`
     上供排查；要给运维一个可分辨的代号时经 `_failure_reason` 取 AWS 错误码，不要 `str(__cause__)`。
+
+    `reason` 是**没有** `__cause__` 时的固定代号（`env-unset` / `empty-value`）：这两种失败根本
+    没走到 AWS 调用，从异常类型上区分不出来，而运维最需要先分清的恰好是「我没配」还是「AWS 拒了」。
+    有 `__cause__` 时 `reason` 为 None，调用方改用 `_failure_reason(exc.__cause__)` 取 AWS 错误码。
+    固定枚举、绝不含自由文本，所以可以安全地打进日志。
     """
+
+    def __init__(self, var_name, reason=None):
+        super().__init__(var_name)
+        self.var_name = var_name
+        self.reason = reason
 
 
 def secret_from_env(var_name):
@@ -47,7 +57,7 @@ def secret_from_env(var_name):
     # WEBHOOK_SECRET_ID="" 静默走进「没配就用默认」，正是本轮要消灭的一类静默失败
     # （falsy 但有意义）。
     if not secret_id:
-        raise SecretUnavailable(var_name)
+        raise SecretUnavailable(var_name, "env-unset")
     if secret_id in _CACHE:
         return _CACHE[secret_id]
     import boto3  # 沿用本仓库写法：boto3 在函数内部 import（见 backstop/handler.py 的 handler）
@@ -61,6 +71,6 @@ def secret_from_env(var_name):
     # 令牌。让空值继续往下走，会把「密钥建错了」显示成「对方令牌不对」（401），运维照着 401
     # 去查 Codeup 那侧，永远查不到真正的原因。
     if not value:
-        raise SecretUnavailable(var_name)
+        raise SecretUnavailable(var_name, "empty-value")
     _CACHE[secret_id] = value
     return value
