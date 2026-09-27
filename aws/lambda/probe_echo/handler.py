@@ -1,8 +1,8 @@
 """P2a-08 探测栈的回显 Lambda：站在生产调度器的位置上，证明入口把 Codeup 的 POST 原样送到了这里。
 
 往日志写一行 JSON（请求头、isBase64Encoded、解码后正文的 SHA256 与文本），响应正文是解码后正文
-**字节**的 SHA256 十六进制——curl 端拿它与本地算的哈希比对。x-codeup-token 的值换成
-`<redacted len=N>`：长度够判断令牌有没有被截断，值本身不进日志。
+**字节**的 SHA256 十六进制——curl 端拿它与本地算的哈希比对。REDACTED_HEADERS 里那几个头的值
+换成 `<redacted len=N>`：长度够判断令牌有没有被截断，值本身不进日志。
 
 正文解码复用调度器的同一份 http_shape（不另写一份）：探测验证的必须是生产的解码路径。
 """
@@ -17,11 +17,17 @@ if os.path.isdir("/opt/dispatcher"):
     sys.path.insert(0, "/opt/dispatcher")
 import http_shape  # noqa: E402
 
-TOKEN_HEADER = "x-codeup-token"
+# Task 1 实测：Codeup 每次投递都把同一个 Secret Token 放在**两个**头里——`X-Codeup-Token`
+# 与 `X-Gitlab-Token`（值逐字相同，它的 webhook 实现沿用了 GitLab 的头名）。只打码前者时
+# 一次性探测令牌就以明文进了日志（本轮真的发生过）。所以这里是一个名单，不是单个头名；
+# 名单项一律小写，比对时把实际头名 `.lower()`（ALB 不保证转发头名的大小写）。
+# 注意：这只约束**回显日志**。生产调度器仍然只读 `x-codeup-token` 校验（handler.py::verify_token），
+# 不接受 `x-gitlab-token` 作为替代——多认一个头就是多一条绕过面。
+REDACTED_HEADERS = ("x-codeup-token", "x-gitlab-token")
 
 
 def _redacted_headers(headers):
-    return {k: (f"<redacted len={len(v or '')}>" if k.lower() == TOKEN_HEADER else v)
+    return {k: (f"<redacted len={len(v or '')}>" if k.lower() in REDACTED_HEADERS else v)
             for k, v in (headers or {}).items()}
 
 
