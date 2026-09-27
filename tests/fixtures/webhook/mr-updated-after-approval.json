@@ -1,0 +1,65 @@
+{
+  "object_attributes": {
+    "work_in_progress": false,
+    "last_commit": {
+      "author": {
+        "name": "Demo User",
+        "email": "user@example.com"
+      },
+      "id": "bd7bed6d814d0d73d36bd366eb27de8796511dbe",
+      "message": "chore(probe): 通过之后再推一次（探 state）\n",
+      "url": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app/commits/bd7bed6d814d0d73d36bd366eb27de8796511dbe",
+      "timestamp": "2026-09-27T16:28:15+08:00"
+    },
+    "local_id": 6,
+    "created_at": "2026-09-27T16:15:59+08:00",
+    "description": "codeup-kiro Phase 2a Task 1：抓取真实 webhook 报文。探测结束后关闭并删分支。",
+    "target_branch": "master",
+    "source_type": "BRANCH",
+    "source": {
+      "web_url": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app",
+      "name": "demo-app",
+      "namespace": "0123456789abcdef01234567",
+      "ssh_url": "git@codeup.aliyun.com:0123456789abcdef01234567/demo-app.git",
+      "visibility_level": 0,
+      "http_url": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app.git"
+    },
+    "source_project_id": 7215683,
+    "title": "[probe] P2a-08 webhook 探测（Task 1，可关闭）",
+    "url": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app/change/6",
+    "source_branch": "probe/p2a08-20260927",
+    "target": {
+      "web_url": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app",
+      "name": "demo-app",
+      "namespace": "0123456789abcdef01234567",
+      "ssh_url": "git@codeup.aliyun.com:0123456789abcdef01234567/demo-app.git",
+      "visibility_level": 0,
+      "http_url": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app.git"
+    },
+    "updated_at": "2026-09-27T16:22:04+08:00",
+    "project_id": 7215683,
+    "merge_status": "can_be_merged",
+    "action": "update",
+    "state": "opened",
+    "author_id": 1965996,
+    "biz_id": "ade2dfbed79049409a95c0d52c8bd361",
+    "target_project_id": 7215683,
+    "is_update_by_push": true
+  },
+  "repository": {
+    "name": "demo-app",
+    "description": "Kiro 自动评审联调用示例业务仓库",
+    "git_http_url": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app.git",
+    "git_ssh_url": "git@codeup.aliyun.com:0123456789abcdef01234567/demo-app.git",
+    "url": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app.git",
+    "homepage": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app"
+  },
+  "user": {
+    "avatar_url": "https://example.invalid/avatar.png",
+    "name": "kingdooo",
+    "extern_uid": "6a5ede93bdf2b6df65dec439",
+    "username": "aliyun:kingdooo_hvFXC"
+  },
+  "version": "new",
+  "object_kind": "merge_request"
+}
