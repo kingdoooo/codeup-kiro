@@ -814,8 +814,15 @@ def test_setup_guide_documents_the_exact_secret_unavailable_log_line():
     # 入口接线之后 503 有**两个**来源：校验 webhook 令牌的共享密钥，与在 MR 上留痕用的云效令牌
     # （验签通过之后才取）。二者共用同一行日志形状，只有 var= 不同——手册必须把第二个变量名也
     # 写出来，否则运维按 var= 只认得一半；代码那侧则必须真的共用同一条路径，不是复制出第二份。
-    assert f"`{prefix}YUNXIAO_TOKEN_ID" in guide or "var=YUNXIAO_TOKEN_ID" in guide, \
-        "手册没写出云效令牌取不到时那行日志的变量名"
+    # 按**行**判（不是整篇判）：整篇判会被手册里别处任何一次提及满足，而这件事只有写在
+    # 503 那一行才对运维有用——排错表就是按「现象 → 这一行」读的。
+    row_503 = [ln for ln in guide.splitlines()
+               if ln.startswith("|") and "secret-unavailable" in ln and "503" in ln]
+    assert len(row_503) == 1, "排错表里 503 / secret-unavailable 那一行找不到（或不止一行）"
+    assert "var=YUNXIAO_TOKEN_ID" in row_503[0], \
+        "503 那一行没写出云效令牌取不到时那行日志的变量名"
+    assert f"`{prefix}WEBHOOK_SECRET_ID code=" in row_503[0], \
+        "503 那一行没按真实形状写共享密钥那个变量名"
     assert handler.count("return _secret_unavailable(exc)") == 2, \
         "两个密钥必须共用同一条 503 + 日志路径（复制出第二份迟早在状态码或日志形状上分叉）"
     # 兜底那侧确实不打这行（它抛异常走 EventBridge 重试），手册也照实这么写
@@ -940,14 +947,41 @@ def test_guide_keeps_the_exit_90_log_line_as_a_cross_check_and_quotes_it_verbati
         "5.2 第 2 步没写明两者不一致时以日志里的值为准"
 
 
+# ── Task 5 复审 I-2/I-3：形状检查的代号与手册必须逐个对齐 ──────────────────────
+def test_setup_guide_lists_every_shape_rejection_code_the_dispatcher_can_emit():
+    """代号是运维唯一的分辨依据：代码里加一个代号却不写进手册，那一类拒绝就查不下去；
+    手册写了代码里没有的代号，运维会照着一个永远不出现的现象排查。两边逐个对齐，不是子串抽查。
+    """
+    aws_dir = pathlib.Path(__file__).resolve().parents[1]
+    handler = (aws_dir / "lambda" / "dispatcher" / "handler.py").read_text()
+    guide = (aws_dir / "setup-guide.md").read_text()
+    # 只看 _reject_reason 那个函数体，避免把别处的字符串字面量当成代号
+    import re
+    body = handler.split("def _reject_reason(")[1].split("\ndef ")[0]
+    codes = set(re.findall(r'return "([a-z][a-z-]+)"', body))
+    assert codes == {"org-unset", "clone-url-prefix", "clone-url-chars", "head-sha",
+                     "repo-id", "mr-local-id", "branch"}, codes
+    row = [ln for ln in guide.splitlines() if ln.startswith("|") and "ignored reason=" in ln]
+    assert len(row) == 1, "排错表里 `ignored reason=` 那一行找不到（或不止一行）"
+    for code in codes:
+        assert f"`{code}`" in row[0], f"手册那一行没写代号 {code}"
+
+
 # ── I6：接入手册不得再次与代码脱节 ────────────────────────────────────────────
 def test_setup_guide_matches_the_landed_stacks_and_ingress():
     # 手册曾在三个 stack 已经挂载之后仍写着「cdk deploy 不会创建任何资源」、且没有部署步骤。
     # 这里钉住会随代码变的几处事实：stack 名、入口输出名、摘要键名、探测栈、G7 的两个可用区 ID。
     guide = (pathlib.Path(__file__).resolve().parents[1] / "setup-guide.md").read_text()
-    for stale in ("不挂载任何 stack", "零个 stack", "产出零个", "调度器尚未实现（Task 11）"):
+    for stale in ("不挂载任何 stack", "零个 stack", "产出零个", "调度器尚未实现（Task 11）",
+                  # Task 5 接线之后这几句都成了反话（复审 I-3：手册自己写了「落地后要更新」却没更新）
+                  "不会拉起评审任务", "此刻它还不生效", "要等 Task 5 落地",
+                  "评论命令触发尚未实现", "过滤逻辑随 Task 5 落地"):
         assert stale not in guide, f"手册仍有过时说法：{stale}"
     names = [s.stack_name for s in _app_mod.build_stacks(cdk.App(), _full_cfg())]
     for fact in [*names, "WebhookUrl", "kiro_image_digests", "CodeupKiroIngressProbe",
-                 "use1-az3", "apne1-az3", "cdk bootstrap", "mergeRequestsEvents", "noteEvents"]:
+                 "use1-az3", "apne1-az3", "cdk bootstrap", "mergeRequestsEvents", "noteEvents",
+                 # Task 5 接线之后运维会真的遇到的三样东西：形状检查的日志、分支过滤配错的日志、
+                 # 以及本方两条失败评论的断环标记（名字改了手册必须跟着改）
+                 "ignored reason=", "bad-target-branch-filter",
+                 "kiro-dispatch-failed", "kiro-backstop", "<!-- kiro-"]:
         assert fact in guide, f"手册缺少：{fact}"

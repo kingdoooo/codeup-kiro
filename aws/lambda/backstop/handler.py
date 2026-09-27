@@ -12,6 +12,17 @@ import secret_fetch  # noqa: E402 — 同上，dispatcher 目录下的 secret_fe
 # 认出「这是我们的评审任务」靠这三个变量；读「已回写」标记只用调度器传进来的 LOCK_KEY（I1）。
 WANT = ("CODEUP_REPO_ID", "MR_LOCAL_ID", "HEAD_SHA")
 
+# 本方标记。这条评论会触发 Codeup 的 Note Hook，而调度器按 `<!-- kiro-` 前缀断环（N5）：
+# 没有标记时唯一的防线是「命令短语不是它的子串」，而短语是可配的（配成 `Kiro 代码评审` 就会
+# 命中标题）——那时「任务反复异常结束」会变成兜底评论 → Note Hook → 又一次评审 → 又一条兜底
+# 评论，每次都是新的 note_biz_id，抢锁拦不住。正文写成模块级常量而不是 post_comment 的内联
+# 字面量：单测要用**真实的这一份**去验断环，不能各自抄一份（抄的那份迟早与线上分叉）。
+BACKSTOP_MARKER = "<!-- kiro-backstop -->"
+BACKSTOP_COMMENT = (
+    "## 🤖 Kiro 代码评审\n" + BACKSTOP_MARKER +
+    "\n\n**评审未完成**：评审任务异常结束（可能是拉取镜像失败、"
+    "内存不足或任务超时），脚本没有机会回写失败原因。重新推送可再次触发。")
+
 
 def _matched_override(event):
     """找到真正带着我们这套环境变量的那个 containerOverride——整个字典，含 name，
@@ -85,7 +96,5 @@ def handler(event, context):
     # 整个存在理由就是「宁可多发一条也不沉默」（I10）。
     codeup_min.post_comment(
         os.environ["YUNXIAO_ORG_ID"], env["CODEUP_REPO_ID"], env["MR_LOCAL_ID"],
-        secret_fetch.secret_from_env("YUNXIAO_TOKEN_ID"),
-        "## 🤖 Kiro 代码评审\n\n**评审未完成**：评审任务异常结束（可能是拉取镜像失败、"
-        "内存不足或任务超时），脚本没有机会回写失败原因。重新推送可再次触发。")
+        secret_fetch.secret_from_env("YUNXIAO_TOKEN_ID"), BACKSTOP_COMMENT)
     return {"ok": True, "posted": True}

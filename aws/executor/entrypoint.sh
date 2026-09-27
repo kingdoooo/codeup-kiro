@@ -41,17 +41,33 @@ done
 
 # ── clone 业务库（受信代码决定不受信的树落在哪里）────────────────────
 /bin/rm -rf "$WORKROOT"; /bin/mkdir -p "$WORKROOT"
+# clone 地址来自 webhook 报文（`repository.git_http_url`），而 webhook 鉴权只是一个共享密钥：
+# 谁拿到它就能把地址改成任意主机，凭证 helper 随后会把云效组织令牌交给那台主机——弱密钥就此
+# 升级成组织令牌。调度器的 classify 已经校验过前缀，这里再查一次是深度防御：执行器不假设
+# 上游一定校验过（今天同一个仓库，明天可能不是）。
+repo_url="https://${BUSINESS_REPO_URL#https://}"
+repo_host="${repo_url#https://}"; repo_host="${repo_host%%/*}"
+# 主机必须**逐字**等于 codeup.aliyun.com：`user@evil.com`、`codeup.aliyun.com@evil.com`、
+# `codeup.aliyun.com.evil.com` 都不等，因此全被挡。
+# 消息里绝不回显地址或主机：BUSINESS_REPO_URL 是外部可控的，真被写成
+# `https://oauth2:<令牌>@…` 时回显就等于把令牌打进日志（与 ⑤ 同一条理由）。
+[[ "$repo_host" == "codeup.aliyun.com" ]] || {
+  echo "业务库地址的主机不是 codeup.aliyun.com，拒绝 clone" >&2; exit 91; }
 # 令牌只经 credential helper 回调时从环境读取，不拼进 URL 或任何命令行参数——
 # 命令行参数经 /proc/<pid>/cmdline、ps 等对同机其他进程可见，比日志更容易泄露。
-# `-c credential.helper='...'` 这段值在本行单引号内不会被外层 bash 展开，
+# `-c credential.<url>.helper='...'` 这段值在本行单引号内不会被外层 bash 展开，
 # 传给 git 的 argv 里只有字面的 `$YUNXIAO_TOKEN` 四个字符；git 稍后把它交给 `sh -c` 子进程
 # 执行时才真正展开（该子进程继承本脚本的环境），密文从未出现在任何进程的启动参数里。
 cred_helper='!f() { echo "username=oauth2"; echo "password=$YUNXIAO_TOKEN"; }; f'
-/usr/bin/git -c credential.helper="$cred_helper" \
-  clone --no-tags "https://${BUSINESS_REPO_URL#https://}" \
+# helper **按 URL 限定**（`credential.<url>.helper`），不是全局的 `credential.helper`：全局 helper
+# 对任何主机的凭证询问都会作答，所以一次重定向（或上面那道检查将来被绕过）就足以把令牌交出去。
+# 限定之后 git 只在向 codeup.aliyun.com 询问凭证时才调它，别的主机拿不到任何东西。
+/usr/bin/git -c credential.https://codeup.aliyun.com.helper="$cred_helper" \
+  clone --no-tags "$repo_url" \
   "$WORKROOT/business" >/dev/null 2>&1 \
   || { echo "clone 业务库失败（凭证、网络或仓库权限）" >&2; exit 91; }
-[[ -z "$MR_TARGET_BRANCH" ]] || /usr/bin/git -C "$WORKROOT/business" -c credential.helper="$cred_helper" \
+[[ -z "$MR_TARGET_BRANCH" ]] || /usr/bin/git -C "$WORKROOT/business" \
+  -c credential.https://codeup.aliyun.com.helper="$cred_helper" \
   fetch --no-tags origin "$MR_TARGET_BRANCH" >/dev/null 2>&1 || true
 
 # ── 与 Flow run block 完全相同的环境变量契约（I9 的裁判就看这一段）──

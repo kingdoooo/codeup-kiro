@@ -140,4 +140,46 @@ first_use=$(LC_ALL=C grep -nE '^[^#]*\$\{?MR_TARGET_BRANCH' "$ENTRY" | grep -v '
 assert_eq "$([ -n "$default_line" ] && [ -n "$first_use" ] && [ "$default_line" -lt "$first_use" ] && echo yes)" \
   "yes" "I5：MR_TARGET_BRANCH 的缺省必须在第一次使用之前"
 
+# ⑭ I-2（Task 5 复审）：clone 地址来自 webhook 报文，而 webhook 鉴权只是一个共享密钥——
+#   拿到它就能把地址改成任意主机，凭证 helper 随后会把云效组织令牌交给那台主机（弱密钥升级成
+#   组织令牌）。两道防线都要守：主机逐字比对必须排在 clone 之前，且 helper 必须按 URL 限定。
+host_line=$(LC_ALL=C grep -n '拒绝 clone' "$ENTRY" | head -1 | cut -d: -f1)
+clone_line=$(LC_ALL=C grep -n 'clone --no-tags' "$ENTRY" | head -1 | cut -d: -f1)
+assert_eq "$([ -n "$host_line" ] && [ -n "$clone_line" ] && [ "$host_line" -lt "$clone_line" ] && echo yes)" \
+  "yes" "I-2：主机检查必须存在且排在 clone 之前"
+assert_contains "$code_lines" '-c credential.https://codeup.aliyun.com.helper=' \
+  "I-2：凭证 helper 必须按 URL 限定到 codeup.aliyun.com"
+assert_not_contains "$code_lines" '-c credential.helper=' \
+  "I-2：不得留下未限定主机的全局 credential.helper（任何主机问凭证它都答）"
+assert_eq "$(printf '%s\n' "$code_lines" | LC_ALL=C grep -c -- '-c credential.https://codeup.aliyun.com.helper=')" \
+  "2" "I-2：clone 与 fetch 两处都要限定（少一处就有一条未限定的路径）"
+
+# ⑮ 行为：把主机检查那一段原样抽出来跑，覆盖 userinfo、同后缀域名、缺协议与令牌写进 URL 四类
+host_block=$(awk '/^repo_url=/{f=1} f{print} f&&/拒绝 clone/{exit}' "$ENTRY")
+assert_contains "$host_block" 'exit 91' "⑮ 抽到了主机检查那一段"
+run_host() {  # BUSINESS_REPO_URL → "rc 输出"
+  local out rc=0
+  out=$(BUSINESS_REPO_URL="$1" /bin/bash -c "set -euo pipefail; $host_block
+echo HOST_OK" </dev/null 2>&1) || rc=$?
+  printf '%s %s' "$rc" "$out"
+}
+assert_eq "$(run_host 'https://codeup.aliyun.com/6a5eeddf/demo-app.git')" "0 HOST_OK" \
+  "⑮ 本方主机放行"
+assert_eq "$(run_host 'codeup.aliyun.com/6a5eeddf/demo-app.git')" "0 HOST_OK" \
+  "⑮ 缺协议时补 https 后仍是本方主机，放行"
+for bad in 'https://evil.example/x.git' \
+           'https://codeup.aliyun.com.evil.example/x.git' \
+           'https://user@evil.example/x.git' \
+           'https://codeup.aliyun.com@evil.example/x.git' \
+           'evil.example/x.git' \
+           'https://oauth2:s3cret-token@codeup.aliyun.com/o/x.git'; do
+  assert_contains "$(run_host "$bad")" "91 业务库地址的主机不是" "⑮ 非本方主机拒绝（${bad}）"
+done
+# 拒绝消息里绝不回显地址：BUSINESS_REPO_URL 外部可控，写成 `https://oauth2:<令牌>@…` 时
+# 回显就等于把令牌打进日志（与 ⑤ 同一条理由）。
+assert_not_contains "$(run_host 'https://oauth2:s3cret-token@codeup.aliyun.com/o/x.git')" \
+  's3cret-token' "⑮ 拒绝消息不得回显 URL 里的令牌"
+assert_not_contains "$(run_host 'https://evil.example/x.git')" 'evil.example' \
+  "⑮ 拒绝消息不得回显攻击者可控的地址"
+
 report

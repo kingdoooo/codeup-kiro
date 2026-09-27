@@ -151,7 +151,7 @@ def _stub_secrets(monkeypatch, *responses):
 def test_handler_fetches_the_secret_by_the_name_in_the_env_and_accepts_a_valid_token(monkeypatch):
     # `_runtime_cfg` 换成桩，好让这条用例只管令牌这一段：否则它会连云效令牌一起取，
     # 下面那句「取的是环境变量里那个密钥名」的断言就会指到第二次调用上（接线本身另有用例覆盖）。
-    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg(org_id=FIX_ORG))
     client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
     # 令牌对了之后这次投递没有事件头 → classify 判 ignore（不是「验完签名就返回 200」）。
     assert_alb_response(handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None),
@@ -278,7 +278,7 @@ def test_the_503_log_line_leaks_neither_the_account_id_nor_the_aws_message(monke
 def test_the_success_path_logs_nothing(monkeypatch, capsys):
     # 正向对照：这行日志只在 fail-closed 路径出现。否则每个正常 webhook 都会刷一行，
     # 上面那条「按 code= 过滤」的排错指引就没法用了。
-    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg(org_id=FIX_ORG))
     _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
     handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None)
     assert capsys.readouterr().out == ""
@@ -408,7 +408,11 @@ FIX = pathlib.Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "webh
 def _fix(name):
     return json.loads((FIX / name).read_text())
 
-CFG = {"bot_usernames": ["aliyun:kirobot"], "review_command": 1,
+# 真实 fixture 的组织 id。classify 要用它核对 clone 地址的前缀，所以每个 cfg 都得带上
+# （`_full_cfg()` 的默认 org_id 是 "o1"，那是给不过 classify 的 dispatch 用例用的）。
+FIX_ORG = "0123456789abcdef01234567"
+
+CFG = {"org_id": FIX_ORG, "bot_usernames": ["aliyun:kirobot"], "review_command": 1,
        "command_phrase": "/kiro review", "target_branch_filter": ""}
 
 # 真实头名是 `X-Codeup-Event`（ALB 交给 Lambda 时小写）。计划原文写的 `codeup-event` 永远匹配不上。
@@ -571,7 +575,7 @@ def test_an_empty_command_phrase_does_not_turn_every_comment_into_a_review():
     assert handler_mod.classify(NOTE_HDR, body, dict(CFG, command_phrase=""))[0] == "ignore"
     assert handler_mod.classify(NOTE_HDR, body, dict(CFG, command_phrase=None))[0] == "ignore"
 
-def test_review_command_disabled_ignores_the_command(): 
+def test_review_command_disabled_ignores_the_command():
     # 开关关掉时评论命令一律不生效（review_command 是 0/1 的整数）。
     body = _fix("note-mr-new.json")
     _set_note_text(body, "/kiro review")
@@ -591,11 +595,13 @@ def test_target_branch_filter_also_applies_to_a_comment_command():
 def test_an_invalid_target_branch_filter_fails_closed_with_one_log_line(capsys):
     # 配错的正则原本会让 re.search 抛 re.error 逃出 handler → ALB 502 → Codeup 只看到投递失败
     # （与 C1 同属静默失败）。改成 fail closed + 一行固定形状日志，运维才有痕迹可查。
-    cfg = dict(CFG, target_branch_filter="[unclosed")
+    cfg = dict(CFG, target_branch_filter="[unclosed(?P<x>")
     assert handler_mod.classify(MR_HDR, _fix("mr-opened.json"), cfg)[0] == "ignore"
     out = capsys.readouterr().out
-    assert "bad-target-branch-filter" in out, out
-    assert out.count("\n") == 1, out
+    assert out == "bad-target-branch-filter var=TARGET_BRANCH_FILTER\n", out
+    # docstring 承诺了「日志里不带正则本身」（它是自由文本），这里就得钉住
+    for leak in ("[unclosed", "(?P<x>", "unclosed"):
+        assert leak not in out, (leak, out)
 
 
 # ── 字段抽取：整数变字符串、0 不是「缺失」、任一必需字段缺失就 ignore ─────────────
@@ -702,7 +708,7 @@ TOKEN_SECRET_ID = "codeup-kiro/yunxiao-token-kiro"   # 与 stacks/dispatcher_sta
 def _set_runtime_env(monkeypatch):
     """_runtime_cfg 需要的非敏感环境变量，名字与 dispatcher_stack.py 注入的完全一致。"""
     cfg = _full_cfg()
-    for name, value in (("YUNXIAO_ORG_ID", cfg["org_id"]),
+    for name, value in (("YUNXIAO_ORG_ID", FIX_ORG),   # 真实 fixture 的组织 id：classify 要核对 clone 前缀
                         ("YUNXIAO_TOKEN_ID", TOKEN_SECRET_ID),
                         ("ECS_CLUSTER", cfg["cluster"]),
                         ("ECS_TASK_DEFINITION", cfg["task_definition"]),
@@ -724,7 +730,7 @@ def test_handler_end_to_end_valid_mr_event_launches_a_task(monkeypatch):
     ecs, table = mock.Mock(), mock.Mock()
     ecs.run_task.return_value = {"tasks": [{"taskArn": "arn:task/1"}]}
     monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
-    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg(org_id=FIX_ORG))
     _stub_secrets(monkeypatch, {"SecretString": "s3cret"})  # secrets wave 已提供的助手，走真实 secret_fetch
     resp = handler_mod.handler({
         "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Merge Request Hook"},
@@ -746,7 +752,7 @@ def test_handler_rejects_bad_token_without_reaching_classify(monkeypatch):
 def test_handler_ignores_a_filtered_event_without_launching(monkeypatch):
     ecs, table = mock.Mock(), mock.Mock()
     monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
-    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg(org_id=FIX_ORG))
     _stub_secrets(monkeypatch, {"SecretString": "s3cret"})  # secrets wave 已提供的助手，走真实 secret_fetch
     resp = handler_mod.handler({
         "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Pipeline Hook"},
@@ -793,7 +799,7 @@ def test_handler_end_to_end_reads_a_base64_encoded_body(monkeypatch):
     ecs, table = mock.Mock(), mock.Mock()
     ecs.run_task.return_value = {"tasks": [{"taskArn": "arn:task/1"}]}
     monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
-    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg(org_id=FIX_ORG))
     _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
     raw = (FIX / "mr-opened.json").read_bytes()
     assert_alb_response(handler_mod.handler({
@@ -808,7 +814,7 @@ def test_handler_unparseable_body_is_a_full_alb_response_and_launches_nothing(bo
     # 新增的返回路径要各有一条完整形状断言：ALB 收到缺字段的响应会回 502（G5）。
     ecs, table = mock.Mock(), mock.Mock()
     monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
-    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg(org_id=FIX_ORG))
     _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
     want = "ignored" if body in ("", None) else "unparseable"   # 空正文 → {} → 形状不对 → ignored
     assert_alb_response(handler_mod.handler({
@@ -820,7 +826,7 @@ def test_handler_unparseable_body_is_a_full_alb_response_and_launches_nothing(bo
 def test_handler_ignored_is_a_full_alb_response(monkeypatch):
     ecs, table = mock.Mock(), mock.Mock()
     monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
-    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg(org_id=FIX_ORG))
     _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
     assert_alb_response(handler_mod.handler({
         "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Merge Request Hook"},
@@ -856,3 +862,236 @@ def test_the_codeup_token_never_comes_from_a_plaintext_env_var(monkeypatch):
     cfg = handler_mod._runtime_cfg()
     assert cfg["codeup_token"] == "t0ken"
     assert client.get_secret_value.call_args.kwargs == {"SecretId": TOKEN_SECRET_ID}
+
+
+# ── Fix round 1 / I-1 + M-1：断环按 `<!-- kiro-` 前缀，覆盖本方写出去的每一种评论 ─────────
+# 本方评论至少五种标记：评审汇总 `<!-- kiro-review:`、发布随机串 `<!-- kiro-review-post:`、
+# 历次记录 `<!-- kiro-history:`、行内评论 `<!-- kiro-inline:`（scripts/lib/review-render.sh），
+# 以及调度器与兜底 Lambda 自己的失败评论。只认第一种时，其余几种一旦正文里带上命令短语就会
+# 触发新一轮评审，而机器人与人可以是同一个账号 → 作者名单也断不了环 → 无穷循环。
+BACKSTOP = load_lambda("dispatcher_tests_backstop", ROOT / "lambda" / "backstop" / "handler.py")
+
+# 与本方评论标题重叠的短语：默认短语 `/kiro review` 不会出现在这些评论里，所以只用默认短语测
+# 等于什么都没测（守卫恒绿）。这个取值是 setup-guide 明确允许配的那一类。
+OVERLAP_PHRASE = "Kiro 代码评审"
+LOOP_CFG = dict(CFG, bot_usernames=[], command_phrase=OVERLAP_PHRASE)
+
+
+def _note_with(text):
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, text)
+    return body
+
+
+def test_an_inline_review_comment_is_ignored_even_when_it_quotes_the_command_phrase():
+    # 行内评论的真实标记形状见 review-render.sh:934-945（新格式带指纹/行号/等级）。
+    note = ("这里建议改成 early return，否则和上面的分支重复。\n"
+            "<!-- kiro-inline:" + "a" * 40 + " L3-3 sev=P1 -->")
+    assert OVERLAP_PHRASE not in note      # 这条不靠标题重叠，靠下面那条 cfg 的短语
+    body = _note_with(note + "\n" + OVERLAP_PHRASE)
+    assert handler_mod.classify(NOTE_HDR, body, LOOP_CFG)[0] == "ignore", \
+        "行内评论也是本方评论，必须断环（N5）"
+
+
+def test_the_dispatchers_own_failure_comment_is_ignored():
+    # 用**生产那一份**正文（handler_mod.failed_comment），不抄副本：抄的那份迟早与线上分叉。
+    body = _note_with(handler_mod.failed_comment("ThrottlingException"))
+    assert OVERLAP_PHRASE in body["object_attributes"]["note"], "前提：短语确实与这条评论重叠"
+    assert handler_mod.classify(NOTE_HDR, body, LOOP_CFG)[0] == "ignore", \
+        "拉起任务持续失败时，失败评论不能把自己再触发一轮（每次都是新的 note_biz_id，抢锁拦不住）"
+
+
+def test_the_backstops_own_comment_is_ignored():
+    body = _note_with(BACKSTOP.BACKSTOP_COMMENT)
+    assert OVERLAP_PHRASE in BACKSTOP.BACKSTOP_COMMENT, "前提：短语确实与这条评论重叠"
+    assert handler_mod.classify(NOTE_HDR, body, LOOP_CFG)[0] == "ignore"
+
+
+def test_both_failure_comments_actually_carry_a_kiro_marker():
+    # 直接钉住「标记在正文里」这件事：上面两条用例即使标记被删掉也可能因为别的原因变绿。
+    for text in (handler_mod.failed_comment("X"), BACKSTOP.BACKSTOP_COMMENT):
+        assert handler_mod.REVIEW_MARKER in text, text
+    assert handler_mod.DISPATCH_FAILED_MARKER in handler_mod.failed_comment("X")
+    assert BACKSTOP.BACKSTOP_MARKER in BACKSTOP.BACKSTOP_COMMENT
+    # 两个标记不得与评审脚本那几种混淆：脚本按 `kiro-review:<载荷> run:N` / `kiro-inline:<指纹>`
+    # 这类带载荷的形状找自己的评论，我们这两个不带冒号载荷，匹配不到。
+    for marker in (handler_mod.DISPATCH_FAILED_MARKER, BACKSTOP.BACKSTOP_MARKER):
+        assert ":" not in marker, marker
+
+
+def test_a_human_comment_still_triggers_a_review_with_the_overlapping_phrase():
+    # 正向对照：上面三条不是因为「这个短语永远匹配不上」而绿的。
+    assert handler_mod.classify(NOTE_HDR, _note_with("辛苦，" + OVERLAP_PHRASE),
+                                LOOP_CFG)[0] == "review"
+
+
+# ── Fix round 1 / I-2(a)：报文取来的标量必须过形状，否则 ignore + 一行固定代号 ───────────
+# 这些标量会变成 clone 的 URL、`git checkout` 的参数与锁键。webhook 鉴权只是一个共享密钥，
+# 拿到它就能把 repository.git_http_url 改成任意主机，而执行器的凭证 helper 会把云效组织令牌
+# 交给那台主机——弱密钥就此升级成组织令牌。
+EVIL_URL = "https://evil.example/x.git"
+
+
+def _mr_with(**over):
+    body = _fix("mr-opened.json")
+    for k, v in over.items():
+        if k == "clone_url":
+            body["repository"]["git_http_url"] = v
+        else:
+            body["object_attributes"][k] = v
+    return body
+
+
+def _note_body_with(**over):
+    body = _note_with("/kiro review")
+    for k, v in over.items():
+        if k == "clone_url":
+            body["repository"]["git_http_url"] = v
+        else:
+            body["merge_request"][k] = v
+    return body
+
+
+@pytest.mark.parametrize("url,code", [
+    (EVIL_URL, "clone-url-prefix"),
+    ("http://codeup.aliyun.com/0123456789abcdef01234567/demo-app.git", "clone-url-prefix"),
+    ("https://codeup.aliyun.com.evil.example/0123456789abcdef01234567/x.git", "clone-url-prefix"),
+    ("https://codeup.aliyun.com/other-org/demo-app.git", "clone-url-prefix"),
+    ("https://codeup.aliyun.com/0123456789abcdef01234567x/demo-app.git", "clone-url-prefix"),
+    ("https://codeup.aliyun.com/0123456789abcdef01234567/x@evil.example/y.git", "clone-url-chars"),
+    ("https://codeup.aliyun.com/0123456789abcdef01234567/x.git?upload-pack=y", "clone-url-chars"),
+    ("https://codeup.aliyun.com/0123456789abcdef01234567/x.git#frag", "clone-url-chars"),
+    ("https://codeup.aliyun.com/0123456789abcdef01234567/../../other/x.git", "clone-url-chars"),
+])
+def test_a_crafted_clone_url_is_rejected_with_a_fixed_reason_code(url, code, capsys):
+    assert handler_mod.classify(MR_HDR, _mr_with(clone_url=url), CFG)[0] == "ignore"
+    out = capsys.readouterr().out
+    assert out == f"ignored reason={code}\n", out
+
+
+@pytest.mark.parametrize("field,value,code", [
+    ("last_commit", {"id": "0731ec9"}, "head-sha"),
+    ("last_commit", {"id": "0731EC9D3A8CDDF524BCA91E6FE799B19D0B01F9"}, "head-sha"),
+    ("last_commit", {"id": "--upload-pack=touch /tmp/x"}, "head-sha"),
+    ("last_commit", {"id": "0731ec9d3a8cddf524bca91e6fe799b19d0b01f9x"}, "head-sha"),
+    ("project_id", "7215683; rm -rf /", "repo-id"),
+    ("project_id", "72156８3", "repo-id"),
+    ("local_id", "6a", "mr-local-id"),
+    ("source_branch", "-upload-pack=x", "branch"),
+    ("target_branch", "-upload-pack=x", "branch"),
+    ("target_branch", "mas ter", "branch"),
+    ("source_branch", "feat\tx", "branch"),
+])
+def test_a_crafted_scalar_is_rejected_with_a_fixed_reason_code(field, value, code, capsys):
+    assert handler_mod.classify(MR_HDR, _mr_with(**{field: value}), CFG)[0] == "ignore"
+    assert capsys.readouterr().out == f"ignored reason={code}\n"
+
+
+def test_the_note_path_validates_the_same_way(capsys):
+    assert handler_mod.classify(NOTE_HDR, _note_body_with(clone_url=EVIL_URL), CFG)[0] == "ignore"
+    assert capsys.readouterr().out == "ignored reason=clone-url-prefix\n"
+    assert handler_mod.classify(NOTE_HDR, _note_body_with(last_commit={"id": "x"}),
+                                CFG)[0] == "ignore"
+    assert capsys.readouterr().out == "ignored reason=head-sha\n"
+
+
+def test_a_missing_org_id_fails_closed(capsys):
+    # falsy 但有意义：组织 id 没配就无从判断 clone 地址属不属于我们，绝不放行。
+    for cfg in (dict(CFG, org_id=""), dict(CFG, org_id=None), {k: v for k, v in CFG.items()
+                                                               if k != "org_id"}):
+        assert handler_mod.classify(MR_HDR, _fix("mr-opened.json"), cfg)[0] == "ignore"
+        assert capsys.readouterr().out == "ignored reason=org-unset\n"
+
+
+def test_the_rejection_log_line_never_echoes_the_payload(capsys):
+    # 报文取值是攻击者可控的自由文本：打进日志会污染日志，也可能把令牌带进去
+    # （`https://oauth2:<令牌>@…` 这种形状）。
+    url = "https://oauth2:s3cret-token@evil.example/x.git"
+    handler_mod.classify(MR_HDR, _mr_with(clone_url=url), CFG)
+    out = capsys.readouterr().out
+    assert out == "ignored reason=clone-url-prefix\n", out
+    for leak in ("evil.example", "s3cret-token", "oauth2", url):
+        assert leak not in out, (leak, out)
+
+
+def test_a_normal_review_logs_nothing():
+    # 正向对照：这行日志只在形状不可信时出现，否则正常投递会把它淹掉。
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert handler_mod.classify(MR_HDR, _fix("mr-opened.json"), CFG)[0] == "review"
+        assert handler_mod.classify(NOTE_HDR, _note_with("/kiro review"), CFG)[0] == "review"
+    assert buf.getvalue() == ""
+
+
+def test_the_real_fixtures_pass_the_shape_checks():
+    # 六个真实 fixture 都不能被这道检查误伤（其中两个本来就该 ignore，但不是因为形状）。
+    for name in ("mr-opened.json", "mr-updated.json", "mr-updated-after-approval.json"):
+        assert handler_mod.classify(MR_HDR, _fix(name), CFG)[0] == "review", name
+    assert handler_mod._reject_reason(
+        handler_mod.classify(MR_HDR, _fix("mr-opened.json"), CFG)[1], CFG) == ""
+
+
+# ── Fix round 1 / M-2：_norm 的大小写与空白归一必须有用例 ────────────────────────────
+@pytest.mark.parametrize("state", ["OPENED", " opened ", "Opened", "opened\n"])
+def test_an_uppercase_or_padded_state_is_still_reviewed(state):
+    # Codeup 自己就不统一：MR 报文的 state 是 `opened`，Note 报文里那个是 `OPENED`（Task 1 §1）。
+    # 逐字比一旦对方换了大小写，就是「一条都不评」的静默失败。
+    assert handler_mod.classify(MR_HDR, _set_state(_fix("mr-opened.json"), state), CFG)[0] == "review"
+
+
+@pytest.mark.parametrize("action", ["UPDATE", " update ", "Update"])
+def test_an_uppercase_action_still_hits_the_non_push_filter(action):
+    body = _fix("mr-updated.json")
+    body["object_attributes"]["action"] = action
+    body["object_attributes"]["is_update_by_push"] = False
+    assert handler_mod.classify(MR_HDR, body, CFG)[0] == "ignore"
+
+
+# ── Fix round 1 / 重投链加固：抢锁成功之后，收尾失败也必须回 200 ────────────────────
+# Codeup 对非 2xx 会用同一个 delivery id 立即重投 2 次（Task 1 实测）：抢锁之后让异常冒出去
+# 就是 502，锁可能已经释放，同一个 head 会被再拉起一次。
+def test_post_comment_failure_after_a_runtask_failure_still_returns_200(monkeypatch, capsys):
+    monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
+                        mock.Mock(side_effect=bexc.ClientError(
+                            {"Error": {"Code": "ThrottlingException",
+                                       "Message": f"…{FULL_ARN}…"}}, "PostComment")))
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.side_effect = RuntimeError("Throttled")
+    assert_alb_response(handler_mod.dispatch(ecs, table, _full_cfg(), F), 200, "runtask-failed")
+    out = capsys.readouterr().out
+    assert out == "cleanup-failed step=comment reason=ThrottlingException\n", out
+    assert table.delete_item.called, "留痕失败不影响释放锁（N4）"
+
+
+def test_release_failure_after_a_runtask_failure_still_posts_and_returns_200(monkeypatch, capsys):
+    posted = []
+    monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
+                        lambda *a, **k: posted.append(a[4]) or True)
+    table, ecs = mock.Mock(), mock.Mock()
+    table.delete_item.side_effect = bexc.ClientError(
+        {"Error": {"Code": "ProvisionedThroughputExceededException"}}, "DeleteItem")
+    ecs.run_task.side_effect = RuntimeError("Throttled")
+    assert_alb_response(handler_mod.dispatch(ecs, table, _full_cfg(), F), 200, "runtask-failed")
+    assert capsys.readouterr().out == \
+        "cleanup-failed step=release reason=ProvisionedThroughputExceededException\n"
+    assert posted, "释放锁失败不得连带吞掉 I10 的留痕"
+
+
+def test_the_cleanup_log_line_leaks_neither_the_account_id_nor_the_aws_message(monkeypatch, capsys):
+    monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
+                        mock.Mock(side_effect=DENIED))
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.side_effect = RuntimeError("Throttled")
+    handler_mod.dispatch(ecs, table, _full_cfg(), F)
+    out = capsys.readouterr().out
+    for leak in ("111122223333", "not authorized", "assumed-role", "arn:", FULL_ARN):
+        assert leak not in out, (leak, out)
+    assert out == "cleanup-failed step=comment reason=AccessDeniedException\n", out
+
+
+def test_a_successful_dispatch_logs_no_cleanup_line(capsys):
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "a"}]}
+    handler_mod.dispatch(ecs, table, _full_cfg(), F)
+    assert capsys.readouterr().out == ""

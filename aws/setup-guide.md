@@ -11,10 +11,26 @@
 `CodeupKiroState`（DynamoDB 幂等锁 + 映射表）、`CodeupKiroExecutor`（VPC、ECS 集群、Fargate 任务定义、
 执行器镜像）、`CodeupKiroDispatcher`（webhook 入口、调度 Lambda、兜底 Lambda），`cdk deploy` 会真的创建
 这些资源（第 6 节）。已实现的代码路径：webhook 共享密钥校验、幂等抢锁、`RunTask` 与失败回写、执行器
-entrypoint（N1 镜像摘要门、clone、调用评审脚本、「已回写」标记）、任务异常结束的兜底回写。**尚未实现**：
-调度器的事件过滤与把 webhook 接到「抢锁 → `RunTask`」这一步（实现计划 Task 5，依赖第 6.1 节的真实报文
-探测），以及评论命令（Task 13）。所以**此刻部署后，合法的 webhook 只会得到 200，不会拉起评审任务**——
-这是预期现象，不是故障；Task 5 落地后本段与第 4.3 节对应两行要随之更新。
+entrypoint（N1 镜像摘要门、clone、调用评审脚本、「已回写」标记）、任务异常结束的兜底回写。
+
+**调度链路已经接通**：合法的 webhook 会走完「校验共享密钥 → 事件过滤 → 幂等抢锁 → `RunTask`」并真的
+拉起评审任务，`RunTask` 失败时释放锁并在 MR 上留痕。所以第 4.3 节「抢锁冲突」「评审未启动」「兜底回写」
+三类现象在真实部署上都能复现。事件过滤的判据（与真实报文一一对应，见第 6.1 节的探测结论）：
+
+- 事件头 `X-Codeup-Event` 为 `Merge Request Hook`、且 `state` 为 `opened` → 评审。「批准」（`accepted`）
+  不评审；批准之后再推送会回到 `opened`，正常评审。只改标题这类 `action: update` 且
+  `is_update_by_push: false` 的事件不评审（没有新代码）。
+- 事件头为 `Note Hook`、`REVIEW_COMMAND=1`、评论正文含触发短语、且不是系统评论、不是本方评论 → 评审。
+- 其余事件类型与认不出形状的报文一律忽略（HTTP 200、正文 `ignored`），不猜。
+- 报文里的取值还要过一道形状检查（clone 地址必须是 `https://codeup.aliyun.com/<组织 id>/…`、提交 SHA
+  必须是 40 位小写十六进制、分支名不得以 `-` 开头等）。不通过时忽略并留一行
+  `ignored reason=<代号>` 日志，代号见第 4.3 节。
+
+**尚未实现**：评论命令只落地了**调度器这一半**——`REVIEW_COMMAND=1` 时，MR 上带触发短语的评论会通过
+过滤、抢锁（键里多一段评论 id，所以同一个提交可以被重复触发）并拉起一次评审任务；但**执行器与评审脚本
+那一半还没有**：容器拿到的环境变量与 MR 事件完全一样，脚本不知道自己是被评论触发的，也不会回复那条
+评论（实现计划 Task 13）。所以此刻在 MR 上评论触发短语，效果等同于「重新跑一次评审」，评审结果照常以
+一条新的汇总评论呈现。
 
 ## 1. 前提条件与数据治理确认
 
@@ -167,8 +183,8 @@ aws secretsmanager create-secret \
 | `KIRO_TIMEOUT` | `kiro_timeout` | Kiro 超时秒数，默认 `900`，只收纯数字 |
 | `DIFF_SIZE_LIMIT` | `diff_size_limit` | diff 直传阈值字节数，默认 `307200`，只收纯数字 |
 | `MAX_COMMENT_BYTES` | `max_comment_bytes` | 单条评论字节上限，默认 `60000` |
-| `TARGET_BRANCH_FILTER` | `target_branch_filter` | 调度器：目标分支正则，空 = 全部 MR。环境变量已随调度 Lambda 部署，**过滤逻辑随 Task 5 落地**——此刻它还不生效 |
-| `REVIEW_COMMAND` / `REVIEW_COMMAND_PHRASE` | `review_command` / `command_phrase` | 调度器：评论命令开关（`0`/`1`）与触发短语（默认 `/kiro review`）。**评论命令触发尚未实现（Task 13）**：预期行为是在 MR 上评论这句短语即可重新评审，取代 Flow 档位「只能重跑流水线」的限制 |
+| `TARGET_BRANCH_FILTER` | `target_branch_filter` | 调度器：目标分支正则，空 = 全部 MR。**已生效**：非空时只有目标分支匹配这个正则的 MR 事件与评论命令才被受理，不匹配的一律忽略（HTTP 200、正文 `ignored`，不拉起任务）。用的是 Python `re.search`（部分匹配），要锚定请自己写 `^`/`$`。正则编译不过时 **fail closed**：不评审，并在调度 Lambda 日志里留一行 `bad-target-branch-filter var=TARGET_BRANCH_FILTER`（日志里不回显正则本身）——配错时是「一条都不评」而不是「全评」 |
+| `REVIEW_COMMAND` / `REVIEW_COMMAND_PHRASE` | `review_command` / `command_phrase` | 调度器：评论命令开关（`0`/`1`）与触发短语（默认 `/kiro review`）。**调度器这一半已生效**：开关为 `1` 时，MR 上正文含这句短语的评论会拉起一次评审（锁键里多一段评论 id，所以同一个提交可以被重复触发）；开关为 `0` 时 Note Hook 一律忽略。**执行器与评审脚本那一半尚未实现（Task 13）**：脚本不知道自己是被评论触发的，也不会回复那条评论，结果照常以一条新的汇总评论呈现。短语为空串时 fail closed（一律不受理），否则「空串是任何正文的子串」会让每条评论都触发评审。**短语不要配成会出现在本方评论里的词**（例如 `Kiro 代码评审`）：本方评论靠 `<!-- kiro-` 标记断环，不靠短语，但把短语配成常见词会让任何转述都触发评审 |
 
 ## 5. 镜像构建与摘要登记
 
@@ -359,12 +375,15 @@ aws/.venv/bin/pip install -r aws/requirements.txt
 | 评审任务确实异常结束了，MR 上却**没有**「兜底」类评论 | 兜底 Lambda 自己失败了。它取云效令牌（`codeup-kiro/yunxiao-token-kiro`）的方式与调度器相同，但**不打调度器那行固定格式的日志**（见下面 503 那一行）：取不到令牌时它直接抛 `SecretUnavailable`，所以 CloudWatch 里看到的是一条 traceback（末行 `SecretUnavailable: YUNXIAO_TOKEN_ID`，其上还会带原始 AWS 错误正文，该正文可能含角色 ARN 与账号 ID）。抛出是有意的：这是 EventBridge 的异步调用，抛出会走 Lambda 自己的重试，限流之类能自愈；吞掉才会变成真正的沉默。最常见的成因是兜底角色缺 `secretsmanager:GetSecretValue`。另外查 `Errors`/`Throttles` 指标与 EventBridge 规则是否匹配到了事件 |
 | MR 上出现「兜底」类回写评论（评审没有正常结论，也没有评审引擎自己的失败原因） | 与上一条不同：`RunTask` 成功了，任务真的起来过，但没能跑到评审脚本自己汇报结果那一步就死掉了——常见原因是镜像拉取失败（registry 权限、镜像被删）、容器 OOM（`ephemeral_storage`/内存配置不够大 diff 的仓库）、或任务在 `KIRO_TIMEOUT` 之外的更外层超时（任务本身的运行时长上限）被杀。这条评论是任务级的兜底，不经过评审脚本自己的失败评论路径，所以看不到评审脚本给出的具体原因 |
 
+| 投递返回 200，正文 `ignored`，但没有任何评审任务被拉起 | 调度器**受理了但按设计忽略了**这次事件。常见且正常的原因：事件类型不是 `Merge Request Hook` / `Note Hook`；MR 的 `state` 不是 `opened`（批准、合并、关闭都在这一类）；`action: update` 且 `is_update_by_push: false`（只改了标题之类，没有新代码）；目标分支不匹配 `TARGET_BRANCH_FILTER`；Note Hook 但 `REVIEW_COMMAND=0`、正文没有触发短语、是系统评论、或是本方评论。这些**都不留日志**（否则正常流量会把真正的信号淹掉）。想确认是哪一类，先按上面几条对照报文 |
+| 投递返回 200 `ignored`，且日志里有一行 `ignored reason=<代号>` | 报文里的取值没过形状检查——**这不是正常流量**，要么有人拿着 webhook 共享密钥在改报文（该密钥可重放、无正文绑定，所以它只能证明「是我们的 webhook」），要么 Codeup 的报文格式变了。代号是固定枚举：`clone-url-prefix`（clone 地址不是 `https://codeup.aliyun.com/<组织 id>/…`——主机或组织 id 不对）、`clone-url-chars`（地址里有 `@`、`?`、`#`、`..`、空白或控制字符）、`head-sha`（提交 SHA 不是 40 位小写十六进制）、`repo-id` / `mr-local-id`（不是纯数字）、`branch`（分支名为空、以 `-` 开头，或含空白/控制字符）、`org-unset`（`YUNXIAO_ORG_ID` 没配好——这一个是我们自己的配置问题）。日志里只有代号，**不回显报文里的任何取值**（那是外部可控的自由文本，回显等于把它打进日志，还可能把 `https://oauth2:<令牌>@…` 里的令牌一起带进去）。处置：`org-unset` 查函数配置；其余先确认这次投递是不是真的来自云效，再考虑轮换共享密钥 |
+| 担心「机器人评论触发新评审」的死循环 | 不会发生，两道防线：① 作者用户名在 `BOT_USERNAMES` 名单里的评论一律忽略；② **正文含 `<!-- kiro-` 开头的 HTML 注释标记的评论一律忽略**。第二道是承重的那道——本方机器人与人**可以是同一个账号**（Task 1 在真实 demo 里实测到：Flow 档位的评审评论作者就是 MR 作者本人），那时名单要么没有这个人（断不了环）、要么有（连人发的命令一起吞掉）。本方写出去的每一种评论都带 `<!-- kiro-` 前缀的标记：评审汇总 `kiro-review:`、发布随机串 `kiro-review-post:`、历次记录 `kiro-history:`、行内评论 `kiro-inline:`、调度器的「评审未启动」`kiro-dispatch-failed`、兜底的「评审未完成」`kiro-backstop`。代价：人在评论里原样贴出这类标记时，那条评论里的触发短语也会被忽略 |
 | Codeup 的 webhook 投递记录显示 401 | Codeup 里填的 Secret Token 与 `codeup-kiro/webhook-secret` 的值不一致，或请求根本没带 `X-Codeup-Token` 头（没带令牌时调度器在取密钥之前就回 401）。**改密钥的值不需要重新部署**：两个 Lambda 的环境变量里只有密钥名，值在调用时取。但取到的值**按执行环境缓存且没有 TTL**，而 Lambda 不承诺执行环境的最长寿命——持续有流量时旧值可能存活数小时，没有任何保证的上限。要让新值立刻生效，改一次函数配置（任何无害改动）强制换执行环境 |
 | Codeup 的 webhook 投递记录显示 503，正文 `secret-unavailable` | 调度器取不到它要的密钥：`codeup-kiro/webhook-secret`（校验 webhook 令牌用），或 `codeup-kiro/yunxiao-token-kiro`（在 MR 上留痕用的云效令牌，验签通过之后才取，所以只有带对令牌的投递才会碰到它）。这是 fail-closed 的显式响应（绝不放行），且**每次都会在调度 Lambda 的日志里留一行固定形状的记录**：`secret-unavailable var=WEBHOOK_SECRET_ID code=<代号>`，取不到云效令牌时同一行写 `var=YUNXIAO_TOKEN_ID`（按 `code=` 过滤定位成因，按 `var=` 定位是哪一个密钥）。代号只有固定几种，正是四类成因的区分：`env-unset`（环境变量没配或为空，几乎只会出现在手改过函数配置之后）、`empty-value`（密钥存在但值为空）、`ResourceNotFoundException`（密钥不存在或名字不符）、`AccessDeniedException`（Lambda 角色缺 `secretsmanager:GetSecretValue`）、`ThrottlingException`（Secrets Manager 限流）。日志里只有变量名与代号，不含密钥值、账号 ID 或 AWS 错误正文。**这次事件已经丢了，不会自己回来**：Codeup 对 503 的重投行为已实测（见下一行）——同一次投递在约 1 秒内一共来 3 次就不再来了，`ThrottlingException` 这种亚秒级抖动有机会在第 2/3 次自愈，而上面四类配置/权限成因在 1 秒内不可能修好。所以处置顺序是：按 `code=` 定位并修好配置，然后**主动重新触发**——往 MR 的源分支再推一次提交（`git commit --allow-empty` 也算）即可产生一次新投递。云效控制台的 webhook 页面是否提供「重新发送」按钮本轮没有核实，不要依赖它 |
 | 同一个 `X-Codeup-Delivery` 的投递在日志里出现了 2~3 次 | **预期行为，不是错误**。实测的是 **503**（Task 1，只测了这一个状态码）：回 503 时 Codeup 立即重试，同一个 delivery id 在约 1 秒内最多到 3 次，之后不再重投（观察 10 分钟以上）。**其他非 2xx（404 / 502 / 504）是否同样重投没有测过**，所以不要把「最多 3 次」当成所有状态码的上界。幂等抢锁（`ReviewLock` 表，键是「仓库#MR#提交」）把这几次吸收掉，只有第一次能真正拉起 Fargate 任务；`X-Codeup-Delivery` 本身也可以当投递级去重的辅助键 |
 | Codeup 的 webhook 投递记录显示 404 或连接超时，调度 Lambda 没有任何日志 | 请求没有到达 Lambda：方法不是 `POST`（监听器默认动作固定返回 404，只有 `POST` 转发给调度器），或 URL 填成了 ALB 域名（内网 ALB 从公网连不上，只能经 CloudFront 访问）——URL 必须是 `WebhookUrl` |
 | Codeup 的 webhook 投递记录显示 502/504 | 502：调度 Lambda 抛了异常或返回了不完整的响应（查 Lambda 日志）；504：Lambda 超过 CloudFront 回源读超时（30 秒）仍未返回。两种情况下请求可能已被处理，Codeup 却记为失败。**Codeup 对 502/504 会不会重投没有实测过**（实测过的只有 503，见上面那一行），所以这里只能说：如果它重投，会被幂等锁挡住；如果它不重投，这次事件就丢了，得主动重新触发 |
 
-「抢锁冲突」「评审未启动」「兜底回写」三行对应的代码已经实现（`aws/lambda/dispatcher/handler.py`、
-`aws/lambda/backstop/handler.py`），但调度器接到 webhook 后走到抢锁这一步要等 Task 5 落地（见本文开头），
-在那之前真实部署上复现不出这三类现象；落地后请对照真实日志核对措辞，不一致时以代码为准并更新本表。
+「抢锁冲突」「评审未启动」「兜底回写」三行对应的代码都已实现且已接到 webhook 入口上
+（`aws/lambda/dispatcher/handler.py`、`aws/lambda/backstop/handler.py`），真实部署上这三类现象都能复现。
+本表的措辞按代码写，真实日志与它不一致时以代码为准并更新本表。

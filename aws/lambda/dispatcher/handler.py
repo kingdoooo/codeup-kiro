@@ -18,8 +18,20 @@ TOKEN_HEADER = "x-codeup-token"
 EVENT_HEADER = "x-codeup-event"
 MR_EVENT = "merge request hook"
 NOTE_EVENT = "note hook"
-# 本方评审评论的标记（scripts/lib/review-render.sh 写入 `<!-- kiro-review:<sha> run:N -->`）。
-REVIEW_MARKER = "<!-- kiro-review:"
+# 本方评论的标记**前缀**，不是某一种标记：评审脚本至少写四种（`<!-- kiro-review:<sha> run:N -->`、
+# `<!-- kiro-review-post:<nonce> -->`、`<!-- kiro-history:[…] -->`、行内评论的
+# `<!-- kiro-inline:<指纹> L<起>-<止> sev=P<n> -->`，见 scripts/lib/review-render.sh），
+# 调度器与兜底 Lambda 自己的失败评论又各有一种。只认 `<!-- kiro-review:` 的话，行内评论（AWS 档位
+# 有 inline_comment 开关）一旦正文里带上命令短语就会触发新一轮评审，而机器人与人可以是同一个账号
+# （Task 1 实测）→ 作者名单也断不了环 → 无穷循环。按前缀认，本方写出去的任何一种标记都能断环。
+# 模型文本里的 `<!--` 已被 scripts 侧 _sanitize_md 转义，所以不受信内容伪造不出这一行。
+REVIEW_MARKER = "<!-- kiro-"
+# 调度器与兜底 Lambda 的失败评论各自的标记。它们不经评审脚本渲染，所以必须自己带上，否则
+# 「拉起任务持续失败」就会变成：失败评论 → Note Hook → 又一次评审 → 又一条失败评论（每次都是
+# 新的 note_biz_id，抢锁拦不住）。取值刻意不带冒号参数，与脚本那几种（`kiro-xxx:<载荷>`）区分开。
+# （兜底 Lambda 的那一个叫 `<!-- kiro-backstop -->`，定义在 backstop/handler.py 里——它自己发那条
+# 评论，标记跟着发出去的地方走；断环这侧按前缀认，不需要逐个枚举。）
+DISPATCH_FAILED_MARKER = "<!-- kiro-dispatch-failed -->"
 
 
 def token_header(headers):
@@ -108,6 +120,59 @@ def _fields_from(mr, repo):
     return fields
 
 
+# 报文取来的标量在往下走之前必须逐个过形状：它们会变成 clone 的 URL、`git checkout` 的参数、
+# 锁键的组成部分。webhook 鉴权只是一个共享密钥（可重放、无正文绑定），谁拿到它就能把
+# `repository.git_http_url` 写成任意主机——执行器的 credential helper 会把云效组织令牌交给那台
+# 主机，等于把弱密钥升级成组织令牌。执行器那侧另有一道主机检查（深度防御），这里是最便宜的一道。
+CODEUP_HOST = "codeup.aliyun.com"
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_DIGITS_RE = re.compile(r"^[0-9]+$")   # 不用 str.isdigit()：它对 "٣"、"²" 这类也为真
+_CTRL_OR_SPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
+_URL_UNSAFE_RE = re.compile(r"[@?#\s\x00-\x1f\x7f]|\.\.")
+
+
+def _reject_reason(fields, cfg):
+    """报文形状不可信时给一个固定代号，可信时给 ""。代号是固定枚举，不含报文里的任何取值。"""
+    org = str(cfg.get("org_id") or "")
+    if not org:
+        return "org-unset"          # 组织 id 没配就无从判断 clone 地址属不属于我们，fail closed
+    if not fields["clone_url"].startswith(f"https://{CODEUP_HOST}/{org}/"):
+        return "clone-url-prefix"   # 主机 + 组织都必须是我们自己的
+    if _URL_UNSAFE_RE.search(fields["clone_url"]):
+        # `@` 会让 `https://codeup.aliyun.com/<org>/x@evil/…` 之类把 userinfo 挪到前面；
+        # `?`/`#`/`..` 可以改写 git 看到的路径；空白与控制字符能把一行参数拆成两行。
+        return "clone-url-chars"
+    if not _SHA_RE.match(fields["head_sha"]):
+        return "head-sha"           # 会变成 `git checkout` 的参数：只接受 40 位小写十六进制
+    if not _DIGITS_RE.match(fields["repo_id"]):
+        return "repo-id"
+    if not _DIGITS_RE.match(fields["mr_local_id"]):
+        return "mr-local-id"
+    for key in ("source_branch", "target_branch"):
+        value = fields[key]
+        # 以 `-` 开头的分支名会被 git 当成选项；空白与控制字符同上。空串 _scalar 已经挡过一次，
+        # 这里再判一次是因为这个函数是「往下走之前的最后一道」，不依赖上游的顺序。
+        if not value or value.startswith("-") or _CTRL_OR_SPACE_RE.search(value):
+            return "branch"
+    return ""
+
+
+def _accept(fields, cfg):
+    """最后一道形状检查。不可信时打一行固定形状日志并返回 False。
+
+    为什么要留日志：这条路径与「正常的 ignore」（approve、非推送 update、分支不匹配）在响应上
+    完全一样（200 ignored），而它意味着有人拿着 webhook 密钥在改报文，或者报文格式变了——两种
+    都必须能在日志里看见。形状固定、只有代号，按 `reason=` 过滤；绝不打印报文里的取值（那是
+    攻击者可控的自由文本，会污染日志，也可能带令牌）。正常的 ignore 一行都不打（否则这条
+    信号就被淹没了）。
+    """
+    reason = _reject_reason(fields, cfg)
+    if reason:
+        print(f"ignored reason={reason}", flush=True)
+        return False
+    return True
+
+
 def _branch_allowed(target, cfg):
     """目标分支过滤：过滤器为空表示不过滤。
 
@@ -149,6 +214,8 @@ def classify(headers, body, cfg):
                 and _dig(body, "object_attributes", "is_update_by_push") is False):
             return "ignore", None            # 非推送的 update 没有新代码；字段缺失时不走这条
         if not _branch_allowed(fields["target_branch"], cfg):
+            return "ignore", None
+        if not _accept(fields, cfg):
             return "ignore", None
         return "review", fields
 
@@ -194,6 +261,8 @@ def classify(headers, body, cfg):
         fields["dedupe_extra"] = _scalar(_dig(body, "object_attributes", "note_biz_id")) or ""
         if not fields["dedupe_extra"]:
             return "ignore", None            # 没有评论 id 就无法去重，宁可不评
+        if not _accept(fields, cfg):
+            return "ignore", None
         return "review", fields
 
     return "ignore", None
@@ -397,6 +466,20 @@ def _failure_reason(exc):
     return type(exc).__name__
 
 
+def failed_comment(reason):
+    """「评审未启动」评论的正文。正文里必须带本方标记（DISPATCH_FAILED_MARKER）——这条评论会触发
+    Note Hook，没有标记时唯一的防线是「命令短语不是它的子串」，而短语是可配的（比如配成
+    `Kiro 代码评审`）：那时拉起任务持续失败就变成失败评论 → Note Hook → 又一次评审 → 又一条失败
+    评论，每次都是新的 note_biz_id，抢锁拦不住（N5）。
+
+    标记单独占一行、紧跟标题：与评审脚本渲染的评论形状一致，且不会与脚本的
+    `<!-- kiro-review:<sha> run:N -->` 混淆（后者带载荷，正则匹配不到这一行）。
+    """
+    return ("## 🤖 Kiro 代码评审\n" + DISPATCH_FAILED_MARKER +
+            "\n\n**评审未启动**：调度器无法拉起评审任务。\n\n"
+            f"原因：`{reason}`。稍后重新推送可再次触发。")
+
+
 def dispatch(ecs, table, cfg, fields):
     """抢锁 → 拉起任务；RunTask 失败时释放锁并在 MR 上留痕（I10），HTTP 仍返回 200
     以免 Codeup 因为我们的内部失败重投同一个 webhook。
@@ -408,10 +491,26 @@ def dispatch(ecs, table, cfg, fields):
         run_task(ecs, cfg, fields, key)
     except Exception as exc:  # noqa: BLE001 — 拉起任务的失败面很杂（限流/无容量/瞬时网络错误），
                                # 都要落到同一条「释放锁 + 留痕」的兜底路径上，不能只挑几种已知异常
-        release(table, key)
-        codeup_min.post_comment(
-            cfg["org_id"], fields["repo_id"], fields["mr_local_id"], cfg["codeup_token"],
-            "## 🤖 Kiro 代码评审\n\n**评审未启动**：调度器无法拉起评审任务。\n\n"
-            f"原因：`{_failure_reason(exc)}`。稍后重新推送可再次触发。")
+        # 抢锁已经成功，这次投递的副作用已经落地。收尾（释放锁、留痕）再抛异常就会让 handler
+        # 以 502 结束，而 Codeup 对非 2xx 会用**同一个** delivery id 立即重投 2 次（Task 1 实测）：
+        # 锁此时可能已经释放，于是同一个 head 可能被再拉起一次（RunTask 报错但服务端其实已经拉起
+        # 的那种客户端错误下，就是两个任务同时评同一个 MR）。所以抢锁之后的每条路径都必须回 200，
+        # 收尾失败只留一行固定形状的代号。两步各自 try：释放锁失败不该连带吞掉 I10 的留痕。
+        _cleanup(release, table, key, step="release")
+        _cleanup(codeup_min.post_comment, cfg["org_id"], fields["repo_id"],
+                 fields["mr_local_id"], cfg["codeup_token"],
+                 failed_comment(_failure_reason(exc)), step="comment")
         return _resp(200, "runtask-failed")
     return _resp(200, "dispatched")
+
+
+def _cleanup(fn, *args, step):
+    """跑一步收尾动作；它抛异常时只打一行固定代号，绝不让异常冒出 dispatch。
+
+    理由见 dispatch 里那段注释：抢锁之后的 502 会招来 Codeup 的立即重投。代号经 _failure_reason
+    取（固定枚举），不带 AWS 错误正文（含角色 ARN 与账号 ID）。
+    """
+    try:
+        fn(*args)
+    except Exception as exc:  # noqa: BLE001 — 收尾这一步的失败面同样很杂，且无论哪种都不能改变响应
+        print(f"cleanup-failed step={step} reason={_failure_reason(exc)}", flush=True)
