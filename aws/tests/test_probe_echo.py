@@ -129,8 +129,12 @@ def test_production_dispatcher_still_accepts_only_x_codeup_token():
     # 正向对照：同一个值换到 x-codeup-token 就能过校验，且那条路径**真的会**去取密钥——
     # 否则上面那个 401 可能只是「这个 handler 什么都 401」。
     assert disp.verify_token({"X-Codeup-Token": secret}, secret) is True
+    # `_runtime_cfg` 换成桩：验签通过之后入口会继续接线，而 `_runtime_cfg` 也经
+    # `secret_from_env` 取云效令牌（还要读一串环境变量）。不 stub 的话下面那句断言会从
+    # 「只为 WEBHOOK_SECRET_ID 取过密钥」变成两次调用，本用例的焦点（校验面只认一个头名）就跑偏了。
     with mock.patch.object(disp.secret_fetch, "secret_from_env",
-                           return_value=secret) as fetched:
+                           return_value=secret) as fetched, \
+            mock.patch.object(disp, "_runtime_cfg", return_value=_full_cfg()):
         assert disp.handler({"headers": {"X-Codeup-Token": secret}}, None)["statusCode"] == 200
     assert fetched.call_args_list == [mock.call("WEBHOOK_SECRET_ID")], fetched.call_args_list
     # 取值层同样只认一个头名

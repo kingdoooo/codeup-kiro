@@ -58,6 +58,40 @@ def load_lambda(module_name, path):
 builtins.load_lambda = load_lambda
 
 
+def _set_state(body, state):
+    """改 MR Hook 报文副本的 MR 状态。
+
+    真实字段路径取自 Task 1 的结论文件（`.scratch/codeup-kiro-phase2a/probe-results/README.md` §1）：
+    MR Hook 是 `object_attributes.state`。**不按文档猜**——文档写的是旧版报文，真实投递是 `version: new`。
+    Note Hook 报文里另有一个 `object_attributes.state`（评论自己的状态，观测值 `OPENED`）与
+    `merge_request.state`，与这里不是同一套取值，所以这个助手只用于 MR Hook 报文。
+    """
+    body["object_attributes"]["state"] = state
+    return body
+
+
+def _set_note_author(body, username):
+    """改 Note Hook 报文副本的评论作者（真实路径 `user.username`；`object_attributes.author_id` 是数字 id）。"""
+    body["user"]["username"] = username
+    return body
+
+
+def _set_note_system(body, flag):
+    """改 Note Hook 报文副本的「是否系统评论」（真实路径 `object_attributes.system`）。"""
+    body["object_attributes"]["system"] = flag
+    return body
+
+
+def _set_note_text(body, text):
+    """改 Note Hook 报文副本的评论正文（真实路径 `object_attributes.note`）。"""
+    body["object_attributes"]["note"] = text
+    return body
+
+
+for _fn in (_set_state, _set_note_author, _set_note_system, _set_note_text):
+    setattr(builtins, _fn.__name__, _fn)
+
+
 def assert_alb_response(r, status, body):
     """ALB Lambda target 的完整响应形状（G5）。调度器每条返回路径、回显 Lambda 都用它断言。
 

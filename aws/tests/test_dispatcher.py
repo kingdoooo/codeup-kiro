@@ -148,9 +148,14 @@ def _stub_secrets(monkeypatch, *responses):
     return client
 
 
-def test_handler_fetches_the_secret_by_the_arn_in_the_env_and_accepts_a_valid_token(monkeypatch):
+def test_handler_fetches_the_secret_by_the_name_in_the_env_and_accepts_a_valid_token(monkeypatch):
+    # `_runtime_cfg` 换成桩，好让这条用例只管令牌这一段：否则它会连云效令牌一起取，
+    # 下面那句「取的是环境变量里那个密钥名」的断言就会指到第二次调用上（接线本身另有用例覆盖）。
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
     client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
-    assert_alb_response(handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None), 200, "")
+    # 令牌对了之后这次投递没有事件头 → classify 判 ignore（不是「验完签名就返回 200」）。
+    assert_alb_response(handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None),
+                        200, "ignored")
     assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ID}
 
 
@@ -273,6 +278,7 @@ def test_the_503_log_line_leaks_neither_the_account_id_nor_the_aws_message(monke
 def test_the_success_path_logs_nothing(monkeypatch, capsys):
     # 正向对照：这行日志只在 fail-closed 路径出现。否则每个正常 webhook 都会刷一行，
     # 上面那条「按 code= 过滤」的排错指引就没法用了。
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
     _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
     handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None)
     assert capsys.readouterr().out == ""
@@ -314,12 +320,14 @@ def test_dispatch_dispatched_is_a_full_alb_response():
 
 
 def test_every_return_in_handler_and_dispatch_goes_through_resp():
-    # 静态守卫，管住以后新增的返回路径（Task 5 会加 unparseable/ignored 两条）：handler()/dispatch()
-    # 里每一个 return 都必须是 `_resp(...)`；handler 另允许 `return dispatch(...)`（它自己也受这条约束）。
+    # 静态守卫，管住以后新增的返回路径（Task 5 已加 unparseable/ignored 两条）：handler()/dispatch()
+    # 里每一个 return 都必须是 `_resp(...)`；handler 另允许 `return dispatch(...)` 与
+    # `return _secret_unavailable(...)`——这两个自己也在这份名单里受同一条约束。
     # 行为用例只覆盖今天存在的路径，新路径写成裸 dict 时只有这条会先红。
     import ast
     tree = ast.parse(pathlib.Path(handler_mod.__file__).read_text())
-    allowed = {"handler": {"_resp", "dispatch"}, "dispatch": {"_resp"}}
+    allowed = {"handler": {"_resp", "dispatch", "_secret_unavailable"},
+               "dispatch": {"_resp"}, "_secret_unavailable": {"_resp"}}
     seen = set()
     for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in allowed):
         seen.add(fn.name)
@@ -390,3 +398,413 @@ def test_runtask_other_error_comment_names_the_type_only(monkeypatch):
     body = _posted_reason(monkeypatch, RuntimeError("internal detail 10.0.0.12"))
     assert "`RuntimeError`" in body
     assert "internal detail" not in body and "10.0.0.12" not in body, body
+
+
+# ── Task 5：事件过滤（classify）──────────────────────────────────────────────
+# 六个 fixture 是 Task 1 抓到的**真实投递**（唯一改动是把 email 换成 user@example.com），
+# 字段路径按结论文件 §1，不按文档猜：文档写的是旧版报文，真实投递是 `version: new`。
+FIX = pathlib.Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "webhook"
+
+def _fix(name):
+    return json.loads((FIX / name).read_text())
+
+CFG = {"bot_usernames": ["aliyun:kirobot"], "review_command": 1,
+       "command_phrase": "/kiro review", "target_branch_filter": ""}
+
+# 真实头名是 `X-Codeup-Event`（ALB 交给 Lambda 时小写）。计划原文写的 `codeup-event` 永远匹配不上。
+MR_HDR = {"x-codeup-event": "Merge Request Hook"}
+NOTE_HDR = {"x-codeup-event": "Note Hook"}
+
+
+def test_mr_opened_is_reviewed():
+    kind, f = handler_mod.classify({"x-codeup-event": "Merge Request Hook"}, _fix("mr-opened.json"), CFG)
+    assert kind == "review"
+    assert f["head_sha"] and f["mr_local_id"] and f["repo_id"]
+
+def test_mr_updated_is_reviewed():
+    kind, _ = handler_mod.classify({"x-codeup-event": "Merge Request Hook"}, _fix("mr-updated.json"), CFG)
+    assert kind == "review"
+
+def test_approved_mr_is_not_a_new_review():
+    # 真实形状（Task 1）：通过 = action "accept"、state "accepted"，不是新评审。
+    assert handler_mod.classify({"x-codeup-event": "Merge Request Hook"},
+                                _fix("mr-approved.json"), CFG)[0] == "ignore"
+
+def test_push_after_approval_is_reviewed_again():
+    # 真实形状（Task 1）：通过之后再推送，state 回到 opened、is_update_by_push 为 true。
+    kind, f = handler_mod.classify({"x-codeup-event": "Merge Request Hook"},
+                                   _fix("mr-updated-after-approval.json"), CFG)
+    assert kind == "review" and f["head_sha"]
+
+def test_update_without_push_is_ignored():
+    # 改标题之类的 update 没有新代码。没有真实样本，按真实字段路径改 mr-updated.json 的副本。
+    body = _fix("mr-updated.json")
+    body["object_attributes"]["is_update_by_push"] = False
+    assert handler_mod.classify({"x-codeup-event": "Merge Request Hook"}, body, CFG)[0] == "ignore"
+
+def test_note_carrying_the_kiro_review_marker_is_ignored_even_from_a_human_account():
+    # 真实样本：Flow 的评审评论，作者与 MR 作者是同一个账号，所以作者名单断不了环。
+    cfg = dict(CFG, bot_usernames=[])
+    assert handler_mod.classify({"x-codeup-event": "Note Hook"},
+                                _fix("note-bot-review.json"), cfg)[0] == "ignore"
+
+def test_merged_or_closed_state_is_ignored():
+    body = _fix("mr-opened.json")
+    for state in ("merged", "closed", "locked"):
+        _set_state(body, state)
+        assert handler_mod.classify({"x-codeup-event": "Merge Request Hook"}, body, CFG)[0] == "ignore"
+
+def test_unknown_event_type_is_ignored_not_guessed():
+    assert handler_mod.classify({"x-codeup-event": "Pipeline Hook"}, {}, CFG)[0] == "ignore"
+
+def test_unknown_payload_shape_is_ignored():
+    assert handler_mod.classify({"x-codeup-event": "Merge Request Hook"}, {"nope": 1}, CFG)[0] == "ignore"
+
+def test_note_from_own_bot_is_ignored_to_break_the_loop():
+    body = _fix("note-mr-new.json")
+    _set_note_author(body, "aliyun:kirobot")
+    _set_note_text(body, "/kiro review")
+    assert handler_mod.classify({"x-codeup-event": "Note Hook"}, body, CFG)[0] == "ignore"
+
+def test_system_note_is_ignored():
+    body = _fix("note-mr-new.json")
+    _set_note_system(body, True)
+    _set_note_text(body, "/kiro review")
+    assert handler_mod.classify({"x-codeup-event": "Note Hook"}, body, CFG)[0] == "ignore"
+
+def test_note_without_command_phrase_is_ignored():
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "looks good to me")
+    assert handler_mod.classify({"x-codeup-event": "Note Hook"}, body, CFG)[0] == "ignore"
+
+def test_note_with_command_from_human_triggers_review_and_carries_comment_id():
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "/kiro review")
+    kind, f = handler_mod.classify({"x-codeup-event": "Note Hook"}, body, CFG)
+    assert kind == "review"
+    # 精确值，不是真值判断：原文用不存在的 object_attributes.id 取值，恒为空串（Task 1）。
+    assert f["dedupe_extra"] == body["object_attributes"]["note_biz_id"], "评论命令的去重键必须是评论 id"
+
+def test_target_branch_filter_excludes_non_matching():
+    cfg = dict(CFG, target_branch_filter=r"^release/")
+    assert handler_mod.classify({"x-codeup-event": "Merge Request Hook"},
+                                _fix("mr-opened.json"), cfg)[0] == "ignore"
+
+
+# ── 上面那组的补强：几处「恒绿的守卫」与「falsy 但有意义」─────────────────────────
+# AWS 档位的真实页脚：pipeline/setup-guide.md 明确写了本档位要把 REVIEW_RERUN_HINT 设成
+# 「评论 `/kiro review` 可重新评审」。届时机器人自己的评审评论正文里**就带着命令短语**，
+# 而机器人与人可以是同一个账号（Task 1 实测）——这才是无穷循环的真实形状。
+# 真实 note-bot-review.json 的正文不含这句短语，所以上面那条真实样本用例即使删掉标记守卫
+# 也照样绿（假绿）；这条才是标记守卫的变异证据。
+def _bot_review_note_with_the_aws_tier_footer():
+    body = _fix("note-bot-review.json")
+    body["object_attributes"]["note"] += "\n第 1 次评审 · 评论 `/kiro review` 可重新评审"
+    return body
+
+def test_bot_review_comment_whose_footer_contains_the_command_phrase_is_still_ignored():
+    cfg = dict(CFG, bot_usernames=[])          # 机器人 == 人：作者名单断不了环
+    body = _bot_review_note_with_the_aws_tier_footer()
+    assert CFG["command_phrase"] in body["object_attributes"]["note"], "本用例的前提：正文确实带命令短语"
+    assert handler_mod.classify(NOTE_HDR, body, cfg)[0] == "ignore", \
+        "本方评审评论必须靠 kiro-review 标记断环，否则页脚里的短语会让它自己触发自己"
+
+def test_a_human_comment_that_only_quotes_the_phrase_still_triggers_a_review():
+    # 正向对照：上面那道标记守卫不能退化成「凡是提到短语就不评」。
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "麻烦重跑一下：/kiro review")
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "review"
+
+def test_an_empty_command_phrase_does_not_turn_every_comment_into_a_review():
+    # falsy 但有意义：`"" in note` 恒真 → 每条评论都触发评审，连机器人自己那条也算 → 循环。
+    # REVIEW_COMMAND_PHRASE 被显式设成空串就会落到这里，必须 fail closed。
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "looks good to me")
+    assert handler_mod.classify(NOTE_HDR, body, dict(CFG, command_phrase=""))[0] == "ignore"
+    assert handler_mod.classify(NOTE_HDR, body, dict(CFG, command_phrase=None))[0] == "ignore"
+
+def test_review_command_disabled_ignores_the_command(): 
+    # 开关关掉时评论命令一律不生效（review_command 是 0/1 的整数）。
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "/kiro review")
+    assert handler_mod.classify(NOTE_HDR, body, dict(CFG, review_command=0))[0] == "ignore"
+
+def test_target_branch_filter_admits_a_matching_branch():
+    # 正向对照：上面那条排除用例不能靠「过滤器一非空就全排除」通过。
+    cfg = dict(CFG, target_branch_filter=r"^master$")
+    assert handler_mod.classify(MR_HDR, _fix("mr-opened.json"), cfg)[0] == "review"
+
+def test_target_branch_filter_also_applies_to_a_comment_command():
+    cfg = dict(CFG, target_branch_filter=r"^release/")
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "/kiro review")
+    assert handler_mod.classify(NOTE_HDR, body, cfg)[0] == "ignore"
+
+def test_an_invalid_target_branch_filter_fails_closed_with_one_log_line(capsys):
+    # 配错的正则原本会让 re.search 抛 re.error 逃出 handler → ALB 502 → Codeup 只看到投递失败
+    # （与 C1 同属静默失败）。改成 fail closed + 一行固定形状日志，运维才有痕迹可查。
+    cfg = dict(CFG, target_branch_filter="[unclosed")
+    assert handler_mod.classify(MR_HDR, _fix("mr-opened.json"), cfg)[0] == "ignore"
+    out = capsys.readouterr().out
+    assert "bad-target-branch-filter" in out, out
+    assert out.count("\n") == 1, out
+
+
+# ── 字段抽取：整数变字符串、0 不是「缺失」、任一必需字段缺失就 ignore ─────────────
+def test_mr_fields_are_strings_because_they_flow_into_container_env():
+    # containerOverrides.environment 的值必须是字符串；project_id / local_id 在报文里是整数。
+    _, f = handler_mod.classify(MR_HDR, _fix("mr-opened.json"), CFG)
+    assert f == {"repo_id": "7215683", "mr_local_id": "6",
+                 "source_branch": "probe/p2a08-20260927", "target_branch": "master",
+                 "head_sha": "0731ec9d3a8cddf524bca91e6fe799b19d0b01f9",
+                 "clone_url": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app.git",
+                 "dedupe_extra": ""}
+    assert all(isinstance(v, str) for v in f.values()), f
+
+def test_note_fields_come_from_the_merge_request_object():
+    # Note Hook 的同名字段在 `merge_request` 下，不在 `object_attributes` 下（Task 1 §1）。
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "/kiro review")
+    _, f = handler_mod.classify(NOTE_HDR, body, CFG)
+    assert f["repo_id"] == "7215683" and f["mr_local_id"] == "6"
+    assert f["head_sha"] == body["merge_request"]["last_commit"]["id"]
+    assert f["target_branch"] == "master" and f["source_branch"] == "probe/p2a08-20260927"
+    assert f["clone_url"] == body["repository"]["git_http_url"]
+
+@pytest.mark.parametrize("field", ["project_id", "local_id"])
+def test_a_zero_int_field_is_not_treated_as_missing(field):
+    # falsy 但有意义：local_id/project_id 为 0 是合法取值，`if not v` 会把它当成缺失、
+    # 于是整条 MR 静默不评。必须用显式的 None 判断。
+    body = _fix("mr-opened.json")
+    body["object_attributes"][field] = 0
+    kind, f = handler_mod.classify(MR_HDR, body, CFG)
+    assert kind == "review"
+    assert f["repo_id" if field == "project_id" else "mr_local_id"] == "0"
+
+@pytest.mark.parametrize("path", [("object_attributes", "project_id"),
+                                  ("object_attributes", "local_id"),
+                                  ("object_attributes", "source_branch"),
+                                  ("object_attributes", "target_branch"),
+                                  ("object_attributes", "last_commit"),
+                                  ("repository", "git_http_url"),
+                                  ("repository",)])
+def test_mr_event_missing_any_required_field_is_ignored(path):
+    body = _fix("mr-opened.json")
+    cur = body
+    for k in path[:-1]:
+        cur = cur[k]
+    del cur[path[-1]]
+    assert handler_mod.classify(MR_HDR, body, CFG)[0] == "ignore"
+
+@pytest.mark.parametrize("path", [("merge_request", "project_id"),
+                                  ("merge_request", "local_id"),
+                                  ("merge_request", "source_branch"),
+                                  ("merge_request", "target_branch"),
+                                  ("merge_request", "last_commit"),
+                                  ("repository", "git_http_url"),
+                                  ("merge_request",)])
+def test_note_event_missing_any_required_field_is_ignored(path):
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "/kiro review")
+    cur = body
+    for k in path[:-1]:
+        cur = cur[k]
+    del cur[path[-1]]
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "ignore"
+
+def test_a_note_without_a_comment_id_is_ignored_because_it_cannot_be_deduped():
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "/kiro review")
+    del body["object_attributes"]["note_biz_id"]
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "ignore"
+
+@pytest.mark.parametrize("bad", [{"a": 1}, ["x"], True, 1.5])
+def test_a_non_scalar_in_a_required_field_is_ignored_not_stringified(bad):
+    # str({"a": 1}) 会把一个字典原样塞进 CODEUP_REPO_ID。形状不对就 ignore，不猜（N6）。
+    body = _fix("mr-opened.json")
+    body["object_attributes"]["project_id"] = bad
+    assert handler_mod.classify(MR_HDR, body, CFG)[0] == "ignore"
+
+def test_a_non_dict_payload_is_ignored_without_raising():
+    for body in ([], "x", None, 7):
+        assert handler_mod.classify(MR_HDR, body, CFG)[0] == "ignore"
+        assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "ignore"
+
+
+# ── 事件头：大小写不敏感，且名字写错不能退化成「什么都评」或「什么都不评」───────────
+@pytest.mark.parametrize("name", ["x-codeup-event", "X-Codeup-Event", "X-CODEUP-EVENT"])
+def test_the_event_header_is_matched_case_insensitively(name):
+    assert handler_mod.classify({name: "Merge Request Hook"}, _fix("mr-opened.json"), CFG)[0] == "review"
+
+@pytest.mark.parametrize("value", ["merge request hook", "MERGE REQUEST HOOK", " Merge Request Hook "])
+def test_the_event_value_is_normalised(value):
+    assert handler_mod.classify({"x-codeup-event": value}, _fix("mr-opened.json"), CFG)[0] == "review"
+
+@pytest.mark.parametrize("headers", [{}, None, {"codeup-event": "Merge Request Hook"},
+                                     {"x-gitlab-event": "Merge Request Hook"}])
+def test_a_missing_or_misnamed_event_header_is_ignored(headers):
+    # 计划原文把头名写成 `codeup-event`：那样每一个投递都判 ignore，而用例照样绿（Task 1 §6.4）。
+    assert handler_mod.classify(headers, _fix("mr-opened.json"), CFG)[0] == "ignore"
+
+
+# ── Step 6：handler() 端到端接线 ────────────────────────────────────────────
+TOKEN_SECRET_ID = "codeup-kiro/yunxiao-token-kiro"   # 与 stacks/dispatcher_stack.py 注入的密钥名一致
+
+
+def _set_runtime_env(monkeypatch):
+    """_runtime_cfg 需要的非敏感环境变量，名字与 dispatcher_stack.py 注入的完全一致。"""
+    cfg = _full_cfg()
+    for name, value in (("YUNXIAO_ORG_ID", cfg["org_id"]),
+                        ("YUNXIAO_TOKEN_ID", TOKEN_SECRET_ID),
+                        ("ECS_CLUSTER", cfg["cluster"]),
+                        ("ECS_TASK_DEFINITION", cfg["task_definition"]),
+                        ("ECS_CONTAINER_NAME", cfg["container_name"]),
+                        ("SUBNET_IDS", ",".join(cfg["subnets"])),
+                        ("SECURITY_GROUP_IDS", ",".join(cfg["security_groups"])),
+                        ("LOCK_TABLE", "ReviewLock"),
+                        ("LOCK_TTL_SECONDS", str(cfg["lock_ttl_seconds"])),
+                        ("BOT_USERNAMES", ",".join(cfg["bot_usernames"])),
+                        ("REVIEW_COMMAND", str(cfg["review_command"])),
+                        ("REVIEW_COMMAND_PHRASE", cfg["command_phrase"]),
+                        ("TARGET_BRANCH_FILTER", cfg["target_branch_filter"])):
+        monkeypatch.setenv(name, value)
+
+
+def test_handler_end_to_end_valid_mr_event_launches_a_task(monkeypatch):
+    """签名有效的 MR 事件必须真的走到 RunTask——这条用例是唯一能发现
+    「各部件都对、但入口没接起来」的守卫。"""
+    ecs, table = mock.Mock(), mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "arn:task/1"}]}
+    monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    _stub_secrets(monkeypatch, {"SecretString": "s3cret"})  # secrets wave 已提供的助手，走真实 secret_fetch
+    resp = handler_mod.handler({
+        "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Merge Request Hook"},
+        "body": (FIX / "mr-opened.json").read_text(),
+    }, None)
+    assert resp["statusCode"] == 200
+    assert ecs.run_task.called, "入口必须真的拉起任务，而不是验完签名就返回 200"
+
+
+def test_handler_rejects_bad_token_without_reaching_classify(monkeypatch):
+    called = []
+    monkeypatch.setattr(handler_mod, "classify", lambda *a: called.append(1) or ("ignore", None))
+    _stub_secrets(monkeypatch, {"SecretString": "s3cret"})  # secrets wave 已提供的助手，走真实 secret_fetch
+    resp = handler_mod.handler({"headers": {"x-codeup-token": "wrong"}, "body": "{}"}, None)
+    assert resp["statusCode"] == 401
+    assert not called, "验签失败必须在解析之前短路"
+
+
+def test_handler_ignores_a_filtered_event_without_launching(monkeypatch):
+    ecs, table = mock.Mock(), mock.Mock()
+    monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    _stub_secrets(monkeypatch, {"SecretString": "s3cret"})  # secrets wave 已提供的助手，走真实 secret_fetch
+    resp = handler_mod.handler({
+        "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Pipeline Hook"},
+        "body": "{}"}, None)
+    assert resp["statusCode"] == 200
+    assert not ecs.run_task.called
+
+
+def test_handler_end_to_end_with_the_real_runtime_cfg_passes_the_fixture_values_to_run_task(monkeypatch):
+    """不 stub `_runtime_cfg`：上面那条 e2e 用例把它整个换掉了，所以环境变量名写错、
+    `codeup_token` 忘了经 Secrets Manager 取，它一概发现不了。这条走真实 `_runtime_cfg`
+    与真实 `secret_fetch`，并**钉住 RunTask 的请求形状**（不只是「被调用过」）。
+    """
+    ecs, table = mock.Mock(), mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "arn:task/1"}]}
+    monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
+    client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"}, {"SecretString": "t0ken"})
+    _set_runtime_env(monkeypatch)
+    assert_alb_response(handler_mod.handler({
+        "headers": {"X-Codeup-Token": "s3cret", "X-Codeup-Event": "Merge Request Hook"},
+        "body": (FIX / "mr-opened.json").read_text()}, None), 200, "dispatched")
+    kwargs = ecs.run_task.call_args.kwargs
+    assert kwargs["cluster"] == "c" and kwargs["taskDefinition"] == "td"
+    env = {e["name"]: e["value"] for e in
+           kwargs["overrides"]["containerOverrides"][0]["environment"]}
+    assert env == {"CODEUP_REPO_ID": "7215683", "MR_LOCAL_ID": "6",
+                   "MR_TARGET_BRANCH": "master",
+                   "CI_COMMIT_REF_NAME": "probe/p2a08-20260927",
+                   "HEAD_SHA": "0731ec9d3a8cddf524bca91e6fe799b19d0b01f9",
+                   "BUSINESS_REPO_URL":
+                       "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app.git",
+                   "LOCK_KEY": "7215683#6#0731ec9d3a8cddf524bca91e6fe799b19d0b01f9"}, env
+    # 抢锁必须在 RunTask 之前（N3），且用的是同一个键（I1）
+    assert table.put_item.call_args.kwargs["Item"]["pk"] == env["LOCK_KEY"]
+    # 云效令牌只从 Secrets Manager 来，且取的是环境变量里那个密钥名
+    assert [c.kwargs["SecretId"] for c in client.get_secret_value.call_args_list] == \
+        [SECRET_ID, TOKEN_SECRET_ID]
+
+
+def test_handler_end_to_end_reads_a_base64_encoded_body(monkeypatch):
+    # ALB 对非 text/*、application/json 的类型会改成 base64（G6）。正文必须经 _body_text 取，
+    # 否则 Codeup 换一个 Content-Type 就变成「每一条都 unparseable」。
+    import base64
+    ecs, table = mock.Mock(), mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "arn:task/1"}]}
+    monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
+    raw = (FIX / "mr-opened.json").read_bytes()
+    assert_alb_response(handler_mod.handler({
+        "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Merge Request Hook"},
+        "isBase64Encoded": True,
+        "body": base64.b64encode(raw).decode("ascii")}, None), 200, "dispatched")
+    assert ecs.run_task.called
+
+
+@pytest.mark.parametrize("body", ["not json", "{", "", None, '{"a": 1', "\udcff"])
+def test_handler_unparseable_body_is_a_full_alb_response_and_launches_nothing(body, monkeypatch):
+    # 新增的返回路径要各有一条完整形状断言：ALB 收到缺字段的响应会回 502（G5）。
+    ecs, table = mock.Mock(), mock.Mock()
+    monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
+    want = "ignored" if body in ("", None) else "unparseable"   # 空正文 → {} → 形状不对 → ignored
+    assert_alb_response(handler_mod.handler({
+        "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Merge Request Hook"},
+        "body": body}, None), 200, want)
+    assert not ecs.run_task.called
+
+
+def test_handler_ignored_is_a_full_alb_response(monkeypatch):
+    ecs, table = mock.Mock(), mock.Mock()
+    monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
+    monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg())
+    _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
+    assert_alb_response(handler_mod.handler({
+        "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Merge Request Hook"},
+        "body": (FIX / "mr-approved.json").read_text()}, None), 200, "ignored")
+    assert not ecs.run_task.called
+
+
+def test_handler_returns_503_when_the_codeup_token_cannot_be_fetched(monkeypatch, capsys):
+    """云效令牌取不到时，必须走与 WEBHOOK_SECRET_ID **同一条** 503 + 固定形状日志路径。"""
+    ecs, table = mock.Mock(), mock.Mock()
+    monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
+    client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"}, DENIED)
+    _set_runtime_env(monkeypatch)
+    assert_alb_response(handler_mod.handler({
+        "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Merge Request Hook"},
+        "body": (FIX / "mr-opened.json").read_text()}, None), 503, "secret-unavailable")
+    out = capsys.readouterr().out
+    assert "secret-unavailable var=YUNXIAO_TOKEN_ID code=AccessDeniedException" in out, out
+    assert out.count("\n") == 1, f"只留一行：{out!r}"
+    for leak in ("111122223333", "not authorized", "assumed-role", "arn:", FULL_ARN):
+        assert leak not in out, (leak, out)
+    assert not ecs.run_task.called, "取不到令牌就不能拉起任务：失败时没法在 MR 上留痕（I10）"
+    # 请求形状，不只是错误处理：第二次问的必须是 YUNXIAO_TOKEN_ID 里那个密钥名
+    assert [c.kwargs["SecretId"] for c in client.get_secret_value.call_args_list] == \
+        [SECRET_ID, TOKEN_SECRET_ID]
+
+
+def test_the_codeup_token_never_comes_from_a_plaintext_env_var(monkeypatch):
+    # 既有裁决：codeup_token 永远不是 config.yaml / 环境变量的字段。把明文变量设上也不该被用到。
+    monkeypatch.setenv("YUNXIAO_TOKEN", "plaintext-must-not-be-used")
+    client = _stub_secrets(monkeypatch, {"SecretString": "t0ken"})
+    _set_runtime_env(monkeypatch)
+    cfg = handler_mod._runtime_cfg()
+    assert cfg["codeup_token"] == "t0ken"
+    assert client.get_secret_value.call_args.kwargs == {"SecretId": TOKEN_SECRET_ID}

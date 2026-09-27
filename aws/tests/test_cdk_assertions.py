@@ -811,6 +811,13 @@ def test_setup_guide_documents_the_exact_secret_unavailable_log_line():
     for code in ("env-unset", "empty-value"):
         assert f'"{code}"' in fetch, f"手册里的代号 {code} 在 secret_fetch.py 里不存在"
         assert f"`{code}`" in guide, code
+    # 入口接线之后 503 有**两个**来源：校验 webhook 令牌的共享密钥，与在 MR 上留痕用的云效令牌
+    # （验签通过之后才取）。二者共用同一行日志形状，只有 var= 不同——手册必须把第二个变量名也
+    # 写出来，否则运维按 var= 只认得一半；代码那侧则必须真的共用同一条路径，不是复制出第二份。
+    assert f"`{prefix}YUNXIAO_TOKEN_ID" in guide or "var=YUNXIAO_TOKEN_ID" in guide, \
+        "手册没写出云效令牌取不到时那行日志的变量名"
+    assert handler.count("return _secret_unavailable(exc)") == 2, \
+        "两个密钥必须共用同一条 503 + 日志路径（复制出第二份迟早在状态码或日志形状上分叉）"
     # 兜底那侧确实不打这行（它抛异常走 EventBridge 重试），手册也照实这么写
     backstop = (aws_dir / "lambda" / "backstop" / "handler.py").read_text()
     assert prefix not in backstop
