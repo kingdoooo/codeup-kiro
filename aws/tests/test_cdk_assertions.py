@@ -591,8 +591,13 @@ def test_guide_prerequisites_mention_buildkit_because_the_asset_now_pins_a_platf
     stack_src = (aws_dir / "stacks" / "executor_stack.py").read_text()
     guide = (aws_dir / "setup-guide.md").read_text()
     assert "platform=ecr_assets.Platform" in stack_src, "镜像资产不再钉平台，这条守卫的前提就没了"
-    assert "buildx" in guide.lower(), "部署前提没说构建机需要 BuildKit/buildx"
-    assert "仿真" in guide, "部署前提没说 Apple Silicon 上还需要 amd64 仿真"
+    # 只在**部署前提那一段**里判，不整篇判：整篇判的话手册任何地方提一次 buildx 就算过，
+    # 而要守的恰恰是「操作者照着前提清单准备环境时看得见这一条」。
+    head = guide.find("前提：第 3 节的三个密钥已在")
+    assert head != -1, "6.3 的部署前提那一段找不到"
+    para = guide[head:guide.find("\n\n", head)]
+    assert "buildx" in para.lower(), "部署前提没说构建机需要 BuildKit/buildx"
+    assert "仿真" in para, "部署前提没说 Apple Silicon 上还需要 amd64 仿真"
 
 
 def _exec_asset_manifest(tmp_path):
