@@ -223,8 +223,17 @@ entrypoint 核对前会剥掉它，所以名单里存的**必须是裸十六进�
    输出形如 `sha256:…`，去掉 `sha256:` 前缀。或者等第一次真实评审被拒：执行器日志（日志组名以
    `CodeupKiroExecutor-ExecutorLogs` 开头，流前缀 `executor`）里有一行
    「镜像摘要不在已探测名单内，拒绝评审：<摘要>」，MR 上同时会出现一条兜底的「评审未完成」。
-   ECR 的 `imageDigest` 与 ECS 元数据的 `ImageID` 是否逐字一致由真实运行确认（spec 待取事实 P2a-04），
-   两者不一致时以执行器日志里打印的值为准。
+   ECR 的 `imageDigest` 与 ECS 元数据的 `ImageID` **逐字一致，已实测**（Task 1 真实 sandbox，
+   2026-09-27，X86_64 Fargate）：镜像按生产路径构建并推送（`docker build --platform linux/amd64`
+   + `docker push`，containerd 镜像存储，所以 ECR 里是带 attestation 子清单的 **OCI image index**），
+   容器级元数据端点顶层 `.ImageID`、`DescribeTasks` 的 `containers[].imageDigest`、以及上面那条
+   `aws ecr describe-images --image-ids imageTag=<标签>` 的 `imageDigest`，三者返回同一个值——
+   **index 自身的摘要**，不是某个平台子清单的摘要。所以上面那条命令取到的就是 entrypoint 会拿去
+   比对的那个值，不必先让一次评审被拒来换取摘要。
+   证据等级：**sandbox 单次实测**，一个账号、一个区域、上面这一种构建方式。换构建方式（不走
+   containerd 镜像存储、或推一个单平台清单而不是 index）没有测过，那时三者的关系可能不同。
+   所以这条交叉核对仍然保留：被拒时执行器日志里那行「镜像摘要不在已探测名单内，拒绝评审：<摘要>」
+   打印的是 entrypoint **实际读到**的值，与上面命令的输出不一致时一律以日志里那个为准。
 3. 把真实摘要**追加**进 `kiro_image_digests`（占位值可以同时删掉），再 `cdk deploy CodeupKiroExecutor`。
    `config.yaml` 不在镜像构建上下文里，改它不会触发重新构建，镜像与摘要保持不变（有测试守着这一条）。
 

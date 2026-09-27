@@ -821,6 +821,49 @@ def test_the_measured_503_redelivery_fact_is_stated_in_both_code_and_guide():
     assert "ReviewLock" in rows[0], rows[0]
 
 
+# ── F5：P2a-04 已实测，5.2 的摘要引导不得再把它写成待取事实 ─────────────────────
+def _guide_digest_bootstrap_step2():
+    """截出 5.2「首次部署的引导」第 2 步那一段（`2. 读出…` 到 `3. 把真实摘要…` 之间）。
+
+    按段截而不是整篇 grep：这段里要断言的几句话（比如那行退出码 90 的日志）在排错表里也出现，
+    整篇 `in` 判断对它们永真，什么也不守。
+    """
+    guide = (pathlib.Path(__file__).resolve().parents[1] / "setup-guide.md").read_text()
+    lines = guide.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("2. 读出执行器镜像的真实摘要"))
+    end = next(i for i, ln in enumerate(lines[start + 1:], start + 1)
+               if ln.startswith("3. 把真实摘要"))
+    return "\n".join(lines[start:end])
+
+
+def test_guide_states_the_measured_ecr_vs_ecs_digest_fact_not_an_open_question():
+    """Task 1 实测（sandbox，2026-09-27）：ECR 的 imageDigest、容器级元数据 .ImageID、
+    DescribeTasks 的 containers[].imageDigest 三者是同一个值（OCI image index 自身的摘要）。
+
+    原文把这件事写成「由真实运行确认（spec 待取事实 P2a-04）」，并让操作者在两者不一致时
+    以日志为准——前半句现在是过时的。这条守住「不得退回待取事实」，同时守住实测结论的三个
+    来源都点了名（少点一个，读者就不知道该拿哪条命令的输出去填名单）。
+    """
+    block = _guide_digest_bootstrap_step2()
+    assert "待取事实 P2a-04" not in block, "5.2 又把 P2a-04 写回待取事实"
+    assert "逐字一致" in block and "已实测" in block, "没写出实测结论"
+    for source in (".ImageID", "containers[].imageDigest", "describe-images"):
+        assert source in block, f"实测结论没点名 {source} 这个来源"
+    assert "index" in block, "没说清三者同值的那个值是 image index 自身的摘要"
+    # 证据等级必须照实标出来：单次 sandbox 实测，不是「所有构建方式都如此」
+    assert "sandbox" in block and "单次实测" in block, "没标证据等级"
+
+
+def test_guide_keeps_the_exit_90_log_line_as_a_cross_check_and_quotes_it_verbatim():
+    # 交叉核对这一条不能因为「已经实测了」就删掉：日志里那个值是 entrypoint **实际读到**的，
+    # 命令的输出只是推断。顺带把措辞钉到 entrypoint.sh 真的打出来的那句上。
+    aws_dir = pathlib.Path(__file__).resolve().parents[1]
+    entry = (aws_dir / "executor" / "entrypoint.sh").read_text()
+    literal = "镜像摘要不在已探测名单内，拒绝评审："
+    assert f'echo "{literal}${{self_digest}}"' in entry, "entrypoint 不再打这行，手册的交叉核对就空了"
+    assert literal in _guide_digest_bootstrap_step2(), "5.2 第 2 步丢了退出码 90 那行日志的交叉核对"
+
+
 # ── I6：接入手册不得再次与代码脱节 ────────────────────────────────────────────
 def test_setup_guide_matches_the_landed_stacks_and_ingress():
     # 手册曾在三个 stack 已经挂载之后仍写着「cdk deploy 不会创建任何资源」、且没有部署步骤。
