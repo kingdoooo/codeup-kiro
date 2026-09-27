@@ -826,6 +826,14 @@ def test_the_measured_503_redelivery_fact_is_stated_in_both_code_and_guide():
                        (row_retry[0], "setup-guide.md 的重投那一行")):
         assert "X-Codeup-Delivery" in text, f"{name} 没点名重投时不变的那个头"
     assert "ReviewLock" in row_retry[0], row_retry[0]
+    # 实测过的只有 **503** 这一个状态码。这一行不得把「非 2xx 都会立即重试」写成实测结论，
+    # 且必须点出其他状态码没测过——否则手册会对同一个行为给出两种置信度（502/504 那一行照实
+    # hedge 着，这一行却言之凿凿）。复审把这条列为 ⚠️：原措辞是从 brief/probe-results 继承的过度概括。
+    assert "503" in row_retry[0], "重投那一行没说清实测的是哪一个状态码"
+    assert "没有测过" in row_retry[0], "重投那一行没点出 404/502/504 是否同样重投没有测过"
+    row_5xx = [ln for ln in rows if "502/504" in ln]
+    assert len(row_5xx) == 1, "排错表里 502/504 那一行找不到（或不止一行）"
+    assert "没有实测过" in row_5xx[0], "502/504 那一行没照实说明它的重投行为未经实测"
 
 
 # ── F5：P2a-04 已实测，5.2 的摘要引导不得再把它写成待取事实 ─────────────────────
