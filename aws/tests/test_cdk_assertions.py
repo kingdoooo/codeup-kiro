@@ -849,7 +849,9 @@ def test_guide_states_the_measured_ecr_vs_ecs_digest_fact_not_an_open_question()
     assert "逐字一致" in block and "已实测" in block, "没写出实测结论"
     for source in (".ImageID", "containers[].imageDigest", "describe-images"):
         assert source in block, f"实测结论没点名 {source} 这个来源"
-    assert "index" in block, "没说清三者同值的那个值是 image index 自身的摘要"
+    # 钉整个短语而不是 `"index" in block`：这段前面解释构建方式时已经出现过 `OCI image index`，
+    # 只判断 `index` 在不在，对「三者同值的那个值到底是谁的摘要」这句话是永真的（实测过）。
+    assert "index 自身的摘要" in block, "没说清三者同值的那个值是 image index 自身的摘要"
     # 证据等级必须照实标出来：单次 sandbox 实测，不是「所有构建方式都如此」
     assert "sandbox" in block and "单次实测" in block, "没标证据等级"
 
