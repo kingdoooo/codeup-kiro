@@ -863,7 +863,13 @@ def test_guide_keeps_the_exit_90_log_line_as_a_cross_check_and_quotes_it_verbati
     entry = (aws_dir / "executor" / "entrypoint.sh").read_text()
     literal = "镜像摘要不在已探测名单内，拒绝评审："
     assert f'echo "{literal}${{self_digest}}"' in entry, "entrypoint 不再打这行，手册的交叉核对就空了"
-    assert literal in _guide_digest_bootstrap_step2(), "5.2 第 2 步丢了退出码 90 那行日志的交叉核对"
+    block = _guide_digest_bootstrap_step2()
+    assert literal in block, "5.2 第 2 步丢了退出码 90 那行日志"
+    # 光有那句日志**不够**：这一段里它本来就出现两次（引导路径之一也引用它），所以上面那条
+    # 断言在 F5 之前就已经是真的、守不住 F5 加的东西。真正要钉的是**优先级规则**——
+    # 日志里那个值是 entrypoint 实际读到的，命令输出只是推断，两者不一致时以日志为准。
+    assert "实际读到" in block and "以日志里那个为准" in block, \
+        "5.2 第 2 步没写明两者不一致时以日志里的值为准"
 
 
 # ── I6：接入手册不得再次与代码脱节 ────────────────────────────────────────────
