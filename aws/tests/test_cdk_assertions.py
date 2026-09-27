@@ -963,8 +963,11 @@ def test_setup_guide_lists_every_shape_rejection_code_the_dispatcher_can_emit():
                      "repo-id", "mr-local-id", "branch"}, codes
     row = [ln for ln in guide.splitlines() if ln.startswith("|") and "ignored reason=" in ln]
     assert len(row) == 1, "排错表里 `ignored reason=` 那一行找不到（或不止一行）"
-    for code in codes:
-        assert f"`{code}`" in row[0], f"手册那一行没写代号 {code}"
+    # 只看那一行里**枚举代号的那一段**，不是整行：整行判会被同一行后面「处置：`org-unset` 查函数
+    # 配置」这类再次提及满足——把枚举里的代号改名，整行判照样绿（失败模式 d，本轮实测踩到过）。
+    listing = row[0].split("固定枚举：", 1)[1].split("。日志里", 1)[0]
+    mentioned = set(re.findall(r"`([a-z][a-z-]+)`", listing))
+    assert mentioned == codes, f"手册枚举与代码不一致，差集：{mentioned ^ codes}"
 
 
 # ── I6：接入手册不得再次与代码脱节 ────────────────────────────────────────────
