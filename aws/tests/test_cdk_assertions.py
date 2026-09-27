@@ -813,8 +813,12 @@ def test_the_measured_503_redelivery_fact_is_stated_in_both_code_and_guide():
         assert "未经核实" not in text, f"{name} 又把 Codeup 的 503 重投写成未经核实"
         assert "3 次" in text, f"{name} 没写出实测的重投上界（同一 delivery 最多 3 次）"
         assert "X-Codeup-Delivery" in text, f"{name} 没点名重投时不变的那个头"
-    # 手册这侧还必须写清楚处置办法与幂等锁的承重作用——只说「丢了」等于没给出路
-    assert "幂等" in guide and "ReviewLock" in guide
+    # 手册这侧还必须有**一行**同时讲到重投与幂等锁的承重作用——只说「丢了」等于没给出路。
+    # 逐行找而不是整篇找：`幂等`/`ReviewLock` 在排错表别处早就有了，整篇 in 判断永真、什么也不守。
+    rows = [ln for ln in guide.splitlines()
+            if ln.startswith("|") and "X-Codeup-Delivery" in ln and "幂等" in ln]
+    assert len(rows) == 1, "排错表缺少「同一 delivery 出现 2~3 次是预期行为、被幂等锁吸收」那一行"
+    assert "ReviewLock" in rows[0], rows[0]
 
 
 # ── I6：接入手册不得再次与代码脱节 ────────────────────────────────────────────
