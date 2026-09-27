@@ -600,7 +600,8 @@ def test_image_asset_manifest_pins_the_build_platform_to_linux_amd64(tmp_path):
     images = _exec_asset_manifest(tmp_path)["dockerImages"]
     assert len(images) == 1, images
     source = list(images.values())[0]["source"]
-    assert source["platform"] == "linux/amd64", \
+    # 用 .get 而不是下标：platform 缺失恰好是要接住的那个缺陷，KeyError 的堆栈说不出这一点。
+    assert source.get("platform") == "linux/amd64", \
         f"资产清单里的构建平台是 {source.get('platform')!r}（缺失=跟构建机走）"
     # 正向对照：这份清单确实是执行器镜像那一条，不是碰巧读到了别的资产
     assert source["dockerFile"] == "aws/executor/Dockerfile", source
