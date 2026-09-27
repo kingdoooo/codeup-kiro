@@ -158,7 +158,14 @@ def classify(headers, body, cfg):
         if _dig(body, "object_attributes", "system") is True:
             return "ignore", None
         author = _dig(body, "user", "username", default="")
-        if author in set(cfg.get("bot_usernames") or []):
+        if not isinstance(author, str):
+            # 形状不明的作者一律 ignore（N6）。顺带也挡住成员判断本身：作者字段是个字典时
+            # `{...} in set(...)` 会因为不可哈希抛 TypeError → 逃出 handler → ALB 502。
+            # 作者名**缺失或为空**不走这条：缺失与空串行为一致（既有约定），空串不可能等于某个
+            # 真实的机器人用户名，而断环真正承重的是下面那道 kiro-review 标记；若因为缺这个字段就
+            # ignore，Codeup 哪天不发 user.username，评论命令就整体静默失效。
+            return "ignore", None
+        if author in (cfg.get("bot_usernames") or []):
             return "ignore", None            # N5：本方评论会触发 Note Hook，必须断环
         note = _dig(body, "object_attributes", "note", default="")
         if not isinstance(note, str):
@@ -213,6 +220,9 @@ def _secret_unavailable(exc):
     YUNXIAO_TOKEN_ID）共用这一份，不复制——复制出来的第二份迟早在日志形状或状态码上分叉，
     而 setup-guide 的排错表只按一种形状写。
 
+    响应正文只给一个固定代号，不带任何 AWS 错误正文（含角色 ARN 与账号 ID，与 _failure_reason
+    同一条理由）。
+
     必须**留一行日志**（I1）：这条路径在 Lambda 看来是成功调用（Errors 指标为 0），
     响应正文对四种成因（缺 IAM 授权、密钥不存在/名字不符、密钥值为空、限流）完全一样，
     不打日志的话全新部署一旦配错就只剩一个查不下去的 503。形状固定、只有变量名与代号，
@@ -242,11 +252,10 @@ def handler(event, context):
         # Codeup 对 503 的重投行为已实测（Task 1，真实 webhook）：同一个 `X-Codeup-Delivery`
         # 在约 1 秒内一共到 3 次（立即重试 2 次），之后再无投递（观察 10 分钟以上）。所以
         # **只有亚秒级抖动（比如一次限流）能靠重投自愈**；配置或权限错误在 1 秒内不可能修好，
-        # 那次事件就永久丢了——下面那行日志是它留下的唯一痕迹。同时这也意味着**被我们回了 503 的
-        # 那次投递**最多可能到 3 次且 delivery id 相同，幂等抢锁（N3）是承重的。
+        # 那次事件就永久丢了——_secret_unavailable 打的那行日志是它留下的唯一痕迹。同时这也意味着
+        # **被我们回了 503 的那次投递**最多可能到 3 次且 delivery id 相同，幂等抢锁（N3）是承重的。
         # （只测了 503 这一个状态码；404/502/504 是否同样重投没测过，所以「最多 3 次」不是所有
         # 状态码的上界。幂等抢锁的必要性不依赖这个数字——共享密钥鉴权本身就可重放。）
-        #
         return _secret_unavailable(exc)
     if not verify_token(event.get("headers"), expected):
         return _resp(401)

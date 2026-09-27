@@ -442,6 +442,21 @@ def test_update_without_push_is_ignored():
     body["object_attributes"]["is_update_by_push"] = False
     assert handler_mod.classify({"x-codeup-event": "Merge Request Hook"}, body, CFG)[0] == "ignore"
 
+def test_an_update_whose_push_flag_is_missing_is_still_reviewed():
+    # 「字段缺失时退回只看 state」：`is_update_by_push is False` 必须是**恒等于 False** 的判断，
+    # 写成 `not _dig(...)` 的话字段缺失（None）就变成 ignore——Codeup 哪天不发这个字段，
+    # 所有 update 事件就静默不评了。
+    body = _fix("mr-updated.json")
+    del body["object_attributes"]["is_update_by_push"]
+    assert handler_mod.classify(MR_HDR, body, CFG)[0] == "review"
+
+def test_an_update_by_push_is_reviewed_even_though_the_extra_filter_exists():
+    # 正向对照：额外过滤只丢「update 且明确不是推送」这一种，不能把所有 update 一起丢掉。
+    body = _fix("mr-updated.json")
+    assert body["object_attributes"]["action"] == "update"
+    assert body["object_attributes"]["is_update_by_push"] is True
+    assert handler_mod.classify(MR_HDR, body, CFG)[0] == "review"
+
 def test_note_carrying_the_kiro_review_marker_is_ignored_even_from_a_human_account():
     # 真实样本：Flow 的评审评论，作者与 MR 作者是同一个账号，所以作者名单断不了环。
     cfg = dict(CFG, bot_usernames=[])
@@ -465,6 +480,39 @@ def test_note_from_own_bot_is_ignored_to_break_the_loop():
     _set_note_author(body, "aliyun:kirobot")
     _set_note_text(body, "/kiro review")
     assert handler_mod.classify({"x-codeup-event": "Note Hook"}, body, CFG)[0] == "ignore"
+
+def test_a_note_whose_author_is_not_a_string_is_ignored_without_raising():
+    # `{...} in set(...)` 会因为不可哈希抛 TypeError，`{...} in [...]` 则悄悄不匹配——
+    # 前者逃出 handler 就是 ALB 502，后者是在形状不明的报文上继续往下走。一律 ignore（N6）。
+    for bad in ({"a": 1}, ["x"], 7):
+        body = _fix("note-mr-new.json")
+        body["user"]["username"] = bad
+        _set_note_text(body, "/kiro review")
+        assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "ignore", bad
+
+@pytest.mark.parametrize("mutate", [lambda b: b["user"].__setitem__("username", None),
+                                    lambda b: b["user"].pop("username"),
+                                    lambda b: b.__setitem__("user", None),
+                                    lambda b: b.pop("user")])
+def test_a_note_without_an_author_name_still_gets_reviewed(mutate):
+    """作者名缺失（或显式 null）按「没给作者」处理，继续往下走，**不**变成 ignore。
+
+    缺失与空串行为一致是既有约定（见 lock_key 那组用例）。这里不 fail closed 的理由：断环真正
+    承重的是 `<!-- kiro-review:` 标记那道（本方机器人与人可以是同一个账号，作者名单本来就靠不住），
+    空串永远不可能等于某个真实的机器人用户名；反过来若因为缺这个字段就 ignore，Codeup 哪天不发
+    `user.username`，评论命令就整体静默失效——那正是本轮要消灭的一类静默失败。
+    """
+    body = _fix("note-mr-new.json")
+    mutate(body)
+    _set_note_text(body, "/kiro review")
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "review"
+
+def test_a_note_whose_body_is_not_a_string_is_ignored_without_raising():
+    # `phrase in note` 对非字符串会抛 TypeError → 502。
+    for bad in ({"a": 1}, ["x"], 7):
+        body = _fix("note-mr-new.json")
+        body["object_attributes"]["note"] = bad
+        assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "ignore", bad
 
 def test_system_note_is_ignored():
     body = _fix("note-mr-new.json")
