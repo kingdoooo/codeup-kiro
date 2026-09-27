@@ -580,6 +580,21 @@ def test_task_definition_pins_runtime_platform_to_x86_64_linux():
     assert rp["OperatingSystemFamily"] == "LINUX", rp
 
 
+def test_guide_prerequisites_mention_buildkit_because_the_asset_now_pins_a_platform():
+    """代码里写了 `platform=`，手册的部署前提就必须跟着说构建机需要什么。
+
+    CDK 对这个参数的要求是 *Requires Docker Buildx*（cloud_assembly_schema 原文），跨架构构建
+    amd64 在 Apple Silicon 上还需要仿真。前提清单原本只写「本机有 Docker 与 CDK CLI」——
+    一台只有老构建器（`DOCKER_BUILDKIT=0`）的机器会撞在资产构建阶段，而清单说它够了。
+    """
+    aws_dir = pathlib.Path(__file__).resolve().parents[1]
+    stack_src = (aws_dir / "stacks" / "executor_stack.py").read_text()
+    guide = (aws_dir / "setup-guide.md").read_text()
+    assert "platform=ecr_assets.Platform" in stack_src, "镜像资产不再钉平台，这条守卫的前提就没了"
+    assert "buildx" in guide.lower(), "部署前提没说构建机需要 BuildKit/buildx"
+    assert "仿真" in guide, "部署前提没说 Apple Silicon 上还需要 amd64 仿真"
+
+
 def _exec_asset_manifest(tmp_path):
     """真正 synth 一次，读云装配里的资产清单（`<stack>.assets.json`）。
 
