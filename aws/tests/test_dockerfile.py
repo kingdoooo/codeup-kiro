@@ -33,6 +33,15 @@ def test_sha256sum_check_uses_strict_mode():
     assert re.search(r"sha256sum\s+--strict\s+-c", src), "缺 --strict：格式错误的摘要行会被放过"
 
 
+def test_base_image_comes_from_the_ecr_public_mirror_not_docker_hub():
+    # Task 1 真实探测：本机网络下 `auth.docker.io` 超时，`FROM debian:stable-slim` 构建不出来；
+    # public.ecr.aws/docker/library/debian:stable-slim 是同一个镜像且拉得通。Codeup 用户的网络
+    # 对 Docker Hub 同样不可靠，所以构建期可达性不押在 Docker Hub 上。
+    src = DOCKERFILE.read_text()
+    froms = re.findall(r"^FROM\s+(\S+)", src, re.MULTILINE)
+    assert froms == ["public.ecr.aws/docker/library/debian:stable-slim"], froms
+
+
 def test_contains_no_secret_material():
     src = DOCKERFILE.read_text()
     for forbidden in ("KIRO_API_KEY", "YUNXIAO_TOKEN", "aws_secret_access_key", "BEGIN RSA"):

@@ -1,4 +1,7 @@
-FROM debian:stable-slim
+# 与 Docker Hub 的 debian:stable-slim 是同一个镜像，走 ECR Public 镜像站：Task 1 真实探测里
+# 本机网络下 `auth.docker.io` 超时、`FROM debian:stable-slim` 直接构建失败，而这个地址拉取正常。
+# Codeup 用户所在的网络对 Docker Hub 往往同样不可靠，构建期可达性不该赌在它身上。
+FROM public.ecr.aws/docker/library/debian:stable-slim
 
 # kiro-review.sh 把 timeout（GNU coreutils）当强制依赖，缺了直接拒绝运行；
 # jq >= 1.6 有硬前置检查；git 用于 clone 与 diff；unzip 用于解开钉版安装包。

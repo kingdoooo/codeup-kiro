@@ -180,8 +180,16 @@ aws secretsmanager create-secret \
 `Dockerfile` 需要 `COPY scripts/ prompts/ kiro/` 这些仓库根下的目录）：
 
 ```bash
-docker build -f aws/executor/Dockerfile -t codeup-kiro-executor:2.21.4 .
+docker build --platform linux/amd64 -f aws/executor/Dockerfile -t codeup-kiro-executor:2.21.4 .
 ```
+
+`--platform linux/amd64` 不能省：`docker build` 的缺省是构建机当前平台，在 Apple Silicon 上会构建出
+`linux/arm64`，而 Fargate 任务定义是 X86_64（`aws/stacks/executor_stack.py` 里与镜像资产成对写死），
+拉取时直接 `TaskFailedToStart` / `CannotPullContainerError: … image Manifest does not contain
+descriptor matching platform 'linux/amd64'`；烤进镜像的 `kirocli-x86_64-linux-musl` 本身也只有 x86_64。
+`cdk deploy` 走的是 `DockerImageAsset`，那一侧的平台已经在代码里钉住，不依赖这条手工命令。
+基础镜像取自 `public.ecr.aws/docker/library/debian:stable-slim`（与 Docker Hub 的
+`debian:stable-slim` 同一个镜像）：实测有些网络下 `auth.docker.io` 会超时，Docker Hub 拉不动。
 
 构建期会用 `sha256sum --strict -c` 核对这个安装包的摘要——摘要写死在 `Dockerfile` 里的
 `ARG KIRO_PINNED_ARTIFACT_SHA256`（完整 64 位十六进制值，不是截断值：截断摘要会让
