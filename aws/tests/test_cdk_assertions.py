@@ -955,14 +955,24 @@ def test_setup_guide_lists_every_shape_rejection_code_the_dispatcher_can_emit():
     aws_dir = pathlib.Path(__file__).resolve().parents[1]
     handler = (aws_dir / "lambda" / "dispatcher" / "handler.py").read_text()
     guide = (aws_dir / "setup-guide.md").read_text()
-    # 只看 _reject_reason 那个函数体，避免把别处的字符串字面量当成代号
+    # 代号有两个来源，都要抽：①_reject_reason 的返回值（形状检查）——只看那个函数体，避免把别处的
+    # 字符串字面量当成代号；②直接调 _log_ignored 的地方（评论命令的状态门）。只抽 ① 的话，
+    # 新增的 mr-not-open 写不写进手册都发现不了。
     import re
     body = handler.split("def _reject_reason(")[1].split("\ndef ")[0]
-    codes = set(re.findall(r'return "([a-z][a-z-]+)"', body))
+    shape_codes = set(re.findall(r'return "([a-z][a-z-]+)"', body))
+    logged_codes = set(re.findall(r'_log_ignored\("([a-z][a-z-]+)"\)', handler))
+    assert shape_codes and logged_codes, (shape_codes, logged_codes)   # 两个抽取器都确实抽到了东西
+    assert handler.count("print(f\"ignored reason=") == 1, \
+        "`ignored reason=` 只能有一处 print（_log_ignored），否则日志形状迟早分叉、抽取器也漏掉一半"
+    codes = shape_codes | logged_codes
     assert codes == {"org-unset", "clone-url-prefix", "clone-url-chars", "head-sha",
-                     "repo-id", "mr-local-id", "branch"}, codes
-    row = [ln for ln in guide.splitlines() if ln.startswith("|") and "ignored reason=" in ln]
-    assert len(row) == 1, "排错表里 `ignored reason=` 那一行找不到（或不止一行）"
+                     "repo-id", "mr-local-id", "branch", "note-biz-id", "mr-not-open"}, codes
+    # 选行的条件要挑出**枚举那一行**：别处（4.3 的 REVIEW_COMMAND 一行）也会正当地提到某个具体代号
+    # （`ignored reason=mr-not-open`），只按 `ignored reason=` 选会一下选中两行。
+    row = [ln for ln in guide.splitlines()
+           if ln.startswith("|") and "ignored reason=<代号>" in ln and "固定枚举：" in ln]
+    assert len(row) == 1, "排错表里枚举代号那一行找不到（或不止一行）"
     # 只看那一行里**枚举代号的那一段**，不是整行：整行判会被同一行后面「处置：`org-unset` 查函数
     # 配置」这类再次提及满足——把枚举里的代号改名，整行判照样绿（失败模式 d，本轮实测踩到过）。
     listing = row[0].split("固定枚举：", 1)[1].split("。日志里", 1)[0]
@@ -988,3 +998,84 @@ def test_setup_guide_matches_the_landed_stacks_and_ingress():
                  "ignored reason=", "bad-target-branch-filter",
                  "kiro-dispatch-failed", "kiro-backstop", "<!-- kiro-"]:
         assert fact in guide, f"手册缺少：{fact}"
+
+    # Task 13：评论命令落地之后，这几句也成了反话（B-2 与控制方裁决）
+    for stale in ("执行器与评审脚本那一半", "一条新的汇总评论", "尚未实现（Task 13）",
+                  "实现计划 Task 13"):
+        assert stale not in guide, f"手册仍有过时说法：{stale}"
+
+
+# ── Task 13 / B-2 + 控制方裁决：评论命令的结果是「原地更新那条汇总评论」 ──────────────
+def _guide_text():
+    return (pathlib.Path(__file__).resolve().parents[1] / "setup-guide.md").read_text()
+
+
+def test_the_guide_describes_the_comment_command_result_as_an_in_place_summary_update():
+    """手册两处原来写「结果照常以一条新的汇总评论呈现」，与引擎的生命周期正好相反。
+
+    引擎：每评审员每 MR 至多一条汇总，按「作者 = 机器人 且 正文含评审标记」定位上一次那条，
+    找到就**原地更新**（run:N 递增、历次表 +1），找不到或没配机器人用户名才新建
+    （scripts/kiro-review.sh 开头，spec I4）。操作者发出命令后看到的是那条评论变了。
+
+    两处各自按**段 / 行**判，不整篇判：整篇判会被 4.2 节里 `CODEUP_BOT_USERNAME` 那句说明满足，
+    而要守的恰恰是「读命令这一段时就看得见原地更新」（失败模式 d，本仓库的文档守卫踩过四次）。
+    """
+    guide = _guide_text()
+    head = guide.find("**评论命令已按 spec 落地**")
+    assert head != -1, "§0 里那段评论命令的说明找不到"
+    para = guide[head:guide.find("\n\n", head)]
+    row = [ln for ln in guide.splitlines()
+           if ln.startswith("|") and "REVIEW_COMMAND_PHRASE" in ln]
+    assert len(row) == 1, "4.3 的 REVIEW_COMMAND 那一行找不到（或不止一行）"
+    for text, name in ((para, "§0 的评论命令那一段"), (row[0], "4.3 的 REVIEW_COMMAND 那一行")):
+        assert "原地更新" in text, f"{name}没说结果是原地更新那条汇总评论"
+        assert "run:N" in text, f"{name}没说 run:N 递增（操作者就是靠这个数字确认重审跑了）"
+        assert "CODEUP_BOT_USERNAME" in text, f"{name}没说「没配机器人用户名时才新建」的那个前提"
+        for stale in ("新的汇总评论", "尚未实现", "Task 13", "不会回复那条评论"):
+            assert stale not in text, f"{name}仍有过时说法：{stale}"
+    # 手册说的必须与引擎真的实现的是同一件事（只读 scripts/，不改）
+    engine = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "kiro-review.sh").read_text()
+    assert "找到就原地更新（run:N 递增" in engine, "引擎的汇总评论生命周期变了，手册这两处要跟着复核"
+    assert "找不到或更新失败就新建" in engine, "引擎不再「找不到才新建」，手册那句前提要跟着复核"
+
+
+def test_the_guide_lists_the_executors_host_check_as_an_exit_91_cause():
+    """B-3：entrypoint 的第二道主机检查也以 91 退出，但 §8 的 91 那一行只写了令牌/网络/权限三类。
+
+    消息逐字取自 entrypoint.sh：运维是拿日志里那句话去表里找行的，手册改写一遍就对不上了。
+    """
+    aws_dir = pathlib.Path(__file__).resolve().parents[1]
+    entry = (aws_dir / "executor" / "entrypoint.sh").read_text()
+    literal = "业务库地址的主机不是 codeup.aliyun.com，拒绝 clone"
+    assert f'echo "{literal}" >&2; exit 91' in entry, "entrypoint 的主机检查消息/退出码变了"
+    row = [ln for ln in _guide_text().splitlines() if ln.startswith("|") and "退出码 91" in ln]
+    assert len(row) == 1, "§8 的退出码 91 那一行找不到（或不止一行）"
+    assert literal in row[0], "§8 的退出码 91 那一行没写主机检查这个成因"
+
+
+# ── Task 13 / O-4：§8 的排错表必须是**一张**连续的表 ─────────────────────────────
+def _guide_section_lines(heading):
+    lines = _guide_text().splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith(f"## {heading}")), None)
+    assert start is not None, f"找不到小节标题：## {heading}"
+    end = next((i for i, ln in enumerate(lines[start + 1:], start + 1) if ln.startswith("## ")),
+               len(lines))
+    return lines[start:end]
+
+
+def test_the_troubleshooting_table_renders_as_one_contiguous_table():
+    """原缺陷（O-4）：表格中间有一个空行，空行之后那几行没有表头，GitHub 把它们当普通段落渲染成
+    一堆竖线文本——而那几行正是最常查的 401 / 503 / 重投 / 404 / 502。
+
+    判的是「所有表格行连成一片」＋「只有一个表头分隔行」，不是「有没有那个空行」：换成别的非表格
+    行（一句说明、一个列表项）插在中间，渲染结果一样坏，这条同样要红。
+    """
+    section = _guide_section_lines("8. 排错")
+    idx = [i for i, ln in enumerate(section) if ln.startswith("|")]
+    assert len(idx) >= 12, f"§8 的表格行少于 12 行，守卫的前提不成立：{len(idx)}"
+    if idx != list(range(idx[0], idx[0] + len(idx))):
+        broken = [section[i][:40] for i in range(idx[0], idx[-1] + 1)
+                  if not section[i].startswith("|")]
+        raise AssertionError(f"§8 的表格被非表格行劈开了：{broken}")
+    seps = [i for i in idx if section[i].replace(" ", "").startswith("|---")]
+    assert seps == [idx[1]], f"§8 应当只有一张表、表头分隔行紧跟表头：{seps}"

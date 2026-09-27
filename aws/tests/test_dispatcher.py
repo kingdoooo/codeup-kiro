@@ -1095,3 +1095,197 @@ def test_a_successful_dispatch_logs_no_cleanup_line(capsys):
     ecs.run_task.return_value = {"tasks": [{"taskArn": "a"}]}
     handler_mod.dispatch(ecs, table, _full_cfg(), F)
     assert capsys.readouterr().out == ""
+
+
+# ── Task 13 / B-1：百分号编码的 `..` 必须与字面量 `..` 一样被拒 ────────────────────────
+# 字面量检查对 `%2e%2e` 无效（Task 5 复审 B-1 实测：那两种写法当时都判 review、一行日志都没有，
+# 执行器的主机检查也放行——主机没变，变的是组织那一段）。云效那侧会不会解码再归一成上级目录
+# 未经实测，所以整条拒绝 `%`。六个真实 fixture 的 git_http_url 一个 `%` 都没有（下一条守卫钉住）。
+PERCENT_URLS = [
+    f"https://codeup.aliyun.com/{FIX_ORG}/%2e%2e/%2e%2e/other-org/x.git",
+    f"https://codeup.aliyun.com/{FIX_ORG}/.%2e/.%2e/other-org/x.git",
+    f"https://codeup.aliyun.com/{FIX_ORG}/%2E%2E/other-org/x.git",
+    f"https://codeup.aliyun.com/{FIX_ORG}/x%40evil.example/y.git",
+    f"https://codeup.aliyun.com/{FIX_ORG}/x.git%3Fupload-pack=y",
+    f"https://codeup.aliyun.com/{FIX_ORG}/demo-app%2egit",
+]
+
+
+@pytest.mark.parametrize("url", PERCENT_URLS)
+def test_a_percent_encoded_clone_url_is_rejected_with_a_fixed_reason_code(url, capsys):
+    assert handler_mod.classify(MR_HDR, _mr_with(clone_url=url), CFG)[0] == "ignore"
+    assert capsys.readouterr().out == "ignored reason=clone-url-chars\n"
+
+
+@pytest.mark.parametrize("url", PERCENT_URLS)
+def test_the_note_path_rejects_a_percent_encoded_clone_url_too(url, capsys):
+    assert handler_mod.classify(NOTE_HDR, _note_body_with(clone_url=url), CFG)[0] == "ignore"
+    assert capsys.readouterr().out == "ignored reason=clone-url-chars\n"
+
+
+def test_all_six_real_fixtures_still_classify_the_same_way(capsys):
+    """加了 `%` 与 note_biz_id 两道检查之后，六个真实投递的判定必须逐个不变。
+
+    用**全集**比对（先断言目录里就是这六个文件）：漏掉一个 fixture 的回归就是「新规则误伤了真实
+    流量」，而单独抽查几个的用例发现不了。
+    """
+    want = {"mr-opened.json": (MR_HDR, "review"),
+            "mr-updated.json": (MR_HDR, "review"),
+            "mr-updated-after-approval.json": (MR_HDR, "review"),
+            "mr-approved.json": (MR_HDR, "ignore"),          # 通过 = accepted，不是新评审
+            "note-mr-new.json": (NOTE_HDR, "ignore"),        # 真实正文里没有命令短语
+            "note-bot-review.json": (NOTE_HDR, "ignore")}    # 本方评审评论（带 kiro- 标记）
+    assert sorted(p.name for p in FIX.glob("*.json")) == sorted(want), "新增 fixture 必须在这里表态"
+    for name, (hdr, expected) in want.items():
+        body = _fix(name)
+        assert "%" not in body["repository"]["git_http_url"], f"{name} 的 clone 地址带 `%`，新规则会误伤它"
+        assert handler_mod.classify(hdr, body, CFG)[0] == expected, name
+    assert capsys.readouterr().out == "", "真实投递不该留下任何一行形状日志"
+
+
+# ── Task 13 / O-2：note_biz_id 必须过形状（它会进 LOCK_KEY → 容器环境与 DynamoDB 主键）────
+@pytest.mark.parametrize("bad", [
+    "25e4cd2aff2d4719b19590745962f61",                  # 31 位
+    "25e4cd2aff2d4719b19590745962f61ab",                # 33 位
+    "25E4CD2AFF2D4719B19590745962F61A",                 # 大写
+    "25e4cd2a-ff2d-4719-b195-90745962f61a",             # 带连字符的 UUID 写法
+    "x#y z\x00",                                        # 复审实测的那个取值：当时判 review
+    "../../../etc/passwd",
+    "$(id)",
+])
+def test_a_crafted_note_id_is_rejected_with_a_fixed_reason_code(bad, capsys):
+    body = _note_with("/kiro review")
+    body["object_attributes"]["note_biz_id"] = bad
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "ignore"
+    assert capsys.readouterr().out == "ignored reason=note-biz-id\n"
+
+
+def test_the_real_note_id_passes_and_still_reaches_the_lock_key(capsys):
+    # 正向对照：那道检查不能退化成「评论命令一律不受理」，且它加在 _accept 里之后
+    # 去重键必须照旧进锁键（位置错了整条路径就判死，而上面那些用例照样绿）。
+    body = _note_with("/kiro review")
+    kind, f = handler_mod.classify(NOTE_HDR, body, CFG)
+    assert kind == "review"
+    assert f["dedupe_extra"] == body["object_attributes"]["note_biz_id"]
+    assert len(f["dedupe_extra"]) == 32, f["dedupe_extra"]
+    assert handler_mod.lock_key(f).endswith("#" + f["dedupe_extra"])
+    assert capsys.readouterr().out == ""
+
+
+def test_an_mr_event_is_not_tripped_by_the_note_id_check(capsys):
+    # falsy 但有意义的反面：MR 事件的 dedupe_extra 是空串（既有约定），那道检查必须跳过它，
+    # 否则每一个 MR 事件都会被判 note-biz-id。
+    kind, f = handler_mod.classify(MR_HDR, _fix("mr-opened.json"), CFG)
+    assert kind == "review" and f["dedupe_extra"] == ""
+    assert handler_mod._reject_reason(f, CFG) == ""
+    assert capsys.readouterr().out == ""
+
+
+# ── Task 13 / 新裁决：MR 已合并/已关闭时不受理评论命令 ──────────────────────────────
+@pytest.mark.parametrize("state", ["merged", "MERGED ", " Merged\n", "closed", "CLOSED", "Closed"])
+def test_a_command_on_a_merged_or_closed_mr_is_ignored(state, capsys):
+    body = _set_note_mr_state(_note_with("/kiro review"), state)
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "ignore"
+    assert capsys.readouterr().out == "ignored reason=mr-not-open\n"
+
+
+@pytest.mark.parametrize("state", ["opened", "OPENED", " opened ", "accepted", "reopened",
+                                   "locked", "unknown-word", "", None])
+def test_a_command_on_any_other_state_is_still_reviewed(state, capsys):
+    """只有确知的两个取值拦门，其余（含没见过的词）一律放行。
+
+    merged/closed 只见于云效文档，没有实测样本（Task 1 结论文件 §1：实测到的只有 opened /
+    accepted）。所以这道门不能写成 `!= "opened"`：那样云效哪天换个词，评论命令就整体静默失效——
+    而 `accepted` 恰恰是已经实测过、且**必须照常评审**的那一个（MR 通过之后仍可要求重审）。
+    """
+    body = _note_with("/kiro review")
+    if state is None:
+        del body["merge_request"]["state"]     # 字段缺失也必须放行
+    else:
+        _set_note_mr_state(body, state)
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "review"
+    assert capsys.readouterr().out == ""
+
+
+def test_the_state_gate_reads_the_merge_requests_state_not_the_notes_own_state():
+    # Note 报文里有两个 state：`object_attributes.state` 是**评论自己**的（实测值 `OPENED`），
+    # `merge_request.state` 才是被评论的 MR。门写到前一个字段上时，上面那组用例会因为
+    # 「fixture 里两个字段恰好都不是 merged」而恒绿——这条把两者分开钉住。
+    body = _note_with("/kiro review")
+    body["object_attributes"]["state"] = "merged"
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "review", \
+        "评论自己的状态不是 MR 的状态，不能拿它拦门"
+    assert handler_mod.classify(NOTE_HDR, _set_note_mr_state(body, "merged"), CFG)[0] == "ignore"
+
+
+def test_the_two_paths_keep_their_own_state_rules():
+    # MR 分支是严格的 `== "opened"`（locked 也 ignore），Note 分支只挡 merged/closed——
+    # 两套规则不能互相串（串了就是「评论命令对 locked 的 MR 静默失效」或「MR 事件放行 accepted」）。
+    assert handler_mod.classify(MR_HDR, _set_state(_fix("mr-opened.json"), "locked"), CFG)[0] == "ignore"
+    assert handler_mod.classify(
+        NOTE_HDR, _set_note_mr_state(_note_with("/kiro review"), "locked"), CFG)[0] == "review"
+    assert handler_mod.NOTE_CLOSED_STATES == frozenset({"merged", "closed"}), \
+        "枚举变了就得连同 setup-guide 的说明一起改"
+
+
+# ── Task 13 / I-1 残留：评审引擎写出去的每一个标记前缀都必须以 REVIEW_MARKER 开头 ────────
+# 断环（N5）靠「本方评论正文里带 `<!-- kiro-` 开头的 HTML 注释」。脚本那侧任何一个标记改成别的
+# 前缀，断环就在那一种评论上失效——而本仓库的相关用例都是手搓标记字面量，改名之后照样绿。
+# 这条从 scripts/ 的源码里抽真正的前缀来比（只读，不改 scripts/）。
+ENGINE_SCRIPTS = [ROOT.parent / "scripts" / "kiro-review.sh",
+                  *sorted((ROOT.parent / "scripts" / "lib").glob("*.sh"))]
+KNOWN_MARKER_PREFIXES = {"<!-- kiro-review:", "<!-- kiro-review-post:",
+                         "<!-- kiro-history:", "<!-- kiro-inline:"}
+
+
+def _marker_prefixes(src):
+    """抽出源码里每一个 HTML 注释标记的前缀（`<!-- 名字` [+ 冒号]）。
+
+    按 `<!--` 抽、**不**按 `kiro-` 抽：按 `kiro-` 抽等于先假设了要证明的结论——某个前缀被改名成
+    `<!-- codeup-review:` 之后就再也抽不到它，守卫恒绿。开头必须是字母，所以脚本注释里那些
+    `` `<!--` `` / `<!--"`（讲转义的那几处）不会被当成标记。
+    """
+    import re
+    return {f"<!-- {name}" for name in re.findall(r"<!--\s*([A-Za-z][A-Za-z0-9._-]*:?)", src)}
+
+
+def test_every_marker_prefix_the_engine_emits_starts_with_the_dispatchers_marker():
+    found = set()
+    for path in ENGINE_SCRIPTS:
+        assert path.exists(), path
+        found |= _marker_prefixes(path.read_text())
+    # 集合与数量都钉住：抽取器什么都没抽到时，「每一个都以 kiro- 开头」是空真。
+    assert found == KNOWN_MARKER_PREFIXES, found
+    assert len(found) == 4, found
+    for prefix in sorted(found):
+        assert prefix.startswith(handler_mod.REVIEW_MARKER), \
+            f"{prefix} 不以 {handler_mod.REVIEW_MARKER} 开头：这一种评论断不了环（N5）"
+
+
+def test_the_marker_guard_goes_red_when_a_prefix_is_renamed():
+    """元测试（变异）：把 review-render.sh 的**副本**里的 `kiro-inline:` 改名，抽取器必须抽到新
+    名字、且它必须判不通过。没有这条，上面那条断言从未被证明能红。副本在内存里，不动 scripts/。
+    """
+    src = (ROOT.parent / "scripts" / "lib" / "review-render.sh").read_text()
+    assert "<!-- kiro-inline:" in src, "变异的前提不成立：源码里没有这个前缀"
+    found = _marker_prefixes(src.replace("<!-- kiro-inline:", "<!-- codeup-inline:"))
+    assert "<!-- codeup-inline:" in found and "<!-- kiro-inline:" not in found, found
+    assert [p for p in sorted(found) if not p.startswith(handler_mod.REVIEW_MARKER)] == \
+        ["<!-- codeup-inline:"], found
+    assert found != KNOWN_MARKER_PREFIXES
+
+
+def test_the_four_marker_prefixes_are_the_ones_the_engine_really_writes():
+    """抽取器抽到的四个前缀必须与脚本里**真正写出去**的那几行对得上（而不是只在注释里出现过）。
+
+    钉的是「变量名 → 取值」与那行 echo：只对集合断言的话，把 REVIEW_HISTORY_PREFIX 的取值改掉、
+    却在注释里留着旧写法，上面那条照样绿。
+    """
+    render = (ROOT.parent / "scripts" / "lib" / "review-render.sh").read_text()
+    for var, prefix in (("REVIEW_INLINE_MARKER_PREFIX", "<!-- kiro-inline:"),
+                        ("REVIEW_POST_NONCE_PREFIX", "<!-- kiro-review-post:"),
+                        ("REVIEW_HISTORY_PREFIX", "<!-- kiro-history:")):
+        assert (f'{var}="{prefix}"' in render or f"{var}='{prefix}'" in render), var
+        assert prefix in KNOWN_MARKER_PREFIXES
+    # 汇总评论那一个没有变量，是直接 echo 出去的
+    assert 'echo "<!-- kiro-review:${sha} run:${run} -->"' in render, "汇总标记那行 echo 变了"

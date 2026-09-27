@@ -88,7 +88,18 @@ def _set_note_text(body, text):
     return body
 
 
-for _fn in (_set_state, _set_note_author, _set_note_system, _set_note_text):
+def _set_note_mr_state(body, state):
+    """改 Note Hook 报文副本里**被评论的那个 MR** 的状态（真实路径 `merge_request.state`）。
+
+    刻意与 `_set_state`（MR Hook 的 `object_attributes.state`）分成两个助手：同名字段在两种报文里
+    不是同一套取值——Note 报文里 `object_attributes.state` 是**评论自己**的状态（观测值 `OPENED`），
+    而 MR 已通过时 `merge_request.state` 仍是 `opened`（Task 1 实测）。写错路径的用例会恒绿。
+    """
+    body["merge_request"]["state"] = state
+    return body
+
+
+for _fn in (_set_state, _set_note_author, _set_note_system, _set_note_text, _set_note_mr_state):
     setattr(builtins, _fn.__name__, _fn)
 
 

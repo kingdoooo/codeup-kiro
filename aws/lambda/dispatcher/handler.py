@@ -128,7 +128,20 @@ CODEUP_HOST = "codeup.aliyun.com"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _DIGITS_RE = re.compile(r"^[0-9]+$")   # 不用 str.isdigit()：它对 "٣"、"²" 这类也为真
 _CTRL_OR_SPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
-_URL_UNSAFE_RE = re.compile(r"[@?#\s\x00-\x1f\x7f]|\.\.")
+# `%` 整条拒绝，不只拒绝 `%2e`：字面量 `..` 的检查对百分号编码无效——`/<org>/%2e%2e/%2e%2e/other-org/x.git`
+# 与 `/<org>/.%2e/…` 两种写法都能绕过它（Task 5 复审 B-1 实测），而这道检查的目的正是「不许爬出本组织」。
+# 云效那侧会不会把 `%2e%2e` 解码再归一成上级目录没有实测过（未知），所以按 fail closed 处理。
+# 真实报文里不会出现 `%`：Task 1 抓到的六个 fixture 的 git_http_url 一个都没有（tests 里有守卫）。
+_URL_UNSAFE_RE = re.compile(r"[@?#%\s\x00-\x1f\x7f]|\.\.")
+# 评论命令的去重键：真实 Note Hook 的 note_biz_id 是 32 位小写十六进制（Task 1 抓到的两个评论
+# fixture 都是）。它会原样进 LOCK_KEY → 容器环境变量与 DynamoDB 主键，所以必须过形状。
+_NOTE_BIZ_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+# Note 报文里 MR 已经合并/关闭时不受理命令：那时评审无处落地（新评论只会挂在一个已结束的 MR 上），
+# 而抢锁又拦不住（每条评论都是新的 note_biz_id）。**只挡这两个确知的取值**，其余（含没见过的词）
+# 一律放行：`merge_request.state` 与 MR 报文的 state 不是同一套取值（MR 已通过时前者仍是 `opened`，
+# Task 1 实测），而 merged/closed 本身只见于云效文档、没有实测样本（Task 1 结论文件 §1 第 61 行）。
+# 若哪天云效换了词，失败方向是「照常评审」而不是「命令静默失效」。
+NOTE_CLOSED_STATES = frozenset({"merged", "closed"})
 
 
 def _reject_reason(fields, cfg):
@@ -140,7 +153,8 @@ def _reject_reason(fields, cfg):
         return "clone-url-prefix"   # 主机 + 组织都必须是我们自己的
     if _URL_UNSAFE_RE.search(fields["clone_url"]):
         # `@` 会让 `https://codeup.aliyun.com/<org>/x@evil/…` 之类把 userinfo 挪到前面；
-        # `?`/`#`/`..` 可以改写 git 看到的路径；空白与控制字符能把一行参数拆成两行。
+        # `?`/`#`/`..` 可以改写 git 看到的路径；`%` 能把 `..` 藏成 `%2e%2e`（见 _URL_UNSAFE_RE 上方）；
+        # 空白与控制字符能把一行参数拆成两行。
         return "clone-url-chars"
     if not _SHA_RE.match(fields["head_sha"]):
         return "head-sha"           # 会变成 `git checkout` 的参数：只接受 40 位小写十六进制
@@ -154,7 +168,21 @@ def _reject_reason(fields, cfg):
         # 这里再判一次是因为这个函数是「往下走之前的最后一道」，不依赖上游的顺序。
         if not value or value.startswith("-") or _CTRL_OR_SPACE_RE.search(value):
             return "branch"
+    extra = fields.get("dedupe_extra") or ""
+    # 评论 id 只有评论命令那条路径才有；MR 事件是空串（既有约定：缺失与空串一致），不检查。
+    # 有值就必须是 32 位小写十六进制——它会进 LOCK_KEY，而锁键是容器环境变量与 DynamoDB 主键。
+    if extra and not _NOTE_BIZ_ID_RE.match(extra):
+        return "note-biz-id"
     return ""
+
+
+def _log_ignored(reason):
+    """忽略这次投递时留下的那一行固定形状日志：`ignored reason=<代号>`。
+
+    只有一处 print（`_accept` 与评论命令的状态门都走它）：形状分叉了 setup-guide 的排错表就只对一半
+    路径成立，而运维是按 `reason=` 过滤的。代号是固定枚举，绝不带报文里的取值。
+    """
+    print(f"ignored reason={reason}", flush=True)
 
 
 def _accept(fields, cfg):
@@ -168,7 +196,7 @@ def _accept(fields, cfg):
     """
     reason = _reject_reason(fields, cfg)
     if reason:
-        print(f"ignored reason={reason}", flush=True)
+        _log_ignored(reason)
         return False
     return True
 
@@ -195,10 +223,11 @@ def classify(headers, body, cfg):
 
     返回 ("review", fields) 或 ("ignore", None)。未知事件与未知报文形状一律 ignore —— 不猜（N6）。
 
-    两条 Task 1 实测的事实只影响注释、不影响逻辑：①同一次投递最多到 3 次（我们回 503 时 Codeup
-    在约 1 秒内立即重试 2 次，`X-Codeup-Delivery` 不变），靠幂等抢锁（N3）吸收，classify 不去重；
+    两条 Task 1 实测的事实：①同一次投递最多到 3 次（我们回 503 时 Codeup 在约 1 秒内立即重试 2 次，
+    `X-Codeup-Delivery` 不变），靠幂等抢锁（N3）吸收，classify 不去重（只影响注释，不影响逻辑）；
     ②Note 报文里的 `merge_request.state` 与 MR 报文的 `state` 不是同一套取值（MR 已通过时前者仍是
-    `opened`），不要拿来互相比较，所以评论分支不看 state。
+    `opened`），所以评论分支**不**照抄 MR 分支的 `== "opened"`，只挡确知的 merged/closed
+    （NOTE_CLOSED_STATES），别的取值一律放行。
     """
     ev = _event_name(headers)
 
@@ -251,6 +280,11 @@ def classify(headers, body, cfg):
             return "ignore", None
         if phrase not in note:
             return "ignore", None
+        # MR 已经合并或关闭时不受理命令（见 NOTE_CLOSED_STATES）。判在短语之后：这样这行日志只在
+        # 「真有人发了命令却什么都没发生」时出现，不会被每一条普通评论刷满。
+        if _norm(_dig(body, "merge_request", "state")) in NOTE_CLOSED_STATES:
+            _log_ignored("mr-not-open")
+            return "ignore", None
         fields = _fields_from(_dig(body, "merge_request"), _dig(body, "repository"))
         if fields is None:
             return "ignore", None
@@ -258,6 +292,7 @@ def classify(headers, body, cfg):
             return "ignore", None
         # 评论的唯一 id 是 note_biz_id（32 位十六进制）；真实 Note Hook 里**没有**
         # object_attributes.id——用 id 取值会恒为空串，于是每一条 /kiro review 都被静默忽略。
+        # 取值的**形状**由下面的 _accept 一并检查（代号 note-biz-id），与别的标量同一处、同一行日志。
         fields["dedupe_extra"] = _scalar(_dig(body, "object_attributes", "note_biz_id")) or ""
         if not fields["dedupe_extra"]:
             return "ignore", None            # 没有评论 id 就无法去重，宁可不评
