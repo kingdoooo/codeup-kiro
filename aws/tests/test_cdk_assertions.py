@@ -830,9 +830,13 @@ def _guide_digest_bootstrap_step2():
     """
     guide = (pathlib.Path(__file__).resolve().parents[1] / "setup-guide.md").read_text()
     lines = guide.splitlines()
-    start = next(i for i, ln in enumerate(lines) if ln.startswith("2. 读出执行器镜像的真实摘要"))
-    end = next(i for i, ln in enumerate(lines[start + 1:], start + 1)
-               if ln.startswith("3. 把真实摘要"))
+    # 用 next(..., None) + 断言而不是裸 next()：标题被改动时 StopIteration 的堆栈说不出
+    # 「是这一段找不到了」，而这恰恰是最可能的失败原因（同 F1 那条 KeyError 的教训）。
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("2. 读出执行器镜像的真实摘要")), None)
+    assert start is not None, "5.2 引导第 2 步的开头不见了（`2. 读出执行器镜像的真实摘要`）"
+    end = next((i for i, ln in enumerate(lines[start + 1:], start + 1)
+                if ln.startswith("3. 把真实摘要")), None)
+    assert end is not None, "5.2 引导第 3 步的开头不见了（`3. 把真实摘要`）"
     return "\n".join(lines[start:end])
 
 
