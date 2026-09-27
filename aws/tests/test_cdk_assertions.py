@@ -797,6 +797,26 @@ def test_setup_guide_documents_the_exact_secret_unavailable_log_line():
     assert "不打调度器那行固定格式的日志" in guide
 
 
+# ── F4：Codeup 对 503 的重投行为已实测，两处都不得退回「未经核实」 ──────────────
+def test_the_measured_503_redelivery_fact_is_stated_in_both_code_and_guide():
+    """守的是**退回**，不是措辞。
+
+    原注释把「Codeup 对 503 是否重投未经核实」当成选 503 的免责说明，手册排错表也照抄了
+    「是否会自己重投未经核实，重新推送一次即可」。Task 1 实测的结论比那句话窄得多：同一个
+    `X-Codeup-Delivery` 在约 1 秒内一共到 3 次就不再来，所以配置/权限错误这次事件是真丢了。
+    谁把这段改回「未经核实」，或者把「最多 3 次」这个上界丢掉，这条会红。
+    """
+    aws_dir = pathlib.Path(__file__).resolve().parents[1]
+    handler = (aws_dir / "lambda" / "dispatcher" / "handler.py").read_text()
+    guide = (aws_dir / "setup-guide.md").read_text()
+    for text, name in ((handler, "dispatcher/handler.py"), (guide, "setup-guide.md")):
+        assert "未经核实" not in text, f"{name} 又把 Codeup 的 503 重投写成未经核实"
+        assert "3 次" in text, f"{name} 没写出实测的重投上界（同一 delivery 最多 3 次）"
+        assert "X-Codeup-Delivery" in text, f"{name} 没点名重投时不变的那个头"
+    # 手册这侧还必须写清楚处置办法与幂等锁的承重作用——只说「丢了」等于没给出路
+    assert "幂等" in guide and "ReviewLock" in guide
+
+
 # ── I6：接入手册不得再次与代码脱节 ────────────────────────────────────────────
 def test_setup_guide_matches_the_landed_stacks_and_ingress():
     # 手册曾在三个 stack 已经挂载之后仍写着「cdk deploy 不会创建任何资源」、且没有部署步骤。
