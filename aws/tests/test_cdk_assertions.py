@@ -567,6 +567,45 @@ def test_task_definition_supplies_aws_region_and_lock_table_to_container():
     assert {"AWS_REGION", "LOCK_TABLE"} <= names
 
 
+# ── F1：构建机架构不得泄进镜像（Task 1 真实探测：arm64 镜像在 X86_64 Fargate 上 TaskFailedToStart）──
+def test_task_definition_pins_runtime_platform_to_x86_64_linux():
+    # Fargate 的缺省恰好就是 X86_64/LINUX，但这里要的是**模板里看得见**：与镜像 platform 成对，
+    # 任何一侧被改动时另一侧的断言会立刻红。
+    t = _exec_template()
+    tds = t.find_resources("AWS::ECS::TaskDefinition")
+    assert len(tds) == 1
+    rp = tds[list(tds)[0]]["Properties"].get("RuntimePlatform")
+    assert rp, "任务定义没有显式 RuntimePlatform"
+    assert rp["CpuArchitecture"] == "X86_64", rp
+    assert rp["OperatingSystemFamily"] == "LINUX", rp
+
+
+def _exec_asset_manifest(tmp_path):
+    """真正 synth 一次，读云装配里的资产清单（`<stack>.assets.json`）。
+
+    断言必须落在真实产物上：镜像的构建平台只出现在资产清单的 `dockerImages.*.source.platform`
+    里（模板里没有这个字段，cdk-assets 才是拿它去 `docker build --platform` 的那一方）。
+    读 Python 源码里有没有 `platform=` 证明不了 synth 真的写出了它。
+    """
+    app = cdk.App(outdir=str(tmp_path))
+    state = StateStack(app, "S", cfg={"region": "us-west-2"})
+    ExecutorStack(app, "E", cfg=_full_cfg(), state=state)
+    app.synth()
+    return json.loads((tmp_path / "E.assets.json").read_text())
+
+
+def test_image_asset_manifest_pins_the_build_platform_to_linux_amd64(tmp_path):
+    # CDK 的缺省是「构建机当前平台」（cloud_assembly_schema 原文 "Default: - current machine
+    # platform"），Apple Silicon 上就是 linux/arm64——部署阻塞级缺陷，静态复审看不出来。
+    images = _exec_asset_manifest(tmp_path)["dockerImages"]
+    assert len(images) == 1, images
+    source = list(images.values())[0]["source"]
+    assert source["platform"] == "linux/amd64", \
+        f"资产清单里的构建平台是 {source.get('platform')!r}（缺失=跟构建机走）"
+    # 正向对照：这份清单确实是执行器镜像那一条，不是碰巧读到了别的资产
+    assert source["dockerFile"] == "aws/executor/Dockerfile", source
+
+
 def test_task_role_dynamodb_grant_is_update_item_only():
     t = _exec_template()
     policies = t.find_resources("AWS::IAM::Policy")

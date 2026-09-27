@@ -74,6 +74,14 @@ class ExecutorStack(cdk.Stack):
             self, "ExecutorImage",
             directory=REPO_ROOT,
             file="aws/executor/Dockerfile",
+            # platform 必须显式写死：CDK 的缺省是「构建机当前平台」
+            # （cloud_assembly_schema: "Default: - current machine platform"），于是在 Apple Silicon
+            # 上 synth/deploy 会产出 linux/arm64 的镜像，Fargate 侧（X86_64）拉取时直接
+            # TaskFailedToStart：`CannotPullContainerError: … image Manifest does not contain
+            # descriptor matching platform 'linux/amd64'`（Task 1 真实探测踩到）。
+            # 构建机的架构绝不允许泄进镜像。另外烤进镜像的是 kirocli-x86_64-linux-musl，
+            # 本身就只有 x86_64 一种，arm64 在这两件事上都是错的。
+            platform=ecr_assets.Platform.LINUX_AMD64,
             # 不排除的话 CDK 分阶段 staging 会把整个仓库根（含 aws/cdk.out/、aws/.venv/、.git/）
             # 当成构建上下文原样拷贝一份——cdk.out 又刚好在仓库根之内，前一次 synth 留下的
             # cdk.out 会被下一次 synth 递归拷进新的 cdk.out，实测直接拷出 ENAMETOOLONG。
@@ -108,6 +116,14 @@ class ExecutorStack(cdk.Stack):
             memory_limit_mib=cfg.get("memory_mib", 8192),
             ephemeral_storage_gib=ephemeral_gib,
             task_role=self.task_role,
+            # 与镜像资产的 platform 成对写死。Fargate 的 runtime_platform 缺省是 X86_64/LINUX，
+            # 但「缺省恰好对」和「显式声明」不是一回事：这一对值必须在同一次改动里一起看见，
+            # 否则谁把镜像改成 arm64 时不会注意到任务定义还停在 X86_64（或反之），
+            # 表现就是任务起不来而模板本身毫无异样。
+            runtime_platform=ecs.RuntimePlatform(
+                cpu_architecture=ecs.CpuArchitecture.X86_64,
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+            ),
         )
 
         self.container_name = cfg.get("container_name", "review")
