@@ -292,7 +292,12 @@ cdk --app "python3 probe_app.py" -c region=<区域> destroy CodeupKiroIngressPro
 ### 6.3 部署
 
 前提：第 3 节的三个密钥已在**同一区域**创建；第 5.1 节的安装包已放到 `aws/executor/`（`cdk deploy` 会从
-仓库根构建执行器镜像并推到 CDK 的资产 ECR 仓库）；本机有 Docker 与 CDK CLI。
+仓库根构建执行器镜像并推到 CDK 的资产 ECR 仓库）；本机有 Docker 与 CDK CLI。**Docker 必须带
+BuildKit/buildx**：镜像资产声明了 `platform=linux/amd64`（`aws/stacks/executor_stack.py`），CDK 把它原样
+传给 `docker build --platform`，而 CDK 文档对这个参数的要求就是 *Requires Docker Buildx*——
+用 `DOCKER_BUILDKIT=0` 的老构建器会直接报错。在 Apple Silicon 上还需要 **amd64 仿真**（跨架构构建）。
+Docker Desktop 两者都自带，装它就不用管这一条。失败方向是响亮的（构建报错、部署停在资产阶段），
+不会静默产出一个架构不对的镜像。
 
 ```bash
 set -euo pipefail
@@ -356,9 +361,9 @@ aws/.venv/bin/pip install -r aws/requirements.txt
 
 | Codeup 的 webhook 投递记录显示 401 | Codeup 里填的 Secret Token 与 `codeup-kiro/webhook-secret` 的值不一致，或请求根本没带 `X-Codeup-Token` 头（没带令牌时调度器在取密钥之前就回 401）。**改密钥的值不需要重新部署**：两个 Lambda 的环境变量里只有密钥名，值在调用时取。但取到的值**按执行环境缓存且没有 TTL**，而 Lambda 不承诺执行环境的最长寿命——持续有流量时旧值可能存活数小时，没有任何保证的上限。要让新值立刻生效，改一次函数配置（任何无害改动）强制换执行环境 |
 | Codeup 的 webhook 投递记录显示 503，正文 `secret-unavailable` | 调度器取不到 `codeup-kiro/webhook-secret`。这是 fail-closed 的显式响应（绝不放行），且**每次都会在调度 Lambda 的日志里留一行固定形状的记录**：`secret-unavailable var=WEBHOOK_SECRET_ID code=<代号>`（按 `code=` 过滤即可）。代号只有固定几种，正是四类成因的区分：`env-unset`（环境变量没配或为空，几乎只会出现在手改过函数配置之后）、`empty-value`（密钥存在但值为空）、`ResourceNotFoundException`（密钥不存在或名字不符）、`AccessDeniedException`（Lambda 角色缺 `secretsmanager:GetSecretValue`）、`ThrottlingException`（Secrets Manager 限流）。日志里只有变量名与代号，不含密钥值、账号 ID 或 AWS 错误正文。**这次事件已经丢了，不会自己回来**：Codeup 对 503 的重投行为已实测（见下一行）——同一次投递在约 1 秒内一共来 3 次就不再来了，`ThrottlingException` 这种亚秒级抖动有机会在第 2/3 次自愈，而上面四类配置/权限成因在 1 秒内不可能修好。所以处置顺序是：按 `code=` 定位并修好配置，然后**主动重新触发**——往 MR 的源分支再推一次提交（`git commit --allow-empty` 也算）即可产生一次新投递。云效控制台的 webhook 页面是否提供「重新发送」按钮本轮没有核实，不要依赖它 |
-| 同一个 `X-Codeup-Delivery` 的投递在日志里出现了 2~3 次 | **预期行为，不是错误**（Task 1 实测）：Codeup 对非 2xx 响应会立即重试，同一个 delivery id 在约 1 秒内最多到 3 次，之后不再重投（观察 10 分钟以上）。幂等抢锁（`ReviewLock` 表，键是「仓库#MR#提交」）把这几次吸收掉，只有第一次能真正拉起 Fargate 任务；`X-Codeup-Delivery` 本身也可以当投递级去重的辅助键 |
+| 同一个 `X-Codeup-Delivery` 的投递在日志里出现了 2~3 次 | **预期行为，不是错误**。实测的是 **503**（Task 1，只测了这一个状态码）：回 503 时 Codeup 立即重试，同一个 delivery id 在约 1 秒内最多到 3 次，之后不再重投（观察 10 分钟以上）。**其他非 2xx（404 / 502 / 504）是否同样重投没有测过**，所以不要把「最多 3 次」当成所有状态码的上界。幂等抢锁（`ReviewLock` 表，键是「仓库#MR#提交」）把这几次吸收掉，只有第一次能真正拉起 Fargate 任务；`X-Codeup-Delivery` 本身也可以当投递级去重的辅助键 |
 | Codeup 的 webhook 投递记录显示 404 或连接超时，调度 Lambda 没有任何日志 | 请求没有到达 Lambda：方法不是 `POST`（监听器默认动作固定返回 404，只有 `POST` 转发给调度器），或 URL 填成了 ALB 域名（内网 ALB 从公网连不上，只能经 CloudFront 访问）——URL 必须是 `WebhookUrl` |
-| Codeup 的 webhook 投递记录显示 502/504 | 502：调度 Lambda 抛了异常或返回了不完整的响应（查 Lambda 日志）；504：Lambda 超过 CloudFront 回源读超时（30 秒）仍未返回。两种情况下请求可能已被处理，Codeup 却记为失败并可能重投，重投会被幂等锁挡住 |
+| Codeup 的 webhook 投递记录显示 502/504 | 502：调度 Lambda 抛了异常或返回了不完整的响应（查 Lambda 日志）；504：Lambda 超过 CloudFront 回源读超时（30 秒）仍未返回。两种情况下请求可能已被处理，Codeup 却记为失败。**Codeup 对 502/504 会不会重投没有实测过**（实测过的只有 503，见上面那一行），所以这里只能说：如果它重投，会被幂等锁挡住；如果它不重投，这次事件就丢了，得主动重新触发 |
 
 「抢锁冲突」「评审未启动」「兜底回写」三行对应的代码已经实现（`aws/lambda/dispatcher/handler.py`、
 `aws/lambda/backstop/handler.py`），但调度器接到 webhook 后走到抢锁这一步要等 Task 5 落地（见本文开头），

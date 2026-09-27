@@ -3,6 +3,7 @@ import hashlib
 import json
 import pathlib
 import sys
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # 回显 Lambda 按 /opt/dispatcher 导入 http_shape（Lambda 运行时里由 layer 提供）；本地把同一个
@@ -60,15 +61,22 @@ def test_token_header_is_redacted_with_its_length(capsys):
     assert log["headers"]["codeup-event"] == "Note Hook", "其余请求头原样记录（Task 1 要取它们）"
 
 
-# ── F3：Codeup 把同一个 Secret Token 放在两个头里（Task 1 实测）────────────────────
-# 真实投递的请求头形状（probe-results §1「请求头」）：事件头、投递 id、**两个**同值的令牌头、
+# ── F3：Codeup 一次投递里带两个令牌头（Task 1 实测）──────────────────────────────
+# 真实投递的请求头形状（probe-results §1「请求头」）：事件头、投递 id、**两个**令牌头、
 # okhttp 的 UA、带 charset 的 Content-Type。头名大小写按 Codeup 发出的原样写——ALB 转发时会
 # 小写，但打码不能依赖「一定已经小写了」，所以这里刻意混着大小写喂。
+#
+# 两个头的值**故意写成不相等的两个 48 位十六进制串**：实测到的只是两者长度相同（各 48 位，
+# 与生成的一次性令牌等长），「逐字相同」是按 GitLab 兼容语义推断的、没做过逐字节比对。
+# 用不相等的值反而更强：它证明两个头各自被打码，而不是「打掉一个、另一个碰巧同值所以也看不见」。
+TOKEN_CODEUP = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678abcdef01"
+TOKEN_GITLAB = "ff00ee11dd22cc33bb44aa5566778899fedcba9876543210"
+assert len(TOKEN_CODEUP) == len(TOKEN_GITLAB) == 48 and TOKEN_CODEUP != TOKEN_GITLAB
 REAL_DELIVERY_HEADERS = {
     "X-Codeup-Event": "Merge Request Hook",
     "X-Codeup-Delivery": "d19fbb32-0000-4000-8000-000000000000",
-    "X-Codeup-Token": "probe-throwaway-token",
-    "X-Gitlab-Token": "probe-throwaway-token",
+    "X-Codeup-Token": TOKEN_CODEUP,
+    "X-Gitlab-Token": TOKEN_GITLAB,
     "User-Agent": "okhttp/4.11.0",
     "Content-Type": "application/json; charset=utf-8",
 }
@@ -82,9 +90,10 @@ def test_both_token_headers_are_redacted_case_insensitively(capsys):
     headers["X-GITLAB-token"] = headers.pop("X-Gitlab-Token")
     echo.handler({"headers": headers, "isBase64Encoded": False, "body": TEXT}, None)
     out = capsys.readouterr().out
-    assert "probe-throwaway-token" not in out, "令牌值不得出现在日志任何位置"
+    for token in (TOKEN_CODEUP, TOKEN_GITLAB):
+        assert token not in out, "令牌值不得出现在日志任何位置"
     log = json.loads(out.strip())
-    marker = f"<redacted len={len('probe-throwaway-token')}>"
+    marker = "<redacted len=48>"
     assert log["headers"]["x-CODEUP-token"] == marker
     assert log["headers"]["X-GITLAB-token"] == marker
     # 正向对照：只打码这两个，其余真实请求头逐字保留——否则「日志里没有令牌」也可能是
@@ -102,10 +111,31 @@ def test_redacted_header_list_covers_every_token_header_the_real_delivery_carrie
 
 
 def test_production_dispatcher_still_accepts_only_x_codeup_token():
-    # 打码面扩到两个头，**校验面不扩**：多认一个头就是多一条绕过面。
-    disp = (ROOT / "lambda" / "dispatcher" / "handler.py").read_text()
-    assert 'TOKEN_HEADER = "x-codeup-token"' in disp
-    assert "gitlab" not in disp.lower(), "调度器不得开始接受 x-gitlab-token 作为替代"
+    """打码面扩到两个头，**校验面不扩**：多认一个头就是多一条绕过面。
+
+    按行为判，不用 `"gitlab" not in 源码` 那种静态判：那种写法连**注释**都禁得住——
+    本文件对应的 probe_echo/handler.py 里就有一句解释「不接受 x-gitlab-token 作为替代」的
+    注释，将来 dispatcher 里加一句同样纯解释性的注释就会无理由地红。
+    """
+    disp = load_lambda("dispatcher_header_scope", ROOT / "lambda" / "dispatcher" / "handler.py")
+    secret = "s3cret-value"
+    # 只带 x-gitlab-token、且值是**对的**：必须 401，而且必须在取密钥**之前**就拒掉。
+    # 把取密钥换成一调用就抛，401 仍然出现，才说明这个头连触发一次 GetSecretValue 都做不到
+    # （否则「401」也可能是取密钥失败之后才拐出来的，那是另一条路径、另一个语义）。
+    with mock.patch.object(disp.secret_fetch, "secret_from_env",
+                           side_effect=AssertionError("不该为 x-gitlab-token 去取密钥")):
+        r = disp.handler({"headers": {"X-Gitlab-Token": secret}}, None)
+    assert r["statusCode"] == 401, r
+    # 正向对照：同一个值换到 x-codeup-token 就能过校验，且那条路径**真的会**去取密钥——
+    # 否则上面那个 401 可能只是「这个 handler 什么都 401」。
+    assert disp.verify_token({"X-Codeup-Token": secret}, secret) is True
+    with mock.patch.object(disp.secret_fetch, "secret_from_env",
+                           return_value=secret) as fetched:
+        assert disp.handler({"headers": {"X-Codeup-Token": secret}}, None)["statusCode"] == 200
+    assert fetched.call_args_list == [mock.call("WEBHOOK_SECRET_ID")], fetched.call_args_list
+    # 取值层同样只认一个头名
+    assert disp.verify_token({"X-Gitlab-Token": secret}, secret) is False
+    assert disp.token_header({"X-Gitlab-Token": secret}) == ""
 
 
 def test_non_utf8_body_is_still_hashed_and_logged_without_crashing(capsys):

@@ -809,16 +809,23 @@ def test_the_measured_503_redelivery_fact_is_stated_in_both_code_and_guide():
     aws_dir = pathlib.Path(__file__).resolve().parents[1]
     handler = (aws_dir / "lambda" / "dispatcher" / "handler.py").read_text()
     guide = (aws_dir / "setup-guide.md").read_text()
-    for text, name in ((handler, "dispatcher/handler.py"), (guide, "setup-guide.md")):
+    # 手册这侧一律**按行**判，不整篇判：`3 次` 现在在两行里共出现四次，只削弱 503 那一行
+    # 整篇判照样绿；`未经核实` 整篇判还会在别处正当地给某件事留保留意见时误报。
+    rows = [ln for ln in guide.splitlines() if ln.startswith("|")]
+    row_503 = [ln for ln in rows if "secret-unavailable" in ln and "503" in ln]
+    assert len(row_503) == 1, "排错表里 503 / secret-unavailable 那一行找不到（或不止一行）"
+    row_retry = [ln for ln in rows if "X-Codeup-Delivery" in ln and "幂等" in ln]
+    assert len(row_retry) == 1, "排错表缺少「同一 delivery 出现 2~3 次是预期行为、被幂等锁吸收」那一行"
+    for text, name in ((handler, "dispatcher/handler.py"),
+                       (row_503[0], "setup-guide.md 的 503 那一行"),
+                       (row_retry[0], "setup-guide.md 的重投那一行")):
         assert "未经核实" not in text, f"{name} 又把 Codeup 的 503 重投写成未经核实"
         assert "3 次" in text, f"{name} 没写出实测的重投上界（同一 delivery 最多 3 次）"
+    # 头名只要求 handler 与重投那一行点出来：503 那一行用「见下一行」指过去，不必重复。
+    for text, name in ((handler, "dispatcher/handler.py"),
+                       (row_retry[0], "setup-guide.md 的重投那一行")):
         assert "X-Codeup-Delivery" in text, f"{name} 没点名重投时不变的那个头"
-    # 手册这侧还必须有**一行**同时讲到重投与幂等锁的承重作用——只说「丢了」等于没给出路。
-    # 逐行找而不是整篇找：`幂等`/`ReviewLock` 在排错表别处早就有了，整篇 in 判断永真、什么也不守。
-    rows = [ln for ln in guide.splitlines()
-            if ln.startswith("|") and "X-Codeup-Delivery" in ln and "幂等" in ln]
-    assert len(rows) == 1, "排错表缺少「同一 delivery 出现 2~3 次是预期行为、被幂等锁吸收」那一行"
-    assert "ReviewLock" in rows[0], rows[0]
+    assert "ReviewLock" in row_retry[0], row_retry[0]
 
 
 # ── F5：P2a-04 已实测，5.2 的摘要引导不得再把它写成待取事实 ─────────────────────
@@ -840,6 +847,22 @@ def _guide_digest_bootstrap_step2():
     return "\n".join(lines[start:end])
 
 
+def _guide_measured_digest_sentence():
+    """再往里截一层：只取 F5 新写的那句实测结论（`逐字一致，已实测` 到 `证据等级：` 之间）。
+
+    为什么还要再截一层：整段（`_guide_digest_bootstrap_step2`）在 F5 **之前**就已经包含
+    `describe-images`（第 2 步开头那个 bash 块）与 `逐字一致`（原文「是否逐字一致由真实运行确认」），
+    所以拿整段判这两个字符串在不在，在 F5 之前就是真的——等于没守。复审逐字比对过 base 版本的
+    同一段，确认只有这两条是空的，其余八条都是活的。三个来源的点名必须落在这句结论里。
+    """
+    block = _guide_digest_bootstrap_step2()
+    head = block.find("逐字一致，已实测")
+    assert head != -1, "5.2 第 2 步里找不到那句实测结论（`逐字一致，已实测`）"
+    tail = block.find("证据等级：", head)
+    assert tail != -1, "实测结论后面没有跟着证据等级那一句"
+    return block[head:tail]
+
+
 def test_guide_states_the_measured_ecr_vs_ecs_digest_fact_not_an_open_question():
     """Task 1 实测（sandbox，2026-09-27）：ECR 的 imageDigest、容器级元数据 .ImageID、
     DescribeTasks 的 containers[].imageDigest 三者是同一个值（OCI image index 自身的摘要）。
@@ -850,13 +873,19 @@ def test_guide_states_the_measured_ecr_vs_ecs_digest_fact_not_an_open_question()
     """
     block = _guide_digest_bootstrap_step2()
     assert "待取事实 P2a-04" not in block, "5.2 又把 P2a-04 写回待取事实"
-    assert "逐字一致" in block and "已实测" in block, "没写出实测结论"
+    # 三个来源与「逐字一致」只在**那句结论自己**里算：整段里 `describe-images`（bash 块）与
+    # `逐字一致`（原文的「是否逐字一致由真实运行确认」）在 F5 之前就已经在了。少点一个来源，
+    # 读者就不知道该拿哪条命令的输出去填名单——尤其是删掉 describe-images 那半句时，
+    # bash 块还在，整段判断照样绿。
+    sentence = _guide_measured_digest_sentence()
+    assert "逐字一致" in sentence and "已实测" in sentence, "没写出实测结论"
     for source in (".ImageID", "containers[].imageDigest", "describe-images"):
-        assert source in block, f"实测结论没点名 {source} 这个来源"
-    # 钉整个短语而不是 `"index" in block`：这段前面解释构建方式时已经出现过 `OCI image index`，
+        assert source in sentence, f"实测结论没点名 {source} 这个来源"
+    # 钉整个短语而不是 `"index" in ...`：这段前面解释构建方式时已经出现过 `OCI image index`，
     # 只判断 `index` 在不在，对「三者同值的那个值到底是谁的摘要」这句话是永真的（实测过）。
-    assert "index 自身的摘要" in block, "没说清三者同值的那个值是 image index 自身的摘要"
-    # 证据等级必须照实标出来：单次 sandbox 实测，不是「所有构建方式都如此」
+    assert "index 自身的摘要" in sentence, "没说清三者同值的那个值是 image index 自身的摘要"
+    # 证据等级必须照实标出来：单次 sandbox 实测，不是「所有构建方式都如此」。
+    # 这一句在结论之后，所以对整段判（子串切片的右边界就是它）。
     assert "sandbox" in block and "单次实测" in block, "没标证据等级"
 
 

@@ -17,9 +17,12 @@ if os.path.isdir("/opt/dispatcher"):
     sys.path.insert(0, "/opt/dispatcher")
 import http_shape  # noqa: E402
 
-# Task 1 实测：Codeup 每次投递都把同一个 Secret Token 放在**两个**头里——`X-Codeup-Token`
-# 与 `X-Gitlab-Token`（值逐字相同，它的 webhook 实现沿用了 GitLab 的头名）。只打码前者时
-# 一次性探测令牌就以明文进了日志（本轮真的发生过）。所以这里是一个名单，不是单个头名；
+# Task 1 实测：Codeup 每次投递都带**两个**令牌头——`X-Codeup-Token` 与 `X-Gitlab-Token`
+# （它的 webhook 实现沿用了 GitLab 的头名）。**实测到的是**：两个头都带明文令牌、长度相同
+# （各 48 位十六进制，与生成的那个一次性令牌等长）。「两个值逐字相同」是按 GitLab 兼容语义
+# **推断**的，没有做过逐字节比对——这个区别不影响下面的做法，因为打码是按**头名**做的，
+# 与两个值是否相等无关。只打码前者时一次性探测令牌就以明文进了日志（本轮真的发生过）。
+# 所以这里是一个名单，不是单个头名；
 # 名单项一律小写，比对时把实际头名 `.lower()`（ALB 不保证转发头名的大小写）。
 # 注意：这只约束**回显日志**。生产调度器仍然只读 `x-codeup-token` 校验（handler.py::verify_token），
 # 不接受 `x-gitlab-token` 作为替代——多认一个头就是多一条绕过面。
