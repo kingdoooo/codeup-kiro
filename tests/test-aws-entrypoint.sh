@@ -30,6 +30,11 @@ gate_line=$(LC_ALL=C grep -n 'KIRO_IMAGE_DIGESTS' "$ENTRY" | head -1 | cut -d: -
 call_line=$(entry_code_line 'kiro-review\.sh')
 assert_eq "$([ -n "$gate_line" ] && [ "$gate_line" -lt "$call_line" ] && echo yes)" "yes" \
   "N1：镜像摘要门必须排在评审脚本之前"
+# 元断言：上面取到的必须是**真正的调用行**而不是注释行。踩过一次：注释里正当地写了
+# scripts/kiro-review.sh，call_line 于是取到那行注释（65）而不是真正的调用（134），③ 变成恒真——
+# 一条只会为了错的理由通过的守卫。本文件所有顺序断言都经 entry_code_line 取行号，这条守着它。
+assert_eq "$(LC_ALL=C sed -n "${call_line}p" "$ENTRY" | LC_ALL=C grep -cE '^[[:space:]]*#')" "0" \
+  "③ 取到的行必须是真正的调用行，不能是注释行（否则顺序断言恒真）"
 
 # ④ 解释器与关键命令用绝对路径（沿用 Flow run block 的同一条理由：PATH 不可信）
 assert_contains "$(cat "$ENTRY")" '/bin/bash -p' "调评审脚本用 /bin/bash -p"
