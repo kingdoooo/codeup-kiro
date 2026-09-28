@@ -255,7 +255,9 @@ fi
 #   （clone 这一步由本测试自己做，等价于执行器 clone 完的状态）。
 if [[ -x /usr/bin/git ]]; then
   ck_block=$(awk '/^# ── 检出 MR 的那个提交/{f=1} /^# ── 与 Flow run block/{exit} f{print}' "$ENTRY")
-  assert_contains "$ck_block" 'checkout -q --detach "$HEAD_SHA"' "⑰ 抽到了检出那一段"
+  # 只验证「抽到了」，**不钉具体写法**：钉写法的话，任何改动都先在这里红，后面真正的行为断言
+  # （⑲ 的引用遮蔽复现）就跑不到了——变异测试会得出「守卫有用」的错误结论。
+  assert_contains "$ck_block" 'checkout -q' "⑰ 抽到了检出那一段"
   ctmp=$(mktemp -d)
   # 环境隔离：不读开发机的全局/系统配置（模板、hooks、init.defaultBranch 都可能改变结果）
   gitq() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
@@ -291,6 +293,45 @@ if [[ -x /usr/bin/git ]]; then
   got=$(run_checkout "$mr_head" mr-src)
   assert_eq "${got##*|}" "$mr_head" "⑰ 检出之后 HEAD 必须是 MR 的提交"
   assert_eq "${got%% *}" "0" "⑰ 正常输入下检出段退出码 0"
+# ⑲ 复审 I-1 的端到端复现：源分支名叫 `origin/<默认分支>`（合法分支名，MR 作者随手就能起）。
+#   建本地分支时 `refs/heads/origin/<默认分支>` 会遮蔽 `refs/remotes/origin/<默认分支>`，引擎第 4 步的
+#   `git merge-base "origin/${TARGET_BRANCH}" HEAD` 退化成 HEAD → diff 为空 → 引擎打「diff 为空，跳过评审」
+#   并 exit 0 → 执行器置「已回写」标记 → 兜底 Lambda 看 exitCode 0 也不吭声 = 一条评论都没有的静默漏评。
+#   所以这条不只断言 HEAD 对，还要**把引擎那两步原样跑一遍**（fetch 目标分支 → merge-base → diff）。
+  stmp=$(mktemp -d)
+  gitq2() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+              GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com \
+              GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com \
+              /usr/bin/git "$@"; }
+  gitq2 init -q "$stmp/work"
+  printf 'base\n' > "$stmp/work/f.txt"
+  gitq2 -C "$stmp/work" add f.txt
+  gitq2 -C "$stmp/work" commit -q -m A
+  sdef=$(gitq2 -C "$stmp/work" rev-parse --abbrev-ref HEAD)
+  # 源分支名刻意与「远端默认分支的短名」同形
+  gitq2 -C "$stmp/work" checkout -q -b "origin/${sdef}"
+  printf 'changed\n' > "$stmp/work/f.txt"; printf 'new\n' > "$stmp/work/g.txt"
+  gitq2 -C "$stmp/work" add -A
+  gitq2 -C "$stmp/work" commit -q -m "MR head"
+  s_mr_head=$(gitq2 -C "$stmp/work" rev-parse HEAD)
+  gitq2 -C "$stmp/work" checkout -q "$sdef"
+  gitq2 clone -q --bare "$stmp/work" "$stmp/bare"
+  gitq2 clone -q "$stmp/bare" "$stmp/business"
+  # 执行器的检出段
+  out=$(WORKROOT="$stmp" HEAD_SHA="$s_mr_head" CI_COMMIT_REF_NAME="origin/${sdef}" \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        /bin/bash -c "set -euo pipefail; $ck_block" 2>&1) || true
+  assert_eq "$(gitq2 -C "$stmp/business" rev-parse HEAD)" "$s_mr_head" \
+    "⑲ 源分支名叫 origin/<默认分支> 时也要检出 MR 的提交"
+  # 引擎第 4 步原样：先 fetch 目标分支到 refs/remotes/origin/<目标分支>，再算 merge-base 与 diff
+  gitq2 -C "$stmp/business" fetch -q origin "+refs/heads/${sdef}:refs/remotes/origin/${sdef}"
+  s_base=$(gitq2 -C "$stmp/business" merge-base "origin/${sdef}" HEAD)
+  assert_eq "$([ "$s_base" != "$s_mr_head" ] && echo yes)" "yes" \
+    "⑲ merge-base 不得退化成 HEAD（退化 = diff 为空 = 静默漏评）"
+  assert_eq "$(gitq2 -C "$stmp/business" diff --numstat "$s_base" HEAD | wc -l | tr -d ' ')" "2" \
+    "⑲ 引擎算出来的 diff 必须非空（本例改了 1 个文件、加了 1 个文件）"
+  rm -rf "$stmp"
+
   # 必须是**分离头指针**：建本地分支 `refs/heads/<源分支名>` 会在源分支叫 `origin/<目标分支>` 时
   # 遮蔽 `refs/remotes/origin/<目标分支>`，引擎的 merge-base 退化成 HEAD → diff 为空 → 静默漏评
   # （复审 I-1，下面 ⑲ 是那个场景的端到端复现）。
@@ -368,48 +409,6 @@ assert_eq "$([ -n "$ck_line" ] && [ -n "$clone_line" ] && [ -n "$engine_line" ] 
   && [ "$clone_line" -lt "$ck_line" ] && [ "$ck_line" -lt "$engine_line" ] && echo yes)" "yes" \
   "⑱ 检出必须排在 clone 之后、调用引擎之前"
 
-# ⑲ 复审 I-1 的端到端复现：源分支名叫 `origin/<默认分支>`（合法分支名，MR 作者随手就能起）。
-#   建本地分支时 `refs/heads/origin/<默认分支>` 会遮蔽 `refs/remotes/origin/<默认分支>`，引擎第 4 步的
-#   `git merge-base "origin/${TARGET_BRANCH}" HEAD` 退化成 HEAD → diff 为空 → 引擎打「diff 为空，跳过评审」
-#   并 exit 0 → 执行器置「已回写」标记 → 兜底 Lambda 看 exitCode 0 也不吭声 = 一条评论都没有的静默漏评。
-#   所以这条不只断言 HEAD 对，还要**把引擎那两步原样跑一遍**（fetch 目标分支 → merge-base → diff）。
-if [[ -x /usr/bin/git ]]; then
-  stmp=$(mktemp -d)
-  gitq2() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-              GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com \
-              GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com \
-              /usr/bin/git "$@"; }
-  gitq2 init -q "$stmp/work"
-  printf 'base\n' > "$stmp/work/f.txt"
-  gitq2 -C "$stmp/work" add f.txt
-  gitq2 -C "$stmp/work" commit -q -m A
-  sdef=$(gitq2 -C "$stmp/work" rev-parse --abbrev-ref HEAD)
-  # 源分支名刻意与「远端默认分支的短名」同形
-  gitq2 -C "$stmp/work" checkout -q -b "origin/${sdef}"
-  printf 'changed\n' > "$stmp/work/f.txt"; printf 'new\n' > "$stmp/work/g.txt"
-  gitq2 -C "$stmp/work" add -A
-  gitq2 -C "$stmp/work" commit -q -m "MR head"
-  s_mr_head=$(gitq2 -C "$stmp/work" rev-parse HEAD)
-  gitq2 -C "$stmp/work" checkout -q "$sdef"
-  gitq2 clone -q --bare "$stmp/work" "$stmp/bare"
-  gitq2 clone -q "$stmp/bare" "$stmp/business"
-  # 执行器的检出段
-  out=$(WORKROOT="$stmp" HEAD_SHA="$s_mr_head" CI_COMMIT_REF_NAME="origin/${sdef}" \
-        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-        /bin/bash -c "set -euo pipefail; $ck_block" 2>&1) || true
-  assert_eq "$(gitq2 -C "$stmp/business" rev-parse HEAD)" "$s_mr_head" \
-    "⑲ 源分支名叫 origin/<默认分支> 时也要检出 MR 的提交"
-  # 引擎第 4 步原样：先 fetch 目标分支到 refs/remotes/origin/<目标分支>，再算 merge-base 与 diff
-  gitq2 -C "$stmp/business" fetch -q origin "+refs/heads/${sdef}:refs/remotes/origin/${sdef}"
-  s_base=$(gitq2 -C "$stmp/business" merge-base "origin/${sdef}" HEAD)
-  assert_eq "$([ "$s_base" != "$s_mr_head" ] && echo yes)" "yes" \
-    "⑲ merge-base 不得退化成 HEAD（退化 = diff 为空 = 静默漏评）"
-  assert_eq "$(gitq2 -C "$stmp/business" diff --numstat "$s_base" HEAD | wc -l | tr -d ' ')" "2" \
-    "⑲ 引擎算出来的 diff 必须非空（本例改了 1 个文件、加了 1 个文件）"
-  rm -rf "$stmp"
-else
-  echo "SKIP: 无 /usr/bin/git，跳过 ⑲ 引用遮蔽复现" >&2
-fi
 
 # ⑳ 必填守卫的行为断言（复审 M-3）：HEAD_SHA 根本没传时，必须在**任何网络 I/O 之前**以 92 退出。
 #   抽的是文件顶部那一段必填项，别的变量都给上、只把 HEAD_SHA 拿掉。
