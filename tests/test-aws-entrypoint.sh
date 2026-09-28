@@ -402,6 +402,11 @@ assert_eq "$([ -n "$need_line" ] && [ -n "$gate_line" ] && [ "$need_line" -lt "$
   "yes" "⑱ HEAD_SHA 必填守卫必须排在镜像摘要门（和 clone）之前，不做任何网络 I/O"
 # 分离头指针，不建本地分支（复审 I-1：`-B` 会让 `origin/<目标分支>` 这种源分支名遮蔽远端引用）
 assert_contains "$code_lines" 'checkout -q --detach "$HEAD_SHA"' "⑱ 必须用 --detach 检出"
+# 检出失败有两种成因（提交真不在库里 / git 不接受这个 ref 名，补取源分支那一步因此失败）。
+# 只写第一种的话，第二种会被归错因——运维照着「重新推送」试到死（复审 M-4）。
+ck_msg=$(LC_ALL=C grep -F '检出 MR 的提交失败' "$ENTRY")
+assert_contains "$ck_msg" "不在业务库里" "⑱ 检出失败消息要说「提交不在业务库里」"
+assert_contains "$ck_msg" "分支名" "⑱ 检出失败消息也要覆盖「git 不接受这个分支名」这个成因"
 assert_not_contains "$code_lines" 'checkout -q -B' "⑱ 不得建本地分支（refs/heads 会遮蔽 refs/remotes）"
 ck_line=$(entry_code_line 'checkout -q --detach')
 engine_line=$(entry_code_line 'kiro-review\.sh')
@@ -426,5 +431,18 @@ req_out=$(CODEUP_REPO_ID=1 MR_LOCAL_ID=2 CI_COMMIT_REF_NAME=b BUSINESS_REPO_URL=
           /bin/bash -c "set -euo pipefail; $req_block
 echo REQ_OK" 2>&1)
 assert_contains "$req_out" "REQ_OK" "⑳ 正向对照：必填项齐全时这一段放行"
+
+# ㉑ 元断言（复审 M-1 的收口）：本文件所有顺序断言的行号都必须落在**非注释行**上。注释里正当地
+#   提到同一个词就会让「A 必须排在 B 之前」恒真——③ 的 call_line 已经踩过一次（注释里写了
+#   scripts/kiro-review.sh，于是取到注释行 65 而不是真正的调用行）。这里把每个模式都过一遍，
+#   免得下一处顺序断言又各自踩。
+for pat in 'kiro-review\.sh' 'KIRO_IMAGE_DIGESTS' 'clone --no-tags' '拒绝 clone' \
+           '^export GIT_CONFIG_VALUE_0=' 'checkout -q --detach' \
+           '\[\[ -n "\$\{HEAD_SHA:-\}" \]\]' ': "\$\{MR_TARGET_BRANCH:=\}"'; do
+  pat_line=$(entry_code_line "$pat")
+  assert_eq "$([ -n "$pat_line" ] && echo yes)" "yes" "㉑ 顺序断言的模式必须匹配到代码：${pat}"
+  assert_eq "$(LC_ALL=C sed -n "${pat_line}p" "$ENTRY" | LC_ALL=C grep -cE '^[[:space:]]*#')" "0" \
+    "㉑ 取到的必须是代码行而不是注释行：${pat}"
+done
 
 report

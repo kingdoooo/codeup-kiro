@@ -1203,7 +1203,7 @@ def test_the_executor_checks_out_the_reviewed_commit_and_the_guide_says_so():
     # 只在 §8 里找：§4 的 HEAD_SHA 那一行也提到退出码 92，整篇判会变成 2 匹配
     row = [ln for ln in _guide_section_lines("8.") if ln.startswith("|") and "退出码 92" in ln]
     assert len(row) == 1, "§8 缺少退出码 92 那一行（或不止一行）"
-    for fact in ("HEAD_SHA", "CI_COMMIT_REF_NAME", "默认分支"):
+    for fact in ("HEAD_SHA", "CI_COMMIT_REF_NAME", "默认分支", "ref 名"):
         assert fact in row[0], f"§8 退出码 92 那一行没写出 {fact}"
 
 
