@@ -1178,17 +1178,26 @@ def test_the_executor_checks_out_the_reviewed_commit_and_the_guide_says_so():
     # ② 执行器侧：形状再查一次 + 检出 + 逐字核对，且都在调用引擎之前
     code = [ln for ln in entry.splitlines() if not ln.lstrip().startswith("#")]
     joined = "\n".join(code)
-    for frag in ('[[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]',
-                 'checkout -q -B "$CI_COMMIT_REF_NAME" "$HEAD_SHA"',
+    for frag in ('[[ -n "${HEAD_SHA:-}" ]]',
+                 '[[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]',
+                 'checkout -q --detach "$HEAD_SHA"',
                  '[[ "$head_now" == "$HEAD_SHA" ]]'):
         assert frag in joined, f"entrypoint 缺少：{frag}"
+    # **分离头指针**，不建本地分支：`-B "$CI_COMMIT_REF_NAME"` 会建出 refs/heads/<源分支名>，
+    # 源分支叫 `origin/<目标分支>` 时它遮蔽 refs/remotes/origin/<目标分支>（git 解析短名字时
+    # refs/heads 在前），引擎的 merge-base 退化成 HEAD → diff 为空 → 评审被跳过且不留评论。
+    # 真 git 复现过；tests/test-aws-entrypoint.sh 的 ⑲ 是那个场景的端到端断言。
+    assert "checkout -q -B" not in joined, "不得建本地分支（refs/heads 会遮蔽 refs/remotes）"
     def line_of(frag):
         return next(i for i, ln in enumerate(code) if frag in ln)
-    assert line_of("clone --no-tags") < line_of("checkout -q -B") < line_of("kiro-review.sh"), \
+    assert line_of("clone --no-tags") < line_of("checkout -q --detach") < line_of("kiro-review.sh"), \
         "检出必须排在 clone 之后、调用引擎之前"
-    assert line_of('[[ "$HEAD_SHA" =~') < line_of("checkout -q -B"), "形状检查必须在检出之前"
-    assert joined.count("exit 92") == 4, \
-        "检出这一段的四条 fail-closed 出口（HEAD_SHA 形状、分支名形状、检出失败、HEAD 不一致）少了一条"
+    assert line_of('[[ "$HEAD_SHA" =~') < line_of("checkout -q --detach"), "形状检查必须在检出之前"
+    # 必填守卫在**任何网络 I/O 之前**（复审 M-3）：缺 HEAD_SHA 时不该先跑完镜像摘要门与一次全量 clone
+    assert line_of('[[ -n "${HEAD_SHA:-}" ]]') < line_of("KIRO_IMAGE_DIGESTS") < line_of("clone --no-tags"), \
+        "HEAD_SHA 必填守卫必须排在镜像摘要门与 clone 之前"
+    assert joined.count("exit 92") == 5, \
+        "五条 fail-closed 出口（HEAD_SHA 必填、HEAD_SHA 形状、分支名形状、检出失败、HEAD 不一致）少了一条"
 
     # ③ 手册侧
     # 只在 §8 里找：§4 的 HEAD_SHA 那一行也提到退出码 92，整篇判会变成 2 匹配

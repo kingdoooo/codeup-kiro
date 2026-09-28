@@ -12,6 +12,11 @@ WORKROOT=/tmp/review
 : "${BUSINESS_REPO_URL:?缺少 BUSINESS_REPO_URL}"
 # 锁键由调度器算好传进来，与抢锁时写入的是同一个字符串（评论命令还多一段评论 id）——本文件绝不自己拼（I1）。
 : "${LOCK_KEY:?缺少 LOCK_KEY（由调度器经 RunTask 环境覆盖传入，与抢锁写入的键是同一个字符串）}"
+# HEAD_SHA 同样必填（评审哪个提交全靠它，见下面「检出 MR 的那个提交」那一段）。刻意**不用** `:?`：
+# 那样退出码是 1，而检出那一段的每条 fail-closed 出口都是 92，运维按退出码查表（§8）——同一件事
+# 给两个码只会让人查错行。位置也要在这里、而不是等到用它的地方：缺了它整轮注定失败，没有理由先跑完
+# 一次镜像摘要门与一次全量 clone（复审 M-3）。形状校验放在检出那一段（紧邻使用处，便于单独测）。
+[[ -n "${HEAD_SHA:-}" ]] || { echo "缺少 HEAD_SHA（由调度器经 RunTask 环境覆盖传入，评审哪个提交全靠它）" >&2; exit 92; }
 # 目标分支可选（调度器对缺失值不传；未设置时评审脚本按源分支经 OpenAPI 反查），缺省必须在任何使用之前——
 # `set -u` 下 `|| true` 救不了未绑定变量的展开，放在使用之后的缺省是死代码。
 : "${MR_TARGET_BRANCH:=}"
@@ -96,7 +101,7 @@ export GIT_CONFIG_VALUE_0="$cred_helper"
 # 与主机检查同一条理由：执行器不假设上游一定校验过）。它们随后会成为 git 的参数：`HEAD_SHA` 只认
 # 40 位小写十六进制，分支名不得以 `-` 开头（会被当成选项）、不得含空白或控制字符。
 # 消息里**不回显取值**：分支名是 MR 作者可控的不受信取值（引擎侧同样只在掩码后记录）。
-: "${HEAD_SHA:?缺少 HEAD_SHA（由调度器经 RunTask 环境覆盖传入，评审哪个提交全靠它）}"
+# （「HEAD_SHA 有没有传」在文件顶部就判过了，与另外几个必填项在一起——那里还没有任何网络 I/O。）
 [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
   || { echo "HEAD_SHA 不是 40 位小写十六进制，拒绝评审（取值不回显）" >&2; exit 92; }
 [[ -n "$CI_COMMIT_REF_NAME" && "$CI_COMMIT_REF_NAME" != -* \
@@ -108,12 +113,18 @@ export GIT_CONFIG_VALUE_0="$cred_helper"
   || /usr/bin/git -C "$WORKROOT/business" fetch --no-tags origin \
        "+refs/heads/${CI_COMMIT_REF_NAME}:refs/remotes/origin/${CI_COMMIT_REF_NAME}" \
        >/dev/null 2>&1 || true
-# `-B <源分支名> <提交>`：本地分支名与源分支一致、停在那个提交上——最接近 Flow 检出后的状态
-# （引擎第 3 步的 `SOURCE_BRANCH` 取自 CI_COMMIT_REF_NAME，分离头指针只会让人在日志里看不懂）。
-# 结尾的 `--` 断掉「分支名碰巧也是一个路径」的歧义（形状已校验过，这是第二道）。
-/usr/bin/git -C "$WORKROOT/business" checkout -q -B "$CI_COMMIT_REF_NAME" "$HEAD_SHA" -- \
+# **分离头指针**（`--detach`），刻意不建本地分支。原先写的是 `-B "$CI_COMMIT_REF_NAME"`，那是一个
+# 可被 MR 作者触发的静默漏评（复审 I-1，本机真 git 复现过）：`-B` 建的是 `refs/heads/<源分支名>`，
+# 而 git 解析短名字时 refs/heads 排在 refs/remotes 之前。源分支若叫 `origin/master`（合法分支名，
+# 调度器与这里的形状检查都不该拒它），引擎第 4 步的 `git merge-base "origin/${TARGET_BRANCH}" HEAD`
+# 里那个 `origin/master` 就解析到 MR 头本身（git 只打一句 `warning: refname … is ambiguous`）：
+# merge-base == HEAD → diff 为空 → 引擎打「diff 为空，跳过评审」并 exit 0 → 执行器置「已回写」标记 →
+# 兜底 Lambda 看到 exitCode 0 也不吭声。**一条评论都没有的静默漏评**，而且检出后的 HEAD 核对也拦不住
+# （HEAD 确实是对的）。分离头指针没有这个歧义，也没丢任何引擎要读的东西：分支名引擎取自
+# CI_COMMIT_REF_NAME（本档位必填），`:958` 那个 `--abbrev-ref HEAD` 兜底在这里是死代码。
+/usr/bin/git -C "$WORKROOT/business" checkout -q --detach "$HEAD_SHA" \
   >/dev/null 2>&1 \
-  || { echo "检出 MR 的提交失败：HEAD_SHA 在业务库里找不到（源分支已被改写或强推？）" >&2; exit 92; }
+  || { echo "检出 MR 的提交失败：HEAD_SHA 指的提交不在业务库里——源分支被改写/强推/删除，或上面那次补取源分支没成功（git 可能不接受这个分支名）" >&2; exit 92; }
 # 检出之后**逐字核对**：checkout 成功但 HEAD 不是那个提交（将来有人把 -B 改成别的写法）时，
 # 评审会静默地评错提交——那正是本次要修的缺陷，不能修完再留一条同样静默的路径。
 head_now=$(/usr/bin/git -C "$WORKROOT/business" rev-parse HEAD 2>/dev/null || true)

@@ -26,7 +26,7 @@ assert_contains "$(cat "$ENTRY")" 'KIRO_INSTALL_PROFILE=pinned' "档位固定为
 assert_not_contains "$(cat "$ENTRY")" 'KIRO_INSTALL_PROFILE=image' "不得新增 image 取值"
 
 # ③ 镜像摘要门（N1）必须在调用评审脚本之前
-gate_line=$(LC_ALL=C grep -n 'KIRO_IMAGE_DIGESTS' "$ENTRY" | head -1 | cut -d: -f1)
+gate_line=$(entry_code_line 'KIRO_IMAGE_DIGESTS')
 call_line=$(entry_code_line 'kiro-review\.sh')
 assert_eq "$([ -n "$gate_line" ] && [ "$gate_line" -lt "$call_line" ] && echo yes)" "yes" \
   "N1：镜像摘要门必须排在评审脚本之前"
@@ -147,7 +147,7 @@ else
 fi
 
 # ⑬ I5：MR_TARGET_BRANCH 的 `:=` 缺省必须排在任何使用之前（set -u 下 `|| true` 救不了未绑定变量）
-default_line=$(LC_ALL=C grep -n ': "${MR_TARGET_BRANCH:=}"' "$ENTRY" | head -1 | cut -d: -f1)
+default_line=$(entry_code_line ': "\$\{MR_TARGET_BRANCH:=\}"')
 first_use=$(LC_ALL=C grep -nE '^[^#]*\$\{?MR_TARGET_BRANCH' "$ENTRY" | grep -v ':=' | head -1 | cut -d: -f1)
 assert_eq "$([ -n "$default_line" ] && [ -n "$first_use" ] && [ "$default_line" -lt "$first_use" ] && echo yes)" \
   "yes" "I5：MR_TARGET_BRANCH 的缺省必须在第一次使用之前"
@@ -255,7 +255,7 @@ fi
 #   （clone 这一步由本测试自己做，等价于执行器 clone 完的状态）。
 if [[ -x /usr/bin/git ]]; then
   ck_block=$(awk '/^# ── 检出 MR 的那个提交/{f=1} /^# ── 与 Flow run block/{exit} f{print}' "$ENTRY")
-  assert_contains "$ck_block" 'checkout -q -B "$CI_COMMIT_REF_NAME" "$HEAD_SHA"' "⑰ 抽到了检出那一段"
+  assert_contains "$ck_block" 'checkout -q --detach "$HEAD_SHA"' "⑰ 抽到了检出那一段"
   ctmp=$(mktemp -d)
   # 环境隔离：不读开发机的全局/系统配置（模板、hooks、init.defaultBranch 都可能改变结果）
   gitq() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
@@ -291,8 +291,13 @@ if [[ -x /usr/bin/git ]]; then
   got=$(run_checkout "$mr_head" mr-src)
   assert_eq "${got##*|}" "$mr_head" "⑰ 检出之后 HEAD 必须是 MR 的提交"
   assert_eq "${got%% *}" "0" "⑰ 正常输入下检出段退出码 0"
-  assert_eq "$(gitq -C "$ctmp/business" rev-parse --abbrev-ref HEAD)" "mr-src" \
-    "⑰ 本地分支名与源分支一致（最接近 Flow 检出后的状态）"
+  # 必须是**分离头指针**：建本地分支 `refs/heads/<源分支名>` 会在源分支叫 `origin/<目标分支>` 时
+  # 遮蔽 `refs/remotes/origin/<目标分支>`，引擎的 merge-base 退化成 HEAD → diff 为空 → 静默漏评
+  # （复审 I-1，下面 ⑲ 是那个场景的端到端复现）。
+  assert_eq "$(gitq -C "$ctmp/business" rev-parse --abbrev-ref HEAD)" "HEAD" \
+    "⑰ 检出后必须是分离头指针，不建本地分支"
+  assert_eq "$(gitq -C "$ctmp/business" for-each-ref --format='%(refname)' refs/heads/mr-src)" "" \
+    "⑰ 不得建出 refs/heads/<源分支名>"
 
   # 负向：HEAD_SHA 形状不对（短 sha、大写、非十六进制、空）一律 fail closed，且不得动 HEAD
   for bad in "${mr_head:0:7}" "$(printf '%s' "$mr_head" | LC_ALL=C tr 'a-f' 'A-F')" \
@@ -301,10 +306,11 @@ if [[ -x /usr/bin/git ]]; then
     assert_contains "$got" "92 HEAD_SHA 不是 40 位小写十六进制" "⑰ HEAD_SHA 形状不对时拒绝（${bad:0:12}）"
     assert_eq "${got##*|}" "$def_head" "⑰ 拒绝时不得动 HEAD（${bad:0:12}）"
   done
-  # HEAD_SHA 根本没设：走文件顶部同一条 `:?` 硬失败（不是上面那条形状消息），同样 fail closed
+  # HEAD_SHA 是空串：落到形状那条（空串也不是 40 位十六进制）。
+  # 「变量根本没传」是另一件事，由文件顶部那条守卫负责——见下面 ⑳ 的行为断言。
   got=$(run_checkout "" mr-src)
-  assert_contains "$got" "缺少 HEAD_SHA" "⑰ HEAD_SHA 未设置时硬失败"
-  assert_eq "${got##*|}" "$def_head" "⑰ HEAD_SHA 未设置时不得动 HEAD"
+  assert_contains "$got" "92 HEAD_SHA 不是 40 位小写十六进制" "⑰ HEAD_SHA 为空串时拒绝"
+  assert_eq "${got##*|}" "$def_head" "⑰ HEAD_SHA 为空串时不得动 HEAD"
   # 负向：分支名以 - 开头 / 含空白 / 为空
   for bad in "-upload-pack=x" "mr src" "" "$(printf 'mr\tsrc')"; do
     got=$(run_checkout "$mr_head" "$bad")
@@ -318,6 +324,25 @@ if [[ -x /usr/bin/git ]]; then
   # 拒绝消息里不得回显不受信取值（分支名由 MR 作者控制）
   got=$(run_checkout "$mr_head" "-upload-pack=touch /tmp/pwned")
   assert_not_contains "$got" "upload-pack" "⑰ 拒绝消息不得回显分支名"
+
+  # 正向覆盖「补取源分支」那一步（复审 M-2）：clone 之后源分支又被推了一次，HEAD_SHA 不在本地，
+  # 必须靠那次 `fetch +refs/heads/<源分支>:refs/remotes/origin/<源分支>` 才拿得到。
+  # 之前只覆盖了「补取也拿不到 → 92」，refspec 写错一个字母所有用例照样绿（全量 clone 里本来就有）。
+  rm -rf "$ctmp/business"
+  gitq clone -q "$ctmp/bare" "$ctmp/business"
+  gitq -C "$ctmp/work" checkout -q mr-src
+  gitq -C "$ctmp/work" commit -q --allow-empty -m "clone 之后的新推送"
+  new_head=$(gitq -C "$ctmp/work" rev-parse HEAD)
+  gitq -C "$ctmp/work" push -q "$ctmp/bare" mr-src
+  assert_eq "$(gitq -C "$ctmp/business" rev-parse --verify --quiet "${new_head}^{commit}" \
+              || echo MISSING)" "MISSING" "⑰ 前提：新提交在已有的克隆里确实不存在"
+  fetch_rc=0
+  WORKROOT="$ctmp" HEAD_SHA="$new_head" CI_COMMIT_REF_NAME=mr-src \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    /bin/bash -c "set -euo pipefail; $ck_block" >/dev/null 2>&1 || fetch_rc=$?
+  assert_eq "$fetch_rc" "0" "⑰ 补取源分支之后检出必须成功"
+  assert_eq "$(gitq -C "$ctmp/business" rev-parse HEAD)" "$new_head" \
+    "⑰ 补取源分支之后 HEAD 必须是那个新提交"
   rm -rf "$ctmp"
 else
   echo "SKIP: 无 /usr/bin/git，跳过 ⑰ 检出行为断言" >&2
@@ -327,11 +352,80 @@ fi
 #   因为 -B 本身就保证了一致——它守的是将来有人换掉 -B 写法时不要静默评错提交）
 assert_contains "$code_lines" 'rev-parse HEAD' "⑰/⑱：检出之后必须核对 HEAD"
 assert_contains "$code_lines" '[[ "$head_now" == "$HEAD_SHA" ]]' "⑱ HEAD 与 HEAD_SHA 必须逐字比较"
-assert_contains "$code_lines" ': "${HEAD_SHA:?' "⑱ HEAD_SHA 缺失必须硬失败"
-ck_line=$(entry_code_line 'checkout -q -B')
+# 必填守卫：刻意不用 `:?`（那样退出码是 1），与检出那一段同一个 92；且必须排在镜像摘要门与 clone
+# 之前——缺了它整轮注定失败，没有理由先跑完一次全量 clone（复审 M-3）。
+assert_contains "$code_lines" '[[ -n "${HEAD_SHA:-}" ]]' "⑱ HEAD_SHA 缺失必须硬失败"
+assert_not_contains "$code_lines" ': "${HEAD_SHA:?' "⑱ HEAD_SHA 的守卫不得用 :?（退出码会变成 1）"
+need_line=$(entry_code_line '\[\[ -n "\$\{HEAD_SHA:-\}" \]\]')
+assert_eq "$([ -n "$need_line" ] && [ -n "$gate_line" ] && [ "$need_line" -lt "$gate_line" ] && echo yes)" \
+  "yes" "⑱ HEAD_SHA 必填守卫必须排在镜像摘要门（和 clone）之前，不做任何网络 I/O"
+# 分离头指针，不建本地分支（复审 I-1：`-B` 会让 `origin/<目标分支>` 这种源分支名遮蔽远端引用）
+assert_contains "$code_lines" 'checkout -q --detach "$HEAD_SHA"' "⑱ 必须用 --detach 检出"
+assert_not_contains "$code_lines" 'checkout -q -B' "⑱ 不得建本地分支（refs/heads 会遮蔽 refs/remotes）"
+ck_line=$(entry_code_line 'checkout -q --detach')
 engine_line=$(entry_code_line 'kiro-review\.sh')
 assert_eq "$([ -n "$ck_line" ] && [ -n "$clone_line" ] && [ -n "$engine_line" ] \
   && [ "$clone_line" -lt "$ck_line" ] && [ "$ck_line" -lt "$engine_line" ] && echo yes)" "yes" \
   "⑱ 检出必须排在 clone 之后、调用引擎之前"
+
+# ⑲ 复审 I-1 的端到端复现：源分支名叫 `origin/<默认分支>`（合法分支名，MR 作者随手就能起）。
+#   建本地分支时 `refs/heads/origin/<默认分支>` 会遮蔽 `refs/remotes/origin/<默认分支>`，引擎第 4 步的
+#   `git merge-base "origin/${TARGET_BRANCH}" HEAD` 退化成 HEAD → diff 为空 → 引擎打「diff 为空，跳过评审」
+#   并 exit 0 → 执行器置「已回写」标记 → 兜底 Lambda 看 exitCode 0 也不吭声 = 一条评论都没有的静默漏评。
+#   所以这条不只断言 HEAD 对，还要**把引擎那两步原样跑一遍**（fetch 目标分支 → merge-base → diff）。
+if [[ -x /usr/bin/git ]]; then
+  stmp=$(mktemp -d)
+  gitq2() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+              GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com \
+              GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com \
+              /usr/bin/git "$@"; }
+  gitq2 init -q "$stmp/work"
+  printf 'base\n' > "$stmp/work/f.txt"
+  gitq2 -C "$stmp/work" add f.txt
+  gitq2 -C "$stmp/work" commit -q -m A
+  sdef=$(gitq2 -C "$stmp/work" rev-parse --abbrev-ref HEAD)
+  # 源分支名刻意与「远端默认分支的短名」同形
+  gitq2 -C "$stmp/work" checkout -q -b "origin/${sdef}"
+  printf 'changed\n' > "$stmp/work/f.txt"; printf 'new\n' > "$stmp/work/g.txt"
+  gitq2 -C "$stmp/work" add -A
+  gitq2 -C "$stmp/work" commit -q -m "MR head"
+  s_mr_head=$(gitq2 -C "$stmp/work" rev-parse HEAD)
+  gitq2 -C "$stmp/work" checkout -q "$sdef"
+  gitq2 clone -q --bare "$stmp/work" "$stmp/bare"
+  gitq2 clone -q "$stmp/bare" "$stmp/business"
+  # 执行器的检出段
+  out=$(WORKROOT="$stmp" HEAD_SHA="$s_mr_head" CI_COMMIT_REF_NAME="origin/${sdef}" \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        /bin/bash -c "set -euo pipefail; $ck_block" 2>&1) || true
+  assert_eq "$(gitq2 -C "$stmp/business" rev-parse HEAD)" "$s_mr_head" \
+    "⑲ 源分支名叫 origin/<默认分支> 时也要检出 MR 的提交"
+  # 引擎第 4 步原样：先 fetch 目标分支到 refs/remotes/origin/<目标分支>，再算 merge-base 与 diff
+  gitq2 -C "$stmp/business" fetch -q origin "+refs/heads/${sdef}:refs/remotes/origin/${sdef}"
+  s_base=$(gitq2 -C "$stmp/business" merge-base "origin/${sdef}" HEAD)
+  assert_eq "$([ "$s_base" != "$s_mr_head" ] && echo yes)" "yes" \
+    "⑲ merge-base 不得退化成 HEAD（退化 = diff 为空 = 静默漏评）"
+  assert_eq "$(gitq2 -C "$stmp/business" diff --numstat "$s_base" HEAD | wc -l | tr -d ' ')" "2" \
+    "⑲ 引擎算出来的 diff 必须非空（本例改了 1 个文件、加了 1 个文件）"
+  rm -rf "$stmp"
+else
+  echo "SKIP: 无 /usr/bin/git，跳过 ⑲ 引用遮蔽复现" >&2
+fi
+
+# ⑳ 必填守卫的行为断言（复审 M-3）：HEAD_SHA 根本没传时，必须在**任何网络 I/O 之前**以 92 退出。
+#   抽的是文件顶部那一段必填项，别的变量都给上、只把 HEAD_SHA 拿掉。
+req_block=$(awk '/^: "\$\{CODEUP_REPO_ID:\?/{f=1} f{print} f&&/^: "\$\{MR_TARGET_BRANCH:=\}"/{exit}' "$ENTRY")
+assert_contains "$req_block" 'HEAD_SHA' "⑳ 抽到了必填项那一段（含 HEAD_SHA 守卫）"
+req_out=$(CODEUP_REPO_ID=1 MR_LOCAL_ID=2 CI_COMMIT_REF_NAME=b BUSINESS_REPO_URL=u LOCK_KEY=k \
+          /bin/bash -c "set -euo pipefail; $req_block
+echo REQ_OK" 2>&1); req_rc=$?
+assert_eq "$req_rc" "92" "⑳ 缺 HEAD_SHA 必须以 92 退出（与检出那一段同一个码，运维按码查表）"
+assert_contains "$req_out" "缺少 HEAD_SHA" "⑳ 报错点名 HEAD_SHA"
+assert_not_contains "$req_out" "REQ_OK" "⑳ 缺 HEAD_SHA 时不得继续往下走"
+# 正向对照：给上 HEAD_SHA 就能过（否则上面那条 92 可能只是「这段什么都拒」）
+req_out=$(CODEUP_REPO_ID=1 MR_LOCAL_ID=2 CI_COMMIT_REF_NAME=b BUSINESS_REPO_URL=u LOCK_KEY=k \
+          HEAD_SHA=0123456789abcdef0123456789abcdef01234567 \
+          /bin/bash -c "set -euo pipefail; $req_block
+echo REQ_OK" 2>&1)
+assert_contains "$req_out" "REQ_OK" "⑳ 正向对照：必填项齐全时这一段放行"
 
 report
