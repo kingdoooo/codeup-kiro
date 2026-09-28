@@ -1089,6 +1089,15 @@ def test_the_guide_describes_the_comment_command_result_as_an_in_place_summary_u
         assert "找不到上一条" in text, f"{name}漏了「找不到上一条（首次评审）也会新建」"
         for stale in ("新的汇总评论", "尚未实现", "Task 13", "不会回复那条评论"):
             assert stale not in text, f"{name}仍有过时说法：{stale}"
+    # M-1：`LOCK_KEY` 是唯一一项不一样的环境变量（run_task 把多带一段评论 id 的锁键原样传进去），
+    # 所以「环境变量与 MR 事件完全一样」这句话必须带上那个例外，否则同一段里前后矛盾。
+    assert "环境变量与 MR 事件的完全一样" in para, "§0 那段不再讲环境变量，这条守卫的前提没了"
+    assert "除 `LOCK_KEY` 多一段评论 id 外" in para, \
+        "§0 那段把「环境变量完全一样」写成了无条件的：锁键多一段评论 id（handler.py::run_task）"
+    handler = (pathlib.Path(__file__).resolve().parents[1]
+               / "lambda" / "dispatcher" / "handler.py").read_text()
+    run_task = handler.split("def run_task(")[1].split("\ndef ")[0]
+    assert '("LOCK_KEY", key)' in run_task, "run_task 不再把锁键当环境变量传，上面那句例外要复核"
     # 手册说的必须与引擎真的实现的是同一件事（只读 scripts/，不改）
     engine = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "kiro-review.sh").read_text()
     assert "找到就原地更新（run:N 递增" in engine, "引擎的汇总评论生命周期变了，手册这两处要跟着复核"
