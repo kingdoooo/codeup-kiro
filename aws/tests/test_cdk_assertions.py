@@ -1154,6 +1154,50 @@ def test_git_credentials_reach_the_engine_and_the_guide_says_how():
         assert fact in row[0], f"§8 那一行没写出 {fact}"
 
 
+# ── Task 14 验收阻塞 2：执行器必须检出 MR 的那个提交，手册与代码两头都钉 ──────────────
+def test_the_executor_checks_out_the_reviewed_commit_and_the_guide_says_so():
+    """真实 Fargate 运行踩过的坑：`git clone` 检出的是仓库**默认分支**，entrypoint 从不检出
+    HEAD_SHA，而引擎把 `git rev-parse HEAD` 当作「本次评审的提交」——于是 AWS 档位每次评审的都是
+    默认分支（MR !4 的汇总标记是 master 的头 f29435f，MR 的头是 7baa0cd）。
+
+    三件事一起钉：① 引擎真的只从 git 里取那个提交（只读 scripts/，它哪天改成读 HEAD_SHA 就提醒复核）；
+    ② entrypoint 有检出 + 检出后的逐字核对，且排在调用引擎之前；③ §8 有一行对应的排错项。
+    """
+    root = pathlib.Path(__file__).resolve().parents[2]
+    entry = (root / "aws" / "executor" / "entrypoint.sh").read_text()
+    engine = (root / "scripts" / "kiro-review.sh").read_text()
+    guide = _guide_text()
+
+    # ① 引擎侧：本次评审的提交只来自 git HEAD，引擎自己不 checkout、也不读 HEAD_SHA
+    assert "head_full=$(git rev-parse HEAD)" in engine, "引擎不再从 git HEAD 取评审提交，检出契约要复核"
+    assert "SHORT_SHA=$(git rev-parse --short HEAD)" in engine
+    assert "HEAD_SHA" not in engine, "引擎开始读 HEAD_SHA 了：执行器的检出与这条断言都要复核"
+    engine_code = "\n".join(ln for ln in engine.splitlines() if not ln.lstrip().startswith("#"))
+    assert "git checkout" not in engine_code, "引擎自己 checkout 了：与执行器这一步的职责要重新划清"
+
+    # ② 执行器侧：形状再查一次 + 检出 + 逐字核对，且都在调用引擎之前
+    code = [ln for ln in entry.splitlines() if not ln.lstrip().startswith("#")]
+    joined = "\n".join(code)
+    for frag in ('[[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]',
+                 'checkout -q -B "$CI_COMMIT_REF_NAME" "$HEAD_SHA"',
+                 '[[ "$head_now" == "$HEAD_SHA" ]]'):
+        assert frag in joined, f"entrypoint 缺少：{frag}"
+    def line_of(frag):
+        return next(i for i, ln in enumerate(code) if frag in ln)
+    assert line_of("clone --no-tags") < line_of("checkout -q -B") < line_of("kiro-review.sh"), \
+        "检出必须排在 clone 之后、调用引擎之前"
+    assert line_of('[[ "$HEAD_SHA" =~') < line_of("checkout -q -B"), "形状检查必须在检出之前"
+    assert joined.count("exit 92") == 4, \
+        "检出这一段的四条 fail-closed 出口（HEAD_SHA 形状、分支名形状、检出失败、HEAD 不一致）少了一条"
+
+    # ③ 手册侧
+    # 只在 §8 里找：§4 的 HEAD_SHA 那一行也提到退出码 92，整篇判会变成 2 匹配
+    row = [ln for ln in _guide_section_lines("8.") if ln.startswith("|") and "退出码 92" in ln]
+    assert len(row) == 1, "§8 缺少退出码 92 那一行（或不止一行）"
+    for fact in ("HEAD_SHA", "CI_COMMIT_REF_NAME", "默认分支"):
+        assert fact in row[0], f"§8 退出码 92 那一行没写出 {fact}"
+
+
 # ── Task 13 / O-4：§8 的排错表必须是**一张**连续的表 ─────────────────────────────
 def _guide_section_lines(heading):
     lines = _guide_text().splitlines()

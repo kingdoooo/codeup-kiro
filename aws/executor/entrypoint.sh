@@ -85,6 +85,41 @@ export GIT_CONFIG_VALUE_0="$cred_helper"
 [[ -z "$MR_TARGET_BRANCH" ]] || /usr/bin/git -C "$WORKROOT/business" \
   fetch --no-tags origin "$MR_TARGET_BRANCH" >/dev/null 2>&1 || true
 
+# ── 检出 MR 的那个提交（clone 给的是仓库默认分支）────────────────────
+# `git clone` 检出的是**仓库默认分支**；Flow 那侧是平台按 MR 事件检出**源分支**。引擎从
+# `git rev-parse HEAD` 取「本次评审的提交」（scripts/kiro-review.sh:602 / :653 / :1513，还有 :975 的
+# 短 sha），自己不做任何 checkout——所以不补这一步，AWS 档位每次评审的都是默认分支。真实 Fargate
+# 运行实测过（Task 14 验收，Codeup-Demo MR !4）：汇总标记写成 `<!-- kiro-review:f29435f run:1 -->`，
+# f29435f 是 master 的头，而 MR 的头是 7baa0cd。
+#
+# 两个入参在这里**再查一次形状**（调度器的 classify 已经查过同样的规则，这是执行器侧的第二道，
+# 与主机检查同一条理由：执行器不假设上游一定校验过）。它们随后会成为 git 的参数：`HEAD_SHA` 只认
+# 40 位小写十六进制，分支名不得以 `-` 开头（会被当成选项）、不得含空白或控制字符。
+# 消息里**不回显取值**：分支名是 MR 作者可控的不受信取值（引擎侧同样只在掩码后记录）。
+: "${HEAD_SHA:?缺少 HEAD_SHA（由调度器经 RunTask 环境覆盖传入，评审哪个提交全靠它）}"
+[[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
+  || { echo "HEAD_SHA 不是 40 位小写十六进制，拒绝评审（取值不回显）" >&2; exit 92; }
+[[ -n "$CI_COMMIT_REF_NAME" && "$CI_COMMIT_REF_NAME" != -* \
+   && ! "$CI_COMMIT_REF_NAME" =~ [[:space:]] && ! "$CI_COMMIT_REF_NAME" =~ [[:cntrl:]] ]] \
+  || { echo "CI_COMMIT_REF_NAME 为空、以 - 开头或含空白/控制字符，拒绝评审（取值不回显）" >&2; exit 92; }
+# 全量 clone 后 HEAD_SHA 通常已在本地；不在就再取一次源分支（评审期间源分支被推过、或将来支持
+# 跨 fork 时都会走到这里）。取不到不在这里判死：下面的 checkout 会给出同一个结论。
+/usr/bin/git -C "$WORKROOT/business" rev-parse --verify --quiet "${HEAD_SHA}^{commit}" >/dev/null 2>&1 \
+  || /usr/bin/git -C "$WORKROOT/business" fetch --no-tags origin \
+       "+refs/heads/${CI_COMMIT_REF_NAME}:refs/remotes/origin/${CI_COMMIT_REF_NAME}" \
+       >/dev/null 2>&1 || true
+# `-B <源分支名> <提交>`：本地分支名与源分支一致、停在那个提交上——最接近 Flow 检出后的状态
+# （引擎第 3 步的 `SOURCE_BRANCH` 取自 CI_COMMIT_REF_NAME，分离头指针只会让人在日志里看不懂）。
+# 结尾的 `--` 断掉「分支名碰巧也是一个路径」的歧义（形状已校验过，这是第二道）。
+/usr/bin/git -C "$WORKROOT/business" checkout -q -B "$CI_COMMIT_REF_NAME" "$HEAD_SHA" -- \
+  >/dev/null 2>&1 \
+  || { echo "检出 MR 的提交失败：HEAD_SHA 在业务库里找不到（源分支已被改写或强推？）" >&2; exit 92; }
+# 检出之后**逐字核对**：checkout 成功但 HEAD 不是那个提交（将来有人把 -B 改成别的写法）时，
+# 评审会静默地评错提交——那正是本次要修的缺陷，不能修完再留一条同样静默的路径。
+head_now=$(/usr/bin/git -C "$WORKROOT/business" rev-parse HEAD 2>/dev/null || true)
+[[ "$head_now" == "$HEAD_SHA" ]] \
+  || { echo "检出之后 HEAD 与 HEAD_SHA 不一致，拒绝评审（避免静默评错提交）" >&2; exit 92; }
+
 # ── 与 Flow run block 完全相同的环境变量契约（I9 的裁判就看这一段）──
 export REVIEW_REPO_DIR="$WORKROOT/business"
 export CI_COMMIT_REF_NAME="$CI_COMMIT_REF_NAME"

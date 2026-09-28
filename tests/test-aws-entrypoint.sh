@@ -6,6 +6,13 @@ cd "$(dirname "$0")"
 ENTRY=../aws/executor/entrypoint.sh
 YAML=../pipeline/flow-pipeline.yaml
 
+# 找 entrypoint 里第一处匹配的行号，**只看非注释行**。注释里正当地提到同一个词（比如解释
+# 「引擎自己会 fetch」时写出 scripts/kiro-review.sh）会让「A 必须排在 B 之前」这类断言拿注释行当 B，
+# 于是断言恒真——一条只会为了错的理由通过的守卫。本文件所有顺序断言都经这个函数取行号。
+entry_code_line() {  # 正则 → 行号（没有匹配则空）
+  LC_ALL=C grep -nE "$1" "$ENTRY" | LC_ALL=C grep -vE '^[0-9]+:[[:space:]]*#' | head -1 | cut -d: -f1
+}
+
 # ① I9 裁判：Flow run block 导出的每个变量，entrypoint 也必须导出
 flow_vars=$(LC_ALL=C grep -oE 'export [A-Z_]+|: "\$\{[A-Z_]+:=' "$YAML" \
             | grep -oE '[A-Z_]{3,}' | sort -u)
@@ -20,7 +27,7 @@ assert_not_contains "$(cat "$ENTRY")" 'KIRO_INSTALL_PROFILE=image' "不得新增
 
 # ③ 镜像摘要门（N1）必须在调用评审脚本之前
 gate_line=$(LC_ALL=C grep -n 'KIRO_IMAGE_DIGESTS' "$ENTRY" | head -1 | cut -d: -f1)
-call_line=$(LC_ALL=C grep -n 'kiro-review.sh' "$ENTRY" | head -1 | cut -d: -f1)
+call_line=$(entry_code_line 'kiro-review\.sh')
 assert_eq "$([ -n "$gate_line" ] && [ "$gate_line" -lt "$call_line" ] && echo yes)" "yes" \
   "N1：镜像摘要门必须排在评审脚本之前"
 
@@ -143,13 +150,13 @@ assert_eq "$([ -n "$default_line" ] && [ -n "$first_use" ] && [ "$default_line" 
 # ⑭ I-2（Task 5 复审）：clone 地址来自 webhook 报文，而 webhook 鉴权只是一个共享密钥——
 #   拿到它就能把地址改成任意主机，凭证 helper 随后会把云效组织令牌交给那台主机（弱密钥升级成
 #   组织令牌）。两道防线都要守：主机逐字比对必须排在 clone 之前，且 helper 必须按 URL 限定。
-host_line=$(LC_ALL=C grep -n '拒绝 clone' "$ENTRY" | head -1 | cut -d: -f1)
-clone_line=$(LC_ALL=C grep -n 'clone --no-tags' "$ENTRY" | head -1 | cut -d: -f1)
+host_line=$(entry_code_line '拒绝 clone')
+clone_line=$(entry_code_line 'clone --no-tags')
 assert_eq "$([ -n "$host_line" ] && [ -n "$clone_line" ] && [ "$host_line" -lt "$clone_line" ] && echo yes)" \
   "yes" "I-2：主机检查必须存在且排在 clone 之前"
 # 凭证经**环境变量**下发给所有子进程（Task 14 验收阻塞：评审引擎自己也要 git fetch，`-c` 只作用于
 # 执行器自己那一次调用，引擎那次是无凭证的）；key 仍必须按 URL 限定。
-export_line=$(LC_ALL=C grep -n '^export GIT_CONFIG_VALUE_0=' "$ENTRY" | head -1 | cut -d: -f1)
+export_line=$(entry_code_line '^export GIT_CONFIG_VALUE_0=')
 assert_eq "$([ -n "$export_line" ] && [ -n "$clone_line" ] && [ "$export_line" -lt "$clone_line" ] && echo yes)" \
   "yes" "I-2：凭证 helper 的导出必须存在且排在 clone 之前"
 assert_contains "$code_lines" "export GIT_CONFIG_COUNT=1" "I-2：必须声明 GIT_CONFIG_COUNT"
@@ -235,5 +242,91 @@ env" | LC_ALL=C grep -v '^YUNXIAO_TOKEN=')
 else
   echo "SKIP: 无 /usr/bin/git，跳过 ⑯ 凭证行为断言" >&2
 fi
+
+# ⑰ Task 14 第二个验收阻塞：clone 给的是仓库**默认分支**，必须自己检出 MR 的那个提交。
+#   真实运行实测过（Codeup-Demo MR !4：汇总标记写成 master 的头 f29435f，MR 的头是 7baa0cd）。
+#   行为断言用**真的本地裸库**：两个分支、MR 头在非默认分支上，跑抽出来的检出段，断言 HEAD 落在
+#   MR 头而不是默认分支头。主机检查让「用本地路径 clone」没法直接跑，所以按控制器裁决只单独跑检出段
+#   （clone 这一步由本测试自己做，等价于执行器 clone 完的状态）。
+if [[ -x /usr/bin/git ]]; then
+  ck_block=$(awk '/^# ── 检出 MR 的那个提交/{f=1} /^# ── 与 Flow run block/{exit} f{print}' "$ENTRY")
+  assert_contains "$ck_block" 'checkout -q -B "$CI_COMMIT_REF_NAME" "$HEAD_SHA"' "⑰ 抽到了检出那一段"
+  ctmp=$(mktemp -d)
+  # 环境隔离：不读开发机的全局/系统配置（模板、hooks、init.defaultBranch 都可能改变结果）
+  gitq() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+             GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com \
+             GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com \
+             /usr/bin/git "$@"; }
+  gitq init -q "$ctmp/work"
+  gitq -C "$ctmp/work" commit -q --allow-empty -m A
+  def_branch=$(gitq -C "$ctmp/work" rev-parse --abbrev-ref HEAD)
+  gitq -C "$ctmp/work" checkout -q -b mr-src
+  gitq -C "$ctmp/work" commit -q --allow-empty -m "MR head"
+  mr_head=$(gitq -C "$ctmp/work" rev-parse HEAD)
+  gitq -C "$ctmp/work" checkout -q "$def_branch"
+  gitq -C "$ctmp/work" commit -q --allow-empty -m "默认分支又前进了一步"
+  def_head=$(gitq -C "$ctmp/work" rev-parse HEAD)
+  gitq clone -q --bare "$ctmp/work" "$ctmp/bare"
+  assert_eq "$([ "$mr_head" != "$def_head" ] && echo yes)" "yes" "⑰ 前提：MR 头与默认分支头不同"
+
+  run_checkout() {  # HEAD_SHA 分支名 → "rc 输出|HEAD"
+    local out rc=0 head
+    rm -rf "$ctmp/business"
+    gitq clone -q "$ctmp/bare" "$ctmp/business"
+    out=$(WORKROOT="$ctmp" HEAD_SHA="$1" CI_COMMIT_REF_NAME="$2" \
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+          /bin/bash -c "set -euo pipefail; $ck_block" 2>&1) || rc=$?
+    head=$(gitq -C "$ctmp/business" rev-parse HEAD)
+    printf '%s %s|%s' "$rc" "$out" "$head"
+  }
+
+  # 正向对照：clone 出来的 HEAD 本来就是默认分支的头，检出之后必须变成 MR 头
+  assert_eq "$(gitq clone -q "$ctmp/bare" "$ctmp/probe" && gitq -C "$ctmp/probe" rev-parse HEAD)" \
+    "$def_head" "⑰ 前提：clone 出来的 HEAD 是默认分支的头（这就是那个缺陷）"
+  got=$(run_checkout "$mr_head" mr-src)
+  assert_eq "${got##*|}" "$mr_head" "⑰ 检出之后 HEAD 必须是 MR 的提交"
+  assert_eq "${got%% *}" "0" "⑰ 正常输入下检出段退出码 0"
+  assert_eq "$(gitq -C "$ctmp/business" rev-parse --abbrev-ref HEAD)" "mr-src" \
+    "⑰ 本地分支名与源分支一致（最接近 Flow 检出后的状态）"
+
+  # 负向：HEAD_SHA 形状不对（短 sha、大写、非十六进制、空）一律 fail closed，且不得动 HEAD
+  for bad in "${mr_head:0:7}" "$(printf '%s' "$mr_head" | LC_ALL=C tr 'a-f' 'A-F')" \
+             "zzzz567890123456789012345678901234567890" "${mr_head} " "${mr_head}x"; do
+    got=$(run_checkout "$bad" mr-src)
+    assert_contains "$got" "92 HEAD_SHA 不是 40 位小写十六进制" "⑰ HEAD_SHA 形状不对时拒绝（${bad:0:12}）"
+    assert_eq "${got##*|}" "$def_head" "⑰ 拒绝时不得动 HEAD（${bad:0:12}）"
+  done
+  # HEAD_SHA 根本没设：走文件顶部同一条 `:?` 硬失败（不是上面那条形状消息），同样 fail closed
+  got=$(run_checkout "" mr-src)
+  assert_contains "$got" "缺少 HEAD_SHA" "⑰ HEAD_SHA 未设置时硬失败"
+  assert_eq "${got##*|}" "$def_head" "⑰ HEAD_SHA 未设置时不得动 HEAD"
+  # 负向：分支名以 - 开头 / 含空白 / 为空
+  for bad in "-upload-pack=x" "mr src" "" "$(printf 'mr\tsrc')"; do
+    got=$(run_checkout "$mr_head" "$bad")
+    assert_contains "$got" "92 CI_COMMIT_REF_NAME 为空、以 - 开头或含空白/控制字符" \
+      "⑰ 分支名形状不对时拒绝（${bad})"
+    assert_eq "${got##*|}" "$def_head" "⑰ 拒绝时不得动 HEAD（${bad}）"
+  done
+  # 负向：形状合法但提交在库里不存在（源分支被强推改写）
+  got=$(run_checkout "0000000000000000000000000000000000000000" mr-src)
+  assert_contains "$got" "92 检出 MR 的提交失败" "⑰ 提交不存在时 fail closed"
+  # 拒绝消息里不得回显不受信取值（分支名由 MR 作者控制）
+  got=$(run_checkout "$mr_head" "-upload-pack=touch /tmp/pwned")
+  assert_not_contains "$got" "upload-pack" "⑰ 拒绝消息不得回显分支名"
+  rm -rf "$ctmp"
+else
+  echo "SKIP: 无 /usr/bin/git，跳过 ⑰ 检出行为断言" >&2
+fi
+
+# ⑱ 检出段的静态形状：必须校验两个入参、必须核对检出后的 HEAD（⑰ 的负向用例覆盖不到「核对」这条，
+#   因为 -B 本身就保证了一致——它守的是将来有人换掉 -B 写法时不要静默评错提交）
+assert_contains "$code_lines" 'rev-parse HEAD' "⑰/⑱：检出之后必须核对 HEAD"
+assert_contains "$code_lines" '[[ "$head_now" == "$HEAD_SHA" ]]' "⑱ HEAD 与 HEAD_SHA 必须逐字比较"
+assert_contains "$code_lines" ': "${HEAD_SHA:?' "⑱ HEAD_SHA 缺失必须硬失败"
+ck_line=$(entry_code_line 'checkout -q -B')
+engine_line=$(entry_code_line 'kiro-review\.sh')
+assert_eq "$([ -n "$ck_line" ] && [ -n "$clone_line" ] && [ -n "$engine_line" ] \
+  && [ "$clone_line" -lt "$ck_line" ] && [ "$ck_line" -lt "$engine_line" ] && echo yes)" "yes" \
+  "⑱ 检出必须排在 clone 之后、调用引擎之前"
 
 report
