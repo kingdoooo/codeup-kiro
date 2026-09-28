@@ -194,7 +194,8 @@ bot_usernames: []          # 机器人与人同号：名单留空，断环交给
 
 执行器的开关与评审行为变量由 `config.yaml` 写进任务定义的容器环境（默认值与 `scripts/` 里的缺省值
 逐项一致，有测试比对）；取值语义归共享评审引擎（`scripts/`），与 Flow 档位同一套规则，详见
-`pipeline/setup-guide.md` 第 11.2 节，本档位不改这些语义。
+`pipeline/setup-guide.md` 第 11.2 节，本档位不改这些语义。**唯一一个刻意与引擎缺省值不同的是
+`REVIEW_RERUN_HINT`**（见下表最后一行）：引擎的缺省值是 Flow 语义的「重跑流水线」，本档位没有流水线。
 
 | 变量 | `config.yaml` 键 | 说明 |
 |---|---|---|
