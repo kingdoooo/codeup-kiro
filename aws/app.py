@@ -17,7 +17,7 @@ import os
 
 import aws_cdk as cdk
 
-from config import load_config
+from config import DEFAULT_COMMAND_PHRASE, load_config
 from stacks.dispatcher_stack import DispatcherStack
 from stacks.executor_stack import ExecutorStack
 from stacks.state_stack import StateStack
@@ -33,7 +33,9 @@ def build_stacks(app, cfg):
 
     dispatcher_cfg = dict(cfg)
     dispatcher_cfg.setdefault("bot_usernames", [cfg["bot_username"]])
-    dispatcher_cfg.setdefault("command_phrase", "/kiro review")
+    # load_config 已经填过这个键（默认值只有 config.py 一处）；这里保留 setdefault 是给绕过
+    # load_config 直接调 build_stacks 的调用方兜底，取值仍引用同一个常量，不再写第二份字面量。
+    dispatcher_cfg.setdefault("command_phrase", DEFAULT_COMMAND_PHRASE)
     dispatcher_cfg.setdefault("target_branch_filter", "")
     dispatcher_cfg.setdefault("lock_ttl_seconds", 86400)
     dispatcher_cfg.setdefault("reserved_concurrency", 5)

@@ -26,6 +26,8 @@ kiro_cli_sha256: "940b47e51692c5ccb65f50a5036cb658b284bc824c2932e5b34460189c0ce4
 inline_comment: 0       # 执行器：INLINE_COMMENT
 # 评论命令（REVIEW_COMMAND）：1 = MR 上正文含 command_phrase 的评论会触发一次重审，结果以**原地更新**
 # 的那条汇总评论呈现（run:N 递增）。短语见下面「可选：调度器」里的 command_phrase。
+# 这个开关还决定汇总评论页脚那句「怎么重新评审」（REVIEW_RERUN_HINT，派生值，不是本文件的键）：
+# 1 → 「评论 `<command_phrase>` 可重新评审」；0 → 「向源分支推送新提交可重新评审」。
 review_command: 0
 
 # ── 可选：评审行为（执行器环境；默认值与 scripts/ 里的缺省值逐项一致，取值语义同 Flow 档位）──
@@ -36,7 +38,11 @@ review_command: 0
 # max_comment_bytes: 60000      # MAX_COMMENT_BYTES
 
 # ── 可选：调度器 ────────────────────────────────────────────────────────
-# bot_usernames: [aliyun:kirobot]   # 忽略其评论的机器人账号列表；默认只有 bot_username 一个
+# bot_usernames: [aliyun:kirobot]   # 忽略其评论的机器人账号列表；默认只有 bot_username 一个。
+#                                   # 机器人与人是同一个账号时改成 `bot_usernames: []`：默认名单会把
+#                                   # 人自己发的 /kiro review 一起忽略掉（命令静默失效）。空名单必须写
+#                                   # `[]`，写成 `bot_usernames:` 是 null、synth 直接报错。断环靠
+#                                   # `<!-- kiro-` 标记那道守卫，见 setup-guide.md 第 4.2 节
 # command_phrase: "/kiro review"    # REVIEW_COMMAND_PHRASE；只在 review_command: 1 时有意义。
 #                                   # 空串会被调度器 fail closed（一律不受理），别配成会出现在本方
 #                                   # 评论里的词（例如 Kiro 代码评审），见 setup-guide.md 第 4.3 节

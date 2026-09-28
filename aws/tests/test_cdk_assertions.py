@@ -948,24 +948,76 @@ def test_guide_keeps_the_exit_90_log_line_as_a_cross_check_and_quotes_it_verbati
 
 
 # ── Task 5 复审 I-2/I-3：形状检查的代号与手册必须逐个对齐 ──────────────────────
+IGNORED_REASON_PREFIX = "ignored reason="
+
+
+def _str_literals(node):
+    """一个表达式（含 f-string）里所有**字面量**字符串片段拼起来；插值部分按空串处理。"""
+    import ast
+    return "".join(sub.value for sub in ast.walk(node)
+                   if isinstance(sub, ast.Constant) and isinstance(sub.value, str))
+
+
+def _ignored_reason_codes(src):
+    """用 AST 抽出「调度器能打出 `ignored reason=` 的全部代号」，并顺带定位日志的出口。
+
+    返回 `(codes, emitters, arg_forms)`：代号集合、正文含 `ignored reason=` 的 print 所在函数名、
+    `_log_ignored(...)` 实参的形态集合。
+
+    按 AST 抽而不是按字面量数（复审 M-4）：原来那条 `handler.count('print(f"ignored reason=') == 1`
+    只钉住了一种拼法——`print("ignored reason=" + code)`、`print("ignored" " reason=" + code)`
+    或 `_log_ignored(some_var)` 都能从它和两个正则抽取器底下溜过去，而那正是这条守卫要防的分叉。
+    """
+    import ast
+    tree = ast.parse(src)
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    assert {"_log_ignored", "_accept", "_reject_reason"} <= set(fns), sorted(fns)
+
+    emitters, codes, arg_forms = [], set(), set()
+    for name, fn in fns.items():
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "print"
+                    and IGNORED_REASON_PREFIX in _str_literals(node)):
+                emitters.append(name)
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "_log_ignored"):
+                continue
+            arg = node.args[0] if len(node.args) == 1 else None
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                arg_forms.add("literal")
+                codes.add(arg.value)
+            elif isinstance(arg, ast.Name) and name == "_accept":
+                # `_accept` 把 `_reject_reason` 的返回值原样转发：代号来自那个函数的 return
+                arg_forms.add("reject-reason")
+                for ret in ast.walk(fns["_reject_reason"]):
+                    if not isinstance(ret, ast.Return):
+                        continue
+                    assert isinstance(ret.value, ast.Constant) and isinstance(ret.value.value, str), \
+                        f"_reject_reason 返回了非字面量代号（抽取器看不见它）：{ast.dump(ret)}"
+                    if ret.value.value:
+                        codes.add(ret.value.value)
+            else:
+                raise AssertionError(
+                    f"{name} 里的 _log_ignored 实参形态不认识（代号会从守卫底下溜过去）："
+                    f"{ast.dump(node)}")
+    return codes, emitters, arg_forms
+
+
 def test_setup_guide_lists_every_shape_rejection_code_the_dispatcher_can_emit():
     """代号是运维唯一的分辨依据：代码里加一个代号却不写进手册，那一类拒绝就查不下去；
     手册写了代码里没有的代号，运维会照着一个永远不出现的现象排查。两边逐个对齐，不是子串抽查。
     """
+    import re
     aws_dir = pathlib.Path(__file__).resolve().parents[1]
     handler = (aws_dir / "lambda" / "dispatcher" / "handler.py").read_text()
     guide = (aws_dir / "setup-guide.md").read_text()
-    # 代号有两个来源，都要抽：①_reject_reason 的返回值（形状检查）——只看那个函数体，避免把别处的
-    # 字符串字面量当成代号；②直接调 _log_ignored 的地方（评论命令的状态门）。只抽 ① 的话，
-    # 新增的 mr-not-open 写不写进手册都发现不了。
-    import re
-    body = handler.split("def _reject_reason(")[1].split("\ndef ")[0]
-    shape_codes = set(re.findall(r'return "([a-z][a-z-]+)"', body))
-    logged_codes = set(re.findall(r'_log_ignored\("([a-z][a-z-]+)"\)', handler))
-    assert shape_codes and logged_codes, (shape_codes, logged_codes)   # 两个抽取器都确实抽到了东西
-    assert handler.count("print(f\"ignored reason=") == 1, \
-        "`ignored reason=` 只能有一处 print（_log_ignored），否则日志形状迟早分叉、抽取器也漏掉一半"
-    codes = shape_codes | logged_codes
+    codes, emitters, arg_forms = _ignored_reason_codes(handler)
+    # 日志只有一个出口，且就是 `_log_ignored`：形状分叉了手册的排错表只对一半路径成立。
+    assert emitters == ["_log_ignored"], \
+        f"`{IGNORED_REASON_PREFIX}` 必须只在 _log_ignored 里打；实际出现在：{emitters}"
+    # 两条代号来源都确实抽到了东西（否则「代号集合对得上」可能是空真）
+    assert arg_forms == {"literal", "reject-reason"}, arg_forms
     assert codes == {"org-unset", "clone-url-prefix", "clone-url-chars", "head-sha",
                      "repo-id", "mr-local-id", "branch", "note-biz-id", "mr-not-open"}, codes
     # 选行的条件要挑出**枚举那一行**：别处（4.3 的 REVIEW_COMMAND 一行）也会正当地提到某个具体代号
@@ -1030,7 +1082,11 @@ def test_the_guide_describes_the_comment_command_result_as_an_in_place_summary_u
     for text, name in ((para, "§0 的评论命令那一段"), (row[0], "4.3 的 REVIEW_COMMAND 那一行")):
         assert "原地更新" in text, f"{name}没说结果是原地更新那条汇总评论"
         assert "run:N" in text, f"{name}没说 run:N 递增（操作者就是靠这个数字确认重审跑了）"
+        # 「新建」的条件是三条，不是一条（复审 M-2）：原文只写了「没配 CODEUP_BOT_USERNAME 时才新建」，
+        # 比引擎强——首次评审（找不到上一条）与原地更新失败同样会新建一条。
         assert "CODEUP_BOT_USERNAME" in text, f"{name}没说「没配机器人用户名时才新建」的那个前提"
+        assert "更新失败" in text, f"{name}把「新建」的条件写窄了：原地更新失败时引擎也会新建一条"
+        assert "找不到上一条" in text, f"{name}漏了「找不到上一条（首次评审）也会新建」"
         for stale in ("新的汇总评论", "尚未实现", "Task 13", "不会回复那条评论"):
             assert stale not in text, f"{name}仍有过时说法：{stale}"
     # 手册说的必须与引擎真的实现的是同一件事（只读 scripts/，不改）
@@ -1079,3 +1135,119 @@ def test_the_troubleshooting_table_renders_as_one_contiguous_table():
         raise AssertionError(f"§8 的表格被非表格行劈开了：{broken}")
     seps = [i for i in idx if section[i].replace(" ", "").startswith("|---")]
     assert seps == [idx[1]], f"§8 应当只有一张表、表头分隔行紧跟表头：{seps}"
+
+
+# ── F6：AWS 档位必须自己设 REVIEW_RERUN_HINT，否则页脚教的是 Flow 的操作 ──────────────
+# 共享引擎的默认值是「重跑流水线可重新评审」（scripts/lib/review-render.sh 的
+# REVIEW_RERUN_HINT_DEFAULT），而本档位没有流水线：不设这个变量，每条汇总评论末尾都在教读者做一件
+# 做不到的事。pipeline/setup-guide.md 第 11.2 节那张表也把本档位列为要改这个变量的一方。
+def _container_env(cfg):
+    app = cdk.App()
+    state = StateStack(app, "S", cfg={"region": "us-west-2"})
+    td = next(iter(Template.from_stack(ExecutorStack(app, "E", cfg=cfg, state=state))
+                   .find_resources("AWS::ECS::TaskDefinition").values()))
+    return {e["Name"]: e["Value"]
+            for e in td["Properties"]["ContainerDefinitions"][0]["Environment"]}
+
+
+@pytest.mark.parametrize("over,want", [
+    # 期望值写成字面量，不引用生产代码里的常量：引用的话改坏了取值两边一起变，守卫恒绿。
+    ({"review_command": 1}, "评论 `/kiro review` 可重新评审"),
+    ({"review_command": 0}, "向源分支推送新提交可重新评审"),
+    ({"review_command": 1, "command_phrase": "Kiro 重新评审"}, "评论 `Kiro 重新评审` 可重新评审"),
+    # 开关开着但短语被显式清空：调度器此时 fail closed（一条命令都不受理），页脚不能承诺评论命令
+    ({"review_command": 1, "command_phrase": ""}, "向源分支推送新提交可重新评审"),
+    # 开关关着时，短语配了也不该出现在页脚里
+    ({"review_command": 0, "command_phrase": "Kiro 重新评审"}, "向源分支推送新提交可重新评审"),
+])
+def test_the_rerun_hint_reaches_the_container_env_and_matches_the_toggle(over, want):
+    env = _container_env(_full_cfg(**over))
+    assert env["REVIEW_RERUN_HINT"] == want, env["REVIEW_RERUN_HINT"]
+
+
+def test_the_rerun_hint_is_never_the_flow_tier_default():
+    # 反向守卫：无论开关取哪个值，都不能出现 Flow 那句（那才是「忘了设」的真实表现）。
+    render = (pathlib.Path(__file__).resolve().parents[2]
+              / "scripts" / "lib" / "review-render.sh").read_text()
+    assert 'REVIEW_RERUN_HINT_DEFAULT="重跑流水线可重新评审"' in render, \
+        "引擎的默认值变了：本档位派生的那句提示要跟着复核"
+    assert 'local raw="${REVIEW_RERUN_HINT-}"' in render, \
+        "引擎读的环境变量名变了，任务定义里那一项就白设了"
+    for toggle in (0, 1):
+        assert "重跑流水线" not in _container_env(_full_cfg(review_command=toggle))["REVIEW_RERUN_HINT"]
+
+
+def test_the_command_phrase_default_is_written_in_exactly_one_place():
+    """短语默认值有两个消费者（调度器判正文、执行器印页脚）。两边各写一份字面量的话，改默认值时
+    漏掉一处就是「页脚教的短语触发不了评审」——那是静默的假承诺，没有任何报错。
+    """
+    import ast
+    import re
+    aws_dir = pathlib.Path(__file__).resolve().parents[1]
+    srcs = {p.relative_to(aws_dir).as_posix(): p.read_text()
+            for p in [aws_dir / "app.py", aws_dir / "config.py",
+                      *sorted((aws_dir / "stacks").glob("*.py"))]}
+    from config import DEFAULT_COMMAND_PHRASE
+
+    def _literal_count(src):
+        """数的是**代码里的字符串字面量**，不是文本出现次数：注释里写出这句短语（解释它是默认值）
+        不算第二份实现，而 `src.count()` 会把它算进去。"""
+        return sum(1 for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.Constant) and n.value == DEFAULT_COMMAND_PHRASE)
+
+    where = {name: _literal_count(src) for name, src in srcs.items()}
+    assert sum(where.values()) == 1, f"短语默认值出现在多处（或一处都没有）：{where}"
+    assert where["config.py"] == 1, where
+    # 派生那一侧必须真的用这个常量，而不是恰好也写对了一个同样的字面量
+    assert "DEFAULT_COMMAND_PHRASE" in srcs["stacks/executor_stack.py"], \
+        "executor_stack 没有引用那个常量（短语缺省时页脚会与调度器实际认的短语不一致）"
+    # 调度 Lambda 是独立部署包、不 import config.py，只能各自写一份；那一份必须与常量一致
+    handler = (aws_dir / "lambda" / "dispatcher" / "handler.py").read_text()
+    assert re.search(r'os\.environ\.get\("REVIEW_COMMAND_PHRASE",\s*"([^"]*)"\)', handler).group(1) \
+        == DEFAULT_COMMAND_PHRASE, "handler.py 的兜底短语与 config.py 的常量不一致"
+
+
+# ── 机器人与人同号：显式 bot_usernames: [] 必须一路活到运行时的空名单 ──────────────────
+def test_an_explicit_empty_bot_list_survives_to_an_empty_env_and_parses_back_to_empty():
+    """手册 4.2 教「机器人与人同号时把 bot_usernames 设成 []」，这条把那句话钉在三处：
+    app.py 的 setdefault 不覆盖显式的 []、模板里那一项是空字符串、运行时解析回空名单。
+    """
+    cfg = _full_cfg(bot_usernames=[])
+    envs = _all_envs(cfg)
+    disp = [env for src, env in envs.items() if "DispatcherFn" in src]
+    assert len(disp) == 1, envs.keys()
+    assert disp[0]["BOT_USERNAMES"] == "", disp[0]["BOT_USERNAMES"]
+    # app.py 这一层：显式的 [] 不能被 setdefault 换成 [bot_username]
+    stacks = _app_mod.build_stacks(cdk.App(), dict(cfg))
+    tmpl = Template.from_stack(stacks[2])
+    fns = tmpl.find_resources("AWS::Lambda::Function")
+    got = {k: v["Properties"]["Environment"]["Variables"].get("BOT_USERNAMES")
+           for k, v in fns.items() if "Dispatcher" in k}
+    assert set(got.values()) == {""}, got
+    # 运行时那一层（空字符串必须解析回空名单，而不是 [""]）在 test_dispatcher.py 里断言：
+    # 那个文件才把 lambda/dispatcher 放进了 sys.path（handler.py 要 import codeup_min）。
+
+
+def test_a_null_bot_list_is_refused_with_a_message_that_names_the_fix(write_cfg):
+    # `bot_usernames:`（空值）在 YAML 里是 null，不是空列表：`",".join(None)` 会在 CDK 内部抛
+    # TypeError，报错说不出「配置写法不对」。手册教的是 `[]`，所以这条错路必须给一句人话。
+    base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    for bad in (None, "aliyun:kirobot", [""], ["  "], [None], 3):
+        cfg = dict(base, bot_usernames=bad)
+        with pytest.raises(ValueError) as exc:
+            load_config(write_cfg(cfg))
+        assert "bot_usernames" in str(exc.value) and "[]" in str(exc.value), str(exc.value)
+    # 正向对照：空列表与正常名单都必须过
+    for ok in ([], ["aliyun:kirobot"], ["a", "b"]):
+        assert load_config(write_cfg(dict(base, bot_usernames=ok)))["bot_usernames"] == ok
+
+
+def test_an_absent_command_phrase_is_filled_but_an_explicit_empty_one_is_kept(write_cfg):
+    # falsy 但有意义：显式空串是「fail closed，一条命令都不受理」的既有语义（handler 的 if not phrase）。
+    # 用 `or` 回落默认会把它悄悄变成「命令照常生效」。
+    base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    from config import DEFAULT_COMMAND_PHRASE
+    bare = {k: v for k, v in base.items() if k != "command_phrase"}
+    assert load_config(write_cfg(bare))["command_phrase"] == DEFAULT_COMMAND_PHRASE
+    assert load_config(write_cfg(dict(base, command_phrase="")))["command_phrase"] == ""
+    assert load_config(write_cfg(dict(base, command_phrase=None)))["command_phrase"] is None

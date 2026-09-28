@@ -11,6 +11,11 @@ GLOBAL_INFERENCE_REGIONS = frozenset({"ap-south-1", "ap-southeast-1", "sa-east-1
 
 TOGGLES = ("inline_comment", "review_command")
 
+# 评论命令的触发短语：默认值只在这里写一份。它有**两个**消费者——调度器（判评论正文里有没有这句）
+# 与执行器（页脚那句「怎么重新评审」要把同一句短语印给读者，见 stacks/executor_stack.py::rerun_hint）。
+# 两边各自 `cfg.get(..., "/kiro review")` 的话，改默认值时漏掉一处就是「页脚教的短语触发不了评审」。
+DEFAULT_COMMAND_PHRASE = "/kiro review"
+
 # 两个 kiro-cli 摘要（安装包 zip / 装好后的入口文件），分工见 ADR-0006；pinned 档位下都是硬要求。
 KIRO_CLI_DIGESTS = ("kiro_pinned_artifact_sha256", "kiro_cli_sha256")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -43,6 +48,22 @@ def load_config(path):
     for name in ("org_id", "bot_username"):
         if not cfg.get(name):
             raise ValueError(f"config 缺少 {name}")
+
+    # 键**不存在**时才填默认（不是 `or`）：显式写成空串/空值是「fail closed，一条命令都不受理」的
+    # 既有语义（handler.py 的 `if not phrase` 那一段），用 `or` 回落默认会把它悄悄变成「命令照常生效」。
+    cfg.setdefault("command_phrase", DEFAULT_COMMAND_PHRASE)
+
+    # bot_usernames 只校验形状，不校验内容：它会被 `",".join(...)` 写进 Lambda 环境变量。
+    # YAML 里想清空名单**必须**写 `[]`；写成 `bot_usernames:`（空值）会被解析成 None，
+    # 那时 `",".join(None)` 抛 TypeError，报错指向 CDK 内部、说不出是配置写法的问题（手册 4.2 教的
+    # 正是「机器人与人同号时把它设成 []」，这条错路必须给一句人话）。
+    if "bot_usernames" in cfg:
+        names = cfg["bot_usernames"]
+        if not isinstance(names, list) or any(
+                not isinstance(n, str) or not n.strip() for n in names):
+            raise ValueError(
+                f"bot_usernames 取值 {names!r} 非法：必须是用户名字符串的列表；"
+                "清空名单请写 `bot_usernames: []`（不要留空值），键整个不写则默认只含 bot_username")
 
     # 三个摘要无默认、必配（spec 变量契约；N7 不允许隐式默认）：缺了的话 synth/部署都顺利，要等第一次
     # 真实评审才在容器里失败，MR 上只看到兜底那句笼统的「可能是拉取镜像失败…」。

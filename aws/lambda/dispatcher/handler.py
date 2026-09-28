@@ -280,11 +280,6 @@ def classify(headers, body, cfg):
             return "ignore", None
         if phrase not in note:
             return "ignore", None
-        # MR 已经合并或关闭时不受理命令（见 NOTE_CLOSED_STATES）。判在短语之后：这样这行日志只在
-        # 「真有人发了命令却什么都没发生」时出现，不会被每一条普通评论刷满。
-        if _norm(_dig(body, "merge_request", "state")) in NOTE_CLOSED_STATES:
-            _log_ignored("mr-not-open")
-            return "ignore", None
         fields = _fields_from(_dig(body, "merge_request"), _dig(body, "repository"))
         if fields is None:
             return "ignore", None
@@ -297,6 +292,14 @@ def classify(headers, body, cfg):
         if not fields["dedupe_extra"]:
             return "ignore", None            # 没有评论 id 就无法去重，宁可不评
         if not _accept(fields, cfg):
+            return "ignore", None
+        # MR 已经合并或关闭时不受理命令（见 NOTE_CLOSED_STATES）。位置有两个约束：
+        # ①在短语之后——否则每一条普通评论都会打一行日志，真正的信号就被淹掉；
+        # ②在 _accept **之后**——`mr-not-open` 在手册里是「正常流量、无需处置」，而形状代号是
+        # 「有人在改报文」。放在前面的话，伪造报文只要顺手多带一个 `state: merged`，就能把
+        # 那条告警降级成一句无需处置的日志（Task 13 复审 M-3）。两种都 ignore，差别只在信号。
+        if _norm(_dig(body, "merge_request", "state")) in NOTE_CLOSED_STATES:
+            _log_ignored("mr-not-open")
             return "ignore", None
         return "review", fields
 

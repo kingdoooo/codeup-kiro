@@ -11,9 +11,32 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+from config import DEFAULT_COMMAND_PHRASE
+
 # aws/executor/Dockerfile 的构建上下文是仓库根（COPY scripts/ prompts/ kiro/ 都是相对仓库根的路径），
 # 这里必须给出同一个根，否则 DockerImageAsset 的目录内容与 Dockerfile 里的 COPY 源路径对不上。
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+# 页脚与降级评论里那句「怎么重新评审」（REVIEW_RERUN_HINT，共享引擎渲染，见
+# scripts/lib/review-render.sh::_review_rerun_hint）。**必须由本档位设置**：引擎的默认值是 Flow 语义
+# 的「重跑流水线可重新评审」，而 AWS 档位根本没有流水线——不设就是每条汇总评论末尾都教读者做一件
+# 做不到的事（pipeline/setup-guide.md 第 11.2 节那张表也把本档位列为要改这个变量的一方）。
+RERUN_HINT_PUSH = "向源分支推送新提交可重新评审"
+
+
+def rerun_hint(cfg):
+    """按 config.yaml 推出这句提示语。
+
+    只有「评论命令真的会被受理」时才承诺评论命令：开关为 1 **且**短语非空。短语被显式写成空串时
+    调度器是 fail closed 的（handler.py 的 `if not phrase`），此时承诺评论命令就是假承诺，
+    所以回落到推送语义——这一条比「照着开关直译」更重要，页脚是读者唯一的操作指引。
+    短语原样嵌进反引号：取值会经引擎的 `_review_sanitize_oneline` 清洗（本地实测：反引号与中文原样
+    保留，`<!--` 被转义成 `&lt;!--`，换行折成空格），所以这里不自己再加一层转义。
+    """
+    phrase = str(cfg.get("command_phrase", DEFAULT_COMMAND_PHRASE) or "")
+    if cfg.get("review_command", 0) == 1 and phrase:
+        return f"评论 `{phrase}` 可重新评审"
+    return RERUN_HINT_PUSH
 
 # 评审行为变量：config.yaml 键 → (容器环境变量名, 缺省值)。缺省值与 scripts/ 里的 `${VAR:-默认}`
 # 逐项一致（tests/test_cdk_assertions.py 读脚本比对），写进任务定义是为了让取值在任务定义里看得见，
@@ -148,6 +171,8 @@ class ExecutorStack(cdk.Stack):
                 # 开关与行为变量必须真的进容器：config.py 校验通过、却从没传给评审脚本的开关，
                 # 表现就是「配对了也不生效」且毫无报错（I2）。
                 "INLINE_COMMENT": str(cfg["inline_comment"]),
+                # 派生值，不是 config.yaml 的键（见 rerun_hint 的 docstring）
+                "REVIEW_RERUN_HINT": rerun_hint(cfg),
                 **{var: str(cfg.get(key, default))
                    for key, (var, default) in BEHAVIOUR_VARS.items()},
             },

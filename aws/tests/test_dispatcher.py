@@ -1289,3 +1289,64 @@ def test_the_four_marker_prefixes_are_the_ones_the_engine_really_writes():
         assert prefix in KNOWN_MARKER_PREFIXES
     # 汇总评论那一个没有变量，是直接 echo 出去的
     assert 'echo "<!-- kiro-review:${sha} run:${run} -->"' in render, "汇总标记那行 echo 变了"
+
+
+# ── 复审 M-3：伪造报文多带一个 `state: merged` 不得把形状告警降级成「正常流量」 ──────────
+# `mr-not-open` 在手册里是「正常流量、无需处置」，形状代号是「有人在改报文」。状态门排在
+# `_accept` 之前时，伪造者顺手加一个 merged 就能把告警换成一句无需处置的日志（两种都 ignore，
+# 差别只在运维看到的信号）。所以状态门必须在形状检查**之后**。
+@pytest.mark.parametrize("over,code", [
+    ({"clone_url": EVIL_URL}, "clone-url-prefix"),
+    ({"clone_url": f"https://codeup.aliyun.com/{FIX_ORG}/%2e%2e/x.git"}, "clone-url-chars"),
+    ({"last_commit": {"id": "nope"}}, "head-sha"),
+    ({"source_branch": "-upload-pack=x"}, "branch"),
+])
+def test_a_forged_note_that_also_claims_merged_still_logs_the_shape_code(over, code, capsys):
+    body = _set_note_mr_state(_note_body_with(**over), "merged")
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "ignore"
+    out = capsys.readouterr().out
+    assert out == f"ignored reason={code}\n", \
+        f"形状告警被 mr-not-open 盖掉了（复审 M-3）：{out!r}"
+
+
+def test_a_forged_note_with_a_bad_comment_id_and_merged_logs_the_comment_id_code(capsys):
+    # 评论 id 的形状检查也在 _accept 里，同样不能被状态门抢先。
+    body = _set_note_mr_state(_note_with("/kiro review"), "merged")
+    body["object_attributes"]["note_biz_id"] = "x#y z"
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "ignore"
+    assert capsys.readouterr().out == "ignored reason=note-biz-id\n"
+
+
+def test_a_well_formed_merged_note_still_reports_mr_not_open(capsys):
+    # 正向对照：挪了位置之后那条「正常流量」的日志仍要打得出来，否则上面几条可以靠
+    # 「状态门被删掉」一起变绿。
+    body = _set_note_mr_state(_note_with("/kiro review"), "merged")
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "ignore"
+    assert capsys.readouterr().out == "ignored reason=mr-not-open\n"
+
+
+def test_the_state_gate_sits_after_the_shape_checks_in_the_source():
+    # 静态守卫：上面那几条断言的是行为，这条钉住**顺序**本身，改回去时错误信息直接说明原因。
+    src = pathlib.Path(handler_mod.__file__).read_text()
+    note_branch = src.split("if ev == NOTE_EVENT:")[1]
+    assert note_branch.index("if not _accept(fields, cfg):") < \
+        note_branch.index("NOTE_CLOSED_STATES"), \
+        "状态门又排到了形状检查前面：伪造报文多带一个 state: merged 就能把形状告警降级（M-3）"
+
+
+# ── 机器人与人同号：BOT_USERNAMES 空字符串必须解析回空名单 ───────────────────────────
+def test_an_empty_bot_usernames_env_parses_back_to_an_empty_list(monkeypatch):
+    """手册 4.2 教「机器人与人同号时把 bot_usernames 设成 []」。CDK 那侧把它注入成空字符串
+    （tests/test_cdk_assertions.py 有断言），运行时必须解析回空名单——写成 `.split(",")` 而不过滤，
+    就会得到 `[""]`，于是**作者名为空或缺失**的评论全部被当成本方机器人忽略掉，而那恰好是
+    「Codeup 不发 user.username」时的取值（既有用例要求那种评论照常评审）。
+    """
+    _set_runtime_env(monkeypatch)
+    monkeypatch.setenv("BOT_USERNAMES", "")
+    _stub_secrets(monkeypatch, {"SecretString": "t0ken"})
+    cfg = handler_mod._runtime_cfg()
+    assert cfg["bot_usernames"] == [], cfg["bot_usernames"]
+    # 行为层面：名单为空时，作者名缺失的评论仍然照常触发评审
+    body = _note_with("/kiro review")
+    del body["user"]["username"]
+    assert handler_mod.classify(NOTE_HDR, body, dict(CFG, bot_usernames=[]))[0] == "review"
