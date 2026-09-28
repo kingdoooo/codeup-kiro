@@ -147,12 +147,28 @@ host_line=$(LC_ALL=C grep -n '拒绝 clone' "$ENTRY" | head -1 | cut -d: -f1)
 clone_line=$(LC_ALL=C grep -n 'clone --no-tags' "$ENTRY" | head -1 | cut -d: -f1)
 assert_eq "$([ -n "$host_line" ] && [ -n "$clone_line" ] && [ "$host_line" -lt "$clone_line" ] && echo yes)" \
   "yes" "I-2：主机检查必须存在且排在 clone 之前"
-assert_contains "$code_lines" '-c credential.https://codeup.aliyun.com.helper=' \
-  "I-2：凭证 helper 必须按 URL 限定到 codeup.aliyun.com"
-assert_not_contains "$code_lines" '-c credential.helper=' \
+# 凭证经**环境变量**下发给所有子进程（Task 14 验收阻塞：评审引擎自己也要 git fetch，`-c` 只作用于
+# 执行器自己那一次调用，引擎那次是无凭证的）；key 仍必须按 URL 限定。
+export_line=$(LC_ALL=C grep -n '^export GIT_CONFIG_VALUE_0=' "$ENTRY" | head -1 | cut -d: -f1)
+assert_eq "$([ -n "$export_line" ] && [ -n "$clone_line" ] && [ "$export_line" -lt "$clone_line" ] && echo yes)" \
+  "yes" "I-2：凭证 helper 的导出必须存在且排在 clone 之前"
+assert_contains "$code_lines" "export GIT_CONFIG_COUNT=1" "I-2：必须声明 GIT_CONFIG_COUNT"
+assert_contains "$code_lines" \
+  "export GIT_CONFIG_KEY_0='credential.https://codeup.aliyun.com.helper'" \
+  "I-2：凭证 helper 的 key 必须按 URL 限定到 codeup.aliyun.com"
+assert_contains "$code_lines" 'export GIT_CONFIG_VALUE_0="$cred_helper"' \
+  "I-2：value 取自 cred_helper 变量，不是就地写一份"
+assert_not_contains "$code_lines" 'credential.helper' \
   "I-2：不得留下未限定主机的全局 credential.helper（任何主机问凭证它都答）"
-assert_eq "$(printf '%s\n' "$code_lines" | LC_ALL=C grep -c -- '-c credential.https://codeup.aliyun.com.helper=')" \
-  "2" "I-2：clone 与 fetch 两处都要限定（少一处就有一条未限定的路径）"
+assert_not_contains "$code_lines" '-c credential' \
+  "I-2：凭证只有环境变量这一处来源，不得再留 -c（两种写法并存迟早分叉）"
+# 令牌绝不以字面量出现：`password=` 后面只允许是 `$YUNXIAO_TOKEN` 这种引用。
+assert_eq "$(LC_ALL=C grep -nE 'password=[^$]' "$ENTRY" || true)" "" \
+  "I-2：password= 后面只能是 \$YUNXIAO_TOKEN 引用，不得写字面量"
+# 单引号是承重的：换成双引号，密文会在这一行就被 bash 展开进导出的 GIT_CONFIG_VALUE_0。
+assert_contains "$code_lines" \
+  "cred_helper='!f() { echo \"username=oauth2\"; echo \"password=\$YUNXIAO_TOKEN\"; }; f'" \
+  "I-2：cred_helper 必须是单引号，令牌不得在赋值时展开"
 
 # ⑮ 行为：把主机检查那一段原样抽出来跑，覆盖 userinfo、同后缀域名、缺协议与令牌写进 URL 四类
 host_block=$(awk '/^repo_url=/{f=1} f{print} f&&/拒绝 clone/{exit}' "$ENTRY")
@@ -181,5 +197,43 @@ assert_not_contains "$(run_host 'https://oauth2:s3cret-token@codeup.aliyun.com/o
   's3cret-token' "⑮ 拒绝消息不得回显 URL 里的令牌"
 assert_not_contains "$(run_host 'https://evil.example/x.git')" 'evil.example' \
   "⑮ 拒绝消息不得回显攻击者可控的地址"
+
+# ⑯ I-2 / Task 14 行为断言（真 git，不是只看源码里有没有某个字符串）：把凭证那一段原样抽出来，
+#   用 `git credential fill` 问三个主机。本方主机必须拿到 oauth2 + 环境里的令牌；另外两个主机
+#   （完全无关的域名、以及带本方域名前缀的域名）必须什么都拿不到。
+#   `GIT_CONFIG_GLOBAL/SYSTEM=/dev/null`：把开发机自己的全局配置（osxkeychain 之类）隔离掉，
+#   否则负向断言可能被本机 helper 满足、变成假绿；执行器镜像里本来就没有这些配置。
+if [[ -x /usr/bin/git ]]; then
+  cred_block=$(awk '/^cred_helper=/{f=1} f{print} f&&/^export GIT_CONFIG_VALUE_0=/{exit}' "$ENTRY")
+  assert_contains "$cred_block" 'GIT_CONFIG_VALUE_0' "⑯ 抽到了凭证那一段"
+  FAKE_TOKEN='t0k3n-for-test-only'
+  NOPASS=$(command -v false)
+  fill() {  # 主机 → "rc 输出"
+    local out rc=0
+    out=$(printf 'protocol=https\nhost=%s\n\n' "$1" \
+      | YUNXIAO_TOKEN="$FAKE_TOKEN" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$NOPASS" \
+        /bin/bash -c "set -euo pipefail; $cred_block
+exec /usr/bin/git credential fill" 2>&1) || rc=$?
+    printf '%s %s' "$rc" "$out"
+  }
+  ours=$(fill codeup.aliyun.com)
+  assert_contains "$ours" "username=oauth2" "⑯ 本方主机拿到 oauth2 用户名"
+  assert_contains "$ours" "password=$FAKE_TOKEN" "⑯ 本方主机拿到环境里的令牌（helper 真的被调用）"
+  for host in evil.example codeup.aliyun.com.evil.example; do
+    got=$(fill "$host")
+    assert_not_contains "$got" "password=" "⑯ 非本方主机拿不到任何密码（${host}）"
+    assert_not_contains "$got" "$FAKE_TOKEN" "⑯ 非本方主机拿不到令牌（${host}）"
+  done
+  # 令牌只能留在 YUNXIAO_TOKEN 里：cred_helper 那行改成双引号就会把密文展开进导出的
+  # GIT_CONFIG_VALUE_0，等于摊给容器里每一个进程（/proc/<pid>/environ）。
+  env_dump=$(YUNXIAO_TOKEN="$FAKE_TOKEN" /bin/bash -c "set -euo pipefail; $cred_block
+env" | LC_ALL=C grep -v '^YUNXIAO_TOKEN=')
+  assert_not_contains "$env_dump" "$FAKE_TOKEN" "⑯ 令牌不得被展开进任何导出的环境变量"
+  assert_contains "$env_dump" 'GIT_CONFIG_VALUE_0=' "⑯ 正向对照：helper 确实导出给了子进程"
+  assert_contains "$env_dump" 'GIT_CONFIG_COUNT=1' "⑯ 正向对照：GIT_CONFIG_COUNT 也导出了"
+else
+  echo "SKIP: 无 /usr/bin/git，跳过 ⑯ 凭证行为断言" >&2
+fi
 
 report

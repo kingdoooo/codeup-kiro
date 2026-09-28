@@ -146,6 +146,23 @@ aws secretsmanager create-secret \
   区域、组织 ID、开关这类非敏感的部署静态值；
 - **AWS 凭证本身不需要任何密钥**：任务角色（task role）通过容器凭证端点（container credentials
   endpoint）向执行器提供临时凭证，不要为「AWS 访问」单独建一个 Secrets Manager 条目。
+- **云效令牌给 git 用的方式：按主机限定的 credential helper，经环境变量下发给所有子进程。**
+  `aws/executor/entrypoint.sh` 在 clone 之前导出三个变量——`GIT_CONFIG_COUNT=1`、
+  `GIT_CONFIG_KEY_0=credential.https://codeup.aliyun.com.helper`、`GIT_CONFIG_VALUE_0=<helper 程序>`。
+  要点有三个，改动这一段之前请先读 `tests/test-aws-entrypoint.sh` 的 ⑭/⑮/⑯（都有断言守着）：
+  - **令牌不在 argv、不在 URL、不进 `.git/config`**：`GIT_CONFIG_VALUE_0` 里存的是 helper 的**程序
+    文本**，其中的 `$YUNXIAO_TOKEN` 未展开（entrypoint 里那行用的是单引号）；git 在真的需要凭证时
+    才把这段交给 `sh -c` 执行，那时才从环境里读出令牌。所以容器里任何进程的
+    `/proc/<pid>/cmdline` 与 `/proc/<pid>/environ` 都看不到令牌值本身（只有 `YUNXIAO_TOKEN` 这一个
+    变量里有，它本来就是 ECS 从 Secrets Manager 注入的）。
+  - **经环境变量而不是 `git -c`**：`-c` 只作用于执行器自己发起的那一次 git 调用，而评审引擎
+    （`scripts/kiro-review.sh`，两个档位共用、不因 AWS 而改）自己还要在业务库里 `git fetch` 目标
+    分支。环境变量会被所有子进程继承，一处下发即可——凭证只有这一个来源。
+  - **按主机限定**（`credential.<url>.helper` 而不是 `credential.helper`）：全局 helper 对任何主机的
+    凭证询问都会作答，一次重定向就足以把组织令牌交给别人。限定之后只有 `codeup.aliyun.com` 问得到。
+  - 这三个变量**不会**进 Kiro 模型进程：kiro-cli 一律以 `env -i` + 固定许可清单启动
+    （`scripts/lib/kiro-agent.sh` 的 `KIRO_ENV_FIXED_NAMES`，里面既没有 `GIT_CONFIG_*` 也没有
+    `YUNXIAO_TOKEN`；逃生口 `KIRO_ENV_PASSTHROUGH` 另有 `YUNXIAO_*` 这条拒绝规则）。
 
 ## 4. 变量三分类
 
@@ -392,7 +409,8 @@ aws/.venv/bin/pip install -r aws/requirements.txt
 |---|---|
 | 评审被拒绝，日志/退出码指向「镜像摘要不在已探测名单内」（entrypoint 退出码 90） | 镜像重新构建过、但没有把新摘要登记进 `kiro_image_digests`（第 5.2 节；首次部署时名单里只有占位值，这是引导流程的正常一步）。核对日志里打印的摘要与名单是否一致 |
 | 评审被拒绝，日志指向「读不到本容器镜像摘要」（entrypoint 退出码 90） | ECS 容器级元数据端点读取失败或返回形状变了。N1 门在读不到摘要时一律拒绝，不会放行；偶发时重新推送即可，持续出现时核对 P2a-04 记录的元数据形状 |
-| 评审被拒绝，日志/退出码指向「clone 业务库失败」（entrypoint 退出码 91） | 云效令牌（`codeup-kiro/yunxiao-token-kiro`）过期或权限不足（需代码只读 + 合并请求读写）；执行器网络不通（VPC/子网/安全组配置，或出网路径）；业务库 URL/仓库权限本身有问题。三者从同一条报错信息区分不开，需要逐个排除。**退出码 91 还有另一个成因，日志形状不同**：`业务库地址的主机不是 codeup.aliyun.com，拒绝 clone`——执行器在 clone 之前自己再查一次主机（深度防御，调度器的形状检查已经挡过一次）。走到这里说明调度器那道被绕过、或两处的组织/地址口径不一致；此时先查 `YUNXIAO_ORG_ID` 与报文里的 `repository.git_http_url`，并考虑轮换 webhook 共享密钥。日志里**不回显地址**（它是外部可控的，可能带令牌） |
+| 评审被拒绝，日志/退出码指向「clone 业务库失败」（entrypoint 退出码 91） | 云效令牌（`codeup-kiro/yunxiao-token-kiro`）过期或权限不足（需代码只读 + 合并请求读写）；执行器网络不通（VPC/子网/安全组配置，或出网路径）；业务库 URL/仓库权限本身有问题。三者从同一条报错信息区分不开，需要逐个排除。**退出码 91 还有另一个成因，日志形状不同**：`业务库地址的主机不是 codeup.aliyun.com，拒绝 clone`——执行器在 clone 之前自己再查一次主机（深度防御，调度器的形状检查已经挡过一次）。走到这里说明调度器那道被绕过、或两处的组织/地址口径不一致；此时先查 `YUNXIAO_ORG_ID` 与报文里的 `repository.git_http_url`，并考虑轮换 webhook 共享密钥。日志里**不回显地址**（它是外部可控的，可能带令牌）。注意 clone 成功**不代表**后续 git 操作也有凭证：凭证是经 `GIT_CONFIG_*` 环境变量下发给所有子进程的（第 3 节最后一条），下一行那条「引擎自己 fetch 失败」就是这一段被改坏时的现象 |
+| 装机、摘要、自检、版本门全过，评审在生成 diff 那一步失败：`[kiro-review] 错误：无法 fetch 目标分支：<分支>`，日志里还有 `fatal: could not read Username for 'https://codeup.aliyun.com'` | **执行器的 git 凭证没有传给评审引擎。** 引擎（`scripts/kiro-review.sh` 第 4 步）会自己在业务库里 `git fetch` 目标分支、必要时再 `git fetch --unshallow`——Flow 档位由平台检出业务库并留下可用凭证，AWS 档位得由执行器提供。真实 Fargate 运行实测过这个坑（Task 14 验收）：当时 helper 只作为 `git -c` 传给执行器自己那两次调用，引擎那次 fetch 因此是无凭证的。**修法**：凭证必须经 `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` 导出（第 3 节最后一条），环境变量才会被引擎这个子进程继承。核对办法：`bash tests/test-aws-entrypoint.sh` 的 ⑯ 用真 git 的 `credential fill` 判这件事。若这三个变量确实在位而现象依旧，再查令牌本身（与上一行「clone 业务库失败」同一批成因） |
 | 同一个 MR 短时间内被评审两次，或看到「抢锁」相关的提示（幂等锁 `ReviewLock` 表） | **预期行为，不是错误**：webhook 被重放，或 Codeup 的「批准」事件与「新建/更新」事件都触发了调度器。幂等锁按「仓库#MR#提交」这个键去重，重复请求会被挡在真正拉起 Fargate 任务之前 |
 | MR 上出现调度器写的「评审未启动」类评论 | 调度器判定收到了合法请求，但 `RunTask` 本身被节流或调用失败——多为 Fargate 任务并发数/账号级限流，或任务定义/网络配置有误导致 `RunTask` 直接报错。这条评论意味着 Fargate 任务从未真正跑起来，评审引擎本身没有机会失败 |
 | 评审任务确实异常结束了，MR 上却**没有**「兜底」类评论 | 兜底 Lambda 自己失败了。它取云效令牌（`codeup-kiro/yunxiao-token-kiro`）的方式与调度器相同，但**不打调度器那行固定格式的日志**（见下面 503 那一行）：取不到令牌时它直接抛 `SecretUnavailable`，所以 CloudWatch 里看到的是一条 traceback（末行 `SecretUnavailable: YUNXIAO_TOKEN_ID`，其上还会带原始 AWS 错误正文，该正文可能含角色 ARN 与账号 ID）。抛出是有意的：这是 EventBridge 的异步调用，抛出会走 Lambda 自己的重试，限流之类能自愈；吞掉才会变成真正的沉默。最常见的成因是兜底角色缺 `secretsmanager:GetSecretValue`。另外查 `Errors`/`Throttles` 指标与 EventBridge 规则是否匹配到了事件 |

@@ -55,19 +55,34 @@ repo_host="${repo_url#https://}"; repo_host="${repo_host%%/*}"
   echo "业务库地址的主机不是 codeup.aliyun.com，拒绝 clone" >&2; exit 91; }
 # 令牌只经 credential helper 回调时从环境读取，不拼进 URL 或任何命令行参数——
 # 命令行参数经 /proc/<pid>/cmdline、ps 等对同机其他进程可见，比日志更容易泄露。
-# `-c credential.<url>.helper='...'` 这段值在本行单引号内不会被外层 bash 展开，
-# 传给 git 的 argv 里只有字面的 `$YUNXIAO_TOKEN` 四个字符；git 稍后把它交给 `sh -c` 子进程
-# 执行时才真正展开（该子进程继承本脚本的环境），密文从未出现在任何进程的启动参数里。
+# 这一行的**单引号**是承重的：`$YUNXIAO_TOKEN` 在这里不被外层 bash 展开，cred_helper 里存的只是
+# 字面的 `$YUNXIAO_TOKEN` 十四个字符；git 稍后把这段交给 `sh -c` 子进程执行时才真正展开（该子进程
+# 继承本脚本的环境）。改成双引号就会把密文展开进下面那个导出的环境变量，等于把它摊给容器里每一个
+# 进程（/proc/<pid>/environ）——tests/test-aws-entrypoint.sh 有一条行为断言守着这件事。
 cred_helper='!f() { echo "username=oauth2"; echo "password=$YUNXIAO_TOKEN"; }; f'
-# helper **按 URL 限定**（`credential.<url>.helper`），不是全局的 `credential.helper`：全局 helper
-# 对任何主机的凭证询问都会作答，所以一次重定向（或上面那道检查将来被绕过）就足以把令牌交出去。
-# 限定之后 git 只在向 codeup.aliyun.com 询问凭证时才调它，别的主机拿不到任何东西。
-/usr/bin/git -c credential.https://codeup.aliyun.com.helper="$cred_helper" \
-  clone --no-tags "$repo_url" \
+# helper 经**环境变量**下发给所有子进程（`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` /
+# `GIT_CONFIG_VALUE_<n>`），不是 `-c`：`-c` 只作用于本进程发起的那一次 git 调用，而评审引擎
+# （`scripts/kiro-review.sh` 第 4 步）自己还要在业务库里 `git fetch` 目标分支、必要时再
+# `git fetch --unshallow`。Flow 档位由平台检出业务库并留下可用凭证，AWS 档位得由执行器提供。
+# 真实 Fargate 运行实测过这个坑（Task 14 验收阻塞）：装机、摘要、自检、版本门全过，到引擎那次
+# fetch 才报 `fatal: could not read Username for 'https://codeup.aliyun.com'`，评审整轮失败。
+# scripts/ 是两个档位共用的引擎、不因 AWS 而改（I9），所以凭证必须以「任何子进程都能用」的形式给。
+#
+# helper 仍然**按 URL 限定**（`credential.<url>.helper`），不是全局的 `credential.helper`：全局
+# helper 对任何主机的凭证询问都会作答，所以一次重定向（或上面那道主机检查将来被绕过）就足以把
+# 令牌交出去。限定之后 git 只在向 codeup.aliyun.com 询问凭证时才调它，别的主机拿不到任何东西。
+#
+# 这三个变量**不会**进 Kiro 进程：kiro-cli 一律以 `env -i` + 固定许可清单启动
+# （scripts/lib/kiro-agent.sh:387 的 KIRO_ENV_FIXED_NAMES，里面没有 GIT_CONFIG_*，也没有
+# YUNXIAO_TOKEN；逃生口 KIRO_ENV_PASSTHROUGH 另有 `YUNXIAO_*` 这条拒绝规则，:412）。
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0='credential.https://codeup.aliyun.com.helper'
+export GIT_CONFIG_VALUE_0="$cred_helper"
+# 本文件自己的 clone/fetch 因此不再需要 `-c`：凭证只有这一处来源，两种写法并存迟早分叉。
+/usr/bin/git clone --no-tags "$repo_url" \
   "$WORKROOT/business" >/dev/null 2>&1 \
   || { echo "clone 业务库失败（凭证、网络或仓库权限）" >&2; exit 91; }
 [[ -z "$MR_TARGET_BRANCH" ]] || /usr/bin/git -C "$WORKROOT/business" \
-  -c credential.https://codeup.aliyun.com.helper="$cred_helper" \
   fetch --no-tags origin "$MR_TARGET_BRANCH" >/dev/null 2>&1 || true
 
 # ── 与 Flow run block 完全相同的环境变量契约（I9 的裁判就看这一段）──

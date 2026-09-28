@@ -1118,6 +1118,42 @@ def test_the_guide_lists_the_executors_host_check_as_an_exit_91_cause():
     assert literal in row[0], "§8 的退出码 91 那一行没写主机检查这个成因"
 
 
+# ── Task 14 验收阻塞：git 凭证必须下发给**引擎那个子进程**，手册与代码两头都钉 ──────────
+def test_git_credentials_reach_the_engine_and_the_guide_says_how():
+    """真实 Fargate 运行踩过的坑：helper 只作为 `git -c` 传给执行器自己那两次调用，评审引擎
+    （scripts/kiro-review.sh 第 4 步）自己的 `git fetch` 因此是无凭证的，装机/摘要/自检/版本门
+    全过之后才在生成 diff 那一步整轮失败。
+
+    三件事一起钉，少一件这个坑就会以另一种形式回来：
+    ① 引擎真的会自己 fetch（只读 scripts/，不改）——哪天引擎不再自己 fetch，这条会提醒复核；
+    ② 执行器用**环境变量**下发按主机限定的 helper，且没有退回 `-c` / 全局 helper；
+    ③ §8 有一行以引擎**逐字**的报错为线索（运维就是拿那句话去表里找行的），并点出修法。
+    """
+    root = pathlib.Path(__file__).resolve().parents[2]
+    entry = (root / "aws" / "executor" / "entrypoint.sh").read_text()
+    engine = (root / "scripts" / "kiro-review.sh").read_text()
+    guide = _guide_text()
+
+    engine_err = "无法 fetch 目标分支"
+    assert f'die_review "{engine_err}"' in engine, "引擎的 fetch 报错措辞变了，手册那一行要跟着改"
+    assert 'git fetch -q origin "+refs/heads/${TARGET_BRANCH}' in engine, \
+        "引擎不再自己 fetch 目标分支了：执行器的凭证下发方式与 §8 那一行都要复核"
+
+    for line in ("export GIT_CONFIG_COUNT=1",
+                 "export GIT_CONFIG_KEY_0='credential.https://codeup.aliyun.com.helper'",
+                 'export GIT_CONFIG_VALUE_0="$cred_helper"'):
+        assert line in entry, f"entrypoint 不再经环境变量下发 git 凭证：{line}"
+    code = "\n".join(ln for ln in entry.splitlines() if not ln.lstrip().startswith("#"))
+    assert "credential.helper" not in code, "退回了未限定主机的全局 credential.helper"
+    assert "-c credential" not in code, "退回了只作用于本进程的 -c（引擎那个子进程又拿不到凭证）"
+
+    row = [ln for ln in guide.splitlines() if ln.startswith("|") and engine_err in ln]
+    assert len(row) == 1, "§8 缺少「无法 fetch 目标分支」那一行（或不止一行）"
+    for fact in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+                 "could not read Username"):
+        assert fact in row[0], f"§8 那一行没写出 {fact}"
+
+
 # ── Task 13 / O-4：§8 的排错表必须是**一张**连续的表 ─────────────────────────────
 def _guide_section_lines(heading):
     lines = _guide_text().splitlines()
