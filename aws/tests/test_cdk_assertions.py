@@ -1,5 +1,6 @@
 import fnmatch
 import pathlib
+import re
 
 import pytest
 from config import load_config, VALID_REGIONS
@@ -627,15 +628,36 @@ def test_image_asset_manifest_pins_the_build_platform_to_linux_amd64(tmp_path):
     assert source["dockerFile"] == "aws/executor/Dockerfile", source
 
 
-def test_task_role_dynamodb_grant_is_update_item_only():
-    t = _exec_template()
-    policies = t.find_resources("AWS::IAM::Policy")
-    ddb_actions = set()
-    for p in policies.values():
-        for s in p["Properties"]["PolicyDocument"]["Statement"]:
-            actions = s["Action"] if isinstance(s["Action"], list) else [s["Action"]]
-            ddb_actions.update(a for a in actions if a.startswith("dynamodb:"))
-    assert ddb_actions == {"dynamodb:UpdateItem"}, ddb_actions
+def test_task_role_dynamodb_grant_is_exactly_update_and_get_item_on_the_lock_table():
+    """任务角色对 DynamoDB 只有两件事：UpdateItem（「已回写」标记 + 按 MR 的租约）与 GetItem（查源分支
+    最新提交的抢锁记录，spec I6 ②），且只作用在锁表那一个 ARN 上。按 (动作, 资源) 成对比较，而不是
+    只收集动作：动作对了、资源写成 `*` 或映射表，只看动作的断言照样绿。动作按小写比较——IAM 的动作名
+    不区分大小写，`DynamoDB:Query` 也是一条真授权。"""
+    app = cdk.App()
+    state = StateStack(app, "S", cfg={"region": "us-west-2"})
+    executor = ExecutorStack(app, "E", cfg=_full_cfg(), state=state)
+    st, et = Template.from_stack(state), Template.from_stack(executor)
+    lock_ids = [k for k, r in st.find_resources("AWS::DynamoDB::Table").items()
+                if r["Properties"]["KeySchema"] == [{"AttributeName": "pk", "KeyType": "HASH"}]]
+    assert len(lock_ids) == 1, lock_ids
+    exports = [o["Export"]["Name"] for o in st.to_json().get("Outputs", {}).values()
+               if o.get("Value") == {"Fn::GetAtt": [lock_ids[0], "Arn"]}]
+    assert len(exports) == 1, exports
+    lock_arn = json.dumps({"Fn::ImportValue": exports[0]}, sort_keys=True)
+
+    roles = [k for k, r in et.find_resources("AWS::IAM::Role").items() if k.startswith("TaskRole")]
+    assert len(roles) == 1, roles
+    assert "ManagedPolicyArns" not in et.find_resources("AWS::IAM::Role")[roles[0]]["Properties"]
+    grants = set()
+    for p in et.find_resources("AWS::IAM::Policy").values():
+        if {"Ref": roles[0]} not in p["Properties"].get("Roles", []):
+            continue
+        for stmt in p["Properties"]["PolicyDocument"]["Statement"]:
+            for a in _as_list(stmt["Action"]):
+                if a.lower().startswith("dynamodb:") or a == "*":
+                    for r in _as_list(stmt["Resource"]):
+                        grants.add((a, json.dumps(r, sort_keys=True)))
+    assert grants == {("dynamodb:UpdateItem", lock_arn), ("dynamodb:GetItem", lock_arn)}, grants
 
 
 def test_container_secrets_reference_secrets_manager_arns_not_plaintext():
@@ -1349,3 +1371,54 @@ def test_an_absent_command_phrase_is_filled_but_an_explicit_empty_one_is_kept(wr
     assert load_config(write_cfg(bare))["command_phrase"] == DEFAULT_COMMAND_PHRASE
     assert load_config(write_cfg(dict(base, command_phrase="")))["command_phrase"] == ""
     assert load_config(write_cfg(dict(base, command_phrase=None)))["command_phrase"] is None
+
+
+# ── spec I6 ②：按 MR 的租约——手册与 entrypoint 两头都钉 ─────────────────────────────
+def _entry_code():
+    entry = (pathlib.Path(__file__).resolve().parents[1] / "executor" / "entrypoint.sh").read_text()
+    return "\n".join(ln for ln in entry.splitlines() if not ln.lstrip().startswith("#"))
+
+
+def test_the_guide_documents_the_lease_exit_93_and_every_head_check_result():
+    """运维拿日志里那句话去 §8 找行：93 的两条消息与 head-check 的每个取值都逐字取自 entrypoint.sh，
+    不在这里另抄一份。每条断言都只在**那一行**里找（整篇或整节里找，别的行碰巧写了同一个词就会假绿）。"""
+    code = _entry_code()
+    msgs = re.findall(r'echo "([^"]*)" >&2; exit 93', code)
+    assert len(msgs) == 2, msgs   # 等待超限 / 读写失败，两条消息必须不同
+    results = re.findall(r"head-check result=([a-z-]+)", code)
+    assert sorted(set(results)) == ["claim-unknown", "current", "moved-unclaimed", "superseded",
+                                    "unknown"], results
+    sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
+
+    row93 = [ln for ln in sec8 if "退出码 93" in ln.split(" | ")[0]]
+    assert len(row93) == 1, "§8 缺少退出码 93 那一行（或不止一行）"
+    for msg in msgs:
+        # `${lease_span}` / `${lease_err}` 在日志里是具体取值，手册里写成占位；比的是两边的固定部分
+        for chunk in re.split(r"\$\{[a-z_]+\}", msg):
+            assert chunk.strip("（）") in row93[0], f"§8 退出码 93 那一行没逐字写出：{chunk}"
+    for code_name in ("AccessDeniedException", "ResourceNotFoundException", "unknown"):
+        assert code_name in row93[0], f"§8 退出码 93 那一行没解释 code={code_name}"
+
+    row_sup = [ln for ln in sec8 if "head-check result=superseded" in ln.split(" | ")[0]]
+    assert len(row_sup) == 1, "§8 缺少 head-check result=superseded 那一行（或不止一行）"
+    for r in set(results) - {"superseded"}:
+        assert f"result={r}" in row_sup[0], f"§8 head-check 那一行没解释 result={r}"
+
+    # 「同一 MR 被评审两次」那一行原先把原因写成「批准事件也触发了调度器」——批准从不触发评审（§0 事件过滤），
+    # 而真正的原因（两次推送）过去会并发、现在按租约依次进行。
+    row_twice = [ln for ln in sec8 if ln.startswith("| 同一个 MR 短时间内被评审两次")]
+    assert len(row_twice) == 1
+    assert "租约" in row_twice[0] and "依次" in row_twice[0], "那一行没说两次评审按租约依次进行"
+    assert "「批准」事件" not in row_twice[0], "那一行仍说批准事件会触发评审"
+
+
+def test_the_guide_opening_explains_the_per_mr_lease():
+    paras = [p for p in _guide_text().split("\n\n") if p.startswith("**同一 MR 串行")]
+    assert len(paras) == 1, "开头缺少「同一 MR 串行」那一段"
+    for fact in ("`lease#<仓库 id>#<MR 编号>`", "`KIRO_TIMEOUT` + 300 秒", "每 10 秒", "只释放自己持有",
+                 "`git ls-remote`", "`head-check result=superseded", "退出码 93", "没有抢锁记录"):
+        assert fact in paras[0], f"「同一 MR 串行」那一段没写出：{fact}"
+    code = _entry_code()
+    assert '"lease#${CODEUP_REPO_ID}#${MR_LOCAL_ID}"' in code, "租约键的形状变了，手册那一段要跟着改"
+    assert "lease_span=$((lease_span + 300))" in code, "租约时长的算法变了，手册那一段要跟着改"
+    assert "/bin/sleep 10" in code, "轮询间隔变了，手册那一段要跟着改"

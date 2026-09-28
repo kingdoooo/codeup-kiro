@@ -10,6 +10,8 @@ class StateStack(cdk.Stack):
         super().__init__(scope, cid, **kw)
 
         # 幂等锁：键 = 仓库#MR#head_sha（评论命令再拼评论 id）。TTL 24h。
+        # 同一张表还放执行器按 MR 的租约（键 `lease#仓库#MR`，见 executor/entrypoint.sh）：
+        # 抢锁键以纯数字的仓库 id 开头，两类键不相交；租约记录同样带 expires_at。
         self.lock_table = ddb.Table(
             self, "ReviewLock",
             partition_key=ddb.Attribute(name="pk", type=ddb.AttributeType.STRING),

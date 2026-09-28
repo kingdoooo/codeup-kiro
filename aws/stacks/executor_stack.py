@@ -123,8 +123,10 @@ class ExecutorStack(cdk.Stack):
             removal_policy=cdk.RemovalPolicy.RETAIN,
         )
 
-        # 任务角色只给 dynamodb:UpdateItem（entrypoint.sh 收尾时写「已回写」标记）与写日志——
-        # 不用 grant_write_data，那会连 PutItem/DeleteItem/条件写都给上，超出这个角色实际要做的事。
+        # 任务角色只给 dynamodb:UpdateItem + GetItem 与写日志。UpdateItem：entrypoint.sh 收尾时写
+        # 「已回写」标记，以及按 MR 的租约（拿租约是条件 upsert、释放是条件更新，都是 UpdateItem）；
+        # GetItem：拿到租约后查「源分支最新提交」有没有调度器的抢锁记录（spec I6 ②）。
+        # 不用 grant_read_write_data，那会连 PutItem/DeleteItem/Query/Scan 都给上，超出这个角色实际要做的事。
         self.task_role = iam.Role(
             self, "TaskRole", assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"))
 
@@ -182,9 +184,9 @@ class ExecutorStack(cdk.Stack):
             },
         )
 
-        state.lock_table.grant(self.task_role, "dynamodb:UpdateItem")
+        state.lock_table.grant(self.task_role, "dynamodb:UpdateItem", "dynamodb:GetItem")
         # add_container 已经通过 LogDrivers.aws_logs 把 CreateLogStream/PutLogEvents 授给了
         # execution_role；这里再显式给任务角色同一组权限——本任务的环境契约明确写了
-        # 「任务角色需要 dynamodb:UpdateItem 与 logs」，两个角色都持有虽有重叠但各自都是最小授权
+        # 「任务角色需要 dynamodb:UpdateItem 与 logs」（租约之后多一个 GetItem），两个角色都持有虽有重叠但各自都是最小授权
         # （都只scope 到这一个日志组），不是通配符。
         log_group.grant_write(self.task_role)
