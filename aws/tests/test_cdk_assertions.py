@@ -1041,7 +1041,8 @@ def test_setup_guide_lists_every_shape_rejection_code_the_dispatcher_can_emit():
     # 两条代号来源都确实抽到了东西（否则「代号集合对得上」可能是空真）
     assert arg_forms == {"literal", "reject-reason"}, arg_forms
     assert codes == {"org-unset", "clone-url-prefix", "clone-url-chars", "head-sha",
-                     "repo-id", "mr-local-id", "branch", "note-biz-id", "mr-not-open"}, codes
+                     "repo-id", "mr-local-id", "branch", "note-biz-id", "mr-not-open",
+                     "missing-field", "kiro-marker"}, codes
     # 选行的条件要挑出**枚举那一行**：别处（4.3 的 REVIEW_COMMAND 一行）也会正当地提到某个具体代号
     # （`ignored reason=mr-not-open`），只按 `ignored reason=` 选会一下选中两行。
     row = [ln for ln in guide.splitlines()
@@ -1169,7 +1170,9 @@ def test_git_credentials_reach_the_engine_and_the_guide_says_how():
     assert "credential.helper" not in code, "退回了未限定主机的全局 credential.helper"
     assert "-c credential" not in code, "退回了只作用于本进程的 -c（引擎那个子进程又拿不到凭证）"
 
-    row = [ln for ln in guide.splitlines() if ln.startswith("|") and engine_err in ln]
+    # 按**第一格**（现象）选行：别的行按名字引用这一行（「本表『无法 fetch 目标分支』那一行」）时，
+    # 整行判会一下选中两行。
+    row = [ln for ln in guide.splitlines() if ln.startswith("|") and engine_err in ln.split(" | ")[0]]
     assert len(row) == 1, "§8 缺少「无法 fetch 目标分支」那一行（或不止一行）"
     for fact in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
                  "could not read Username"):
@@ -1212,21 +1215,28 @@ def test_the_executor_checks_out_the_reviewed_commit_and_the_guide_says_so():
     assert "checkout -q -B" not in joined, "不得建本地分支（refs/heads 会遮蔽 refs/remotes）"
     def line_of(frag):
         return next(i for i, ln in enumerate(code) if frag in ln)
-    assert line_of("clone --no-tags") < line_of("checkout -q --detach") < line_of("kiro-review.sh"), \
+    assert line_of("/usr/bin/git clone ") < line_of("checkout -q --detach") < line_of("kiro-review.sh"), \
         "检出必须排在 clone 之后、调用引擎之前"
     assert line_of('[[ "$HEAD_SHA" =~') < line_of("checkout -q --detach"), "形状检查必须在检出之前"
     # 必填守卫在**任何网络 I/O 之前**（复审 M-3）：缺 HEAD_SHA 时不该先跑完镜像摘要门与一次全量 clone
-    assert line_of('[[ -n "${HEAD_SHA:-}" ]]') < line_of("KIRO_IMAGE_DIGESTS") < line_of("clone --no-tags"), \
+    assert line_of('[[ -n "${HEAD_SHA:-}" ]]') < line_of("KIRO_IMAGE_DIGESTS") < line_of("/usr/bin/git clone "), \
         "HEAD_SHA 必填守卫必须排在镜像摘要门与 clone 之前"
-    assert joined.count("exit 92") == 5, \
-        "五条 fail-closed 出口（HEAD_SHA 必填、HEAD_SHA 形状、分支名形状、检出失败、HEAD 不一致）少了一条"
+    assert joined.count("exit 92") == 6, \
+        ("六条 fail-closed 出口（HEAD_SHA 必填、HEAD_SHA 形状、源分支形状、目标分支形状、检出失败、"
+         "HEAD 不一致）少了一条")
 
     # ③ 手册侧
     # 只在 §8 里找：§4 的 HEAD_SHA 那一行也提到退出码 92，整篇判会变成 2 匹配
     row = [ln for ln in _guide_section_lines("8.") if ln.startswith("|") and "退出码 92" in ln]
     assert len(row) == 1, "§8 缺少退出码 92 那一行（或不止一行）"
-    for fact in ("HEAD_SHA", "CI_COMMIT_REF_NAME", "默认分支", "ref 名"):
+    for fact in ("HEAD_SHA", "CI_COMMIT_REF_NAME", "MR_TARGET_BRANCH", "默认分支", "ref 名"):
         assert fact in row[0], f"§8 退出码 92 那一行没写出 {fact}"
+    # 复审 s6 N-1：上面 `"HEAD_SHA" in row` 被成因①（形状不对）满足，于是「缺少 HEAD_SHA」这个成因
+    # 漏写了也照样绿。这里要求逐字的日志前缀，取自 entrypoint 那条消息本身。
+    missing = re.search(r'echo "(缺少 HEAD_SHA)（', entry)
+    assert missing, "entrypoint 的「缺少 HEAD_SHA」消息变了"
+    assert f"「{missing.group(1)}」" in row[0].split(" | ")[0], "§8 退出码 92 那一行的现象格没写「缺少 HEAD_SHA」"
+    assert f"「{missing.group(1)}」——" in row[0], "§8 退出码 92 那一行没解释「缺少 HEAD_SHA」这个成因"
 
 
 # ── Task 13 / O-4：§8 的排错表必须是**一张**连续的表 ─────────────────────────────
@@ -1370,7 +1380,45 @@ def test_an_absent_command_phrase_is_filled_but_an_explicit_empty_one_is_kept(wr
     bare = {k: v for k, v in base.items() if k != "command_phrase"}
     assert load_config(write_cfg(bare))["command_phrase"] == DEFAULT_COMMAND_PHRASE
     assert load_config(write_cfg(dict(base, command_phrase="")))["command_phrase"] == ""
-    assert load_config(write_cfg(dict(base, command_phrase=None)))["command_phrase"] is None
+    # 显式 null 不再原样放行（复审 s5 M-1，吸收 pre-accept M-a）：到 CDK 里只剩一句看不懂的
+    # 「Unable to deserialize value」。现在在 load_config 就报错，并点名这个键。
+    with pytest.raises(ValueError, match="command_phrase"):
+        load_config(write_cfg(dict(base, command_phrase=None)))
+
+
+@pytest.mark.parametrize("bad", [None, 123, True, " ", "   ", " /kiro review", "/kiro review ",
+                                 "/kiro\nreview", "\t/kiro"])
+def test_a_command_phrase_that_is_not_a_clean_string_is_refused_naming_the_key(bad, write_cfg):
+    # 全空白是空串的孪生兄弟却不 fail closed：任何含这串空格的评论都会拉起一次评审
+    base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    with pytest.raises(ValueError, match="command_phrase"):
+        load_config(write_cfg(dict(base, command_phrase=bad)))
+
+
+@pytest.mark.parametrize("good", ["", "/kiro review", "Kiro 重新评审", "/kiro  review"])
+def test_clean_command_phrases_are_kept_verbatim(good, write_cfg):
+    # 正向对照：空串（fail closed 的既有语义）与中间带空白的短语都合法，原样保留
+    base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    assert load_config(write_cfg(dict(base, command_phrase=good)))["command_phrase"] == good
+
+
+@pytest.mark.parametrize("bad", [[" aliyun:bot"], ["aliyun:bot "], ["a,b"], ["ok", "x,y"], ["\taliyun:bot"]])
+def test_bot_username_items_must_be_stripped_and_comma_free(bad, write_cfg):
+    base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    with pytest.raises(ValueError, match="bot_usernames"):
+        load_config(write_cfg(dict(base, bot_usernames=bad)))
+
+
+def test_an_empty_bot_list_is_accepted_with_a_poc_only_warning(write_cfg, capsys):
+    base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    capsys.readouterr()
+    assert load_config(write_cfg(dict(base, bot_usernames=[])))["bot_usernames"] == []
+    out = capsys.readouterr().out
+    assert out.startswith("警告：bot_usernames 为空——只适合机器人与人同号的 PoC"), out
+    assert "专用机器人账号" in out and "run:N" in out, out
+    # 正向对照：非空名单不打这行（否则上面那条可能只是「总在打」）
+    assert load_config(write_cfg(dict(base, bot_usernames=["aliyun:bot"])))["bot_usernames"] == ["aliyun:bot"]
+    assert "bot_usernames" not in capsys.readouterr().out
 
 
 # ── spec I6 ②：按 MR 的租约——手册与 entrypoint 两头都钉 ─────────────────────────────
@@ -1499,7 +1547,7 @@ def test_the_guide_says_how_to_subscribe_to_and_replay_backstop_failures():
                  '"posted": true', "RetriesExhausted", "14 天"):
         assert step in row[0], f"「收到兜底告警」那一行缺：{step}"
 
-    silent = [ln for ln in sec8 if ln.startswith("| 评审任务确实异常结束了，MR 上却**没有**「兜底」类评论")]
+    silent = [ln for ln in sec8 if ln.startswith("| 评审任务确实异常结束了，MR 上却**没有**兜底评论")]
     assert len(silent) == 1
     backstop = (pathlib.Path(__file__).resolve().parents[1] / "lambda" / "backstop" / "handler.py").read_text()
     steps = re.findall(r'print\("backstop step=([a-z-]+)"', backstop)
@@ -1519,3 +1567,142 @@ def test_the_503_row_lists_the_timeout_codes_the_bounded_client_can_now_produce(
         assert code in row[0], f"503 那一行缺：{code}"
     # 代号是开放集合（AWS 错误码或异常类型名），原文「只有固定几种，正是四类成因」既数错又说成了封闭集合
     assert "只有固定几种" not in row[0]
+
+
+def test_the_guide_says_where_the_git_error_tail_shows_up_for_exit_91_and_92():
+    """全分支复审 s1/s6：git 的 stderr 以前一律丢掉，91 的三类成因「区分不开、逐个排除」。现在 entrypoint
+    打一段带固定前缀的尾巴；手册的 91 / 92 两行要告诉运维去看它。前缀取自 entrypoint，不在这里另写。"""
+    entry = (pathlib.Path(__file__).resolve().parents[1] / "executor" / "entrypoint.sh").read_text()
+    m = re.search(r"sed 's/\^/  (git: )/'", entry)
+    assert m, "entrypoint 的 git 报错尾巴前缀变了"
+    prefix = m.group(1)
+    sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
+    for code in (91, 92):
+        row = [ln for ln in sec8 if f"退出码 {code}" in ln.split(" | ")[0]]
+        assert len(row) == 1, code
+        assert f"`{prefix}`" in row[0], f"§8 退出码 {code} 那一行没说 git 报错的尾巴在哪"
+    row91 = [ln for ln in sec8 if "退出码 91" in ln.split(" | ")[0]][0]
+    assert "区分不开，需要逐个排除" not in row91, "91 那一行仍说三类成因区分不开"
+    assert "`<redacted>`" in row91 and "不进 MR 评论" in row91
+
+
+# ── 最终修复轮 C：文档与小修的守卫。每一条都只在它那一行 / 那一段 / 那一段注释里找 ──────────
+def test_the_dispatchers_retry_chain_comment_labels_only_503_as_measured():
+    """复审 s2 M-1（延期的 L34 实际发生了）：dispatch 里那段注释曾写「Codeup 对非 2xx 会…立即重投
+    2 次（Task 1 实测）」，实测的只有 503。只在**那一段注释**里判，不整篇判：同一文件别处（F4 那段）
+    正当地写着「只测了 503」，整篇判会被它满足。"""
+    handler = (pathlib.Path(__file__).resolve().parents[1] / "lambda" / "dispatcher" / "handler.py").read_text()
+    body = handler.split("\ndef dispatch(", 1)[1].split("\ndef ", 1)[0]
+    lines = body.splitlines()
+    start = next(i for i, ln in enumerate(lines) if "抢锁已经成功" in ln)
+    block = []
+    for ln in lines[start:]:
+        if not ln.strip().startswith("#"):
+            break
+        block.append(ln.strip().lstrip("#").strip())
+    comment = "".join(block)
+    assert "（Task 1 实测）" in comment, "那段注释不再引用实测，这条守卫的前提没了"
+    assert "对 503 会" in comment and "对 502" in comment and "没有测过" in comment, comment
+    # 「实测」只许挂在 503 那一句上
+    assert comment.index("对 503 会") < comment.index("（Task 1 实测）") < comment.index("对 502"), comment
+    assert "非 2xx" not in comment, "那段注释又把「非 2xx 都重投」写成了实测结论"
+
+
+def test_the_troubleshooting_table_refers_to_rows_by_name_and_every_name_resolves():
+    """复审 s2 M-2 / L35：「见上面那一行」「见下一行」这类位置引用一插行就错（502/504 那一行的「上面那一行」
+    早就指错了）。§8 里一律按名字引用，而且每个名字都要唯一对上一行的「现象」格。"""
+    sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
+    for ln in sec8:
+        found = re.findall(r"上一行|下一行|上一条|下一条|上面那一行|下面那一行", ln)
+        assert not found, f"§8 仍有位置引用 {found}：{ln[:60]}"
+    firsts = [ln.split(" | ")[0].replace("**", "").replace("`", "") for ln in sec8]
+    names = set()
+    for ln in sec8:
+        names.update(re.findall(r"本表「([^」]+)」那一行", ln))
+    assert len(names) >= 5, names   # 不是空真：这几处位置引用都已经换成了名字
+    for name in names:
+        hits = [f for f in firsts if name in f]
+        assert len(hits) == 1, f"本表「{name}」那一行对上了 {len(hits)} 行"
+
+
+def test_the_redelivery_row_describes_an_observable_symptom():
+    """复审 s2 M-3：我们部署的代码不记录 X-Codeup-Delivery，「同一个 X-Codeup-Delivery 在日志里出现 2~3 次」
+    是看不到的现象；「只有第一次能拉起」对实测的 503 也不对（回 503 的那几次根本没走到抢锁）。"""
+    sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
+    row = [ln for ln in sec8 if ln.startswith("| Codeup 重投同一次投递")]
+    assert len(row) == 1
+    first = row[0].split(" | ")[0]
+    assert "REPORT" in first and "查不到" in first, first
+    assert "只有第一次能真正拉起" not in row[0]
+    assert "抢到锁的那一次" in row[0]
+    # 反向核对「查不到」这句话：调度器的代码里没有任何一个非文档字符串的字面量提到这个头
+    # （文档字符串与注释正当地提到它，不算）。哪天开始读/记它，这一行的现象要改回来。
+    import ast
+    handler = (pathlib.Path(__file__).resolve().parents[1] / "lambda" / "dispatcher" / "handler.py").read_text()
+    tree = ast.parse(handler)
+    docstrings = {id(n.value) for n in ast.walk(tree)
+                  if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)}
+    literals = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
+                and isinstance(n.value, str) and id(n) not in docstrings]
+    assert literals and not [v for v in literals if "delivery" in v.lower()], "调度器开始读/记 delivery id 了"
+
+
+def test_the_merged_or_closed_states_are_labelled_doc_derived_and_unmeasured():
+    """复审 s5 M-2：merged / closed 只见于云效文档，Task 1 只见过 opened/accepted。两处都不得再写成确知。"""
+    rows = [ln for ln in _guide_text().splitlines() if ln.startswith("|")]
+    r43 = [ln for ln in rows if ln.startswith("| `REVIEW_COMMAND` / `REVIEW_COMMAND_PHRASE`")]
+    assert len(r43) == 1
+    sent = r43[0].split("已合并/已关闭的 MR 上的命令不受理", 1)[1].split("。短语为空串", 1)[0]
+    assert "没有实测过" in sent and "照常评审" in sent, sent
+    r8 = [ln for ln in rows if "ignored reason=<代号>" in ln and "固定枚举：" in ln]
+    assert len(r8) == 1
+    seg = r8[0].split("`mr-not-open`（**正常流量**", 1)[1].split("）。日志里", 1)[0]
+    assert "没有实测过" in seg and "确知" not in seg, seg
+
+
+def test_the_guide_says_bot_equals_human_is_poc_only_with_the_adoption_hazard_and_recovery():
+    """复审 s5 I-1：真实验收（N5，Codeup-Demo MR !4）里人发的带标记评论被引擎当成汇总接管了；
+    手册以前说唯一的代价是「触发短语被忽略」。"""
+    guide = _guide_text()
+    paras = [p for p in guide.split("\n\n") if p.startswith("**机器人与人是同一个账号只适合 PoC")]
+    assert len(paras) == 1, "4.2 缺少「只适合 PoC」那一段"
+    for fact in ("第 1.4 节", "`CODEUP_BOT_USERNAME`", "接管", "**恢复**", "删掉那条评论",
+                 "`<!-- kiro-test -->`", "`ignored reason=kiro-marker`", "`cdk synth` 会打一行警告"):
+        assert fact in paras[0], f"「只适合 PoC」那一段缺：{fact}"
+    sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
+    row = [ln for ln in sec8 if ln.startswith("| 担心「机器人评论触发新评审」的死循环")]
+    assert len(row) == 1
+    tail = row[0].split("代价", 1)[1]
+    for fact in ("只适合 PoC", "接管", "删掉那条评论", "专用机器人账号"):
+        assert fact in tail, f"§8 断环那一行的「代价」没写出：{fact}"
+    example = (pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml").read_text()
+    block = example.split("# bot_usernames:", 1)[1].split("# command_phrase:", 1)[0]
+    assert "只适合 PoC" in block and "专用机器人账号" in block, block
+
+
+def test_the_six_required_executor_variables_are_named_where_the_guide_counts_them():
+    """复审 s6 N-3：4.1 那一格原来写「上面四项加 LOCK_KEY、HEAD_SHA 共六项」，字面所指的「上面四项」
+    含可选的 MR_TARGET_BRANCH 而漏了 CI_COMMIT_REF_NAME。现在逐个点名，并与 entrypoint 的必填守卫核对。"""
+    entry = (pathlib.Path(__file__).resolve().parents[1] / "executor" / "entrypoint.sh").read_text()
+    head = entry.split("# ── N1 镜像摘要门", 1)[0]
+    required = re.findall(r'^: "\$\{([A-Z_]+):\?', head, re.M)
+    assert '[[ -n "${HEAD_SHA:-}" ]]' in head
+    required.append("HEAD_SHA")
+    assert sorted(required) == sorted(["CODEUP_REPO_ID", "MR_LOCAL_ID", "CI_COMMIT_REF_NAME",
+                                       "BUSINESS_REPO_URL", "LOCK_KEY", "HEAD_SHA"]), required
+    row = [ln for ln in _guide_text().splitlines() if ln.startswith("| `CI_COMMIT_REF_NAME` |")]
+    assert len(row) == 1
+    sent = row[0].split("就要求", 1)[1].split("缺一硬失败", 1)[0]
+    assert set(re.findall(r"`([A-Z_]+)`", sent)) == set(required) | {"MR_TARGET_BRANCH"}, sent
+    assert "可选" in sent and "上面四项" not in row[0], sent
+
+
+def test_the_webhook_secret_row_states_the_trust_boundary_and_that_the_fix_is_tracked():
+    """复审 s3 I-2 / s4 O-1（Kent 裁决：跟踪、本轮不修）：一个共享密钥填进每个接入仓库的 webhook，
+    持有者能让执行器评审组织里令牌读得到的任何仓库。手册要把这条边界写在那个密钥的那一行里。"""
+    guide = _guide_text()
+    row = [ln for ln in guide.splitlines() if ln.startswith("| `codeup-kiro/webhook-secret` |")]
+    assert len(row) == 1
+    for fact in ("**信任边界**", "只有这一个共享密钥", "任何仓库", "另一个仓库的 MR", "轮换", "跟踪"):
+        assert fact in row[0], f"webhook 密钥那一行缺：{fact}"
+    assert ".scratch" not in guide, "公开手册不得链接本地的 .scratch 路径"

@@ -84,11 +84,28 @@ export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0='credential.https://codeup.aliyun.com.helper'
 export GIT_CONFIG_VALUE_0="$cred_helper"
 # 本文件自己的 clone/fetch 因此不再需要 `-c`：凭证只有这一处来源，两种写法并存迟早分叉。
+#
+# git 失败时打它 stderr 的**尾巴**（以前一律丢掉，退出码 91 这个最常见的真实故障——跨境网络、令牌
+# 过期——因此查不下去，全分支复审 s1/s6）。只进容器日志、绝不进 MR 评论；文件放在业务库之外。
+# 令牌不会出现在里面：它只经上面那个 helper 交给 git，git 从不打印 helper 给的密码，主机检查也
+# 不允许 URL 里带 userinfo。仍按深度防御把任何 `scheme://…@` 的 userinfo 抹掉。git 的报错会带分支名
+# （MR 作者可控），所以逐行去掉控制字符、截到 200 字节、加固定前缀：伪造不出一行像样的日志。
+GIT_ERR="$WORKROOT/git-stderr.log"
+git_err_tail() {
+  [[ -s "$GIT_ERR" ]] || return 0
+  /usr/bin/tail -n 5 "$GIT_ERR" | LC_ALL=C /usr/bin/tr -d '\000-\010\013-\037\177' \
+    | LC_ALL=C /usr/bin/sed -E 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]*@#\1<redacted>@#g' \
+    | LC_ALL=C /usr/bin/cut -c1-200 | LC_ALL=C /usr/bin/sed 's/^/  git: /' >&2 || true
+}
+# `--no-tags` 是**承重的**，不只是省流量：服务端若有一个叫 `origin/<目标分支>` 的标签，clone 下来的
+# `refs/tags/origin/<目标分支>` 会遮蔽 `refs/remotes/origin/<目标分支>`（git 解析短名字时 refs/tags
+# 排在 refs/remotes 之前），引擎第 4 步的 merge-base 就解析到那个标签——标签由有推送权限的人随意指，
+# 指到 MR 头就是 diff 为空、静默漏评，与下面 `-B` 那个坑同一类。`--no-tags` 还会写下
+# `remote.origin.tagOpt=--no-tags`，引擎自己那次 fetch 也就不会顺带取标签。tests/test-aws-entrypoint.sh
+# 的 ⑲ 有一个服务端带这种标签的变体。
 /usr/bin/git clone --no-tags "$repo_url" \
-  "$WORKROOT/business" >/dev/null 2>&1 \
-  || { echo "clone 业务库失败（凭证、网络或仓库权限）" >&2; exit 91; }
-[[ -z "$MR_TARGET_BRANCH" ]] || /usr/bin/git -C "$WORKROOT/business" \
-  fetch --no-tags origin "$MR_TARGET_BRANCH" >/dev/null 2>&1 || true
+  "$WORKROOT/business" >/dev/null 2>"$GIT_ERR" \
+  || { echo "clone 业务库失败（凭证、网络或仓库权限）" >&2; git_err_tail; exit 91; }
 
 # ── 检出 MR 的那个提交（clone 给的是仓库默认分支）────────────────────
 # `git clone` 检出的是**仓库默认分支**；Flow 那侧是平台按 MR 事件检出**源分支**。引擎从
@@ -97,9 +114,10 @@ export GIT_CONFIG_VALUE_0="$cred_helper"
 # 运行实测过（Task 14 验收，Codeup-Demo MR !4）：汇总标记写成 `<!-- kiro-review:f29435f run:1 -->`，
 # f29435f 是 master 的头，而 MR 的头是 7baa0cd。
 #
-# 两个入参在这里**再查一次形状**（调度器的 classify 已经查过同样的规则，这是执行器侧的第二道，
+# 三个入参在这里**再查一次形状**（调度器的 classify 已经查过同样的规则，这是执行器侧的第二道，
 # 与主机检查同一条理由：执行器不假设上游一定校验过）。它们随后会成为 git 的参数：`HEAD_SHA` 只认
-# 40 位小写十六进制，分支名不得以 `-` 开头（会被当成选项）、不得含空白或控制字符。
+# 40 位小写十六进制，分支名不得以 `-` 开头（会被当成选项）、不得含空白或控制字符。目标分支是可选的，
+# 只在非空时查（空 = 引擎按源分支反查目标分支）。
 # 消息里**不回显取值**：分支名是 MR 作者可控的不受信取值（引擎侧同样只在掩码后记录）。
 # （「HEAD_SHA 有没有传」在文件顶部就判过了，与另外几个必填项在一起——那里还没有任何网络 I/O。）
 [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] \
@@ -107,12 +125,28 @@ export GIT_CONFIG_VALUE_0="$cred_helper"
 [[ -n "$CI_COMMIT_REF_NAME" && "$CI_COMMIT_REF_NAME" != -* \
    && ! "$CI_COMMIT_REF_NAME" =~ [[:space:]] && ! "$CI_COMMIT_REF_NAME" =~ [[:cntrl:]] ]] \
   || { echo "CI_COMMIT_REF_NAME 为空、以 - 开头或含空白/控制字符，拒绝评审（取值不回显）" >&2; exit 92; }
-# 全量 clone 后 HEAD_SHA 通常已在本地；不在就再取一次源分支（评审期间源分支被推过、或将来支持
-# 跨 fork 时都会走到这里）。取不到不在这里判死：下面的 checkout 会给出同一个结论。
-/usr/bin/git -C "$WORKROOT/business" rev-parse --verify --quiet "${HEAD_SHA}^{commit}" >/dev/null 2>&1 \
-  || /usr/bin/git -C "$WORKROOT/business" fetch --no-tags origin \
+[[ -z "$MR_TARGET_BRANCH" ]] || [[ "$MR_TARGET_BRANCH" != -* \
+   && ! "$MR_TARGET_BRANCH" =~ [[:space:]] && ! "$MR_TARGET_BRANCH" =~ [[:cntrl:]] ]] \
+  || { echo "MR_TARGET_BRANCH 以 - 开头或含空白/控制字符，拒绝评审（取值不回显）" >&2; exit 92; }
+# 目标分支用**带前缀的 refspec** 取（与下面补取源分支同一种写法）：`+refs/heads/X:…` 不可能被 git
+# 当成选项，裸写 `"$MR_TARGET_BRANCH"` 时以 `-` 开头的取值就在选项的位置上（复审 O-5 / s4 M-A）。
+# 取不到不致命（引擎第 4 步自己还会再取一次），但把 git 的报错留在日志里：那时引擎的「无法 fetch
+# 目标分支」往往就是同一个原因。
+if [[ -n "$MR_TARGET_BRANCH" ]] && ! /usr/bin/git -C "$WORKROOT/business" fetch --no-tags origin \
+     "+refs/heads/${MR_TARGET_BRANCH}:refs/remotes/origin/${MR_TARGET_BRANCH}" \
+     >/dev/null 2>"$GIT_ERR"; then
+  echo "取目标分支失败（不致命，引擎会再取一次；取值不回显）" >&2; git_err_tail
+fi
+# 全量 clone 后 HEAD_SHA 通常已在本地；不在（评审排队期间源分支又被推过）就再取一次源分支。
+# 这次取的是 origin，也就是目标仓库：跨 fork 的 MR 的提交不在这里，将来要支持时得另取 fork 的地址。
+# 取不到不在这里判死：下面的 checkout 会给出同一个结论（报错尾巴先留在日志里）。
+if ! /usr/bin/git -C "$WORKROOT/business" rev-parse --verify --quiet "${HEAD_SHA}^{commit}" \
+     >/dev/null 2>&1 \
+   && ! /usr/bin/git -C "$WORKROOT/business" fetch --no-tags origin \
        "+refs/heads/${CI_COMMIT_REF_NAME}:refs/remotes/origin/${CI_COMMIT_REF_NAME}" \
-       >/dev/null 2>&1 || true
+       >/dev/null 2>"$GIT_ERR"; then
+  echo "补取源分支失败（取值不回显）" >&2; git_err_tail
+fi
 # **分离头指针**（`--detach`），刻意不建本地分支。原先写的是 `-B "$CI_COMMIT_REF_NAME"`，那是一个
 # 可被 MR 作者触发的静默漏评（复审 I-1，本机真 git 复现过）：`-B` 建的是 `refs/heads/<源分支名>`，
 # 而 git 解析短名字时 refs/heads 排在 refs/remotes 之前。源分支若叫 `origin/master`（合法分支名，
@@ -123,9 +157,9 @@ export GIT_CONFIG_VALUE_0="$cred_helper"
 # （HEAD 确实是对的）。分离头指针没有这个歧义，也没丢任何引擎要读的东西：分支名引擎取自
 # CI_COMMIT_REF_NAME（本档位必填），`:958` 那个 `--abbrev-ref HEAD` 兜底在这里是死代码。
 /usr/bin/git -C "$WORKROOT/business" checkout -q --detach "$HEAD_SHA" \
-  >/dev/null 2>&1 \
-  || { echo "检出 MR 的提交失败：HEAD_SHA 指的提交不在业务库里——源分支被改写/强推/删除，或上面那次补取源分支没成功（git 可能不接受这个分支名）" >&2; exit 92; }
-# 检出之后**逐字核对**：checkout 成功但 HEAD 不是那个提交（将来有人把 -B 改成别的写法）时，
+  >/dev/null 2>"$GIT_ERR" \
+  || { echo "检出 MR 的提交失败：HEAD_SHA 指的提交不在业务库里——源分支被改写/强推/删除，或上面那次补取源分支没成功（git 可能不接受这个分支名）" >&2; git_err_tail; exit 92; }
+# 检出之后**逐字核对**：checkout 成功但 HEAD 不是那个提交（将来有人改动上面这行检出写法）时，
 # 评审会静默地评错提交——那正是本次要修的缺陷，不能修完再留一条同样静默的路径。
 head_now=$(/usr/bin/git -C "$WORKROOT/business" rev-parse HEAD 2>/dev/null || true)
 [[ "$head_now" == "$HEAD_SHA" ]] \

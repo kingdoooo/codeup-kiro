@@ -901,18 +901,24 @@ def test_the_dispatchers_own_failure_comment_is_ignored():
         "拉起任务持续失败时，失败评论不能把自己再触发一轮（每次都是新的 note_biz_id，抢锁拦不住）"
 
 
-def test_the_backstops_own_comment_is_ignored():
-    body = _note_with(BACKSTOP.BACKSTOP_COMMENT)
-    assert OVERLAP_PHRASE in BACKSTOP.BACKSTOP_COMMENT, "前提：短语确实与这条评论重叠"
+# 兜底评论按退出码有几种正文（复审 s6 m-B），每一种都要能断环
+BACKSTOP_BODIES = [BACKSTOP.backstop_comment(c) for c in (None, 1, 137, 90, 91, 92, 93)]
+
+
+@pytest.mark.parametrize("text", BACKSTOP_BODIES)
+def test_the_backstops_own_comment_is_ignored(text):
+    body = _note_with(text)
+    assert OVERLAP_PHRASE in text, "前提：短语确实与这条评论重叠"
     assert handler_mod.classify(NOTE_HDR, body, LOOP_CFG)[0] == "ignore"
 
 
 def test_both_failure_comments_actually_carry_a_kiro_marker():
     # 直接钉住「标记在正文里」这件事：上面两条用例即使标记被删掉也可能因为别的原因变绿。
-    for text in (handler_mod.failed_comment("X"), BACKSTOP.BACKSTOP_COMMENT):
+    for text in [handler_mod.failed_comment("X")] + BACKSTOP_BODIES:
         assert handler_mod.REVIEW_MARKER in text, text
     assert handler_mod.DISPATCH_FAILED_MARKER in handler_mod.failed_comment("X")
-    assert BACKSTOP.BACKSTOP_MARKER in BACKSTOP.BACKSTOP_COMMENT
+    for text in BACKSTOP_BODIES:
+        assert BACKSTOP.BACKSTOP_MARKER in text, text
     # 两个标记不得与评审脚本那几种混淆：脚本按 `kiro-review:<载荷> run:N` / `kiro-inline:<指纹>`
     # 这类带载荷的形状找自己的评论，我们这两个不带冒号载荷，匹配不到。
     for marker in (handler_mod.DISPATCH_FAILED_MARKER, BACKSTOP.BACKSTOP_MARKER):
@@ -1136,11 +1142,14 @@ def test_all_six_real_fixtures_still_classify_the_same_way(capsys):
             "note-mr-new.json": (NOTE_HDR, "ignore"),        # 真实正文里没有命令短语
             "note-bot-review.json": (NOTE_HDR, "ignore")}    # 本方评审评论（带 kiro- 标记）
     assert sorted(p.name for p in FIX.glob("*.json")) == sorted(want), "新增 fixture 必须在这里表态"
+    # 唯一会留日志的是本方评审评论：标记那道守卫打 `kiro-marker`（复审 s5 I-1，机器人与人同号时
+    # 被吞掉的命令要看得见）。别的五个真实投递一行都不许有——尤其不许有形状代号或 missing-field。
+    logs = {"note-bot-review.json": "ignored reason=kiro-marker\n"}
     for name, (hdr, expected) in want.items():
         body = _fix(name)
         assert "%" not in body["repository"]["git_http_url"], f"{name} 的 clone 地址带 `%`，新规则会误伤它"
         assert handler_mod.classify(hdr, body, CFG)[0] == expected, name
-    assert capsys.readouterr().out == "", "真实投递不该留下任何一行形状日志"
+        assert capsys.readouterr().out == logs.get(name, ""), f"{name} 的日志不对"
 
 
 # ── Task 13 / O-2：note_biz_id 必须过形状（它会进 LOCK_KEY → 容器环境与 DynamoDB 主键）────
@@ -1374,3 +1383,95 @@ def test_the_dispatchers_ecs_and_dynamodb_clients_are_built_with_the_bounded_con
     # 正向对照：不带配置的客户端确实是另一组值——否则上面那条可能只是碰巧等于缺省
     import boto3
     assert boto3.client("ecs").meta.config.read_timeout == 60
+
+
+# ── 复审 s3 M-1：本该评审的事件缺字段时必须留痕（以前三条路径一行日志都没有）──────────────
+@pytest.mark.parametrize("drop", [
+    lambda b: b["object_attributes"]["last_commit"].pop("id"),
+    lambda b: b["object_attributes"].pop("last_commit"),
+    lambda b: b["object_attributes"].__setitem__("local_id", {"x": 1}),   # 不是标量
+    lambda b: b["repository"].pop("git_http_url"),
+])
+def test_an_mr_event_missing_a_required_field_is_ignored_with_a_log_line(drop, capsys):
+    body = _fix("mr-opened.json")
+    assert handler_mod.classify(MR_HDR, body, CFG)[0] == "review"      # 正向对照：原报文要评审
+    capsys.readouterr()
+    drop(body)
+    assert handler_mod.classify(MR_HDR, body, CFG) == ("ignore", None)
+    assert capsys.readouterr().out == "ignored reason=missing-field\n"
+
+
+def test_a_normal_ignore_with_a_missing_field_stays_silent(capsys):
+    # state/action 两道排在抽字段之前：批准事件恰好缺字段时仍是「正常的 ignore」，不刷日志
+    body = _fix("mr-approved.json")
+    body["object_attributes"].pop("last_commit", None)
+    assert handler_mod.classify(MR_HDR, body, CFG) == ("ignore", None)
+    assert capsys.readouterr().out == ""
+
+
+def test_a_command_missing_a_required_field_is_ignored_with_a_log_line(capsys):
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "/kiro review")
+    assert handler_mod.classify(NOTE_HDR, body, CFG)[0] == "review"    # 正向对照
+    capsys.readouterr()
+    body["merge_request"].pop("last_commit")
+    assert handler_mod.classify(NOTE_HDR, body, CFG) == ("ignore", None)
+    assert capsys.readouterr().out == "ignored reason=missing-field\n"
+
+
+def test_an_ordinary_comment_missing_a_field_stays_silent(capsys):
+    # 缺字段的日志排在短语之后：普通评论（没有命令短语）不管报文缺什么都不打
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "looks good to me")
+    body["merge_request"].pop("last_commit")
+    assert handler_mod.classify(NOTE_HDR, body, CFG) == ("ignore", None)
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", "__missing__"])
+def test_a_command_without_a_comment_id_is_ignored_with_the_note_biz_id_code(value, capsys):
+    # falsy 的几种（缺失、null、空串、全空白）同一个结论：无法去重，不评——但要留痕
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "/kiro review")
+    if value == "__missing__":
+        body["object_attributes"].pop("note_biz_id")
+    else:
+        body["object_attributes"]["note_biz_id"] = value
+    assert handler_mod.classify(NOTE_HDR, body, CFG) == ("ignore", None)
+    assert capsys.readouterr().out == "ignored reason=note-biz-id\n"
+
+
+def test_a_comment_carrying_our_marker_is_ignored_with_a_log_line(capsys):
+    # 复审 s5 I-1：机器人与人同号（bot_usernames: []）时，人贴了标记的那条评论里的命令在这里被吞掉
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, "<!-- kiro-test -->\n/kiro review")
+    assert handler_mod.classify(NOTE_HDR, body, dict(CFG, bot_usernames=[])) == ("ignore", None)
+    assert capsys.readouterr().out == "ignored reason=kiro-marker\n"
+
+
+# ── 复审 s3 M-2：RunTask 返回空 tasks[] + failures[] 时，评论里的原因要是 ECS 给的，不是 IndexError ──
+@pytest.mark.parametrize("failures, want", [
+    ([{"arn": "arn:aws:ecs:us-west-2:111122223333:container-instance/x", "reason": "RESOURCE:ENI"}],
+     "RunTaskFailure:RESOURCE:ENI"),
+    ([{"reason": "AGENT"}], "RunTaskFailure:AGENT"),
+    # 不是枚举形状的自由文本不进 MR 评论（可能带 ARN、账号 ID）
+    ([{"reason": "Capacity is unavailable at arn:aws:ecs:us-west-2:111122223333:x"}],
+     "RunTaskFailure:unknown"),
+    ([], "RunTaskFailure:unknown"),
+    (None, "RunTaskFailure:unknown"),
+])
+def test_an_empty_run_task_result_is_reported_with_the_ecs_failure_reason(failures, want, monkeypatch):
+    posted = []
+    monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
+                        lambda *a, **k: posted.append(a) or True)
+    table, ecs = mock.Mock(), mock.Mock()
+    resp = {"tasks": []}
+    if failures is not None:
+        resp["failures"] = failures
+    ecs.run_task.return_value = resp
+    r = handler_mod.dispatch(ecs, table, _full_cfg(), F)
+    assert_alb_response(r, 200, "runtask-failed")
+    assert table.delete_item.called, "必须释放锁（N4）"
+    body = posted[0][4]
+    assert f"原因：`{want}`" in body, body
+    assert "IndexError" not in body and "111122223333" not in body

@@ -240,3 +240,62 @@ def test_a_successful_post_logs_each_step_once_and_reports_posted(monkeypatch, c
     assert backstop.handler(_ev(exit_code=137), None) == {"ok": True, "posted": True}
     assert capsys.readouterr().out == (
         "backstop step=read-mark\nbackstop step=fetch-token\nbackstop step=post-comment\n")
+
+
+# ── 复审 s6 m-B：兜底评论要写出退出码，entrypoint 自己的四个 fail-closed 码各有一句成因 ─────────
+GUIDE = ROOT / "setup-guide.md"
+
+
+@pytest.mark.parametrize("code", [90, 91, 92, 93])
+def test_each_entrypoint_exit_code_gets_its_own_cause_and_a_pointer_that_resolves(code):
+    text = backstop.backstop_comment(code)
+    assert f"（退出码 {code}）" in text, text
+    assert backstop.EXIT_CAUSES[code] in text
+    assert "拉取镜像失败" not in text and "内存不足" not in text, "entrypoint 的码不得再套用笼统的成因"
+    assert f"第 8 节里标着「退出码 {code}」的行" in text, text
+    # 指针要真的指得到：§8 里至少有一行的「现象」那一格写着这个退出码
+    lines = GUIDE.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("## 8."))
+    rows = [ln for ln in lines[start:] if ln.startswith("|") and f"退出码 {code}" in ln.split(" | ")[0]]
+    assert rows, f"§8 没有标着退出码 {code} 的行，评论里的指针指空了"
+
+
+def test_the_four_codes_are_exactly_the_entrypoints_fail_closed_exits():
+    # 与 entrypoint.sh 两头核对：那边加一个新的 fail-closed 码而这里没有，评论又会套用笼统成因
+    import re
+    entry = (ROOT / "executor" / "entrypoint.sh").read_text()
+    code = "\n".join(ln for ln in entry.splitlines() if not ln.lstrip().startswith("#"))
+    exits = {int(n) for n in re.findall(r"\bexit (9[0-9])\b", code)}
+    assert exits == set(backstop.EXIT_CAUSES) == {90, 91, 92, 93}, exits
+
+
+@pytest.mark.parametrize("code, want", [
+    (137, "（退出码 137；可能是内存不足或任务超时）"),
+    (1, "（退出码 1；"),
+    (0, "（退出码 0；"),              # falsy 但有意义：0 也是一个真实的退出码（多容器时可能走到）
+    (None, "没有退出码"),
+    (True, "没有退出码"),              # bool 不是退出码
+    ("92", "没有退出码"),              # 字符串不写进评论（不是 ECS 给的整数形状）
+])
+def test_other_exit_codes_are_stated_without_guessing_an_entrypoint_cause(code, want):
+    text = backstop.backstop_comment(code)
+    assert want in text, text
+    assert "第 8 节里标着" not in text
+
+
+def test_the_handler_posts_the_comment_for_the_exit_code_of_the_matched_container(monkeypatch):
+    _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
+    posted = []
+    monkeypatch.setattr(backstop.codeup_min, "post_comment",
+                        lambda *a, **k: posted.append(a) or True)
+    ev = _ev(exit_code=92)
+    assert backstop.handler(ev, None) == {"ok": True, "posted": True}
+    assert posted[0][4] == backstop.backstop_comment(92)
+    # 多容器：按 override 的名字取那个容器的码，不取下标 0
+    ev = _ev(exit_code=0)
+    ev["detail"]["overrides"]["containerOverrides"][0]["name"] = "review"
+    ev["detail"]["containers"] = [{"name": "sidecar", "exitCode": 0}, {"name": "review", "exitCode": 93}]
+    posted.clear()
+    _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
+    assert backstop.handler(ev, None) == {"ok": True, "posted": True}
+    assert posted[0][4] == backstop.backstop_comment(93)

@@ -18,10 +18,31 @@ WANT = ("CODEUP_REPO_ID", "MR_LOCAL_ID", "HEAD_SHA")
 # 评论，每次都是新的 note_biz_id，抢锁拦不住。正文写成模块级常量而不是 post_comment 的内联
 # 字面量：单测要用**真实的这一份**去验断环，不能各自抄一份（抄的那份迟早与线上分叉）。
 BACKSTOP_MARKER = "<!-- kiro-backstop -->"
-BACKSTOP_COMMENT = (
-    "## 🤖 Kiro 代码评审\n" + BACKSTOP_MARKER +
-    "\n\n**评审未完成**：评审任务异常结束（可能是拉取镜像失败、"
-    "内存不足或任务超时），脚本没有机会回写失败原因。重新推送可再次触发。")
+
+# entrypoint.sh 自己 fail closed 的四个退出码：都在评审脚本启动之前（或租约那一步），脚本没机会回写。
+# 以前兜底对任何非零退出码都说「可能是拉取镜像失败、内存不足或任务超时」，对这四个全是错的
+# （复审 s6 m-B）。每个码一句成因，并指到手册 §8 里按退出码查的那一行。
+EXIT_CAUSES = {
+    90: "执行器的镜像摘要门拒绝了评审（镜像摘要不在已探测名单内，或读不到本容器的镜像摘要）",
+    91: "执行器 clone 业务库失败（云效令牌、网络或仓库权限），或业务库地址没过主机检查",
+    92: "执行器没能检出 MR 的那个提交（提交已被强推改写或删除、分支名 git 不接受，或缺少 HEAD_SHA）",
+    93: "执行器没能拿到这个 MR 的评审租约（同一 MR 的上一次评审迟迟没结束，或读写租约失败）",
+}
+
+
+def backstop_comment(exit_code):
+    """兜底评论的正文。退出码只在确实是整数时写进去（它来自 ECS 事件，不是自由文本；bool 不算）。"""
+    code = exit_code if type(exit_code) is int else None
+    if code in EXIT_CAUSES:
+        cause = (f"{EXIT_CAUSES[code]}（退出码 {code}），评审脚本没有启动。"
+                 f"按部署手册 aws/setup-guide.md 第 8 节里标着「退出码 {code}」的行排查")
+    elif code is not None:
+        cause = (f"评审任务异常结束（退出码 {code}；可能是内存不足或任务超时），"
+                 "脚本没有机会回写失败原因")
+    else:
+        cause = "评审任务异常结束（没有退出码：容器多半没能启动，例如拉取镜像失败），脚本没有机会回写失败原因"
+    return ("## 🤖 Kiro 代码评审\n" + BACKSTOP_MARKER +
+            f"\n\n**评审未完成**：{cause}。重新推送可再次触发。")
 
 
 def _matched_override(event):
@@ -97,7 +118,8 @@ def handler(event, context):
         .Table(os.environ["LOCK_TABLE"])
     if not should_post(event, table):
         return {"ok": True, "posted": False}
-    env = _fields(event)
+    ov, env = _matched_override(event)
+    exit_code, _ = _exit_code(event, ov.get("name"))
     print("backstop step=fetch-token", flush=True)
     token = secret_fetch.secret_from_env("YUNXIAO_TOKEN_ID")
     # 令牌在真要发评论时才取（见 secret_fetch.py）：绝大多数 Task State Change 事件都被 should_post
@@ -108,7 +130,7 @@ def handler(event, context):
     print("backstop step=post-comment", flush=True)
     posted = codeup_min.post_comment(
         os.environ["YUNXIAO_ORG_ID"], env["CODEUP_REPO_ID"], env["MR_LOCAL_ID"],
-        token, BACKSTOP_COMMENT)
+        token, backstop_comment(exit_code))
     # 发失败（令牌被轮换吊销 → 401、跨境网络断）也必须抛：以前返回值被丢掉、照样报 posted=True，
     # 这次调用就算「成功」——Lambda 不重试，失败目的地队列也收不到，MR 上一句话都没有，正是
     # 兜底要消灭的那种沉默。抛出之后走 Lambda 的重试，重试耗尽进 BackstopFailures 队列并触发告警

@@ -57,13 +57,32 @@ def load_config(path):
     # YAML 里想清空名单**必须**写 `[]`；写成 `bot_usernames:`（空值）会被解析成 None，
     # 那时 `",".join(None)` 抛 TypeError，报错指向 CDK 内部、说不出是配置写法的问题（手册 4.2 教的
     # 正是「机器人与人同号时把它设成 []」，这条错路必须给一句人话）。
+    # 每一项还必须**去掉了首尾空白且不含逗号**：带空白的名字永远匹配不上真实用户名（那道断环守卫
+    # 静默失效）；带逗号的名字在 `",".join(...)` 之后会被调度器拆成两个（复审 s5 M-1）。
     if "bot_usernames" in cfg:
         names = cfg["bot_usernames"]
         if not isinstance(names, list) or any(
-                not isinstance(n, str) or not n.strip() for n in names):
+                not isinstance(n, str) or not n.strip() or n != n.strip() or "," in n
+                for n in names):
             raise ValueError(
-                f"bot_usernames 取值 {names!r} 非法：必须是用户名字符串的列表；"
-                "清空名单请写 `bot_usernames: []`（不要留空值），键整个不写则默认只含 bot_username")
+                f"bot_usernames 取值 {names!r} 非法：必须是用户名字符串的列表，每一项不带首尾空白、"
+                "不含逗号；清空名单请写 `bot_usernames: []`（不要留空值），键整个不写则默认只含 bot_username")
+        if names == []:
+            # 空名单是「机器人与人同号」的 PoC 配法（手册 4.2）。它合法，但带着一个只有专用账号才能
+            # 消除的隐患，synth 时说一声（与跨区推理那条同一种警告）。
+            print("警告：bot_usernames 为空——只适合机器人与人同号的 PoC。同号时引擎分不清你的评论与它自己的"
+                  "汇总：你发的带 `<!-- kiro-review:… run:N -->` 标记行的评论会在下一次评审时被当成汇总接管。"
+                  "生产请用专用机器人账号（setup-guide.md 第 1.4、4.2 节）。", flush=True)
+
+    # command_phrase：键存在时必须是字符串，且要么是空串（fail closed，一律不受理），要么首尾不带空白、
+    # 不含换行（复审 s5 M-1）。全空白的短语是空串的孪生兄弟却**不** fail closed——任何含这串空格的
+    # 评论都会拉起一次评审；首尾带空白的短语在评论开头永远匹配不上；null 或数字到 CDK 里只报一句看不懂的
+    # 「Unable to deserialize value as aws-cdk-lib.aws_lambda.FunctionProps」。
+    phrase = cfg["command_phrase"]
+    if type(phrase) is not str or (phrase and (phrase != phrase.strip() or "\n" in phrase)):
+        raise ValueError(
+            f"command_phrase 取值 {phrase!r} 非法：必须是加引号的字符串，首尾不带空白、不含换行，"
+            '例如 command_phrase: "/kiro review"；写成空串 "" 表示一条命令都不受理')
 
     # 三个摘要无默认、必配（spec 变量契约；N7 不允许隐式默认）：缺了的话 synth/部署都顺利，要等第一次
     # 真实评审才在容器里失败，MR 上只看到兜底那句笼统的「可能是拉取镜像失败…」。

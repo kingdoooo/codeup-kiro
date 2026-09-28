@@ -171,7 +171,9 @@ assert_eq "$([ -n "$default_line" ] && [ -n "$first_use" ] && [ "$default_line" 
 #   拿到它就能把地址改成任意主机，凭证 helper 随后会把云效组织令牌交给那台主机（弱密钥升级成
 #   组织令牌）。两道防线都要守：主机逐字比对必须排在 clone 之前，且 helper 必须按 URL 限定。
 host_line=$(entry_code_line '拒绝 clone')
-clone_line=$(entry_code_line 'clone --no-tags')
+# 锚点只认「这是 clone 那一行」，不连带 `--no-tags`：连带的话删掉 `--no-tags` 会在这里以「主机检查必须
+# 排在 clone 之前」这种不相干的理由红（复审 s6），⑲ 的标签变体才是守 `--no-tags` 的那一条。
+clone_line=$(entry_code_line '^/usr/bin/git clone ')
 assert_eq "$([ -n "$host_line" ] && [ -n "$clone_line" ] && [ "$host_line" -lt "$clone_line" ] && echo yes)" \
   "yes" "I-2：主机检查必须存在且排在 clone 之前"
 # 凭证经**环境变量**下发给所有子进程（Task 14 验收阻塞：评审引擎自己也要 git fetch，`-c` 只作用于
@@ -269,8 +271,16 @@ fi
 #   MR 头而不是默认分支头。主机检查让「用本地路径 clone」没法直接跑，所以按控制器裁决只单独跑检出段
 #   （clone 这一步由本测试自己做，等价于执行器 clone 完的状态）。
 if [[ -x /usr/bin/git ]]; then
-  # 检出段之后紧跟租约那一段（㉒ 单独测），抽到租约段的标题为止。
-  ck_block=$(awk '/^# ── 检出 MR 的那个提交/{f=1} /^# ── 按 MR 的租约/{exit} f{print}' "$ENTRY")
+  # 检出段之后紧跟租约那一段（㉒ 单独测），抽到租约段的标题为止。检出段失败时要打 git 报错的尾巴，
+  # 那个助手（GIT_ERR + git_err_tail）定义在 clone 那一段，原样抽出来垫在前面（㉓ 单独测它）。
+  err_block=$(awk '/^GIT_ERR=/{f=1} f{print} f&&/^}$/{exit}' "$ENTRY")
+  assert_contains "$err_block" 'git_err_tail()' "⑰ 抽到了 git 报错尾巴的助手"
+  # 检出段现在也读 MR_TARGET_BRANCH（非空时查形状、取目标分支），它的 `:=` 缺省在文件顶部，一并垫上。
+  tb_default=$(LC_ALL=C grep -E '^: "\$\{MR_TARGET_BRANCH:=\}"$' "$ENTRY")
+  assert_eq "$tb_default" ': "${MR_TARGET_BRANCH:=}"' "⑰ 抽到了 MR_TARGET_BRANCH 的缺省"
+  ck_block="$tb_default
+$err_block
+$(awk '/^# ── 检出 MR 的那个提交/{f=1} /^# ── 按 MR 的租约/{exit} f{print}' "$ENTRY")"
   # 只验证「抽到了」，**不钉具体写法**：钉写法的话，任何改动都先在这里红，后面真正的行为断言
   # （⑲ 的引用遮蔽复现）就跑不到了——变异测试会得出「守卫有用」的错误结论。
   assert_contains "$ck_block" 'checkout -q' "⑰ 抽到了检出那一段"
@@ -346,6 +356,33 @@ if [[ -x /usr/bin/git ]]; then
     "⑲ merge-base 不得退化成 HEAD（退化 = diff 为空 = 静默漏评）"
   assert_eq "$(gitq2 -C "$stmp/business" diff --numstat "$s_base" HEAD | wc -l | tr -d ' ')" "2" \
     "⑲ 引擎算出来的 diff 必须非空（本例改了 1 个文件、加了 1 个文件）"
+
+  # ⑲ 的标签变体：`clone --no-tags` 是承重的（全分支复审 s6）。服务端有一个叫 `origin/<默认分支>` 的
+  # **标签**、指着 MR 头（有推送权限的人随手就能打）：clone 带上它的话，`refs/tags/origin/<默认分支>`
+  # 会遮蔽 `refs/remotes/origin/<默认分支>`（git 解析短名字时 refs/tags 排在 refs/remotes 之前），
+  # 引擎第 4 步的 merge-base 退化成 HEAD——diff 为空、静默漏评。clone 的参数**取自 entrypoint 那一行**，
+  # 不在这里另写一份：有人删掉 `--no-tags`，这里先红。
+  # 先跑行为、后钉写法（与 ⑰ 同一条理由）：先钉写法的话删掉 `--no-tags` 在这里就红，下面真正的
+  # 遮蔽复现跑不到，变异测试得出「守卫有用」的错误结论。
+  clone_flags=$(LC_ALL=C grep -oE '^/usr/bin/git clone( --[a-z-]+)*' "$ENTRY" | sed -E 's#^/usr/bin/git clone ?##')
+  rm -rf "$stmp/business"
+  gitq2 -C "$stmp/work" tag "origin/${sdef}" "$s_mr_head"
+  gitq2 -C "$stmp/work" push -q "$stmp/bare" "refs/tags/origin/${sdef}"
+  # shellcheck disable=SC2086 # clone_flags 是若干个 `--xxx`，需要按空白拆开
+  gitq2 clone -q $clone_flags "$stmp/bare" "$stmp/business"
+  out=$(WORKROOT="$stmp" HEAD_SHA="$s_mr_head" CI_COMMIT_REF_NAME="origin/${sdef}" \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        /bin/bash -c "set -euo pipefail; $ck_block" 2>&1) || true
+  gitq2 -C "$stmp/business" fetch -q origin "+refs/heads/${sdef}:refs/remotes/origin/${sdef}"
+  s_base=$(gitq2 -C "$stmp/business" merge-base "origin/${sdef}" HEAD 2>/dev/null)
+  assert_eq "$([ "$s_base" != "$s_mr_head" ] && echo yes)" "yes" \
+    "⑲ 标签变体：merge-base 不得被标签带偏成 HEAD"
+  assert_eq "$(gitq2 -C "$stmp/business" diff --numstat "$s_base" HEAD | wc -l | tr -d ' ')" "2" \
+    "⑲ 标签变体：diff 仍非空"
+  assert_eq "$(gitq2 -C "$stmp/business" tag -l)" "" "⑲ 标签变体：clone 没有带下任何标签"
+  assert_eq "$(gitq2 -C "$stmp/business" config remote.origin.tagOpt)" "--no-tags" \
+    "⑲ 标签变体：clone 写下了 tagOpt，引擎之后的 fetch 也不会顺带取标签"
+  assert_contains " $clone_flags " " --no-tags " "⑲ 标签变体：entrypoint 的 clone 带 --no-tags"
   rm -rf "$stmp"
 
   # 必须是**分离头指针**：建本地分支 `refs/heads/<源分支名>` 会在源分支叫 `origin/<目标分支>` 时
@@ -406,7 +443,7 @@ else
 fi
 
 # ⑱ 检出段的静态形状：必须校验两个入参、必须核对检出后的 HEAD（⑰ 的负向用例覆盖不到「核对」这条，
-#   因为 -B 本身就保证了一致——它守的是将来有人换掉 -B 写法时不要静默评错提交）
+#   因为 `--detach "$HEAD_SHA"` 本身就保证了一致——它守的是将来有人改动检出写法时不要静默评错提交）
 assert_contains "$code_lines" 'rev-parse HEAD' "⑰/⑱：检出之后必须核对 HEAD"
 assert_contains "$code_lines" '[[ "$head_now" == "$HEAD_SHA" ]]' "⑱ HEAD 与 HEAD_SHA 必须逐字比较"
 # 必填守卫：刻意不用 `:?`（那样退出码是 1），与检出那一段同一个 92；且必须排在镜像摘要门与 clone
@@ -447,6 +484,127 @@ req_out=$(CODEUP_REPO_ID=1 MR_LOCAL_ID=2 CI_COMMIT_REF_NAME=b BUSINESS_REPO_URL=
           /bin/bash -c "set -euo pipefail; $req_block
 echo REQ_OK" 2>&1)
 assert_contains "$req_out" "REQ_OK" "⑳ 正向对照：必填项齐全时这一段放行"
+
+# ㉓ git 失败时打 stderr 的尾巴（全分支复审 s1/s6：以前一律丢掉，退出码 91/92 查不下去），以及
+#   MR_TARGET_BRANCH 的第二道形状检查 + 带前缀的 refspec（复审 O-5 / s4 M-A）。都用真 git。
+if [[ -x /usr/bin/git ]]; then
+  gtmp=$(mktemp -d)
+  err_block=$(awk '/^GIT_ERR=/{f=1} f{print} f&&/^}$/{exit}' "$ENTRY")
+  assert_contains "$err_block" 'git_err_tail()' "㉓ 抽到了 git 报错尾巴的助手"
+  # 尾巴的形状：只留最后 5 行、逐行去控制字符、截到 200 字节、固定前缀、抹掉 URL 里的 userinfo
+  {
+    for i in 1 2 3; do echo "early line $i"; done
+    printf 'fatal: unable to access '"'"'https://oauth2:s3cret-t0ken@codeup.aliyun.com/o/x.git/'"'"'\n'
+    printf 'remote: forged\r\033[31m red\n'
+    printf 'x%.0s' $(seq 1 300); echo
+    echo "fatal: couldn't find remote ref refs/heads/功能/登录"
+    echo "last line"
+  } > "$gtmp/git-stderr.log"
+  tail_out=$(WORKROOT="$gtmp" /bin/bash -c "set -euo pipefail; $err_block
+git_err_tail" 2>&1)
+  assert_not_contains "$tail_out" "early line 3" "㉓ 只打最后 5 行"
+  assert_contains "$tail_out" "  git: fatal: unable to access 'https://<redacted>@codeup.aliyun.com/o/x.git/'" \
+    "㉓ URL 里的 userinfo 被抹掉"
+  assert_not_contains "$tail_out" "s3cret-t0ken" "㉓ 令牌形状的 userinfo 不进日志"
+  assert_contains "$tail_out" "  git: remote: forged[31m red" "㉓ 控制字符（回车、ESC）被去掉"
+  assert_eq "$(printf '%s' "$tail_out" | LC_ALL=C tr -d '\n\t' | LC_ALL=C grep -c "$(printf '[\001-\037\177]')" || true)" "0" \
+    "㉓ 输出里一个控制字符都没有"
+  long=$(printf '%s\n' "$tail_out" | LC_ALL=C grep '^  git: xxx')
+  assert_eq "${#long}" "$((200 + 7))" "㉓ 每行截到 200 字节（加 7 字节前缀）"
+  assert_contains "$tail_out" "  git: fatal: couldn't find remote ref refs/heads/功能/登录" "㉓ 非 ASCII 原样保留"
+  assert_eq "$(printf '%s\n' "$tail_out" | LC_ALL=C grep -vc '^  git: ' || true)" "0" "㉓ 每一行都带固定前缀"
+  : > "$gtmp/git-stderr.log"
+  assert_eq "$(WORKROOT="$gtmp" /bin/bash -c "set -euo pipefail; $err_block
+git_err_tail" 2>&1)" "" "㉓ 没有报错时什么都不打"
+
+  # clone 失败（91）时真的带上 git 的报错：抽 clone 那一行原样跑，地址换成一个不存在的本地路径
+  #（主机检查是另一段，⑮ 单独测）
+  clone_block=$(awk '/^\/usr\/bin\/git clone /{f=1} f{print} f&&/exit 91; }$/{exit}' "$ENTRY")
+  assert_contains "$clone_block" 'exit 91' "㉓ 抽到了 clone 那一行"
+  out=$(WORKROOT="$gtmp" repo_url="$gtmp/no-such-repo" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        /bin/bash -c "set -euo pipefail; $err_block
+$clone_block" 2>&1) && rc=0 || rc=$?
+  assert_eq "$rc" "91" "㉓ clone 失败退出 91"
+  assert_contains "$out" "clone 业务库失败（凭证、网络或仓库权限）" "㉓ 固定消息还在"
+  assert_contains "$out" "  git: fatal:" "㉓ clone 失败时日志里有 git 自己的报错"
+
+  # MR_TARGET_BRANCH：非空时查形状（与 CI_COMMIT_REF_NAME 同一套），用带前缀的 refspec 取
+  tgit() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_AUTHOR_NAME=t \
+             GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com \
+             /usr/bin/git "$@"; }
+  tgit init -q "$gtmp/work"
+  tgit -C "$gtmp/work" commit -q --allow-empty -m A
+  tdef=$(tgit -C "$gtmp/work" rev-parse --abbrev-ref HEAD)
+  tgit -C "$gtmp/work" checkout -q -b mr-src
+  tgit -C "$gtmp/work" commit -q --allow-empty -m "MR head"
+  t_head=$(tgit -C "$gtmp/work" rev-parse HEAD)
+  tgit -C "$gtmp/work" checkout -q "$tdef"      # 裸库的默认分支 = 这时 work 所在的分支
+  tgit clone -q --bare "$gtmp/work" "$gtmp/bare"
+  run_ck() {  # MR_TARGET_BRANCH → "rc|输出"；每次重新 clone
+    local out rc=0
+    rm -rf "$gtmp/business"; tgit clone -q --no-tags "$gtmp/bare" "$gtmp/business"
+    out=$(WORKROOT="$gtmp" HEAD_SHA="$t_head" CI_COMMIT_REF_NAME=mr-src MR_TARGET_BRANCH="$1" \
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+          /bin/bash -c "set -euo pipefail; $ck_block" 2>&1) || rc=$?
+    printf '%s|%s' "$rc" "$out"
+  }
+  for bad in "-upload-pack=touch /tmp/pwned" "main x" "$(printf 'ma\tin')" "$(printf 'ma\001in')"; do
+    got=$(run_ck "$bad")
+    assert_eq "${got%%|*}" "92" "㉓ MR_TARGET_BRANCH 形状不对时 92（${bad:0:12}）"
+    assert_contains "$got" "MR_TARGET_BRANCH 以 - 开头或含空白/控制字符，拒绝评审" "㉓ 固定消息（${bad:0:12}）"
+    assert_not_contains "$got" "upload-pack" "㉓ 不回显取值"
+    assert_eq "$(tgit -C "$gtmp/business" rev-parse HEAD)" "$(tgit -C "$gtmp/bare" rev-parse "$tdef")" \
+      "㉓ 拒绝时不动 HEAD（${bad:0:12}）"
+  done
+  # 空串是「没给目标分支」（可选项）：放行，不取
+  assert_eq "$(run_ck "" | cut -d'|' -f1)" "0" "㉓ MR_TARGET_BRANCH 为空时放行（可选项）"
+  # 取的是真的目标分支：clone 之后默认分支又前进了一步，检出段跑完 refs/remotes/origin/<目标> 必须跟上
+  rm -rf "$gtmp/business"; tgit clone -q --no-tags "$gtmp/bare" "$gtmp/business"
+  tgit -C "$gtmp/work" commit -q --allow-empty -m "目标分支在 clone 之后又前进了"
+  t_new=$(tgit -C "$gtmp/work" rev-parse HEAD)
+  tgit -C "$gtmp/work" push -q "$gtmp/bare" "$tdef"
+  WORKROOT="$gtmp" HEAD_SHA="$t_head" CI_COMMIT_REF_NAME=mr-src MR_TARGET_BRANCH="$tdef" \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    /bin/bash -c "set -euo pipefail; $ck_block" >/dev/null 2>&1
+  assert_eq "$(tgit -C "$gtmp/business" rev-parse "refs/remotes/origin/$tdef")" "$t_new" \
+    "㉓ 目标分支按 +refs/heads/X:refs/remotes/origin/X 取到了"
+  # 带前缀的 refspec 是承重的，不只是形状检查的备份：单独跑取目标分支那一段、绕过上面的形状检查，
+  # 给一个以 `-` 开头的值。裸写 `"$MR_TARGET_BRANCH"` 时它落在选项位置，本地传输下 `--upload-pack`
+  # 真的会执行（https 传输下没有这个效果，但 refspec 形式让它在任何传输下都只是一个取不到的 ref 名）。
+  tf_block=$(awk '/^if \[\[ -n "\$MR_TARGET_BRANCH" \]\]/{f=1} f{print} f&&/^fi$/{exit}' "$ENTRY")
+  assert_contains "$tf_block" 'fetch --no-tags origin' "㉓ 抽到了取目标分支那一段"
+  rm -rf "$gtmp/business"; tgit clone -q --no-tags "$gtmp/bare" "$gtmp/business"
+  WORKROOT="$gtmp" MR_TARGET_BRANCH="--upload-pack=touch $gtmp/pwned;" \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    /bin/bash -c "set -euo pipefail; $err_block
+$tf_block" >/dev/null 2>&1 || true
+  assert_eq "$([ -e "$gtmp/pwned" ] && echo EXECUTED || echo safe)" "safe" \
+    "㉓ 以 - 开头的目标分支即使绕过形状检查也不会被 git 当成选项"
+  # 目标分支在服务端不存在：不致命（引擎会再取一次），但留一行固定消息 + git 的报错
+  got=$(run_ck "no-such-branch")
+  assert_eq "${got%%|*}" "0" "㉓ 取不到目标分支不致命"
+  assert_contains "$got" "取目标分支失败（不致命，引擎会再取一次；取值不回显）" "㉓ 取不到目标分支时留一行"
+  assert_contains "$got" "  git: fatal:" "㉓ 取不到目标分支时带 git 的报错"
+  # 检出失败（92）时也带 git 的报错；补取源分支失败时同样留痕
+  out=$(rm -rf "$gtmp/business"; tgit clone -q --no-tags "$gtmp/bare" "$gtmp/business"
+        WORKROOT="$gtmp" HEAD_SHA=0000000000000000000000000000000000000000 CI_COMMIT_REF_NAME=mr-src \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        /bin/bash -c "set -euo pipefail; $ck_block" 2>&1) && rc=0 || rc=$?
+  assert_eq "$rc" "92" "㉓ 提交不存在时 92"
+  assert_contains "$out" "  git: " "㉓ 检出失败时日志里有 git 自己的报错"
+  out=$(rm -rf "$gtmp/business"; tgit clone -q --no-tags "$gtmp/bare" "$gtmp/business"
+        WORKROOT="$gtmp" HEAD_SHA=0000000000000000000000000000000000000000 CI_COMMIT_REF_NAME=gone \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        /bin/bash -c "set -euo pipefail; $ck_block" 2>&1) || true
+  assert_contains "$out" "补取源分支失败（取值不回显）" "㉓ 补取源分支失败时留一行"
+  rm -rf "$gtmp"
+else
+  echo "SKIP: 无 /usr/bin/git，跳过 ㉓ git 报错尾巴与目标分支断言" >&2
+fi
+assert_not_contains "$code_lines" 'origin "$MR_TARGET_BRANCH"' \
+  "㉓ 目标分支不得再以裸值出现在 fetch 的参数位置（以 - 开头就是选项）"
+assert_contains "$code_lines" '"+refs/heads/${MR_TARGET_BRANCH}:refs/remotes/origin/${MR_TARGET_BRANCH}"' \
+  "㉓ 目标分支用带前缀的 refspec 取"
 
 # ㉒ 按 MR 的租约（spec I6 ②，全分支复审 s3 I-1；Task 14 验收 C2 在真实环境证实了同一 MR 两次推送并发、
 #   丢失更新）。行为断言：把租约那一段与「调引擎 + 收尾」那一段原样抽出来跑，只把 aws / date / sleep /
@@ -668,7 +826,7 @@ assert_eq "$([ -n "$headnow_line" ] && [ -n "$acquire_line" ] && [ -n "$trap_lin
 #   提到同一个词就会让「A 必须排在 B 之前」恒真——③ 的 call_line 已经踩过一次（注释里写了
 #   scripts/kiro-review.sh，于是取到注释行 65 而不是真正的调用行）。这里把每个模式都过一遍，
 #   免得下一处顺序断言又各自踩。
-for pat in 'kiro-review\.sh' 'KIRO_IMAGE_DIGESTS' 'clone --no-tags' '拒绝 clone' \
+for pat in 'kiro-review\.sh' 'KIRO_IMAGE_DIGESTS' '^/usr/bin/git clone ' '拒绝 clone' \
            '^export GIT_CONFIG_VALUE_0=' 'checkout -q --detach' \
            '\[\[ -n "\$\{HEAD_SHA:-\}" \]\]' ': "\$\{MR_TARGET_BRANCH:=\}"' \
            '\[\[ "\$head_now" == "\$HEAD_SHA" \]\]' '^while :; do' '^trap lease_release EXIT' \

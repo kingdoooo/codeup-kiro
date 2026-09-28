@@ -232,16 +232,21 @@ def classify(headers, body, cfg):
     ev = _event_name(headers)
 
     if ev == MR_EVENT:
-        fields = _fields_from(_dig(body, "object_attributes"), _dig(body, "repository"))
-        if fields is None:
-            return "ignore", None
         # state/action 归一大小写再比：Codeup 自己就不统一（MR 报文的 state 是 `opened`，Note 报文
         # 里那个是 `OPENED`），逐字比一旦对方改了大小写就是「一条都不评」的静默失败。
+        # 这两道排在抽字段**之前**（它们直接读报文）：这样下面「缺字段」那行日志只会出现在本该评审的
+        # 事件上，批准、改标题这类正常的 ignore 不会因为报文里恰好缺个字段而刷日志。
         if _norm(_dig(body, "object_attributes", "state")) != "opened":
             return "ignore", None            # 通过 = accepted（Task 1 实测），不是新评审
         if (_norm(_dig(body, "object_attributes", "action")) == "update"
                 and _dig(body, "object_attributes", "is_update_by_push") is False):
             return "ignore", None            # 非推送的 update 没有新代码；字段缺失时不走这条
+        fields = _fields_from(_dig(body, "object_attributes"), _dig(body, "repository"))
+        if fields is None:
+            # 本该评审的事件缺了必需字段（或字段不是标量）：报文格式变了，或者有人在改报文。
+            # 以前这里一行日志都没有——每一次评审都静默停掉、部署看上去完全健康（复审 s3 M-1）。
+            _log_ignored("missing-field")
+            return "ignore", None
         if not _branch_allowed(fields["target_branch"], cfg):
             return "ignore", None
         if not _accept(fields, cfg):
@@ -272,6 +277,9 @@ def classify(headers, body, cfg):
             # （断不了环）、要么有（把人的命令一起吞掉）。而 AWS 档位的页脚按
             # pipeline/setup-guide.md 会写「评论 `/kiro review` 可重新评审」——评审评论正文里
             # 就带着命令短语，少了这道守卫就是评审触发自己的无穷循环。
+            # 留一行日志：机器人与人同号时，人贴了标记的那条评论里的命令会在这里被吞掉，
+            # 不留痕的话「命令静默失效」查不下去（复审 s5 I-1）。本方评论也会打这一行，量是每次评审一两行。
+            _log_ignored("kiro-marker")
             return "ignore", None
         phrase = cfg.get("command_phrase") or ""
         if not phrase:
@@ -282,6 +290,8 @@ def classify(headers, body, cfg):
             return "ignore", None
         fields = _fields_from(_dig(body, "merge_request"), _dig(body, "repository"))
         if fields is None:
+            # 已经过了短语那一道（只有命令才走到这里），所以这行日志不会被普通评论刷屏
+            _log_ignored("missing-field")
             return "ignore", None
         if not _branch_allowed(fields["target_branch"], cfg):
             return "ignore", None
@@ -290,7 +300,8 @@ def classify(headers, body, cfg):
         # 取值的**形状**由下面的 _accept 一并检查（代号 note-biz-id），与别的标量同一处、同一行日志。
         fields["dedupe_extra"] = _scalar(_dig(body, "object_attributes", "note_biz_id")) or ""
         if not fields["dedupe_extra"]:
-            return "ignore", None            # 没有评论 id 就无法去重，宁可不评
+            _log_ignored("note-biz-id")      # 没有评论 id 就无法去重，宁可不评——但要留痕
+            return "ignore", None
         if not _accept(fields, cfg):
             return "ignore", None
         # MR 已经合并或关闭时不受理命令（见 NOTE_CLOSED_STATES）。位置有两个约束：
@@ -496,7 +507,26 @@ def run_task(ecs, cfg, fields, key):
             "assignPublicIp": "ENABLED"}},
         overrides={"containerOverrides": [
             {"name": cfg["container_name"], "environment": env}]})
-    return resp["tasks"][0]["taskArn"]
+    tasks = resp.get("tasks") or []
+    if not tasks:
+        # RunTask 可以 HTTP 200、不抛异常，却一个任务都没拉起，原因放在 failures[]（ECS API 文档）。
+        # 以前这里直接 `[0]`，于是「评审未启动」那条评论里的原因是 `IndexError`（复审 s3 M-2）。
+        raise RunTaskFailure((resp.get("failures") or [{}])[0].get("reason"))
+    return tasks[0]["taskArn"]
+
+
+# RunTask failures[].reason 的形状：`RESOURCE:ENI`、`AGENT`、`ATTRIBUTE` 这类枚举（可带冒号后缀）。
+# 不是这个形状的一律记成 unknown：这段文字要进 MR 评论，绝不回显自由文本（与 _failure_reason 同一条理由）。
+_RUNTASK_REASON_RE = re.compile(r"[A-Z][A-Z_]*(:[A-Z][A-Z_]*)?")
+
+
+class RunTaskFailure(RuntimeError):
+    """RunTask 返回了空的 tasks[]。reason 取 failures[0].reason，只认枚举形状。"""
+
+    def __init__(self, reason):
+        super().__init__("RunTaskFailure")
+        self.reason = reason if isinstance(reason, str) and _RUNTASK_REASON_RE.fullmatch(reason) \
+            else "unknown"
 
 
 def _failure_reason(exc):
@@ -509,6 +539,8 @@ def _failure_reason(exc):
         code = exc.response.get("Error", {}).get("Code")
         if code:
             return code
+    if isinstance(exc, RunTaskFailure):
+        return f"RunTaskFailure:{exc.reason}"
     return type(exc).__name__
 
 
@@ -538,7 +570,8 @@ def dispatch(ecs, table, cfg, fields):
     except Exception as exc:  # noqa: BLE001 — 拉起任务的失败面很杂（限流/无容量/瞬时网络错误），
                                # 都要落到同一条「释放锁 + 留痕」的兜底路径上，不能只挑几种已知异常
         # 抢锁已经成功，这次投递的副作用已经落地。收尾（释放锁、留痕）再抛异常就会让 handler
-        # 以 502 结束，而 Codeup 对非 2xx 会用**同一个** delivery id 立即重投 2 次（Task 1 实测）：
+        # 以 502 结束。Codeup 对 503 会用**同一个** delivery id 立即重投 2 次（Task 1 实测）；对 502
+        # 是否同样重投没有测过，按会重投来设计：
         # 锁此时可能已经释放，于是同一个 head 可能被再拉起一次（RunTask 报错但服务端其实已经拉起
         # 的那种客户端错误下，就是两个任务同时评同一个 MR）。所以抢锁之后的每条路径都必须回 200，
         # 收尾失败只留一行固定形状的代号。两步各自 try：释放锁失败不该连带吞掉 I10 的留痕。

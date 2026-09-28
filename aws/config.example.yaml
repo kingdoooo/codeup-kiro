@@ -39,11 +39,15 @@ review_command: 0
 
 # ── 可选：调度器 ────────────────────────────────────────────────────────
 # bot_usernames: [aliyun:kirobot]   # 忽略其评论的机器人账号列表；默认只有 bot_username 一个。
-#                                   # 机器人与人是同一个账号时改成 `bot_usernames: []`：默认名单会把
-#                                   # 人自己发的 /kiro review 一起忽略掉（命令静默失效）。空名单必须写
-#                                   # `[]`，写成 `bot_usernames:` 是 null、synth 直接报错。断环靠
-#                                   # `<!-- kiro-` 标记那道守卫，见 setup-guide.md 第 4.2 节
+#                                   # 每一项是去掉首尾空白、不含逗号的用户名。
+#                                   # 机器人与人同号**只适合 PoC**（生产用专用机器人账号，setup-guide.md
+#                                   # 第 1.4 节）：同号时改成 `bot_usernames: []`，否则默认名单会把人自己
+#                                   # 发的 /kiro review 一起忽略掉（命令静默失效）；代价是人发的带
+#                                   # `<!-- kiro-review:… run:N -->` 标记行的评论会被引擎当成汇总接管，
+#                                   # 恢复办法见第 4.2 节。空名单必须写 `[]`，写成 `bot_usernames:` 是
+#                                   # null、synth 直接报错；写成 `[]` 时 synth 会打一行警告。
 # command_phrase: "/kiro review"    # REVIEW_COMMAND_PHRASE；只在 review_command: 1 时有意义。
+#                                   # 必须是字符串，首尾不带空白、不含换行（synth 时校验）。
 #                                   # 空串会被调度器 fail closed（一律不受理），别配成会出现在本方
 #                                   # 评论里的词（例如 Kiro 代码评审），见 setup-guide.md 第 4.3 节
 # target_branch_filter: ""          # TARGET_BRANCH_FILTER，正则；空 = 全部 MR
