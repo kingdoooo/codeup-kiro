@@ -1350,3 +1350,27 @@ def test_an_empty_bot_usernames_env_parses_back_to_an_empty_list(monkeypatch):
     body = _note_with("/kiro review")
     del body["user"]["username"]
     assert handler_mod.classify(NOTE_HDR, body, dict(CFG, bot_usernames=[]))[0] == "review"
+
+
+# ── 有界超时（全分支复审 s4 M-B）：抢锁之后 RunTask / DynamoDB 卡住不得耗尽 29 s ──────────────
+def _fake_aws_env(monkeypatch):
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-west-2")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/dev/null")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+    for var in ("AWS_PROFILE", "AWS_SESSION_TOKEN", "AWS_RETRY_MODE", "AWS_MAX_ATTEMPTS"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_the_dispatchers_ecs_and_dynamodb_clients_are_built_with_the_bounded_config(monkeypatch):
+    # 真的 boto3 客户端（不发请求）：读它们**实际生效**的配置，而不是断言我们传了什么参数
+    _fake_aws_env(monkeypatch)
+    monkeypatch.setenv("LOCK_TABLE", "lock")
+    ecs, table = handler_mod._clients({})
+    for name, cfg in (("ecs", ecs.meta.config), ("dynamodb", table.meta.client.meta.config)):
+        assert (cfg.connect_timeout, cfg.read_timeout) == (2, 5), name
+        assert cfg.retries == {"mode": "standard", "total_max_attempts": 2}, (name, cfg.retries)
+    # 正向对照：不带配置的客户端确实是另一组值——否则上面那条可能只是碰巧等于缺省
+    import boto3
+    assert boto3.client("ecs").meta.config.read_timeout == 60

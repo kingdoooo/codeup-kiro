@@ -417,9 +417,17 @@ def _runtime_cfg():
 
 
 def _clients(cfg):
-    """ECS 客户端与锁表。boto3 在函数内部 import，沿用本仓库写法（见 secret_fetch.py）。"""
+    """ECS 客户端与锁表。boto3 在函数内部 import，沿用本仓库写法（见 secret_fetch.py）。
+
+    两个都用有界配置（bounded_config.py）：RunTask 或 PutItem 在抢锁之后卡过 29 s 的话，Lambda
+    直接超时，释放锁与「评审未启动」都不会执行——锁挂 24 h、MR 上一句话都没有，Codeup 的重投又被
+    抢锁当成重复（全分支复审 s4 M-B）。
+    """
     import boto3
-    return boto3.client("ecs"), boto3.resource("dynamodb").Table(os.environ["LOCK_TABLE"])
+    import bounded_config
+    return (boto3.client("ecs", config=bounded_config.client_config()),
+            boto3.resource("dynamodb", config=bounded_config.client_config())
+            .Table(os.environ["LOCK_TABLE"]))
 
 
 def lock_key(fields):

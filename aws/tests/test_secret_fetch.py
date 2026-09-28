@@ -173,3 +173,115 @@ def test_no_lambda_source_writes_into_os_environ():
                         and attr in ("update", "setdefault", "pop"))
                        or (isinstance(base, ast.Name) and base.id == "os" and attr == "putenv"))
                 assert not bad, f"{p.name}:{node.lineno} 改写 os.environ（{attr}）"
+
+
+# ── 有界超时（全分支复审 s1 F1）：一次卡住的 GetSecretValue 不得耗尽 29 s 的函数预算 ──────────
+# botocore 缺省是连接/读各 60 s + legacy 重试（超时也重试），卡住一次 Lambda 就超时，调度器那行
+# `secret-unavailable` 日志根本打不出来。下面第一条钉住配置的**数值**，第二条用**真的 botocore**
+# 连一个接受连接却永不应答的本地端口，证明这份配置真的传给了客户端、真的生效（只断言 Config 对象
+# 的话，「建了但没传进去」照样绿）。
+import socket  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+import bounded_config  # noqa: E402
+
+LAMBDA_TIMEOUT = 29   # stacks/dispatcher_stack.py 两个函数的 timeout；下面那条断言会从模板里核对
+
+
+def test_the_bounded_config_leaves_room_in_the_29_second_budget():
+    cfg = bounded_config.client_config()
+    assert cfg.connect_timeout == bounded_config.CONNECT_TIMEOUT == 2
+    assert cfg.read_timeout == bounded_config.READ_TIMEOUT == 5
+    # total_max_attempts（含首次）而不是 max_attempts（写在 Config 里时不含首次，boto3 retries 指南）
+    assert cfg.retries == {"mode": "standard", "total_max_attempts": 2}, cfg.retries
+    worst = bounded_config.worst_case_seconds()
+    assert worst == 2 * (2 + 5) + 1 == 15
+    # 一个服务卡住时，卡住的那次调用之后还要有时间把日志打出来 / 释放锁 + 发评论
+    assert worst <= LAMBDA_TIMEOUT - 10, worst
+
+
+def test_both_lambdas_really_run_with_a_29_second_timeout():
+    # 上面的预算按 29 s 算；函数超时哪天被改大改小，这条先红，预算要跟着复核
+    import aws_cdk as cdk
+    from aws_cdk.assertions import Template
+    from stacks.dispatcher_stack import DispatcherStack
+    from stacks.executor_stack import ExecutorStack
+    from stacks.state_stack import StateStack
+    app = cdk.App()
+    state = StateStack(app, "S", cfg={"region": "us-west-2"})
+    executor = ExecutorStack(app, "E", cfg=_full_cfg(), state=state)
+    t = Template.from_stack(DispatcherStack(app, "D", cfg=_full_cfg(), state=state, executor=executor))
+    timeouts = {k: r["Properties"].get("Timeout") for k, r in t.find_resources("AWS::Lambda::Function").items()
+                if k.startswith(("DispatcherFn", "BackstopFn"))}
+    assert sorted(timeouts.values()) == [LAMBDA_TIMEOUT, LAMBDA_TIMEOUT], timeouts
+
+
+class _SilentServer:
+    """接受 TCP 连接但一个字节都不回；hold 秒之后关掉（没有配置时客户端就会卡满这段时间）。"""
+
+    def __init__(self, hold):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self.accepted, self.hold, self._conns = 0, hold, []
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.accepted += 1
+            self._conns.append(conn)
+            threading.Timer(self.hold, conn.close).start()
+
+    def close(self):
+        self.sock.close()
+        for c in self._conns:
+            c.close()
+
+
+@pytest.fixture
+def silent_secrets_manager(monkeypatch):
+    srv = _SilentServer(hold=4)
+    monkeypatch.setenv("AWS_ENDPOINT_URL_SECRETS_MANAGER", f"http://127.0.0.1:{srv.port}")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fake")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-west-2")
+    for var in ("AWS_PROFILE", "AWS_SESSION_TOKEN", "AWS_RETRY_MODE", "AWS_MAX_ATTEMPTS"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/dev/null")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+    # 生产值（2 + 5 s）×2 次要等 15 s；这里只把两个超时缩小，重试模式与次数保持生产值——
+    # 要证明的是「这份配置真的传进了客户端」，数值本身由上面那条断言钉住。
+    monkeypatch.setattr(bounded_config, "CONNECT_TIMEOUT", 0.3)
+    monkeypatch.setattr(bounded_config, "READ_TIMEOUT", 0.3)
+    yield srv
+    srv.close()
+
+
+def test_a_stalled_get_secret_value_fails_closed_within_the_bound_with_real_botocore(
+        silent_secrets_manager, monkeypatch):
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
+    t0 = time.monotonic()
+    with pytest.raises(fetch.SecretUnavailable) as ei:
+        fetch.secret_from_env("WEBHOOK_SECRET_ID")
+    elapsed = time.monotonic() - t0
+    assert type(ei.value.__cause__).__name__ == "ReadTimeoutError", repr(ei.value.__cause__)
+    # 缺省配置下这里要等满 hold（4 s）才被断开，然后 legacy 再重试几轮
+    assert elapsed < 3, elapsed
+    assert silent_secrets_manager.accepted == 2, "total_max_attempts=2：首次 + 一次重试"
+
+
+def test_the_dispatcher_logs_secret_unavailable_and_answers_503_on_a_stall(
+        silent_secrets_manager, monkeypatch, capsys):
+    handler_mod = load_lambda("stall_dispatcher", ROOT / "lambda" / "dispatcher" / "handler.py")
+    handler_mod.secret_fetch._CACHE.clear()
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
+    r = handler_mod.handler({"headers": {"x-codeup-token": "s3cret"}}, None)
+    assert_alb_response(r, 503, "secret-unavailable")
+    assert capsys.readouterr().out == \
+        "secret-unavailable var=WEBHOOK_SECRET_ID code=ReadTimeoutError\n"

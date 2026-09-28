@@ -61,8 +61,12 @@ def secret_from_env(var_name):
     if secret_id in _CACHE:
         return _CACHE[secret_id]
     import boto3  # 沿用本仓库写法：boto3 在函数内部 import（见 backstop/handler.py 的 handler）
+    import bounded_config  # 同目录；兜底 Lambda 经 /opt/dispatcher 导入，与本文件同一手法
     try:
-        resp = boto3.client("secretsmanager").get_secret_value(SecretId=secret_id)
+        # 有界配置是承重的：缺省的 60 s 读超时 + legacy 重试会让一次卡住的调用耗尽 29 s 的函数预算，
+        # 调用方那行 `secret-unavailable` 日志就永远打不出来（见 bounded_config.py）。
+        resp = boto3.client("secretsmanager", config=bounded_config.client_config()) \
+            .get_secret_value(SecretId=secret_id)
     except Exception as exc:  # noqa: BLE001 — 权限、限流、密钥不存在、瞬时网络错误都要落到同一条
                               # fail-closed 路径；只挑几种已知异常会让其余的逃成 Lambda 500
         raise SecretUnavailable(var_name) from exc

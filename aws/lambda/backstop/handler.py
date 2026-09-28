@@ -79,22 +79,41 @@ def should_post(event, table):
     key = env.get("LOCK_KEY")
     if not key:
         return True
+    # 每一次出站调用之前打一行固定形状的步骤日志：超时的时候日志里最后一行就是卡住的那一步。
+    # 以前三步（读标记、取令牌、发评论）一行都不打，Task 14 验收 (a) 那次超时只能靠推断（s1 F2）。
+    print("backstop step=read-mark", flush=True)
     item = (table.get_item(Key={"pk": key}).get("Item") or {})
     return not item.get("posted")
 
 
+class PostFailed(RuntimeError):
+    """发评论的那次 POST 没成功（HTTP 非 2xx 或网络错误；codeup_min 只返回 False，不抛）。"""
+
+
 def handler(event, context):
     import boto3
-    table = boto3.resource("dynamodb").Table(os.environ["LOCK_TABLE"])
+    import bounded_config  # /opt/dispatcher 下，与 secret_fetch 同一手法（有界超时，见该文件）
+    table = boto3.resource("dynamodb", config=bounded_config.client_config()) \
+        .Table(os.environ["LOCK_TABLE"])
     if not should_post(event, table):
         return {"ok": True, "posted": False}
     env = _fields(event)
+    print("backstop step=fetch-token", flush=True)
+    token = secret_fetch.secret_from_env("YUNXIAO_TOKEN_ID")
     # 令牌在真要发评论时才取（见 secret_fetch.py）：绝大多数 Task State Change 事件都被 should_post
     # 挡掉，提前取只会给每一次状态迁移都加一次 GetSecretValue 调用（配额与延迟）。
     # 取不到就让 SecretUnavailable 抛出去：这是 EventBridge 的异步调用，抛出会走 Lambda 自己的
     # 重试（密钥限流这类瞬时失败能自愈），吞掉返回 {"posted": False} 才是真正的沉默——兜底的
     # 整个存在理由就是「宁可多发一条也不沉默」（I10）。
-    codeup_min.post_comment(
+    print("backstop step=post-comment", flush=True)
+    posted = codeup_min.post_comment(
         os.environ["YUNXIAO_ORG_ID"], env["CODEUP_REPO_ID"], env["MR_LOCAL_ID"],
-        secret_fetch.secret_from_env("YUNXIAO_TOKEN_ID"), BACKSTOP_COMMENT)
+        token, BACKSTOP_COMMENT)
+    # 发失败（令牌被轮换吊销 → 401、跨境网络断）也必须抛：以前返回值被丢掉、照样报 posted=True，
+    # 这次调用就算「成功」——Lambda 不重试，失败目的地队列也收不到，MR 上一句话都没有，正是
+    # 兜底要消灭的那种沉默。抛出之后走 Lambda 的重试，重试耗尽进 BackstopFailures 队列并触发告警
+    # （dispatcher_stack.py）。代价：超时但其实已经发出去的那次会在重试时多发一条（重复好于沉默）。
+    if not posted:
+        print("backstop step=post-comment result=failed", flush=True)
+        raise PostFailed("post-comment")
     return {"ok": True, "posted": True}

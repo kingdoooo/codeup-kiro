@@ -2,11 +2,16 @@ import os
 
 import aws_cdk as cdk
 from aws_cdk import (
+    aws_cloudwatch as cloudwatch,
+    aws_cloudwatch_actions as cw_actions,
     aws_events as events,
     aws_events_targets as targets,
     aws_iam as iam,
     aws_lambda as lambda_,
+    aws_lambda_destinations as destinations,
     aws_secretsmanager as secretsmanager,
+    aws_sns as sns,
+    aws_sqs as sqs,
 )
 from constructs import Construct
 
@@ -135,7 +140,7 @@ class DispatcherStack(cdk.Stack):
         # ALB 放进执行器 VPC 的隔离子网（跨栈引用），不为入口单独再建一个 VPC。
         ingress = WebhookIngress(self, "WebhookIngress", vpc=executor.vpc, target_fn=dispatcher_fn)
 
-        # codeup_min 与 secret_fetch 都与 backstop/handler.py 不同目录；handler.py 按约定从
+        # codeup_min、secret_fetch 与 bounded_config 都与 backstop/handler.py 不同目录；handler.py 按约定从
         # /opt/dispatcher 导入它们（见该文件顶部注释），所以这里把整个 lambda/ 目录铺成一层
         # Layer——铺开后 layer 内容根就是 lambda/ 的内容，挂载到 /opt/ 之后正好落在
         # /opt/dispatcher/codeup_min.py 与 /opt/dispatcher/secret_fetch.py，与既有代码的路径假设
@@ -147,8 +152,26 @@ class DispatcherStack(cdk.Stack):
             description="共享 codeup_min.py 与 secret_fetch.py，供 backstop 按 /opt/dispatcher 的既有路径假设导入",
         )
 
+        # 兜底 Lambda 是 EventBridge 异步调用的：抛异常或超时后 Lambda 自己重试 2 次，再失败就**丢弃**
+        # 这个事件（AWS 文档：Lambda discards the event when the maximum age passes or all retry
+        # attempts fail）——I10「重复好于沉默」在平台这一层断掉，而且毫无痕迹。Task 14 验收 (a)
+        # 实测过一次：任务 c38fb2ce 异常结束，MR 上没有兜底评论（全分支复审 s1 F2）。
+        # 所以丢弃之前先把调用记录（`requestPayload` 就是原始的 ECS 事件）送进这个队列，并对它与
+        # BackstopFn 的 Errors 各设一个告警。队列用 SQS 托管加密（不需要额外的 KMS 授权就能让
+        # Lambda 往里写），保留 14 天（上限）：够运维在假期之后照手册 §8 重放。
+        backstop_failures = sqs.Queue(
+            self, "BackstopFailures",
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            enforce_ssl=True,
+            retention_period=cdk.Duration.days(14),
+        )
+
         backstop_fn = lambda_.Function(
             self, "BackstopFn",
+            on_failure=destinations.SqsDestination(backstop_failures),
+            # 显式写出 Lambda 的缺省（重试 2 次）：手册 §8 讲重放时按这个次数解释
+            # `approximateInvokeCount`，缺省哪天变了这里不该跟着悄悄变。
+            retry_attempts=2,
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="handler.handler",
             code=lambda_.Code.from_asset(os.path.join(LAMBDA_ROOT, "backstop")),
@@ -183,6 +206,44 @@ class DispatcherStack(cdk.Stack):
             targets=[targets.LambdaFunction(backstop_fn)],
         )
 
+        # 两个告警都通知同一个主题，运维订阅它即可（手册 §8「兜底告警」）。告警动作写在 CDK 里而不是
+        # 让运维在控制台手加：手加的动作下一次 `cdk deploy` 就被覆盖掉。
+        # 主题**不加** KMS 加密：CloudWatch 告警发不进用 AWS 托管密钥 alias/aws/sns 加密的主题（那个
+        # 密钥的策略不允许 cloudwatch.amazonaws.com 解密/生成数据密钥，也改不了），要加密就得另建客户
+        # 托管密钥并改它的策略。告警通知里只有告警名、指标与阈值，没有评审内容或密钥；传输强制 TLS。
+        alarm_topic = sns.Topic(self, "BackstopAlarmTopic", enforce_ssl=True)
+        failures_alarm = cloudwatch.Alarm(
+            self, "BackstopFailuresAlarm",
+            alarm_description=(
+                "兜底 Lambda 重试耗尽后丢下的事件进了 BackstopFailures 队列：有 MR 缺一条「评审未完成」"
+                "评论。按 aws/setup-guide.md 第 8 节「兜底告警」重放"),
+            metric=backstop_failures.metric_approximate_number_of_messages_visible(
+                period=cdk.Duration.minutes(5), statistic="Maximum"),
+            threshold=0,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            evaluation_periods=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        errors_alarm = cloudwatch.Alarm(
+            self, "BackstopErrorsAlarm",
+            alarm_description=(
+                "兜底 Lambda 抛了异常或超时（会自动重试；重试耗尽的事件进 BackstopFailures 队列）。"
+                "查它的日志组，见 aws/setup-guide.md 第 8 节「兜底告警」"),
+            metric=backstop_fn.metric_errors(period=cdk.Duration.minutes(5), statistic="Sum"),
+            threshold=0,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            evaluation_periods=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        for alarm in (failures_alarm, errors_alarm):
+            alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
+        cdk.CfnOutput(self, "BackstopAlarmTopicArn", value=alarm_topic.topic_arn,
+                      description="兜底告警的 SNS 主题：aws sns subscribe 订阅它（手册第 8 节）")
+        cdk.CfnOutput(self, "BackstopFailuresQueueUrl", value=backstop_failures.queue_url,
+                      description="兜底重试耗尽后丢下的事件：按手册第 8 节「兜底告警」重放")
+        cdk.CfnOutput(self, "BackstopFunctionName", value=backstop_fn.function_name,
+                      description="重放兜底事件时 aws lambda invoke 的目标（手册第 8 节「兜底告警」）")
+
         cdk.CfnOutput(
             self, "WebhookUrl", value=ingress.url,
             description=(
@@ -194,4 +255,5 @@ class DispatcherStack(cdk.Stack):
 
         self.dispatcher_fn = dispatcher_fn
         self.backstop_fn = backstop_fn
+        self.backstop_failures = backstop_failures
         self.ingress = ingress

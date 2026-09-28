@@ -200,3 +200,43 @@ def test_backstop_never_reads_a_bare_plaintext_secret_env_var():
     src = pathlib.Path(backstop.__file__).read_text()
     for bare in ('YUNXIAO_TOKEN"', "YUNXIAO_TOKEN'", 'WEBHOOK_SECRET"', "WEBHOOK_SECRET'"):
         assert bare not in src, f"backstop/handler.py 仍在读明文环境变量 {bare}"
+
+
+# ── 兜底可靠性（全分支复审 s1 F2）───────────────────────────────────────────────
+def test_the_backstops_dynamodb_resource_is_built_with_the_bounded_config(monkeypatch):
+    # 真的 boto3 资源（不发请求）：lastStatus 不是 STOPPED，should_post 在读表之前就返回
+    import boto3
+    for k, v in (("AWS_DEFAULT_REGION", "us-west-2"), ("AWS_ACCESS_KEY_ID", "testing"),
+                 ("AWS_SECRET_ACCESS_KEY", "fake"), ("AWS_CONFIG_FILE", "/dev/null"),
+                 ("AWS_SHARED_CREDENTIALS_FILE", "/dev/null"), ("LOCK_TABLE", "lock")):
+        monkeypatch.setenv(k, v)
+    for var in ("AWS_PROFILE", "AWS_SESSION_TOKEN", "AWS_RETRY_MODE", "AWS_MAX_ATTEMPTS"):
+        monkeypatch.delenv(var, raising=False)
+    made, real = [], boto3.resource
+    monkeypatch.setattr(boto3, "resource", lambda *a, **k: made.append(real(*a, **k)) or made[-1])
+    assert backstop.handler(_ev(status="RUNNING"), None) == {"ok": True, "posted": False}
+    cfg = made[0].meta.client.meta.config
+    assert (cfg.connect_timeout, cfg.read_timeout) == (2, 5)
+    assert cfg.retries == {"mode": "standard", "total_max_attempts": 2}, cfg.retries
+
+
+def test_a_failed_post_raises_so_lambda_retries_and_the_failure_destination_gets_it(
+        monkeypatch, capsys):
+    # codeup_min.post_comment 失败时只返回 False、不抛。以前这个返回值被丢掉、照样报 posted=True：
+    # Lambda 不重试、失败目的地收不到，MR 上一句话都没有——兜底要消灭的正是这种沉默。
+    _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
+    monkeypatch.setattr(backstop.codeup_min, "post_comment", lambda *a, **k: False)
+    with pytest.raises(backstop.PostFailed):
+        backstop.handler(_ev(exit_code=137), None)
+    # 每一次出站调用之前一行固定形状的步骤日志（超时时最后一行就是卡住的那一步）
+    assert capsys.readouterr().out == (
+        "backstop step=read-mark\nbackstop step=fetch-token\nbackstop step=post-comment\n"
+        "backstop step=post-comment result=failed\n")
+
+
+def test_a_successful_post_logs_each_step_once_and_reports_posted(monkeypatch, capsys):
+    _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
+    monkeypatch.setattr(backstop.codeup_min, "post_comment", lambda *a, **k: True)
+    assert backstop.handler(_ev(exit_code=137), None) == {"ok": True, "posted": True}
+    assert capsys.readouterr().out == (
+        "backstop step=read-mark\nbackstop step=fetch-token\nbackstop step=post-comment\n")

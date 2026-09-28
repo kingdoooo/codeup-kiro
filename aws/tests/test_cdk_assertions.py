@@ -1422,3 +1422,100 @@ def test_the_guide_opening_explains_the_per_mr_lease():
     assert '"lease#${CODEUP_REPO_ID}#${MR_LOCAL_ID}"' in code, "租约键的形状变了，手册那一段要跟着改"
     assert "lease_span=$((lease_span + 300))" in code, "租约时长的算法变了，手册那一段要跟着改"
     assert "/bin/sleep 10" in code, "轮询间隔变了，手册那一段要跟着改"
+
+
+# ── 兜底可靠性（全分支复审 s1 F2）：重试耗尽的事件不得被 Lambda 静默丢弃 ─────────────────
+def _only(t, typ, pred=lambda k, r: True):
+    found = {k: r for k, r in t.find_resources(typ).items() if pred(k, r)}
+    assert len(found) == 1, (typ, sorted(found))
+    return next(iter(found.items()))
+
+
+def test_backstop_failed_async_invocations_land_in_an_encrypted_14_day_queue():
+    t = _disp_template()
+    fn_id, _ = _only(t, "AWS::Lambda::Function", lambda k, r: k.startswith("BackstopFn"))
+    q_id, q = _only(t, "AWS::SQS::Queue")
+    assert q["Properties"].get("SqsManagedSseEnabled") is True, q["Properties"]
+    assert q["Properties"].get("MessageRetentionPeriod") == 14 * 86400, q["Properties"]
+    _, eic = _only(t, "AWS::Lambda::EventInvokeConfig")
+    p = eic["Properties"]
+    assert p["FunctionName"] == {"Ref": fn_id}, p
+    assert p["Qualifier"] == "$LATEST", p
+    assert p["MaximumRetryAttempts"] == 2, p
+    assert p["DestinationConfig"] == {"OnFailure": {"Destination": {"Fn::GetAtt": [q_id, "Arn"]}}}, p
+    # 目的地要真的写得进去：兜底角色必须能往这个队列 SendMessage（CDK 的 SqsDestination 负责授）
+    sends = set()
+    for pol in t.find_resources("AWS::IAM::Policy").values():
+        if "BackstopFn" not in json.dumps(pol["Properties"].get("Roles")):
+            continue
+        for stmt in pol["Properties"]["PolicyDocument"]["Statement"]:
+            if "sqs:SendMessage" in _as_list(stmt["Action"]):
+                sends.update(json.dumps(r, sort_keys=True) for r in _as_list(stmt["Resource"]))
+    assert sends == {json.dumps({"Fn::GetAtt": [q_id, "Arn"]}, sort_keys=True)}, sends
+
+
+def test_both_backstop_alarms_fire_on_the_first_occurrence_and_notify_one_topic():
+    t = _disp_template()
+    fn_id, _ = _only(t, "AWS::Lambda::Function", lambda k, r: k.startswith("BackstopFn"))
+    q_id, _ = _only(t, "AWS::SQS::Queue")
+    topic_id, _ = _only(t, "AWS::SNS::Topic")
+    alarms = {(a["Properties"]["Namespace"], a["Properties"]["MetricName"]): a["Properties"]
+              for a in t.find_resources("AWS::CloudWatch::Alarm").values()}
+    assert set(alarms) == {("AWS/SQS", "ApproximateNumberOfMessagesVisible"),
+                           ("AWS/Lambda", "Errors")}, set(alarms)
+    dims = {("AWS/SQS", "ApproximateNumberOfMessagesVisible"):
+            [{"Name": "QueueName", "Value": {"Fn::GetAtt": [q_id, "QueueName"]}}],
+            ("AWS/Lambda", "Errors"): [{"Name": "FunctionName", "Value": {"Ref": fn_id}}]}
+    for key, a in alarms.items():
+        assert a["Dimensions"] == dims[key], (key, a["Dimensions"])
+        # 「> 0」：第一次出现就告警。阈值 0 是有意义的取值（falsy），GreaterThanOrEqual 0 会恒真
+        assert a["Threshold"] == 0 and a["ComparisonOperator"] == "GreaterThanThreshold", (key, a)
+        assert a["EvaluationPeriods"] == 1 and a["TreatMissingData"] == "notBreaching", (key, a)
+        assert a["AlarmActions"] == [{"Ref": topic_id}], (key, a.get("AlarmActions"))
+    outputs = t.to_json()["Outputs"]
+    assert {"BackstopAlarmTopicArn", "BackstopFailuresQueueUrl", "BackstopFunctionName"} \
+        <= set(outputs), sorted(outputs)
+    assert outputs["BackstopFunctionName"]["Value"] == {"Ref": fn_id}
+    assert outputs["BackstopFailuresQueueUrl"]["Value"] == {"Ref": q_id}
+    assert outputs["BackstopAlarmTopicArn"]["Value"] == {"Ref": topic_id}
+
+
+def test_the_guide_says_how_to_subscribe_to_and_replay_backstop_failures():
+    """每条断言只在它那一行里找：整节里找的话，别的行碰巧提到同一个词就会假绿。"""
+    sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
+    row = [ln for ln in sec8 if ln.startswith("| 收到兜底告警")]
+    assert len(row) == 1, "§8 缺少「收到兜底告警」那一行"
+    t = _disp_template()
+    outputs = set(t.to_json()["Outputs"])
+    alarms = {k for k in t.find_resources("AWS::CloudWatch::Alarm")}
+    for name in ("BackstopAlarmTopicArn", "BackstopFailuresQueueUrl", "BackstopFunctionName"):
+        assert name in outputs, f"部署输出里没有 {name}，手册那一行引用的是它"
+        assert f"<{name}>" in row[0], f"「收到兜底告警」那一行没用部署输出 {name}"
+    for alarm in ("BackstopFailuresAlarm", "BackstopErrorsAlarm"):
+        assert any(k.startswith(alarm) for k in alarms), f"模板里没有 {alarm}"
+        assert f"`{alarm}`" in row[0], f"那一行没点名 {alarm}"
+    for step in ("aws sns subscribe", "aws sqs receive-message", ".requestPayload",
+                 "aws lambda invoke", "fileb://event.json", "aws sqs delete-message",
+                 '"posted": true', "RetriesExhausted", "14 天"):
+        assert step in row[0], f"「收到兜底告警」那一行缺：{step}"
+
+    silent = [ln for ln in sec8 if ln.startswith("| 评审任务确实异常结束了，MR 上却**没有**「兜底」类评论")]
+    assert len(silent) == 1
+    backstop = (pathlib.Path(__file__).resolve().parents[1] / "lambda" / "backstop" / "handler.py").read_text()
+    steps = re.findall(r'print\("backstop step=([a-z-]+)"', backstop)
+    assert steps == ["read-mark", "fetch-token", "post-comment"], steps
+    for step in steps:
+        assert f"`backstop step={step}`" in silent[0], f"那一行没列出步骤日志 backstop step={step}"
+    for fact in ("`PostFailed`", "`BackstopFailures`", "不会被丢掉"):
+        assert fact in silent[0], f"「没有兜底评论」那一行缺：{fact}"
+
+
+def test_the_503_row_lists_the_timeout_codes_the_bounded_client_can_now_produce():
+    sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
+    row = [ln for ln in sec8 if ln.startswith("| Codeup 的 webhook 投递记录显示 503")]
+    assert len(row) == 1
+    for code in ("`ReadTimeoutError`", "`ConnectTimeoutError`", "`EndpointConnectionError`",
+                 "bounded_config.py"):
+        assert code in row[0], f"503 那一行缺：{code}"
+    # 代号是开放集合（AWS 错误码或异常类型名），原文「只有固定几种，正是四类成因」既数错又说成了封闭集合
+    assert "只有固定几种" not in row[0]
