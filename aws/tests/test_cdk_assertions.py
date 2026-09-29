@@ -1472,8 +1472,12 @@ def test_the_guide_opening_explains_the_per_mr_lease():
     assert '"lease#${CODEUP_REPO_ID}#${MR_LOCAL_ID}"' in code, "租约键的形状变了，手册那一段要跟着改"
     # 手册里的四个数都从这几行来（issue 04）：租期、续期间隔、引擎总时长上限、等待上限
     for line in ("LEASE_TTL=120", "LEASE_RENEW_EVERY=30", "engine_cap=$((engine_cap + 1800))",
-                 "lease_wait_limit=$((engine_cap + 300))", "/bin/sleep 10"):
+                 "lease_wait_limit=$((engine_cap + 300))", "/bin/sleep 10", '/bin/sleep "$LEASE_RENEW_EVERY"'):
         assert line in code, f"{line} 变了，手册「同一 MR 串行」那一段要跟着改"
+    # 续期间隔必须远小于租期：连着失败两次（每次最坏约 25 秒）租约还在（L1）
+    ttl = int(re.search(r"^LEASE_TTL=(\d+)$", code, re.M).group(1))
+    every = int(re.search(r"^LEASE_RENEW_EVERY=(\d+)$", code, re.M).group(1))
+    assert 3 * every < ttl, (every, ttl)
 
 
 def test_the_guide_documents_the_engine_cap_exit_124():

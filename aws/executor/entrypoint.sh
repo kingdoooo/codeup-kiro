@@ -178,8 +178,9 @@ head_now=$(/usr/bin/git -C "$WORKROOT/business" rev-parse HEAD 2>/dev/null || tr
 #   L6 退出（任何路径）时续期循环已停，释放之后不会再有续期成功（issue 04）。
 # 租期短、持有期间续期（issue 04）：租期 120 秒，拿到之后后台每 30 秒续一次。不按引擎最坏耗时定一个长租期——
 # 那个最坏值约 1–1.5 小时（每次 Codeup API 最坏约 195 秒、一次评审十几次调用，引擎自己的 git fetch 还没有上限），
-# 被强杀的任务（StopTask 30 秒后的 SIGKILL、OOM）会把 MR 挡上那么久；短租期下最多 120 秒就能被接管（L2），
-# 所以也不需要 init 进程来保证陷阱一定跑到。
+# 被强杀的任务（OOM、StopTask 之后迟迟不退被 SIGKILL）会把 MR 挡上那么久；短租期下最多 120 秒就能被接管（L2），
+# 所以也不需要 init 进程来保证陷阱一定跑到。（StopTask 的 SIGTERM 本身陷阱是接得住的：挂了 EXIT 陷阱的 bash 作为
+# PID 1 会跑陷阱、释放租约、以 143 退出——issue 04 复审在 debian:stable-slim 的 bash 5.2 里实验过。）
 # 引擎包在总时长上限 engine_cap = KIRO_TIMEOUT + 1800 秒里：它给续期（也就是持有时长）设了上界，也给挂住的任务的
 # Fargate 费用设了上界。KIRO_TIMEOUT 不是纯数字时按引擎的缺省 900 算：引擎自己会拒绝这个取值并在 MR 上说明
 # （die_review），这里不抢它的活。等待上限 = engine_cap + 300：持有者合法持有的最长时间，加上它死后租约失效的余量。
@@ -226,14 +227,14 @@ lease_acquire() {
   lease_err=$(aws_err_code "$err")
   return 2
 }
-# 续期循环（后台跑）：每 LEASE_RENEW_EVERY 秒以「持有者还是我」为条件把 lease_until 续到 now + LEASE_TTL。
+# 续期循环（后台跑）：**先立刻续一次**，之后每 LEASE_RENEW_EVERY 秒以「持有者还是我」为条件把 lease_until 续到
+# now + LEASE_TTL。先续一次是因为拿租约那次调用用的是 CLI 缺省超时：它慢慢成功时，租约可能已经所剩无几（复审 Minor）。
 # 单独用短的 CLI 超时：CLI 缺省连接/读各 60 秒、共 3 次，一次续期就可能比租期还长；这样最坏约 25 秒。
 # 条件失败 = 已被接管（我续期失败了太久）：停止续期、引擎照跑——中途杀掉评审只会留下半截评论，
 # 并发是加租约之前的行为，不会更糟。别的错误（限流等）打代号、下一轮再试。
 lease_renew_loop() {
   local now until_ts err
   while :; do
-    /bin/sleep "$LEASE_RENEW_EVERY"
     now=$(/bin/date +%s); until_ts=$((now + LEASE_TTL))
     if err=$(/usr/local/bin/aws dynamodb update-item --cli-connect-timeout 2 --cli-read-timeout 5 \
           --region "$AWS_REGION" --table-name "$LOCK_TABLE" --key "$lease_key" \
@@ -244,12 +245,13 @@ lease_renew_loop() {
             --arg until "$until_ts" --arg exp "$((until_ts + 86400))" \
             '{":me":{S:$me},":until":{N:$until},":exp":{N:$exp}}')" \
           2>&1 >/dev/null); then
-      continue
-    fi
-    if [[ "$err" == *ConditionalCheckFailedException* ]]; then
+      :
+    elif [[ "$err" == *ConditionalCheckFailedException* ]]; then
       echo "MR 租约已被别的任务接管，停止续期（本次评审照常跑完，可能与接管者并发）" >&2; return 0
+    else
+      echo "续期 MR 租约失败（code=$(aws_err_code "$err")），下一轮再试" >&2
     fi
-    echo "续期 MR 租约失败（code=$(aws_err_code "$err")），下一轮再试" >&2
+    /bin/sleep "$LEASE_RENEW_EVERY"
   done
 }
 # 释放 = lease_until 清零**并抹掉持有者**，条件是持有者还是我（L3）：我挂住期间被接管的话，这一步什么也不写。
@@ -346,10 +348,13 @@ export KIRO_PINNED_ARTIFACT=/opt/kiro/kirocli-x86_64-linux-musl.zip
 
 rc=0
 # 总时长上限（见租约那一段开头）：超时 124 原样透出——兜底 Lambda 的通用文案写着「任务超时」；
-# 30 秒内不理 TERM 就 KILL（137，与 OOM 同码，兜底文案同样覆盖）。引擎内层 timeout 下的 kiro-cli 自成
-# 进程组、不被这里杀掉，但本文件是 PID 1，它一退出整个任务就结束。
+# 30 秒内不理 TERM 就 KILL（137）。137 与 OOM 同码，所以只在确实跑满了上限时才打那行消息，运维靠它区分两者。
+# 引擎内层 timeout 下的 kiro-cli 自成进程组、不被这里杀掉，但本文件是 PID 1，它一退出整个任务就结束。
+engine_t0=$(/bin/date +%s)
 /usr/bin/timeout -k 30 "$engine_cap" /bin/bash -p "$PKG/scripts/kiro-review.sh" || rc=$?
-if [[ "$rc" -eq 124 ]]; then echo "评审引擎超过总时长上限 ${engine_cap} 秒仍未结束，已终止" >&2; fi
+if [[ "$rc" -eq 124 ]] || { [[ "$rc" -eq 137 ]] && (( $(/bin/date +%s) - engine_t0 >= engine_cap )); }; then
+  echo "评审引擎超过总时长上限 ${engine_cap} 秒仍未结束，已终止" >&2
+fi
 # 标记只在脚本干净退出（rc=0）时才置位——不能不分退出码都置位。脚本在 MR 定位
 # 之前有三类路径会以非零退出却什么评论都没写：path-gate 的裸 exit、die() 里的
 # 依赖/环境校验、MR 定位歧义（Phase 1 的 I10 契约只保证「MR 定位之后」的失败必定

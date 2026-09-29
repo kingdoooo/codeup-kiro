@@ -631,18 +631,24 @@ STUB
   cat > "$ltmp/sleep" <<'STUB'
 #!/bin/sh
 echo "$1" >> "$SLEEP_LOG"
-if [ -n "${FAKE_CLOCK:-}" ]; then echo $(( $(cat "$FAKE_CLOCK") + $1 )) > "$FAKE_CLOCK"; fi
+step="$1"; if [ "$1" = 30 ] && [ -n "${RENEW_CLOCK_STEP:-}" ]; then step="$RENEW_CLOCK_STEP"; fi
+if [ -n "${FAKE_CLOCK:-}" ]; then echo $(( $(cat "$FAKE_CLOCK") + step )) > "$FAKE_CLOCK"; fi
 if [ -n "${SLEEP_HOOK:-}" ]; then sh -c "$SLEEP_HOOK"; fi
 if [ "$1" = 30 ]; then exec /bin/sleep "${RENEW_REAL_SLEEP:-0.2}"; fi
 exec /bin/sleep "${REAL_SLEEP:-0}"
 STUB
-  # timeout 替身：记下参数；命令行里含 TIMEOUT_EXPIRE_MATCH 时不跑命令、按 GNU timeout 的超时退出 124
+  # timeout 替身：记下参数；命令行里含 TIMEOUT_EXPIRE_MATCH 时不跑命令、以 TIMEOUT_EXPIRE_RC（缺省 124，GNU timeout
+  # 的超时码）退出，并把假时钟拨快 TIMEOUT_EXPIRE_ADVANCE 秒（模拟「真的跑满了上限」；不拨 = 早早被杀，比如 OOM）
   cat > "$ltmp/timeout" <<'STUB'
 #!/bin/sh
 echo "$*" >> "$TIMEOUT_LOG"
 while [ $# -gt 0 ]; do case "$1" in -k) shift 2 ;; -*) shift ;; *) break ;; esac; done
 shift
-case "$*" in *"${TIMEOUT_EXPIRE_MATCH:-<never>}"*) exit 124 ;; esac
+case "$*" in *"${TIMEOUT_EXPIRE_MATCH:-<never>}"*)
+  if [ -n "${FAKE_CLOCK:-}" ] && [ -n "${TIMEOUT_EXPIRE_ADVANCE:-}" ]; then
+    echo $(( $(cat "$FAKE_CLOCK") + TIMEOUT_EXPIRE_ADVANCE )) > "$FAKE_CLOCK"; fi
+  exit "${TIMEOUT_EXPIRE_RC:-124}" ;;
+esac
 exec "$@"
 STUB
   cat > "$ltmp/engine" <<'STUB'
@@ -730,12 +736,14 @@ STUB
   assert_contains "$(cat "$ltmp/err.r1#7#A")" "head-check result=current sha=${c1:0:7}" \
     "㉒ 最新提交就是 HEAD_SHA 时打 current"
   assert_eq "$(sleeps)" "0" "㉒ 无人持有时不等待"
+  assert_nonzero "$(grep -c '^update-item r1#7#A ' "$ltmp/ddb.log" | tr -d ' ')" \
+    "㉒ 正向对照：rc=0 时写过「已回写」标记（下面「超过上限时不置标记」那条断言的同一个模式在这里能匹配）"
 
   # issue 04：租期固定 120 秒（与 KIRO_TIMEOUT 无关，靠续期撑住长评审）；引擎包在总时长上限
   # engine_cap = KIRO_TIMEOUT + 1800 里。0 是有意义的取值（不回落 900），0600 按十进制，非数字按引擎缺省 900。
   # 前导零的样例刻意**不用 0900**：去掉 `10#` 之后 bash 3.2 报「value too great for base」却不中止，
   # 取值留在缺省 900——恰好等于 0900 的正确结果，变异测试因此假绿过一次。
-  # 续期那一轮真睡 5 秒：引擎替身一结束就退出，引擎开始时的快照里只有拿租约那一次写入。
+  # 续期那一轮真睡 5 秒：引擎开始时快照里的 lease_until 只可能来自拿租约或紧接着那次立刻续期，两者读到的时钟都是 5000。
   for kt in '60:1860' '0:1800' '0600:2400' '15m:2700'; do
     reset_lease; echo 5000 > "$ltmp/clock"
     run_lease 'r1#7#A' KIRO_TIMEOUT="${kt%%:*}" FAKE_CLOCK="$ltmp/clock" RENEW_REAL_SLEEP=5 >/dev/null
@@ -745,16 +753,26 @@ STUB
       "㉒ KIRO_TIMEOUT=${kt%%:*} 时引擎总时长上限 = ${kt##*:} 秒（KIRO_TIMEOUT + 1800），另给 30 秒 KILL 余量"
   done
 
-  # 续期：引擎运行期间 lease_until 往后推，expires_at 跟着推（N4），且只用短的 CLI 超时（续期调用不能比租期还长）
+  # 续期：引擎运行期间把 lease_until 续到「那一刻 + 120」，expires_at 跟着推（N4）。为了让「续多长」可以逐字断言：
+  # 续期那一轮不拨假时钟（RENEW_CLOCK_STEP=0），引擎一开始把时钟拨到 7000——之后每次续期读到的都是 7000，
+  # 引擎结束时 lease_until 必须正好是 7120（复审 Important 2：只断言「越过 5120」时，续 30 或 90 秒也能过）。
   reset_lease; echo 5000 > "$ltmp/clock"
-  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" ENGINE_SECONDS=1 RENEW_REAL_SLEEP=0.1)" "0" "㉒ 前提：带续期的评审正常结束"
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" ENGINE_SECONDS=1 RENEW_REAL_SLEEP=0.1 RENEW_CLOCK_STEP=0 \
+               ENGINE_HOOK='echo 7000 > "$FAKE_CLOCK"')" "0" "㉒ 前提：带续期的评审正常结束"
   end_until=$(attr "$ltmp/snap.json.end" "$LEASE" lease_until)
-  assert_eq "$([ -n "$end_until" ] && [ "$end_until" -gt 5120 ] && echo yes)" "yes" \
-    "㉒ 续期：引擎结束时 lease_until（${end_until}）已越过拿租约时的 5120"
+  assert_eq "$end_until" "7120" "㉒ 续期把租约续到「续期那一刻 + 120 秒」（引擎结束时的快照）"
+  # 续期循环每一轮睡的都正好是 LEASE_RENEW_EVERY（30）秒：sleep 替身只数 10 秒的等待，续期间隔改成比租期还长
+  # 也不会有别的断言变红（复审 Important 1 实测过 150 秒）
+  assert_eq "$(LC_ALL=C grep -vx 10 "$ltmp/sleep.log" | sort -u)" "30" "㉒ 续期循环每一轮睡 30 秒"
   assert_eq "$(( $(attr "$ltmp/snap.json.end" "$LEASE" expires_at) - end_until ))" "86400" \
     "㉒ 续期时 expires_at 同步 = lease_until + 1 天（N4）"
   assert_eq "$(attr "$ltmp/snap.json.end" "$LEASE" holder)" "r1#7#A|$ARN_A" "㉒ 续期不改持有者"
   assert_eq "$([ "$(updates_ok)" -ge 3 ] && echo yes)" "yes" "㉒ 拿租约 + 至少一次续期 + 释放（共 $(updates_ok) 次写入）"
+  # 起续期循环时先立刻续一次（拿租约那次调用可能慢慢才成功，复审 Minor）：续期那一轮真睡 5 秒、引擎 1 秒，
+  # 这期间能出现的续期只有那「立刻一次」
+  reset_lease
+  assert_eq "$(run_lease 'r1#7#A' ENGINE_SECONDS=1 RENEW_REAL_SLEEP=5)" "0" "㉒ 前提：评审正常结束"
+  assert_eq "$(updates_ok)" "3" "㉒ 起续期循环时先立刻续一次（拿租约 + 立刻续期 + 释放）"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "0" "㉒ 带续期的评审结束后照样释放"
   # L6：退出之后续期循环已经停了——再等一会儿，表上不再有任何写入
   n_before=$(wc -l < "$ltmp/ddb.log"); /bin/sleep 0.6
@@ -937,6 +955,15 @@ STUB
   assert_contains "$(cat "$ltmp/err.r1#7#A")" "评审引擎超过总时长上限 1860 秒仍未结束，已终止" "㉒ 超过上限打一行固定消息"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "0" "㉒ 超过上限时照样释放租约"
   assert_eq "$(grep -c '^update-item r1#7#A ' "$ltmp/ddb.log" | tr -d ' ')" "0" "㉒ 超过上限时不置「已回写」标记"
+  # 137：30 秒内不理 TERM 被 KILL 与 OOM 同码——只有真的跑满了上限才打那行消息（复审 Minor）
+  reset_lease; echo 5000 > "$ltmp/clock"
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" TIMEOUT_EXPIRE_MATCH="$ltmp/engine" TIMEOUT_EXPIRE_RC=137 \
+               TIMEOUT_EXPIRE_ADVANCE=1890)" "137" "㉒ 跑满上限后被 KILL：137 原样透出"
+  assert_contains "$(cat "$ltmp/err.r1#7#A")" "评审引擎超过总时长上限 1860 秒仍未结束，已终止" "㉒ 跑满上限后被 KILL 也打那行消息"
+  reset_lease; echo 5000 > "$ltmp/clock"
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" TIMEOUT_EXPIRE_MATCH="$ltmp/engine" TIMEOUT_EXPIRE_RC=137)" \
+    "137" "㉒ 早早被 KILL（像 OOM）：137 原样透出"
+  assert_not_contains "$(cat "$ltmp/err.r1#7#A")" "总时长上限" "㉒ 没跑满上限的 137 不打上限那行消息（不把 OOM 说成超时）"
   # ls-remote 有上限（30 秒）：超时 = 核对未知 = 照常评审
   reset_lease; push_c2 "$c2"
   assert_eq "$(run_lease 'r1#7#A' TIMEOUT_EXPIRE_MATCH=ls-remote)" "0" "㉒ ls-remote 超时时照常评审"
