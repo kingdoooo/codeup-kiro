@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import uuid
 
 import botocore.exceptions
 
@@ -458,17 +459,28 @@ def claim(table, key, ttl_seconds):
     """条件写入抢锁。返回 False 表示这次投递是重复的（重放、approve、元数据更新）。
 
     抢锁必须在 RunTask 之前（N3）：webhook 共享密钥可重放，这是唯一的重放防护点。
+
+    条件失败**不一定**是别人抢的（issue 02）：PutItem 没有幂等 token，本调用的第一次尝试已经写进去、应答却超时，
+    SDK 的 standard 重试就会撞上自己刚写的记录。所以每次调用写一个新的 claim_id，并让条件失败带回旧项
+    （ALL_OLD）：旧项是本调用写的就算抢到。claim_id 刻意每次调用新生成——用 `X-Codeup-Delivery` 之类的
+    报文取值的话，同一投递的精确重放也会被认成「我的」，N3 就没了。
     """
+    claim_id = uuid.uuid4().hex
+    now = int(time.time())
     try:
         table.put_item(
-            Item={"pk": key, "expires_at": int(time.time()) + ttl_seconds,
-                  "claimed_at": int(time.time())},
-            ConditionExpression="attribute_not_exists(pk)")
+            Item={"pk": key, "expires_at": now + ttl_seconds, "claimed_at": now,
+                  "claim_id": claim_id},
+            ConditionExpression="attribute_not_exists(pk)",
+            ReturnValuesOnConditionCheckFailure="ALL_OLD")
         return True
     except botocore.exceptions.ClientError as exc:
         code = exc.response.get("Error", {}).get("Code")
         if code == "ConditionalCheckFailedException":
-            return False
+            # 旧项是线上格式（`{"S": …}`）：错误应答不经 resource 层反序列化（2026-09-29 沙箱实测）。
+            # 认不出的形状（没带旧项、升级前没有 claim_id 的记录）一律当成重复——失败方向是不派发。
+            old = exc.response.get("Item")
+            return isinstance(old, dict) and old.get("claim_id") == {"S": claim_id}
         raise  # 真 AWS 错误（限流等）绝不能吞成「重复投递」
 
 

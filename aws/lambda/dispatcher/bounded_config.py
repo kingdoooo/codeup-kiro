@@ -14,8 +14,10 @@ botocore 的缺省是连接 60 s、读 60 s、legacy 重试（Secrets Manager �
 RunTask 卡住时 15 s 后还剩 14 s 做释放锁与留痕。几个服务同时卡住时仍可能超时——那时整条出网
 链路多半已经断了，任何配置都救不回来。
 
-读超时不取得更小：DynamoDB 的 PutItem 在响应超时之后可能其实已经写进去了，重试时条件写会报
-「已存在」，抢锁就把这次投递当成重复。正常请求的延迟是毫秒级，5 s 只会切断真正卡住的连接。
+重试会重发非幂等写入（issue 02），两处各有自己的去重：RunTask 的 clientToken 由 SDK 每次调用生成一次、
+重试复用，ECS 按它返回原来那个任务；抢锁的 PutItem 已提交、应答却超时时，重试撞上的是本调用自己写的
+记录，handler.claim 靠 claim_id + ALL_OLD 认出来。读超时仍不取得更小：每多一次这种重试就多等一轮，
+而正常请求的延迟是毫秒级，5 s 只会切断真正卡住的连接。
 
 `total_max_attempts` 而不是 `max_attempts`：写在 Config 对象里的 max_attempts **不含**首次请求
 （boto3 文档 guide/retries.html），total_max_attempts 才是「一共几次」。

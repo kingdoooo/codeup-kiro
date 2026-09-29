@@ -1385,6 +1385,87 @@ def test_the_dispatchers_ecs_and_dynamodb_clients_are_built_with_the_bounded_con
     assert boto3.client("ecs").meta.config.read_timeout == 60
 
 
+# ── issue 02：有界重试下的非幂等写入 ─────────────────────────────────────────────────────
+# 「已提交、应答丢了」之后的重试发生在 botocore 里面，Mock 的 side_effect 证明不了它（替掉的正是 botocore）。
+# 所以这几条走生产 _clients() 建的真客户端（真的有界超时 + standard 重试），只把服务端换成本地替身
+# （fake_aws_http.py：真的求值条件、按 clientToken 去重），读超时也是生产那个 5 s——每条慢用例约 6 s。
+import fake_aws_http  # noqa: E402
+
+
+@pytest.fixture
+def fake_aws(monkeypatch):
+    import boto3
+    import bounded_config
+    _fake_aws_env(monkeypatch)
+    for var in ("AWS_ENDPOINT_URL_DYNAMODB", "AWS_ENDPOINT_URL_ECS", "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"):
+        monkeypatch.delenv(var, raising=False)
+    srv = fake_aws_http.FakeAws(stall_seconds=bounded_config.READ_TIMEOUT + 1).start()
+    monkeypatch.setenv("AWS_ENDPOINT_URL", srv.url)
+    monkeypatch.setenv("LOCK_TABLE", "lock")
+    monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)   # 让缺省 session 按上面这组环境变量重建
+    yield srv
+    srv.stop()
+
+
+def test_a_claim_whose_first_attempt_committed_but_timed_out_still_dispatches(fake_aws):
+    # 抢锁的 PutItem 已经写进去、应答却超过读超时 → standard 重试 → 条件失败。以前这就判成 duplicate：
+    # 不拉起任务、不发评论、锁占 24 h（I10 静默）。现在旧项是本次调用自己写的，算抢到。
+    ecs, table = handler_mod._clients({})
+    fake_aws.stall("PutItem")
+    with mock.patch.object(handler_mod.codeup_min, "post_comment") as post:
+        r = handler_mod.dispatch(ecs, table, _full_cfg(), F)
+    assert [op for op, _ in fake_aws.requests].count("PutItem") == 2, "前提：抢锁真的超时重试了一次"
+    assert_alb_response(r, 200, "dispatched")
+    assert len(fake_aws.launched) == 1
+    post.assert_not_called()
+
+
+def test_a_claim_record_written_by_another_call_is_still_a_duplicate(fake_aws):
+    # N3 不变：别的调用（重放、Codeup 重投）写下的记录照旧挡住。替身真的求值条件——删掉 ConditionExpression、
+    # 或者「条件失败一律算抢到」、或者 claim_id 每次都一样，这条都会红。
+    _, table = handler_mod._clients({})
+    assert handler_mod.claim(table, "r1#7#abc123", 86400) is True
+    assert handler_mod.claim(table, "r1#7#abc123", 86400) is False
+    assert all(b.get("ConditionExpression") == "attribute_not_exists(pk)"
+               for op, b in fake_aws.requests if op == "PutItem")
+
+
+def test_a_claim_record_from_before_the_upgrade_is_a_duplicate(fake_aws):
+    # 升级前写的记录没有 claim_id：按别人的处理，不能因为「旧项里没有 id」就放行
+    fake_aws.items["r1#7#abc123"] = {"pk": {"S": "r1#7#abc123"}, "expires_at": {"N": "99999999999"}}
+    _, table = handler_mod._clients({})
+    assert handler_mod.claim(table, "r1#7#abc123", 86400) is False
+
+
+@pytest.mark.parametrize("old", [
+    None,                                   # 应答里没有旧项（没请求 ALL_OLD，或服务端没给）
+    {"pk": {"S": "k"}},                     # 旧项没有 claim_id
+    {"pk": {"S": "k"}, "claim_id": {"N": "1"}},
+    {"pk": {"S": "k"}, "claim_id": "not-wire-format"},
+])
+def test_a_conditional_failure_whose_old_item_is_not_recognisably_ours_is_a_duplicate(old):
+    # 失败方向（C2）：认不出旧项就当成重复，绝不当成「抢到了」而重复派发
+    table = mock.Mock()
+    resp = {"Error": {"Code": "ConditionalCheckFailedException"}}
+    if old is not None:
+        resp["Item"] = old
+    table.put_item.side_effect = bexc.ClientError(resp, "PutItem")
+    assert handler_mod.claim(table, "k", 86400) is False
+
+
+def test_a_run_task_whose_first_attempt_launched_but_timed_out_is_retried_with_the_same_client_token(fake_aws):
+    # 契约测试（issue 02 核实结论）：RunTask 的 clientToken 由 SDK 每次调用生成一次，同一调用内部的重试复用它，
+    # ECS 按它去重——所以「慢应答 → 重试 → 第二个任务」不会发生，调度器不需要自己传 token。这条守的是将来
+    # 有人在 run_task 外面手写重试（每次新调用 = 新 token = 新任务）。
+    ecs, _ = handler_mod._clients({})
+    fake_aws.stall("RunTask")
+    arn = handler_mod.run_task(ecs, _full_cfg(), F, "r1#7#abc123")
+    runs = [b for op, b in fake_aws.requests if op == "RunTask"]
+    assert len(runs) == 2, "前提：RunTask 真的超时重试了一次"
+    assert runs[0].get("clientToken") and runs[0]["clientToken"] == runs[1]["clientToken"]
+    assert fake_aws.launched == [arn]
+
+
 # ── 复审 s3 M-1：本该评审的事件缺字段时必须留痕（以前三条路径一行日志都没有）──────────────
 @pytest.mark.parametrize("drop", [
     lambda b: b["object_attributes"]["last_commit"].pop("id"),
