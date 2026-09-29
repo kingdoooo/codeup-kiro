@@ -478,9 +478,11 @@ def claim(table, key, ttl_seconds):
         code = exc.response.get("Error", {}).get("Code")
         if code == "ConditionalCheckFailedException":
             # 旧项是线上格式（`{"S": …}`）：错误应答不经 resource 层反序列化（2026-09-29 沙箱实测）。
-            # 认不出的形状（没带旧项、升级前没有 claim_id 的记录）一律当成重复——失败方向是不派发。
+            # 也认反序列化后的裸字符串：哪个 boto3 版本改了这一点时，修复不至于静默失效。两种都只认
+            # 本调用刚生成的 id，所以放宽形状不放宽 C1。认不出的（没带旧项、升级前没有 claim_id 的记录）
+            # 一律当成重复——失败方向是不派发。
             old = exc.response.get("Item")
-            return isinstance(old, dict) and old.get("claim_id") == {"S": claim_id}
+            return isinstance(old, dict) and old.get("claim_id") in ({"S": claim_id}, claim_id)
         raise  # 真 AWS 错误（限流等）绝不能吞成「重复投递」
 
 

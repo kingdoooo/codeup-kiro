@@ -1397,8 +1397,10 @@ def fake_aws(monkeypatch):
     import boto3
     import bounded_config
     _fake_aws_env(monkeypatch)
-    for var in ("AWS_ENDPOINT_URL_DYNAMODB", "AWS_ENDPOINT_URL_ECS", "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS"):
+    for var in ("AWS_ENDPOINT_URL_DYNAMODB", "AWS_ENDPOINT_URL_ECS", "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS",
+                "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")   # 本机替身绝不能经代理（经代理只会红，但红得莫名其妙）
     srv = fake_aws_http.FakeAws(stall_seconds=bounded_config.READ_TIMEOUT + 1).start()
     monkeypatch.setenv("AWS_ENDPOINT_URL", srv.url)
     monkeypatch.setenv("LOCK_TABLE", "lock")
@@ -1441,7 +1443,7 @@ def test_a_claim_record_from_before_the_upgrade_is_a_duplicate(fake_aws):
     None,                                   # 应答里没有旧项（没请求 ALL_OLD，或服务端没给）
     {"pk": {"S": "k"}},                     # 旧项没有 claim_id
     {"pk": {"S": "k"}, "claim_id": {"N": "1"}},
-    {"pk": {"S": "k"}, "claim_id": "not-wire-format"},
+    {"pk": {"S": "k"}, "claim_id": "someone-else"},    # 反序列化后的形状，但不是本调用的 id
 ])
 def test_a_conditional_failure_whose_old_item_is_not_recognisably_ours_is_a_duplicate(old):
     # 失败方向（C2）：认不出旧项就当成重复，绝不当成「抢到了」而重复派发
@@ -1451,6 +1453,20 @@ def test_a_conditional_failure_whose_old_item_is_not_recognisably_ours_is_a_dupl
         resp["Item"] = old
     table.put_item.side_effect = bexc.ClientError(resp, "PutItem")
     assert handler_mod.claim(table, "k", 86400) is False
+
+
+@pytest.mark.parametrize("wrap", [lambda i: {"S": i}, lambda i: i], ids=["wire", "deserialized"])
+def test_a_conditional_failure_on_our_own_record_counts_as_claimed_in_either_item_shape(wrap):
+    # 真 DynamoDB + 当前 boto3 给的是线上格式（上面的替身用例走的就是它）；反序列化后的裸字符串也要认，
+    # 否则哪天运行时的 boto3 改了错误应答的处理，issue 02 的修复就静默失效（失败方向安全，但修复没了）。
+    table = mock.Mock()
+    def put(**kw):
+        raise bexc.ClientError({"Error": {"Code": "ConditionalCheckFailedException"},
+                                "Item": {"pk": {"S": "k"}, "claim_id": wrap(kw["Item"]["claim_id"])}},
+                               "PutItem")
+    table.put_item.side_effect = put
+    assert handler_mod.claim(table, "k", 86400) is True
+    assert table.put_item.call_args.kwargs["ReturnValuesOnConditionCheckFailure"] == "ALL_OLD"
 
 
 def test_a_run_task_whose_first_attempt_launched_but_timed_out_is_retried_with_the_same_client_token(fake_aws):
