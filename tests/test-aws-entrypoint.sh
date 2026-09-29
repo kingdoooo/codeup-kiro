@@ -769,8 +769,11 @@ STUB
     "㉒ 续期失败一次不影响评审"
   assert_contains "$(cat "$ltmp/err.r1#7#A")" "续期 MR 租约失败（code=ProvisionedThroughputExceededException），下一轮再试" \
     "㉒ 续期失败打一行带错误码的消息"
-  assert_eq "$(awk -v k="$LEASE" '$2==k && $3=="injected-error"{f=1; next} f && $2==k && $3=="ok"{print "yes"; exit}' "$ltmp/ddb.log")" \
-    "yes" "㉒ 续期失败之后接着续（失败之后还有成功的写入）"
+  # 数「失败之后的成功写入」至少 2 次：释放本身也是一次成功的 update-item，只数 1 次的话「失败一次就停止续期」
+  # 照样通过（变异 N4 在这里假绿过一次）。
+  after_fail=$(awk -v k="$LEASE" '$2==k && $3=="injected-error"{f=1; next} f && $2==k && $3=="ok"{n++} END{print n+0}' "$ltmp/ddb.log")
+  assert_eq "$([ "$after_fail" -ge 2 ] && echo yes)" "yes" \
+    "㉒ 续期失败之后接着续：失败之后还有 ${after_fail} 次成功写入（至少一次续期 + 释放）"
 
   # L1：第二个任务在第一个持有期间必须等，第一个结束（释放）之后才轮到它——两个真的并发进程
   reset_lease
