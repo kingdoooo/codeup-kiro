@@ -760,6 +760,9 @@ STUB
   n_before=$(wc -l < "$ltmp/ddb.log"); /bin/sleep 0.6
   assert_eq "$(wc -l < "$ltmp/ddb.log")" "$n_before" "㉒ L6：退出之后不再有续期写入（续期循环没有泄漏）"
 
+  # 续期调用自带短的 CLI 超时（静态）：CLI 缺省连接/读各 60 秒、共 3 次，一次续期就可能比 120 秒的租期还长
+  renew_fn=$(awk '/^lease_renew_loop\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRY")
+  assert_contains "$renew_fn" "update-item --cli-connect-timeout 2 --cli-read-timeout 5" "㉒ 续期调用带短的 CLI 超时"
   # 续期遇到别的错误（限流）：打代号、下一轮接着续，不停。第 1 次写是拿租约，第 2 次是第一次续期
   reset_lease
   assert_eq "$(run_lease 'r1#7#A' FAKE_DDB_FAIL_NTH=2 ENGINE_SECONDS=1 RENEW_REAL_SLEEP=0.1)" "0" \
@@ -879,6 +882,8 @@ STUB
   assert_eq "$(run_lease 'r1#7#A' ENGINE_HOOK="$steal" ENGINE_SECONDS=1 RENEW_REAL_SLEEP=0.1)" "0" \
     "㉒ 前提：被接管的任务自己正常结束"
   assert_contains "$(cat "$ltmp/err.r1#7#A")" "MR 租约已被别的任务接管，停止续期" "㉒ 续期发现被接管时打一行并停止续期"
+  assert_eq "$(grep -c 'MR 租约已被别的任务接管，停止续期' "$ltmp/err.r1#7#A" | tr -d ' ')" "1" \
+    "㉒ 被接管之后真的停止续期（引擎还跑了约 1 秒、续期一轮 0.1 秒，没停的话这一行会打很多次）"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#new" "㉒ L3：退出时不改别人的持有"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "77777777777" \
     "㉒ L3：退出时绝不放掉别人的租约（lease_until 原样）"
