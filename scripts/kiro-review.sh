@@ -77,6 +77,8 @@ source "${SCRIPT_DIR}/lib/diff-compress.sh"
 source "${SCRIPT_DIR}/lib/kiro-agent.sh"
 source "${SCRIPT_DIR}/lib/isolation.sh"
 source "${SCRIPT_DIR}/lib/review-render.sh"
+# git 网络调用遇到 Codeup 限流（HTTP 429）时有界重试（issue 03），只重试 429、别的失败原样返回
+source "${SCRIPT_DIR}/lib/git-retry.sh"
 
 KIRO_TIMEOUT="${KIRO_TIMEOUT:-900}"
 # 评论字节上限。必须校验：非整数会让下面的 `-gt` 比较在 set -e 下直接崩掉，而 0 会让每条评论
@@ -432,7 +434,8 @@ inline_classify_to() {
     # 一样解析不出，而那种情形永远不会自愈（没有新推送去触发下一轮）。所以先加深再判。
     if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
       log "注意：提交 ${raw:0:12} 在本地解析不出，而这是一个浅克隆——先加深再判定（否则 graft 边界之下的旧提交会被误报成「新推送」）"
-      git fetch --unshallow --quiet 2>/dev/null || git fetch --deepen 100 --quiet 2>/dev/null || true
+      retry_git_429 git fetch --unshallow --quiet 2>/dev/null \
+        || retry_git_429 git fetch --deepen 100 --quiet 2>/dev/null || true
       if INLINE_TO_NORM=$(inline_resolve_commit "$raw"); then
         log "加深后解析成功：${INLINE_TO_NORM:0:12}"
       else
@@ -1431,11 +1434,11 @@ if [[ "$INLINE_COMMENT" == "1" ]]; then
 fi
 
 # --- 4. 生成 diff（merge-base 三点比较；浅克隆自动加深）---
-git fetch -q origin "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}" \
+retry_git_429 git fetch -q origin "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}" \
   || die_review "无法 fetch 目标分支" "$TARGET_BRANCH"   # 分支名是 MR 作者可控的不受信取值，走 die_review 的第二个参数（日志里掩码）
 if ! BASE=$(git merge-base "origin/${TARGET_BRANCH}" HEAD 2>/dev/null); then
   log "浅克隆缺少历史，尝试 --unshallow……"
-  git fetch -q --unshallow origin 2>/dev/null || true
+  retry_git_429 git fetch -q --unshallow origin 2>/dev/null || true
   BASE=$(git merge-base "origin/${TARGET_BRANCH}" HEAD) || die_review "无法计算 merge-base"
 fi
 # --- 4.0 变更文件的 Git 属性（CodeX 2026-09-09 P0-1）---

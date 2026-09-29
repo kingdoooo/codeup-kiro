@@ -685,6 +685,7 @@ EOL 公告;遇到这类失败别照「回到已探测版本」的常规 runbook(
 ## 10. 故障排查
 | 现象 | 排查 |
 |---|---|
+| 日志里有 `git: Codeup 限流（HTTP 429），N 秒后重试`，或评审失败于「无法 fetch 目标分支」且日志里有 `The requested URL returned error: 429` / `请求过于频繁` | Codeup 对 git HTTP 限流。评审脚本取目标分支（及浅克隆加深历史）时遇到 429 会自动退避重试（10、20、40 秒，最多 4 次），只重试 429；仍失败说明同一组织短时间内 git 请求太多（多条流水线同时跑），稍后重跑流水线即可 |
 | MR 提交后流水线未触发 | Codeup 库 Webhooks 页无 Flow 条目 → 服务连接无自动配置权限，手动配置；确认触发事件勾选「合并请求新建/更新」；YAML 模式确认 triggerEvents 已配置 |
 | 报错「缺少依赖：timeout/gtimeout」 | 执行器安装 GNU coreutils（超时是强制依赖，防 Kiro 挂起占死流水线） |
 | kiro-cli 安装失败 | 网络不通 → 第 6/7 节 |

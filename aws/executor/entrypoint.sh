@@ -103,7 +103,10 @@ git_err_tail() {
 # 指到 MR 头就是 diff 为空、静默漏评，与下面 `-B` 那个坑同一类。`--no-tags` 还会写下
 # `remote.origin.tagOpt=--no-tags`，引擎自己那次 fetch 也就不会顺带取标签。tests/test-aws-entrypoint.sh
 # 的 ⑲ 有一个服务端带这种标签的变体。
-/usr/bin/git clone --no-tags "$repo_url" \
+# Codeup 的 git HTTP 限流（429）有界重试（issue 03，scripts/lib/git-retry.sh）：clone、补取源分支、ls-remote 都经它，
+# 只重试 429（10/20/40 秒）；别的失败原样立刻返回。重试时的「N 秒后重试」提示与最后一次的报错一起进 GIT_ERR。
+source "$PKG/scripts/lib/git-retry.sh"
+retry_git_429 /usr/bin/git clone --no-tags "$repo_url" \
   "$WORKROOT/business" >/dev/null 2>"$GIT_ERR" \
   || { echo "clone 业务库失败（凭证、网络或仓库权限）" >&2; git_err_tail; exit 91; }
 
@@ -128,21 +131,15 @@ git_err_tail() {
 [[ -z "$MR_TARGET_BRANCH" ]] || [[ "$MR_TARGET_BRANCH" != -* \
    && ! "$MR_TARGET_BRANCH" =~ [[:space:]] && ! "$MR_TARGET_BRANCH" =~ [[:cntrl:]] ]] \
   || { echo "MR_TARGET_BRANCH 以 - 开头或含空白/控制字符，拒绝评审（取值不回显）" >&2; exit 92; }
-# 目标分支用**带前缀的 refspec** 取（与下面补取源分支同一种写法）：`+refs/heads/X:…` 不可能被 git
-# 当成选项，裸写 `"$MR_TARGET_BRANCH"` 时以 `-` 开头的取值就在选项的位置上（复审 O-5 / s4 M-A）。
-# 取不到不致命（引擎第 4 步自己还会再取一次），但把 git 的报错留在日志里：那时引擎的「无法 fetch
-# 目标分支」往往就是同一个原因。
-if [[ -n "$MR_TARGET_BRANCH" ]] && ! /usr/bin/git -C "$WORKROOT/business" fetch --no-tags origin \
-     "+refs/heads/${MR_TARGET_BRANCH}:refs/remotes/origin/${MR_TARGET_BRANCH}" \
-     >/dev/null 2>"$GIT_ERR"; then
-  echo "取目标分支失败（不致命，引擎会再取一次；取值不回显）" >&2; git_err_tail
-fi
+# 这里**不再**单独取一次目标分支（issue 03 G4）：全量 clone 已经带了 `refs/remotes/origin/<目标>`，引擎第 4 步
+# 自己还会用带前缀的 refspec 再取一次（并在取不到时给出「无法 fetch 目标分支」）——多一次往返只会在 Codeup 限流时
+# 多撞一次 429。形状检查（上面那道 92）照旧：MR_TARGET_BRANCH 随后会原样交给引擎。
 # 全量 clone 后 HEAD_SHA 通常已在本地；不在（评审排队期间源分支又被推过）就再取一次源分支。
 # 这次取的是 origin，也就是目标仓库：跨 fork 的 MR 的提交不在这里，将来要支持时得另取 fork 的地址。
 # 取不到不在这里判死：下面的 checkout 会给出同一个结论（报错尾巴先留在日志里）。
 if ! /usr/bin/git -C "$WORKROOT/business" rev-parse --verify --quiet "${HEAD_SHA}^{commit}" \
      >/dev/null 2>&1 \
-   && ! /usr/bin/git -C "$WORKROOT/business" fetch --no-tags origin \
+   && ! retry_git_429 /usr/bin/git -C "$WORKROOT/business" fetch --no-tags origin \
        "+refs/heads/${CI_COMMIT_REF_NAME}:refs/remotes/origin/${CI_COMMIT_REF_NAME}" \
        >/dev/null 2>"$GIT_ERR"; then
   echo "补取源分支失败（取值不回显）" >&2; git_err_tail
@@ -272,12 +269,13 @@ lease_release() {
 # 评审最新提交。新提交**没有**抢锁记录（那次投递丢了，比如撞上 503）时照常评自己的提交——
 # 否则最新的推送就没人评了。ls-remote 或读抢锁记录失败时同样照常评审：退化成加租约之前的行为。
 # ls-remote 经上面导出的凭证 helper 访问 origin（即主机检查过的那个地址），不需要任何新 API；
-# 包在 30 秒上限里（issue 04：挂住的连接会让任务永远不结束），超时同样算「核对未知」。
+# 包在 30 秒上限里（issue 04：挂住的连接会让任务永远不结束），超时同样算「核对未知」；撞上 429 按 issue 03 重试——
+# 限流下核对失败会让本任务照常评审旧提交，那正是会把汇总评论改回旧结论的场景。
 # 新提交的抢锁键是调度器 lock_key() 对 MR 事件的形状（仓库#MR#提交，不带评论 id）；
 # aws/tests/test_lock_key_contract.py 用真实的 lock_key() 核对这一行，两边不会各写各的。
 head_check_superseded() {
   local ls_out tip="" ls_sha ls_ref tip_key claim_rc=0 claim_out claim_pk
-  ls_out=$(/usr/bin/timeout 30 /usr/bin/git -C "$WORKROOT/business" ls-remote origin \
+  ls_out=$(retry_git_429 /usr/bin/timeout 30 /usr/bin/git -C "$WORKROOT/business" ls-remote origin \
            "refs/heads/${CI_COMMIT_REF_NAME}" 2>/dev/null) || ls_out=""
   while IFS=$'\t' read -r ls_sha ls_ref; do
     if [[ "$ls_ref" == "refs/heads/${CI_COMMIT_REF_NAME}" ]]; then tip="$ls_sha"; fi

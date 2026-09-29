@@ -4,6 +4,9 @@ cd "$(dirname "$0")"
 . ./helpers.sh
 
 ENTRY=../aws/executor/entrypoint.sh
+# 抽出来跑的几段（检出段、clone 那一行、租约段）都要用 retry_git_429（issue 03）：生产里它由 clone 之前那一行
+# `source "$PKG/scripts/lib/git-retry.sh"` 加载，这里垫同一个文件。
+RETRY_SRC="source \"$(cd .. && pwd)/scripts/lib/git-retry.sh\""
 YAML=../pipeline/flow-pipeline.yaml
 
 # 找 entrypoint 里第一处匹配的行号，**只看非注释行**。注释里正当地提到同一个词（比如解释
@@ -177,7 +180,7 @@ assert_eq "$([ -n "$default_line" ] && [ -n "$first_use" ] && [ "$default_line" 
 host_line=$(entry_code_line '拒绝 clone')
 # 锚点只认「这是 clone 那一行」，不连带 `--no-tags`：连带的话删掉 `--no-tags` 会在这里以「主机检查必须
 # 排在 clone 之前」这种不相干的理由红（复审 s6），⑲ 的标签变体才是守 `--no-tags` 的那一条。
-clone_line=$(entry_code_line '^/usr/bin/git clone ')
+clone_line=$(entry_code_line '^retry_git_429 /usr/bin/git clone ')
 assert_eq "$([ -n "$host_line" ] && [ -n "$clone_line" ] && [ "$host_line" -lt "$clone_line" ] && echo yes)" \
   "yes" "I-2：主机检查必须存在且排在 clone 之前"
 # 凭证经**环境变量**下发给所有子进程（Task 14 验收阻塞：评审引擎自己也要 git fetch，`-c` 只作用于
@@ -284,6 +287,7 @@ if [[ -x /usr/bin/git ]]; then
   assert_eq "$tb_default" ': "${MR_TARGET_BRANCH:=}"' "⑰ 抽到了 MR_TARGET_BRANCH 的缺省"
   ck_block="$tb_default
 $err_block
+$RETRY_SRC
 $(awk '/^# ── 检出 MR 的那个提交/{f=1} /^# ── 按 MR 的租约/{exit} f{print}' "$ENTRY")"
   # 只验证「抽到了」，**不钉具体写法**：钉写法的话，任何改动都先在这里红，后面真正的行为断言
   # （⑲ 的引用遮蔽复现）就跑不到了——变异测试会得出「守卫有用」的错误结论。
@@ -368,7 +372,8 @@ $(awk '/^# ── 检出 MR 的那个提交/{f=1} /^# ── 按 MR 的租约/{e
   # 不在这里另写一份：有人删掉 `--no-tags`，这里先红。
   # 先跑行为、后钉写法（与 ⑰ 同一条理由）：先钉写法的话删掉 `--no-tags` 在这里就红，下面真正的
   # 遮蔽复现跑不到，变异测试得出「守卫有用」的错误结论。
-  clone_flags=$(LC_ALL=C grep -oE '^/usr/bin/git clone( --[a-z-]+)*' "$ENTRY" | sed -E 's#^/usr/bin/git clone ?##')
+  clone_flags=$(LC_ALL=C grep -oE '^retry_git_429 /usr/bin/git clone( --[a-z-]+)*' "$ENTRY" \
+                | sed -E 's#^retry_git_429 /usr/bin/git clone ?##')
   rm -rf "$stmp/business"
   gitq2 -C "$stmp/work" tag "origin/${sdef}" "$s_mr_head"
   gitq2 -C "$stmp/work" push -q "$stmp/bare" "refs/tags/origin/${sdef}"
@@ -523,10 +528,11 @@ git_err_tail" 2>&1)" "" "㉓ 没有报错时什么都不打"
 
   # clone 失败（91）时真的带上 git 的报错：抽 clone 那一行原样跑，地址换成一个不存在的本地路径
   #（主机检查是另一段，⑮ 单独测）
-  clone_block=$(awk '/^\/usr\/bin\/git clone /{f=1} f{print} f&&/exit 91; }$/{exit}' "$ENTRY")
+  clone_block=$(awk '/^retry_git_429 \/usr\/bin\/git clone /{f=1} f{print} f&&/exit 91; }$/{exit}' "$ENTRY")
   assert_contains "$clone_block" 'exit 91' "㉓ 抽到了 clone 那一行"
   out=$(WORKROOT="$gtmp" repo_url="$gtmp/no-such-repo" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
         /bin/bash -c "set -euo pipefail; $err_block
+$RETRY_SRC
 $clone_block" 2>&1) && rc=0 || rc=$?
   assert_eq "$rc" "91" "㉓ clone 失败退出 91"
   assert_contains "$out" "clone 业务库失败（凭证、网络或仓库权限）" "㉓ 固定消息还在"
@@ -562,33 +568,21 @@ $clone_block" 2>&1) && rc=0 || rc=$?
   done
   # 空串是「没给目标分支」（可选项）：放行，不取
   assert_eq "$(run_ck "" | cut -d'|' -f1)" "0" "㉓ MR_TARGET_BRANCH 为空时放行（可选项）"
-  # 取的是真的目标分支：clone 之后默认分支又前进了一步，检出段跑完 refs/remotes/origin/<目标> 必须跟上
+  # G4（issue 03）：检出段**不再**取目标分支——clone 之后目标分支又前进了一步，检出段跑完 refs/remotes/origin/<目标>
+  # 仍是 clone 时的那个提交（跟上它是引擎第 4 步自己那次 fetch 的事），少一次往返就少撞一次 Codeup 的 429
   rm -rf "$gtmp/business"; tgit clone -q --no-tags "$gtmp/bare" "$gtmp/business"
+  t_old=$(tgit -C "$gtmp/business" rev-parse "refs/remotes/origin/$tdef")
   tgit -C "$gtmp/work" commit -q --allow-empty -m "目标分支在 clone 之后又前进了"
-  t_new=$(tgit -C "$gtmp/work" rev-parse HEAD)
   tgit -C "$gtmp/work" push -q "$gtmp/bare" "$tdef"
   WORKROOT="$gtmp" HEAD_SHA="$t_head" CI_COMMIT_REF_NAME=mr-src MR_TARGET_BRANCH="$tdef" \
     GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     /bin/bash -c "set -euo pipefail; $ck_block" >/dev/null 2>&1
-  assert_eq "$(tgit -C "$gtmp/business" rev-parse "refs/remotes/origin/$tdef")" "$t_new" \
-    "㉓ 目标分支按 +refs/heads/X:refs/remotes/origin/X 取到了"
-  # 带前缀的 refspec 是承重的，不只是形状检查的备份：单独跑取目标分支那一段、绕过上面的形状检查，
-  # 给一个以 `-` 开头的值。裸写 `"$MR_TARGET_BRANCH"` 时它落在选项位置，本地传输下 `--upload-pack`
-  # 真的会执行（https 传输下没有这个效果，但 refspec 形式让它在任何传输下都只是一个取不到的 ref 名）。
-  tf_block=$(awk '/^if \[\[ -n "\$MR_TARGET_BRANCH" \]\]/{f=1} f{print} f&&/^fi$/{exit}' "$ENTRY")
-  assert_contains "$tf_block" 'fetch --no-tags origin' "㉓ 抽到了取目标分支那一段"
-  rm -rf "$gtmp/business"; tgit clone -q --no-tags "$gtmp/bare" "$gtmp/business"
-  WORKROOT="$gtmp" MR_TARGET_BRANCH="--upload-pack=touch $gtmp/pwned;" \
-    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-    /bin/bash -c "set -euo pipefail; $err_block
-$tf_block" >/dev/null 2>&1 || true
-  assert_eq "$([ -e "$gtmp/pwned" ] && echo EXECUTED || echo safe)" "safe" \
-    "㉓ 以 - 开头的目标分支即使绕过形状检查也不会被 git 当成选项"
-  # 目标分支在服务端不存在：不致命（引擎会再取一次），但留一行固定消息 + git 的报错
+  assert_eq "$(tgit -C "$gtmp/business" rev-parse "refs/remotes/origin/$tdef")" "$t_old" \
+    "㉓ G4：检出段不取目标分支（refs/remotes/origin/<目标> 仍是 clone 时的值）"
+  # 目标分支在服务端不存在：检出段不取它，所以既不失败也不留「取目标分支失败」那一行（引擎第 4 步会报）
   got=$(run_ck "no-such-branch")
-  assert_eq "${got%%|*}" "0" "㉓ 取不到目标分支不致命"
-  assert_contains "$got" "取目标分支失败（不致命，引擎会再取一次；取值不回显）" "㉓ 取不到目标分支时留一行"
-  assert_contains "$got" "  git: fatal:" "㉓ 取不到目标分支时带 git 的报错"
+  assert_eq "${got%%|*}" "0" "㉓ 目标分支在服务端不存在时检出段照常通过"
+  assert_not_contains "$got" "取目标分支失败" "㉓ G4：检出段不再有「取目标分支失败」那一行"
   # 检出失败（92）时也带 git 的报错；补取源分支失败时同样留痕
   out=$(rm -rf "$gtmp/business"; tgit clone -q --no-tags "$gtmp/bare" "$gtmp/business"
         WORKROOT="$gtmp" HEAD_SHA=0000000000000000000000000000000000000000 CI_COMMIT_REF_NAME=mr-src \
@@ -607,8 +601,8 @@ else
 fi
 assert_not_contains "$code_lines" 'origin "$MR_TARGET_BRANCH"' \
   "㉓ 目标分支不得再以裸值出现在 fetch 的参数位置（以 - 开头就是选项）"
-assert_contains "$code_lines" '"+refs/heads/${MR_TARGET_BRANCH}:refs/remotes/origin/${MR_TARGET_BRANCH}"' \
-  "㉓ 目标分支用带前缀的 refspec 取"
+assert_not_contains "$code_lines" 'refs/remotes/origin/${MR_TARGET_BRANCH}' \
+  "㉓ G4：入口脚本不再单独取目标分支（引擎第 4 步用带前缀的 refspec 取）"
 
 # ㉒ 按 MR 的租约（spec I6 ②，全分支复审 s3 I-1；Task 14 验收 C2 在真实环境证实了同一 MR 两次推送并发、
 #   丢失更新）。行为断言：把租约那一段与「调引擎 + 收尾」那一段原样抽出来跑，只把 aws / date / sleep /
@@ -671,7 +665,7 @@ case "$url" in "$ECS_CONTAINER_METADATA_URI_V4/task") ;; *) exit 22 ;; esac
 printf '%s' "$FAKE_TASK_META"
 STUB
   chmod +x "$ltmp/aws" "$ltmp/date" "$ltmp/sleep" "$ltmp/engine" "$ltmp/curl" "$ltmp/timeout"
-  run_block=$(printf '%s\n%s\n' "$lease_block" "$tail_block" \
+  run_block=$(printf '%s\n%s\n%s\n' "$RETRY_SRC" "$lease_block" "$tail_block" \
     | sed -e "s#/usr/local/bin/aws#$ltmp/aws#g" -e "s#/bin/date#$ltmp/date#g" \
           -e "s#/bin/sleep#$ltmp/sleep#g" -e "s#/usr/bin/curl#$ltmp/curl#g" \
           -e "s#/usr/bin/timeout#$ltmp/timeout#g" \
@@ -1002,7 +996,7 @@ assert_eq "$(printf '%s\n' "$curl_code" | LC_ALL=C grep -c -- '--max-time 10')" 
 #   提到同一个词就会让「A 必须排在 B 之前」恒真——③ 的 call_line 已经踩过一次（注释里写了
 #   scripts/kiro-review.sh，于是取到注释行 65 而不是真正的调用行）。这里把每个模式都过一遍，
 #   免得下一处顺序断言又各自踩。
-for pat in 'kiro-review\.sh' 'KIRO_IMAGE_DIGESTS' '^/usr/bin/git clone ' '拒绝 clone' \
+for pat in 'kiro-review\.sh' 'KIRO_IMAGE_DIGESTS' '^retry_git_429 /usr/bin/git clone ' '拒绝 clone' \
            '^export GIT_CONFIG_VALUE_0=' 'checkout -q --detach' \
            '\[\[ -n "\$\{HEAD_SHA:-\}" \]\]' ': "\$\{MR_TARGET_BRANCH:=\}"' \
            '\[\[ "\$head_now" == "\$HEAD_SHA" \]\]' '^while :; do' '^trap lease_exit EXIT' \
