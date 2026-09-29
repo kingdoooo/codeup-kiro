@@ -626,12 +626,24 @@ if [[ -x /usr/bin/git && -x /usr/bin/jq ]] && command -v python3 >/dev/null; the
 #!/bin/sh
 if [ -n "${FAKE_CLOCK:-}" ]; then cat "$FAKE_CLOCK"; else exec /bin/date "$@"; fi
 STUB
+  # sleep 替身：等待租约那一轮是 10 秒，续期循环那一轮是 30 秒（issue 04）。续期那一轮默认真睡 0.2 秒
+  # （RENEW_REAL_SLEEP），否则续期循环会在引擎替身运行的那一小会儿里空转几十次。
   cat > "$ltmp/sleep" <<'STUB'
 #!/bin/sh
 echo "$1" >> "$SLEEP_LOG"
 if [ -n "${FAKE_CLOCK:-}" ]; then echo $(( $(cat "$FAKE_CLOCK") + $1 )) > "$FAKE_CLOCK"; fi
 if [ -n "${SLEEP_HOOK:-}" ]; then sh -c "$SLEEP_HOOK"; fi
+if [ "$1" = 30 ]; then exec /bin/sleep "${RENEW_REAL_SLEEP:-0.2}"; fi
 exec /bin/sleep "${REAL_SLEEP:-0}"
+STUB
+  # timeout 替身：记下参数；命令行里含 TIMEOUT_EXPIRE_MATCH 时不跑命令、按 GNU timeout 的超时退出 124
+  cat > "$ltmp/timeout" <<'STUB'
+#!/bin/sh
+echo "$*" >> "$TIMEOUT_LOG"
+while [ $# -gt 0 ]; do case "$1" in -k) shift 2 ;; -*) shift ;; *) break ;; esac; done
+shift
+case "$*" in *"${TIMEOUT_EXPIRE_MATCH:-<never>}"*) exit 124 ;; esac
+exec "$@"
 STUB
   cat > "$ltmp/engine" <<'STUB'
 #!/bin/sh
@@ -639,6 +651,7 @@ echo "engine-start $LOCK_KEY" >> "$EVENTS"
 cp "$FAKE_DDB_STATE" "$ENGINE_SNAPSHOT"
 if [ -n "${ENGINE_HOOK:-}" ]; then sh -c "$ENGINE_HOOK"; fi
 /bin/sleep "${ENGINE_SECONDS:-0}"
+cp "$FAKE_DDB_STATE" "$ENGINE_SNAPSHOT.end"
 echo "engine-end $LOCK_KEY" >> "$EVENTS"
 exit "${ENGINE_RC:-0}"
 STUB
@@ -651,14 +664,16 @@ case "$url" in "$ECS_CONTAINER_METADATA_URI_V4/task") ;; *) exit 22 ;; esac
 [ -z "${FAKE_TASK_META_FAIL:-}" ] || exit 22
 printf '%s' "$FAKE_TASK_META"
 STUB
-  chmod +x "$ltmp/aws" "$ltmp/date" "$ltmp/sleep" "$ltmp/engine" "$ltmp/curl"
+  chmod +x "$ltmp/aws" "$ltmp/date" "$ltmp/sleep" "$ltmp/engine" "$ltmp/curl" "$ltmp/timeout"
   run_block=$(printf '%s\n%s\n' "$lease_block" "$tail_block" \
     | sed -e "s#/usr/local/bin/aws#$ltmp/aws#g" -e "s#/bin/date#$ltmp/date#g" \
           -e "s#/bin/sleep#$ltmp/sleep#g" -e "s#/usr/bin/curl#$ltmp/curl#g" \
+          -e "s#/usr/bin/timeout#$ltmp/timeout#g" \
           -e "s#/bin/bash -p \"\$PKG/scripts/kiro-review.sh\"#$ltmp/engine#")
   assert_contains "$run_block" "$ltmp/engine || rc=\$?" "㉒ 引擎调用换成了替身"
   assert_not_contains "$run_block" "/usr/local/bin/aws" "㉒ aws 全部换成了替身（不会碰真的 AWS）"
   assert_not_contains "$run_block" "/usr/bin/curl" "㉒ curl 全部换成了元数据端点替身"
+  assert_not_contains "$run_block" "/usr/bin/timeout" "㉒ timeout 全部换成了替身"
 
   # 真的本地裸库：源分支 feat 上两个提交，c1 是本任务的 HEAD_SHA；「源分支又被推过」= 把 c2 推进裸库
   lgit() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
@@ -682,8 +697,8 @@ STUB
     rm -f "$ltmp/state.json" "$ltmp/ddb.log" "$ltmp/sleep.log" "$ltmp/events" "$ltmp/snap.json"
     local init='{}'; if [[ $# -gt 0 ]]; then init="$1"; fi
     printf '%s' "$init" > "$ltmp/state.json"
-    : > "$ltmp/sleep.log"; : > "$ltmp/events"; : > "$ltmp/ddb.log"
-    rm -f "$ltmp/clock"
+    : > "$ltmp/sleep.log"; : > "$ltmp/events"; : > "$ltmp/ddb.log"; : > "$ltmp/timeout.log"
+    rm -f "$ltmp/clock" "$ltmp/state.json.updates" "$ltmp/snap.json.end"
   }
   run_lease() {  # LOCK_KEY [KEY=VAL ...] → 打印 rc；stderr 在 $ltmp/err.<LOCK_KEY>
     local me="$1" rc=0; shift
@@ -691,13 +706,14 @@ STUB
         CI_COMMIT_REF_NAME=feat KIRO_TIMEOUT=60 WORKROOT="$ltmp" LOCK_KEY="$me" PKG=/nonexistent \
         ECS_CONTAINER_METADATA_URI_V4=http://169.254.170.2/v4/c0 FAKE_TASK_META="{\"TaskARN\":\"$ARN_A\"}" \
         FAKE_DDB_STATE="$ltmp/state.json" FAKE_DDB_LOG="$ltmp/ddb.log" SLEEP_LOG="$ltmp/sleep.log" \
-        EVENTS="$ltmp/events" ENGINE_SNAPSHOT="$ltmp/snap.json" \
+        EVENTS="$ltmp/events" ENGINE_SNAPSHOT="$ltmp/snap.json" TIMEOUT_LOG="$ltmp/timeout.log" \
         GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
         "$@" /bin/bash -c "set -euo pipefail; $run_block" >/dev/null 2>"$ltmp/err.$me" </dev/null || rc=$?
     echo "$rc"
   }
   attr() { /usr/bin/jq -r --arg k "$2" --arg a "$3" '.[$k][$a] | (.S // .N // empty)' "$1"; }
-  sleeps() { wc -l < "$ltmp/sleep.log" | tr -d ' '; }
+  sleeps() { grep -cx 10 "$ltmp/sleep.log" | tr -d ' '; }   # 只数等待租约的那几轮（续期那一轮是 30）
+  updates_ok() { grep -c "^update-item $LEASE ok$" "$ltmp/ddb.log" | tr -d ' '; }
 
   # 正向对照：空表 → 拿到、评审、释放。持有者是自己，lease_until 清零，expires_at 一直在（N4）。
   reset_lease; push_c2 "$c1"
@@ -709,20 +725,49 @@ STUB
   assert_eq "$(( $(attr "$ltmp/snap.json" "$LEASE" expires_at) - snap_until ))" "86400" \
     "㉒ 租约记录带 expires_at = lease_until + 1 天（N4：不许有不带 TTL 的记录）"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "0" "㉒ 退出时释放（lease_until 清零）"
-  assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#A|$ARN_A" "㉒ 释放不改持有者"
+  assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "" \
+    "㉒ 释放抹掉持有者（issue 04 L3：被 kill 的续期循环留下的孤儿调用晚到时，条件 #h = :me 必然失败）"
   assert_contains "$(cat "$ltmp/err.r1#7#A")" "head-check result=current sha=${c1:0:7}" \
     "㉒ 最新提交就是 HEAD_SHA 时打 current"
   assert_eq "$(sleeps)" "0" "㉒ 无人持有时不等待"
 
-  # 租约时长 = KIRO_TIMEOUT + 300；0 是有意义的取值（不回落 900），0600 按十进制，非数字按引擎缺省 900。
+  # issue 04：租期固定 120 秒（与 KIRO_TIMEOUT 无关，靠续期撑住长评审）；引擎包在总时长上限
+  # engine_cap = KIRO_TIMEOUT + 1800 里。0 是有意义的取值（不回落 900），0600 按十进制，非数字按引擎缺省 900。
   # 前导零的样例刻意**不用 0900**：去掉 `10#` 之后 bash 3.2 报「value too great for base」却不中止，
-  # lease_span 留在缺省 900——恰好等于 0900 的正确结果，变异测试因此假绿过一次。
-  for kt in '60:360' '0:300' '0600:900' '15m:1200'; do
+  # 取值留在缺省 900——恰好等于 0900 的正确结果，变异测试因此假绿过一次。
+  # 续期那一轮真睡 5 秒：引擎替身一结束就退出，引擎开始时的快照里只有拿租约那一次写入。
+  for kt in '60:1860' '0:1800' '0600:2400' '15m:2700'; do
     reset_lease; echo 5000 > "$ltmp/clock"
-    run_lease 'r1#7#A' KIRO_TIMEOUT="${kt%%:*}" FAKE_CLOCK="$ltmp/clock" >/dev/null
-    assert_eq "$(attr "$ltmp/snap.json" "$LEASE" lease_until)" "$((5000 + ${kt##*:}))" \
-      "㉒ KIRO_TIMEOUT=${kt%%:*} 时租约到期 = 现在 + ${kt##*:} 秒"
+    run_lease 'r1#7#A' KIRO_TIMEOUT="${kt%%:*}" FAKE_CLOCK="$ltmp/clock" RENEW_REAL_SLEEP=5 >/dev/null
+    assert_eq "$(attr "$ltmp/snap.json" "$LEASE" lease_until)" "5120" \
+      "㉒ KIRO_TIMEOUT=${kt%%:*} 时租约到期仍是 现在 + 120 秒"
+    assert_contains "$(cat "$ltmp/timeout.log")" "-k 30 ${kt##*:} $ltmp/engine" \
+      "㉒ KIRO_TIMEOUT=${kt%%:*} 时引擎总时长上限 = ${kt##*:} 秒（KIRO_TIMEOUT + 1800），另给 30 秒 KILL 余量"
   done
+
+  # 续期：引擎运行期间 lease_until 往后推，expires_at 跟着推（N4），且只用短的 CLI 超时（续期调用不能比租期还长）
+  reset_lease; echo 5000 > "$ltmp/clock"
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" ENGINE_SECONDS=1 RENEW_REAL_SLEEP=0.1)" "0" "㉒ 前提：带续期的评审正常结束"
+  end_until=$(attr "$ltmp/snap.json.end" "$LEASE" lease_until)
+  assert_eq "$([ -n "$end_until" ] && [ "$end_until" -gt 5120 ] && echo yes)" "yes" \
+    "㉒ 续期：引擎结束时 lease_until（${end_until}）已越过拿租约时的 5120"
+  assert_eq "$(( $(attr "$ltmp/snap.json.end" "$LEASE" expires_at) - end_until ))" "86400" \
+    "㉒ 续期时 expires_at 同步 = lease_until + 1 天（N4）"
+  assert_eq "$(attr "$ltmp/snap.json.end" "$LEASE" holder)" "r1#7#A|$ARN_A" "㉒ 续期不改持有者"
+  assert_eq "$([ "$(updates_ok)" -ge 3 ] && echo yes)" "yes" "㉒ 拿租约 + 至少一次续期 + 释放（共 $(updates_ok) 次写入）"
+  assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "0" "㉒ 带续期的评审结束后照样释放"
+  # L6：退出之后续期循环已经停了——再等一会儿，表上不再有任何写入
+  n_before=$(wc -l < "$ltmp/ddb.log"); /bin/sleep 0.6
+  assert_eq "$(wc -l < "$ltmp/ddb.log")" "$n_before" "㉒ L6：退出之后不再有续期写入（续期循环没有泄漏）"
+
+  # 续期遇到别的错误（限流）：打代号、下一轮接着续，不停。第 1 次写是拿租约，第 2 次是第一次续期
+  reset_lease
+  assert_eq "$(run_lease 'r1#7#A' FAKE_DDB_FAIL_NTH=2 ENGINE_SECONDS=1 RENEW_REAL_SLEEP=0.1)" "0" \
+    "㉒ 续期失败一次不影响评审"
+  assert_contains "$(cat "$ltmp/err.r1#7#A")" "续期 MR 租约失败（code=ProvisionedThroughputExceededException），下一轮再试" \
+    "㉒ 续期失败打一行带错误码的消息"
+  assert_eq "$(awk -v k="$LEASE" '$2==k && $3=="injected-error"{f=1; next} f && $2==k && $3=="ok"{print "yes"; exit}' "$ltmp/ddb.log")" \
+    "yes" "㉒ 续期失败之后接着续（失败之后还有成功的写入）"
 
   # L1：第二个任务在第一个持有期间必须等，第一个结束（释放）之后才轮到它——两个真的并发进程
   reset_lease
@@ -753,7 +798,8 @@ STUB
     $'engine-start r1#7#A\nengine-end r1#7#A\nengine-start r1#7#A\nengine-end r1#7#A' \
     "㉒ L1'：同一个 LOCK_KEY 的两个任务，引擎运行也不重叠"
   assert_nonzero "$(sleeps)" "㉒ 同键的第二个任务确实等过"
-  assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#A|$ARN_B" "㉒ 最后持有者是第二个任务"
+  assert_eq "$(attr "$ltmp/snap.json" "$LEASE" holder)" "r1#7#A|$ARN_B" \
+    "㉒ 第二个任务的引擎运行期间，持有者是它自己（同键、ARN 不同）"
 
   # L1''：同一个任务的持有者值不变 → AWS CLI 自己的重试（上一次尝试已经写入、应答丢了）被 `#h = :me` 认成本人，
   # 不等、直接进去。这里用「表里已经是我、而且远未到期」模拟那次已落地的写入。
@@ -764,7 +810,8 @@ STUB
   # 反向对照：同键、别的任务（ARN 不同）写下的未到期租约 → 必须等（等满上限 93）
   reset_lease "{\"$LEASE\":{\"pk\":{\"S\":\"$LEASE\"},\"holder\":{\"S\":\"r1#7#A|$ARN_B\"},\"lease_until\":{\"N\":\"999999999999\"},\"expires_at\":{\"N\":\"999999999999\"}}}"
   echo 1000 > "$ltmp/clock"
-  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock")" "93" "㉒ 同键别的任务持有时不得重入"
+  jump='echo $(( $(cat "$FAKE_CLOCK") + 100000 )) > "$FAKE_CLOCK"'   # 第一轮等待之后把假时钟拨过等待上限
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" SLEEP_HOOK="$jump")" "93" "㉒ 同键别的任务持有时不得重入"
   assert_eq "$(cat "$ltmp/events")" "" "㉒ 同键别的任务持有时不跑引擎"
 
   # 读不到本任务 ARN → fail closed（93），不碰租约、不跑引擎。端点失败、字段缺失、形状不对都一样
@@ -829,21 +876,36 @@ STUB
   steal="$ltmp/aws dynamodb update-item --region x --table-name t --key '{\"pk\":{\"S\":\"$LEASE\"}}' \
 --update-expression 'SET #h = :h, #u = :u' --expression-attribute-names '{\"#h\":\"holder\",\"#u\":\"lease_until\"}' \
 --expression-attribute-values '{\":h\":{\"S\":\"r1#7#new\"},\":u\":{\"N\":\"77777777777\"}}'"
-  assert_eq "$(run_lease 'r1#7#A' ENGINE_HOOK="$steal")" "0" "㉒ 前提：被接管的任务自己正常结束"
+  assert_eq "$(run_lease 'r1#7#A' ENGINE_HOOK="$steal" ENGINE_SECONDS=1 RENEW_REAL_SLEEP=0.1)" "0" \
+    "㉒ 前提：被接管的任务自己正常结束"
+  assert_contains "$(cat "$ltmp/err.r1#7#A")" "MR 租约已被别的任务接管，停止续期" "㉒ 续期发现被接管时打一行并停止续期"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#new" "㉒ L3：退出时不改别人的持有"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "77777777777" \
     "㉒ L3：退出时绝不放掉别人的租约（lease_until 原样）"
 
-  # 等待有上限：别人一直持有（这里是远未到期的租约）→ 等满 KIRO_TIMEOUT+300 秒后以 93 退出，不跑引擎
+  # 等待有上限：别人一直持有（这里是远未到期的租约）→ 等满 engine_cap + 300 秒（KIRO_TIMEOUT=60 → 2160）后
+  # 以 93 退出，不跑引擎
   reset_lease "{\"$LEASE\":{\"pk\":{\"S\":\"$LEASE\"},\"holder\":{\"S\":\"r1#7#hung\"},\"lease_until\":{\"N\":\"999999999999\"},\"expires_at\":{\"N\":\"999999999999\"}}}"
   echo 1000 > "$ltmp/clock"
   assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock")" "93" "㉒ 等待超过上限时以 93 退出"
-  assert_eq "$(sleeps)" "36" "㉒ 按 10 秒一轮等满 360 秒（KIRO_TIMEOUT=60 + 300）"
-  assert_contains "$(cat "$ltmp/err.r1#7#A")" "等待同一 MR 的上一次评审超过 360 秒仍未结束，拒绝评审" \
+  assert_eq "$(sleeps)" "216" "㉒ 按 10 秒一轮等满 2160 秒（KIRO_TIMEOUT=60 + 1800 + 300）"
+  assert_contains "$(cat "$ltmp/err.r1#7#A")" "等待同一 MR 的上一次评审超过 2160 秒仍未结束，拒绝评审" \
     "㉒ 等待超限的消息固定"
   assert_eq "$(cat "$ltmp/events")" "" "㉒ 等待超限时不跑引擎"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#hung" "㉒ 没拿到租约就退出时不碰别人的租约"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "999999999999" "㉒ 没拿到租约时 lease_until 原样"
+  assert_contains "$(cat "$ltmp/err.r1#7#A")" "head-check result=current sha=${c1:0:7}" \
+    "㉒ 等待到上限时先再核对一次最新提交（这里仍是本任务的提交 → 照旧 93）"
+  # A-M3：排队等到上限时源分支已前进、新提交也抢过锁 → 本任务已被取代：安静退出 0（不让兜底为旧提交发失败评论）
+  reset_lease "{\"$LEASE\":{\"pk\":{\"S\":\"$LEASE\"},\"holder\":{\"S\":\"r1#7#hung\"},\"lease_until\":{\"N\":\"999999999999\"},\"expires_at\":{\"N\":\"999999999999\"}},\"r1#7#$c2\":{\"pk\":{\"S\":\"r1#7#$c2\"},\"expires_at\":{\"N\":\"99999999999\"}}}"
+  push_c2 "$c2"; echo 1000 > "$ltmp/clock"
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" SLEEP_HOOK="$jump")" "0" "㉒ A-M3：等到上限时已被取代 → 退出 0"
+  assert_contains "$(cat "$ltmp/err.r1#7#A")" "head-check result=superseded sha=${c1:0:7} tip=${c2:0:7}" \
+    "㉒ A-M3：打 superseded"
+  assert_not_contains "$(cat "$ltmp/err.r1#7#A")" "拒绝评审" "㉒ A-M3：被取代时不打 93 的消息"
+  assert_eq "$(cat "$ltmp/events")" "" "㉒ A-M3：不跑引擎"
+  assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#hung" "㉒ A-M3：没拿到租约，不碰别人的租约"
+  push_c2 "$c1"
 
   # DynamoDB 别的错误 → fail closed（93），消息与等待超限区分开，只带错误码不带错误正文
   reset_lease
@@ -861,6 +923,20 @@ STUB
   assert_contains "$(cat "$ltmp/err.r1#7#A")" "读写 MR 租约失败（code=unknown），拒绝评审" \
     "㉒ 没有错误码的失败记成 unknown（不从别的括号里捡词）"
 
+  # 引擎超过总时长上限：timeout 以 124 结束 → 原样透出、打一行固定消息、照样释放租约、不置「已回写」标记
+  reset_lease
+  assert_eq "$(run_lease 'r1#7#A' TIMEOUT_EXPIRE_MATCH="$ltmp/engine")" "124" "㉒ 引擎超过总时长上限时退出码 124 原样透出"
+  assert_contains "$(cat "$ltmp/err.r1#7#A")" "评审引擎超过总时长上限 1860 秒仍未结束，已终止" "㉒ 超过上限打一行固定消息"
+  assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "0" "㉒ 超过上限时照样释放租约"
+  assert_eq "$(grep -c '^update-item r1#7#A ' "$ltmp/ddb.log" | tr -d ' ')" "0" "㉒ 超过上限时不置「已回写」标记"
+  # ls-remote 有上限（30 秒）：超时 = 核对未知 = 照常评审
+  reset_lease; push_c2 "$c2"
+  assert_eq "$(run_lease 'r1#7#A' TIMEOUT_EXPIRE_MATCH=ls-remote)" "0" "㉒ ls-remote 超时时照常评审"
+  assert_contains "$(cat "$ltmp/timeout.log")" "30 /usr/bin/git -C $ltmp/business ls-remote origin" "㉒ ls-remote 包在 30 秒上限里"
+  assert_contains "$(cat "$ltmp/err.r1#7#A")" "head-check result=unknown" "㉒ ls-remote 超时时打 unknown"
+  assert_eq "$(head -1 "$ltmp/events")" "engine-start r1#7#A" "㉒ ls-remote 超时时跑引擎"
+  push_c2 "$c1"
+
   # 引擎的退出码原样透出：EXIT 陷阱里的释放不得吞掉它（兜底 Lambda 按退出码判断要不要回写）
   reset_lease
   assert_eq "$(run_lease 'r1#7#A' ENGINE_RC=3)" "3" "㉒ 引擎非零退出码原样透出"
@@ -873,13 +949,19 @@ fi
 # ㉒ 静态顺序：租约在检出核对之后、引擎之前；陷阱挂在拿到租约之后（没拿到就退出时不碰别人的租约）
 headnow_line=$(entry_code_line '\[\[ "\$head_now" == "\$HEAD_SHA" \]\]')
 acquire_line=$(entry_code_line '^while :; do')
-trap_line=$(entry_code_line '^trap lease_release EXIT')
-lsremote_line=$(entry_code_line 'ls-remote origin')
+trap_line=$(entry_code_line '^trap lease_exit EXIT')
+# 「核对最新提交」取**顶层的调用点**：核对本身抽成了函数、定义在等待循环之前（等待到上限时也要调它）
+lsremote_line=$(entry_code_line '^if head_check_superseded; then exit 0; fi')
 assert_eq "$([ -n "$headnow_line" ] && [ -n "$acquire_line" ] && [ -n "$trap_line" ] \
   && [ -n "$lsremote_line" ] && [ -n "$engine_line" ] && [ "$headnow_line" -lt "$acquire_line" ] \
   && [ "$acquire_line" -lt "$trap_line" ] && [ "$trap_line" -lt "$lsremote_line" ] \
   && [ "$lsremote_line" -lt "$engine_line" ] && echo yes)" "yes" \
   "㉒ 顺序：检出核对 → 拿租约 → 挂释放陷阱 → 核对最新提交 → 调引擎"
+
+# ㉔ 元数据端点的每一次读取都有上限（issue 04）：端点挂住时 curl 永远不返回，任务永远不结束、也没有兜底评论。
+curl_code=$(LC_ALL=C grep -nE '/usr/bin/curl ' "$ENTRY" | LC_ALL=C grep -vE '^[0-9]+:[[:space:]]*#')
+assert_eq "$(printf '%s\n' "$curl_code" | wc -l | tr -d ' ')" "2" "㉔ entrypoint 里正好两处 curl（N1 摘要、租约持有者 ARN）"
+assert_eq "$(printf '%s\n' "$curl_code" | LC_ALL=C grep -c -- '--max-time 10')" "2" "㉔ 两处 curl 都带 --max-time 10"
 
 # ㉑ 元断言（复审 M-1 的收口）：本文件所有顺序断言的行号都必须落在**非注释行**上。注释里正当地
 #   提到同一个词就会让「A 必须排在 B 之前」恒真——③ 的 call_line 已经踩过一次（注释里写了
@@ -888,8 +970,8 @@ assert_eq "$([ -n "$headnow_line" ] && [ -n "$acquire_line" ] && [ -n "$trap_lin
 for pat in 'kiro-review\.sh' 'KIRO_IMAGE_DIGESTS' '^/usr/bin/git clone ' '拒绝 clone' \
            '^export GIT_CONFIG_VALUE_0=' 'checkout -q --detach' \
            '\[\[ -n "\$\{HEAD_SHA:-\}" \]\]' ': "\$\{MR_TARGET_BRANCH:=\}"' \
-           '\[\[ "\$head_now" == "\$HEAD_SHA" \]\]' '^while :; do' '^trap lease_release EXIT' \
-           'ls-remote origin'; do
+           '\[\[ "\$head_now" == "\$HEAD_SHA" \]\]' '^while :; do' '^trap lease_exit EXIT' \
+           'ls-remote origin' '^if head_check_superseded; then exit 0; fi'; do
   pat_line=$(entry_code_line "$pat")
   assert_eq "$([ -n "$pat_line" ] && echo yes)" "yes" "㉑ 顺序断言的模式必须匹配到代码：${pat}"
   assert_eq "$(LC_ALL=C sed -n "${pat_line}p" "$ENTRY" | LC_ALL=C grep -cE '^[[:space:]]*#')" "0" \

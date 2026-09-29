@@ -12,6 +12,7 @@
 出错形状照 AWS CLI v2：服务端错误打 `An error occurred (<Code>) when calling the <Op> operation: …`
 到 stderr、退出码 254。FAKE_DDB_FAIL=<操作名> 让该操作一律报 ProvisionedThroughputExceededException；再设
 FAKE_DDB_FAIL_KIND=connect 则改成「连不上端点」（没有错误码的那种）。
+FAKE_DDB_FAIL_NTH=<n> 只让第 n 次 update-item 报限流（租约续期「失败一次后接着续」用）。更新表达式支持 `SET …` 与可选的 `REMOVE …`。
 FAKE_DDB_EMPTY_GET=blank 时查不到记录打空输出（默认打 `{}`）——两种都要能被 entrypoint 读成「不存在」。
 """
 import fcntl
@@ -159,9 +160,16 @@ def compare(a, op, b):
 
 
 def apply_update(expr, names, values, item):
-    m = re.fullmatch(r"\s*SET\s+(.+)", expr)
+    # `SET a = :x, b = :y` 可选跟一个 `REMOVE #c[, #d]`（租约释放用它抹掉持有者，issue 04）
+    m = re.fullmatch(r"\s*SET\s+(.+?)(?:\s+REMOVE\s+(.+))?\s*", expr)
     if not m:
-        die(f"only SET updates are supported: {expr!r}")
+        die(f"only SET [REMOVE] updates are supported: {expr!r}")
+    for part in (m.group(2) or "").split(",") if m.group(2) else []:
+        rm = re.fullmatch(r"\s*(#?[A-Za-z0-9_]+)\s*", part)
+        if not rm:
+            die(f"unsupported REMOVE clause {part!r}")
+        attr = names[rm.group(1)] if rm.group(1).startswith("#") else rm.group(1)
+        item.pop(attr, None)
     for part in m.group(1).split(","):
         pm = re.fullmatch(r"\s*(#?[A-Za-z0-9_]+)\s*=\s*(:[A-Za-z0-9_]+)\s*", part)
         if not pm:
@@ -192,6 +200,19 @@ def main():
         except FileNotFoundError:
             table = {}
         result = "ok"
+        # FAKE_DDB_FAIL_NTH=<n>：第 n 次 update-item 报限流（只那一次）。计数存在状态文件旁边，与表同一把锁。
+        nth = os.environ.get("FAKE_DDB_FAIL_NTH")
+        if nth and op == "update-item":
+            cnt_path = state_path + ".updates"
+            try:
+                with open(cnt_path) as fh:
+                    cnt = int(fh.read() or "0") + 1
+            except FileNotFoundError:
+                cnt = 1
+            with open(cnt_path, "w") as fh:
+                fh.write(str(cnt))
+            if cnt == int(nth):
+                result = "injected-error"
         if os.environ.get("FAKE_DDB_FAIL") == op:
             result = "injected-error"
         elif op == "get-item":
@@ -204,7 +225,7 @@ def main():
             elif os.environ.get("FAKE_DDB_EMPTY_GET") != "blank":
                 print("{}")
             result = "hit" if item is not None else "miss"
-        else:
+        elif result == "ok":
             names = json.loads(o.get("--expression-attribute-names") or "{}")
             values = json.loads(o.get("--expression-attribute-values") or "{}")
             if "--update-expression" not in o:

@@ -1442,7 +1442,7 @@ def test_the_guide_documents_the_lease_exit_93_and_every_head_check_result():
     row93 = [ln for ln in sec8 if "退出码 93" in ln.split(" | ")[0]]
     assert len(row93) == 1, "§8 缺少退出码 93 那一行（或不止一行）"
     for msg in msgs:
-        # `${lease_span}` / `${lease_err}` 在日志里是具体取值，手册里写成占位；比的是两边的固定部分
+        # `${lease_wait_limit}` / `${lease_err}` 在日志里是具体取值，手册里写成占位；比的是两边的固定部分
         for chunk in re.split(r"\$\{[a-z_]+\}", msg):
             assert chunk.strip("（）") in row93[0], f"§8 退出码 93 那一行没逐字写出：{chunk}"
     for code_name in ("AccessDeniedException", "ResourceNotFoundException", "unknown"):
@@ -1464,13 +1464,27 @@ def test_the_guide_documents_the_lease_exit_93_and_every_head_check_result():
 def test_the_guide_opening_explains_the_per_mr_lease():
     paras = [p for p in _guide_text().split("\n\n") if p.startswith("**同一 MR 串行")]
     assert len(paras) == 1, "开头缺少「同一 MR 串行」那一段"
-    for fact in ("`lease#<仓库 id>#<MR 编号>`", "`KIRO_TIMEOUT` + 300 秒", "每 10 秒", "只释放自己持有",
+    for fact in ("`lease#<仓库 id>#<MR 编号>`", "租期 120 秒", "每 30 秒续期", "`KIRO_TIMEOUT` + 1800 秒",
+                 "`KIRO_TIMEOUT` + 2100 秒", "退出码 124", "每 10 秒", "只释放自己持有",
                  "`git ls-remote`", "`head-check result=superseded", "退出码 93", "没有抢锁记录"):
         assert fact in paras[0], f"「同一 MR 串行」那一段没写出：{fact}"
     code = _entry_code()
     assert '"lease#${CODEUP_REPO_ID}#${MR_LOCAL_ID}"' in code, "租约键的形状变了，手册那一段要跟着改"
-    assert "lease_span=$((lease_span + 300))" in code, "租约时长的算法变了，手册那一段要跟着改"
-    assert "/bin/sleep 10" in code, "轮询间隔变了，手册那一段要跟着改"
+    # 手册里的四个数都从这几行来（issue 04）：租期、续期间隔、引擎总时长上限、等待上限
+    for line in ("LEASE_TTL=120", "LEASE_RENEW_EVERY=30", "engine_cap=$((engine_cap + 1800))",
+                 "lease_wait_limit=$((engine_cap + 300))", "/bin/sleep 10"):
+        assert line in code, f"{line} 变了，手册「同一 MR 串行」那一段要跟着改"
+
+
+def test_the_guide_documents_the_engine_cap_exit_124():
+    """引擎总时长上限那条消息逐字取自 entrypoint.sh，§8 标着「退出码 124」的那一行必须逐字写出（issue 04）。"""
+    msgs = re.findall(r'echo "(评审引擎超过总时长上限[^"]*)" >&2', _entry_code())
+    assert len(msgs) == 1, msgs
+    sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
+    row = [ln for ln in sec8 if "退出码 124" in ln.split(" | ")[0]]
+    assert len(row) == 1, "§8 缺少退出码 124 那一行（或不止一行）"
+    for chunk in re.split(r"\$\{[a-z_]+\}", msgs[0]):
+        assert chunk in row[0], f"§8 退出码 124 那一行没逐字写出：{chunk}"
 
 
 # ── 兜底可靠性（全分支复审 s1 F2）：重试耗尽的事件不得被 Lambda 静默丢弃 ─────────────────

@@ -27,7 +27,7 @@ WORKROOT=/tmp/review
 # 别的容器，N1 会悄悄校验错误的镜像而评审容器本身的摘要从未被核对——这就废了本任务唯一要守的不变式。
 : "${KIRO_IMAGE_DIGESTS:?缺少 KIRO_IMAGE_DIGESTS（已探测镜像摘要名单，必配无默认）}"
 : "${ECS_CONTAINER_METADATA_URI_V4:?缺少 ECS_CONTAINER_METADATA_URI_V4（ECS 容器级元数据端点），无法核对镜像摘要}"
-meta=$(/usr/bin/curl -sf "${ECS_CONTAINER_METADATA_URI_V4}" || true)
+meta=$(/usr/bin/curl -sf --max-time 10 "${ECS_CONTAINER_METADATA_URI_V4}" || true)
 raw_digest=$(printf '%s' "$meta" | /usr/bin/jq -r '.ImageID // empty' 2>/dev/null || true)
 # ECS 返回的 ImageID 带 `sha256:` 前缀（如 `sha256:25f3...`）；约定 KIRO_IMAGE_DIGESTS 里存的是
 # 去掉这个前缀之后的裸十六进制串，所以这里核对前也剥一次前缀，两边口径才对得上。
@@ -174,29 +174,43 @@ head_now=$(/usr/bin/git -C "$WORKROOT/business" rev-parse HEAD 2>/dev/null || tr
 #   L2 接管只比较 lease_until，不靠 DynamoDB TTL 删除（TTL 是惰性的，可能迟到约 48 h）；
 #   L3 释放以「持有者是我」为条件，绝不放掉别人的租约；
 #   L4 键 `lease#<仓库>#<MR>` 与抢锁键不相交（抢锁键以数字开头），同一张表可以共用；
-#   L5 最后一个拿到租约的任务评的是当前的头（拿到之后核对源分支，见下一段）。
-# 退化：挂住的任务活过了自己的租约，别人就会接管、两者并发——就是加租约之前的行为，不会更糟。
-# 时长 = KIRO_TIMEOUT + 300 秒（装机、自检、渲染、回写的余量）。KIRO_TIMEOUT 不是纯数字时按
-# 引擎的缺省 900 算：引擎自己会拒绝这个取值并在 MR 上说明（die_review），这里不抢它的活。
-lease_span=900
-if [[ "${KIRO_TIMEOUT:-}" =~ ^[0-9]+$ ]]; then lease_span=$((10#$KIRO_TIMEOUT)); fi
-lease_span=$((lease_span + 300))
+#   L5 最后一个拿到租约的任务评的是当前的头（拿到之后核对源分支，见下一段）；
+#   L6 退出（任何路径）时续期循环已停，释放之后不会再有续期成功（issue 04）。
+# 租期短、持有期间续期（issue 04）：租期 120 秒，拿到之后后台每 30 秒续一次。不按引擎最坏耗时定一个长租期——
+# 那个最坏值约 1–1.5 小时（每次 Codeup API 最坏约 195 秒、一次评审十几次调用，引擎自己的 git fetch 还没有上限），
+# 被强杀的任务（StopTask 30 秒后的 SIGKILL、OOM）会把 MR 挡上那么久；短租期下最多 120 秒就能被接管（L2），
+# 所以也不需要 init 进程来保证陷阱一定跑到。
+# 引擎包在总时长上限 engine_cap = KIRO_TIMEOUT + 1800 秒里：它给续期（也就是持有时长）设了上界，也给挂住的任务的
+# Fargate 费用设了上界。KIRO_TIMEOUT 不是纯数字时按引擎的缺省 900 算：引擎自己会拒绝这个取值并在 MR 上说明
+# （die_review），这里不抢它的活。等待上限 = engine_cap + 300：持有者合法持有的最长时间，加上它死后租约失效的余量。
+# 退化：续期失败到租约过期（DynamoDB 持续不可用两分钟以上），别人就会接管、两者并发——就是加租约之前的行为。
+LEASE_TTL=120
+LEASE_RENEW_EVERY=30
+engine_cap=900
+if [[ "${KIRO_TIMEOUT:-}" =~ ^[0-9]+$ ]]; then engine_cap=$((10#$KIRO_TIMEOUT)); fi
+engine_cap=$((engine_cap + 1800))
+lease_wait_limit=$((engine_cap + 300))
 lease_key=$(/usr/bin/jq -cn --arg k "lease#${CODEUP_REPO_ID}#${MR_LOCAL_ID}" '{pk: {S: $k}}')
 # 持有者 = LOCK_KEY + 本任务 ARN（issue 02）。只记 LOCK_KEY 不够：同一个键可以有两个任务（RunTask 客户端耗尽重试、
 # 服务端其实已经起了，调度器释放锁之后同一报文又被重放），下面的 `#h = :me` 会把第二个当成本人放进去——L1 破。
 # ARN 取自**任务级**端点的 TaskARN（文档保证的字段：v4 只增不删不改名）；容器级响应里的 Labels 是 Docker 标签，
 # 不是契约。读不到或形状不对就 fail closed（93），与上面 N1 门对同一个元数据服务的处理一致。
 # 这个值在任务整个生命期不变，所以 AWS CLI 自己的重试（上一次尝试已经写入、应答丢了）仍被 `#h = :me` 认成本人。
-task_meta=$(/usr/bin/curl -sf "${ECS_CONTAINER_METADATA_URI_V4}/task" || true)
+task_meta=$(/usr/bin/curl -sf --max-time 10 "${ECS_CONTAINER_METADATA_URI_V4}/task" || true)
 task_arn=$(printf '%s' "$task_meta" | /usr/bin/jq -r '.TaskARN // empty' 2>/dev/null || true)
 [[ "$task_arn" =~ ^arn:aws[a-z-]*:ecs:[a-z0-9-]+:[0-9]{12}:task/[A-Za-z0-9_/-]+$ ]] || {
   echo "读不到本任务的 ARN（ECS 任务级元数据端点），无法确定租约持有者，拒绝评审" >&2; exit 93; }
 lease_me="${LOCK_KEY}|${task_arn}"
+# AWS CLI 报错里的错误码（固定枚举，`An error occurred (<代号>) when calling …`），不打错误正文：正文带表 ARN 与
+# 账号 ID。连不上端点之类没有代号的错误记成 unknown。
+aws_err_code() {
+  if [[ "$1" =~ An\ error\ occurred\ \(([A-Za-z]+)\) ]]; then printf '%s' "${BASH_REMATCH[1]}"; else printf unknown; fi
+}
 # 返回 0 = 拿到；1 = 别人持有（ConditionalCheckFailedException）；2 = 别的错误（代号放进 lease_err）。
 # 每次写都带 expires_at（N4：锁表里不许有不带 TTL 的记录）。
 lease_acquire() {
   local now until_ts err
-  now=$(/bin/date +%s); until_ts=$((now + lease_span))
+  now=$(/bin/date +%s); until_ts=$((now + LEASE_TTL))
   if err=$(/usr/local/bin/aws dynamodb update-item --region "$AWS_REGION" \
         --table-name "$LOCK_TABLE" --key "$lease_key" \
         --condition-expression 'attribute_not_exists(pk) OR #u < :now OR #h = :me' \
@@ -209,24 +223,84 @@ lease_acquire() {
     return 0
   fi
   if [[ "$err" == *ConditionalCheckFailedException* ]]; then return 1; fi
-  # 只取 AWS 错误码（固定枚举，AWS CLI 的 `An error occurred (<代号>) when calling …`），不打错误正文：
-  # 正文带表 ARN 与账号 ID。连不上端点之类没有代号的错误记成 unknown。
-  lease_err=unknown
-  if [[ "$err" =~ An\ error\ occurred\ \(([A-Za-z]+)\) ]]; then lease_err="${BASH_REMATCH[1]}"; fi
+  lease_err=$(aws_err_code "$err")
   return 2
 }
-# 释放 = 把 lease_until 清零，条件是持有者还是我（L3）：我挂住期间被接管的话，这一步什么也不写。
+# 续期循环（后台跑）：每 LEASE_RENEW_EVERY 秒以「持有者还是我」为条件把 lease_until 续到 now + LEASE_TTL。
+# 单独用短的 CLI 超时：CLI 缺省连接/读各 60 秒、共 3 次，一次续期就可能比租期还长；这样最坏约 25 秒。
+# 条件失败 = 已被接管（我续期失败了太久）：停止续期、引擎照跑——中途杀掉评审只会留下半截评论，
+# 并发是加租约之前的行为，不会更糟。别的错误（限流等）打代号、下一轮再试。
+lease_renew_loop() {
+  local now until_ts err
+  while :; do
+    /bin/sleep "$LEASE_RENEW_EVERY"
+    now=$(/bin/date +%s); until_ts=$((now + LEASE_TTL))
+    if err=$(/usr/local/bin/aws dynamodb update-item --cli-connect-timeout 2 --cli-read-timeout 5 \
+          --region "$AWS_REGION" --table-name "$LOCK_TABLE" --key "$lease_key" \
+          --condition-expression '#h = :me' \
+          --update-expression 'SET #u = :until, #e = :exp' \
+          --expression-attribute-names '{"#h":"holder","#u":"lease_until","#e":"expires_at"}' \
+          --expression-attribute-values "$(/usr/bin/jq -cn --arg me "$lease_me" \
+            --arg until "$until_ts" --arg exp "$((until_ts + 86400))" \
+            '{":me":{S:$me},":until":{N:$until},":exp":{N:$exp}}')" \
+          2>&1 >/dev/null); then
+      continue
+    fi
+    if [[ "$err" == *ConditionalCheckFailedException* ]]; then
+      echo "MR 租约已被别的任务接管，停止续期（本次评审照常跑完，可能与接管者并发）" >&2; return 0
+    fi
+    echo "续期 MR 租约失败（code=$(aws_err_code "$err")），下一轮再试" >&2
+  done
+}
+# 释放 = lease_until 清零**并抹掉持有者**，条件是持有者还是我（L3）：我挂住期间被接管的话，这一步什么也不写。
+# 抹掉持有者是 L6 承重的：被 kill 的续期循环可能留下一个正在路上的 aws 调用，它晚于释放到达时条件
+# `#h = :me` 必然失败，不会把已释放的租约续活。
 lease_release() {
   /usr/local/bin/aws dynamodb update-item --region "$AWS_REGION" \
     --table-name "$LOCK_TABLE" --key "$lease_key" \
     --condition-expression '#h = :me' \
-    --update-expression 'SET #u = :zero' \
+    --update-expression 'SET #u = :zero REMOVE #h' \
     --expression-attribute-names '{"#h":"holder","#u":"lease_until"}' \
     --expression-attribute-values "$(/usr/bin/jq -cn --arg me "$lease_me" \
       '{":me":{S:$me},":zero":{N:"0"}}')" >/dev/null 2>&1 || true
 }
+# 核对源分支的最新提交（L5）：打一行 `head-check result=…`，本任务已被取代时返回 0，其余返回 1（照常评审）。
+# 等租约期间源分支可能又被推过。最新提交不是 HEAD_SHA、**且**调度器已经为它抢过锁（有新任务在路上
+# 或已经评过），这个任务就被取代了：退出 0、不发任何评论（退出 0 兜底 Lambda 也不吭声），由新任务
+# 评审最新提交。新提交**没有**抢锁记录（那次投递丢了，比如撞上 503）时照常评自己的提交——
+# 否则最新的推送就没人评了。ls-remote 或读抢锁记录失败时同样照常评审：退化成加租约之前的行为。
+# ls-remote 经上面导出的凭证 helper 访问 origin（即主机检查过的那个地址），不需要任何新 API；
+# 包在 30 秒上限里（issue 04：挂住的连接会让任务永远不结束），超时同样算「核对未知」。
+# 新提交的抢锁键是调度器 lock_key() 对 MR 事件的形状（仓库#MR#提交，不带评论 id）；
+# aws/tests/test_lock_key_contract.py 用真实的 lock_key() 核对这一行，两边不会各写各的。
+head_check_superseded() {
+  local ls_out tip="" ls_sha ls_ref tip_key claim_rc=0 claim_out claim_pk
+  ls_out=$(/usr/bin/timeout 30 /usr/bin/git -C "$WORKROOT/business" ls-remote origin \
+           "refs/heads/${CI_COMMIT_REF_NAME}" 2>/dev/null) || ls_out=""
+  while IFS=$'\t' read -r ls_sha ls_ref; do
+    if [[ "$ls_ref" == "refs/heads/${CI_COMMIT_REF_NAME}" ]]; then tip="$ls_sha"; fi
+  done <<< "$ls_out"
+  if [[ ! "$tip" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "head-check result=unknown sha=${HEAD_SHA:0:7}" >&2; return 1
+  fi
+  if [[ "$tip" == "$HEAD_SHA" ]]; then
+    echo "head-check result=current sha=${HEAD_SHA:0:7}" >&2; return 1
+  fi
+  tip_key="${CODEUP_REPO_ID}#${MR_LOCAL_ID}#${tip}"
+  claim_out=$(/usr/local/bin/aws dynamodb get-item --region "$AWS_REGION" \
+      --table-name "$LOCK_TABLE" --consistent-read --projection-expression pk \
+      --key "$(/usr/bin/jq -cn --arg k "$tip_key" '{pk: {S: $k}}')" 2>/dev/null) || claim_rc=$?
+  claim_pk=$(printf '%s' "$claim_out" | /usr/bin/jq -r '.Item.pk.S // empty' 2>/dev/null || true)
+  if [[ "$claim_rc" -ne 0 ]]; then
+    echo "head-check result=claim-unknown sha=${HEAD_SHA:0:7} tip=${tip:0:7}" >&2; return 1
+  fi
+  if [[ "$claim_pk" == "$tip_key" ]]; then
+    echo "head-check result=superseded sha=${HEAD_SHA:0:7} tip=${tip:0:7}" >&2; return 0
+  fi
+  echo "head-check result=moved-unclaimed sha=${HEAD_SHA:0:7} tip=${tip:0:7}" >&2; return 1
+}
 lease_err=""
-lease_deadline=$(( $(/bin/date +%s) + lease_span ))
+lease_deadline=$(( $(/bin/date +%s) + lease_wait_limit ))
 lease_waiting=0
 while :; do
   lease_rc=0; lease_acquire || lease_rc=$?
@@ -235,48 +309,30 @@ while :; do
   if [[ "$lease_rc" -ne 1 ]]; then
     echo "读写 MR 租约失败（code=${lease_err}），拒绝评审" >&2; exit 93; fi
   if (( $(/bin/date +%s) >= lease_deadline )); then
-    echo "等待同一 MR 的上一次评审超过 ${lease_span} 秒仍未结束，拒绝评审" >&2; exit 93; fi
+    # 排队等到上限的任务先再核对一次：连推三次以上时，排在后面的旧任务往往早已被取代——那时安静退出，
+    # 不让兜底 Lambda 为一个旧提交发「评审未完成」（issue 04 A-M3）。没拿到租约，退出时什么都不碰。
+    if head_check_superseded; then exit 0; fi
+    echo "等待同一 MR 的上一次评审超过 ${lease_wait_limit} 秒仍未结束，拒绝评审" >&2; exit 93; fi
   if [[ "$lease_waiting" -eq 0 ]]; then
-    echo "同一 MR 的上一次评审仍在进行，等待租约（最长 ${lease_span} 秒）" >&2; lease_waiting=1; fi
+    echo "同一 MR 的上一次评审仍在进行，等待租约（最长 ${lease_wait_limit} 秒）" >&2; lease_waiting=1; fi
   /bin/sleep 10
 done
-# 拿到了才挂释放：没拿到就退出时，租约是别人的，碰都不能碰。
-trap lease_release EXIT
-
-# ── 拿到租约之后核对源分支的最新提交（L5）────────────────────────────
-# 等租约期间源分支可能又被推过。最新提交不是 HEAD_SHA、**且**调度器已经为它抢过锁（有新任务在路上
-# 或已经评过），这个任务就被取代了：退出 0、不发任何评论（退出 0 兜底 Lambda 也不吭声），由新任务
-# 评审最新提交。新提交**没有**抢锁记录（那次投递丢了，比如撞上 503）时照常评自己的提交——
-# 否则最新的推送就没人评了。ls-remote 或读抢锁记录失败时同样照常评审：退化成加租约之前的行为。
-# ls-remote 经上面导出的凭证 helper 访问 origin（即主机检查过的那个地址），不需要任何新 API。
-# 新提交的抢锁键是调度器 lock_key() 对 MR 事件的形状（仓库#MR#提交，不带评论 id）；
-# aws/tests/test_lock_key_contract.py 用真实的 lock_key() 核对这一行，两边不会各写各的。
-ls_out=$(/usr/bin/git -C "$WORKROOT/business" ls-remote origin "refs/heads/${CI_COMMIT_REF_NAME}" \
-         2>/dev/null) || ls_out=""
-tip=""
-while IFS=$'\t' read -r ls_sha ls_ref; do
-  if [[ "$ls_ref" == "refs/heads/${CI_COMMIT_REF_NAME}" ]]; then tip="$ls_sha"; fi
-done <<< "$ls_out"
-if [[ ! "$tip" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "head-check result=unknown sha=${HEAD_SHA:0:7}" >&2
-elif [[ "$tip" == "$HEAD_SHA" ]]; then
-  echo "head-check result=current sha=${HEAD_SHA:0:7}" >&2
-else
-  tip_key="${CODEUP_REPO_ID}#${MR_LOCAL_ID}#${tip}"
-  claim_rc=0
-  claim_out=$(/usr/local/bin/aws dynamodb get-item --region "$AWS_REGION" \
-      --table-name "$LOCK_TABLE" --consistent-read --projection-expression pk \
-      --key "$(/usr/bin/jq -cn --arg k "$tip_key" '{pk: {S: $k}}')" 2>/dev/null) || claim_rc=$?
-  claim_pk=$(printf '%s' "$claim_out" | /usr/bin/jq -r '.Item.pk.S // empty' 2>/dev/null || true)
-  if [[ "$claim_rc" -ne 0 ]]; then
-    echo "head-check result=claim-unknown sha=${HEAD_SHA:0:7} tip=${tip:0:7}" >&2
-  elif [[ "$claim_pk" == "$tip_key" ]]; then
-    echo "head-check result=superseded sha=${HEAD_SHA:0:7} tip=${tip:0:7}" >&2
-    exit 0
-  else
-    echo "head-check result=moved-unclaimed sha=${HEAD_SHA:0:7} tip=${tip:0:7}" >&2
+# 拿到了才挂陷阱：没拿到就退出时，租约是别人的，碰都不能碰。陷阱先停续期循环、再释放（L6）；
+# 续期循环是后台子 shell，EXIT 陷阱不会被它继承，它被 kill 时不会自己去释放。
+lease_renewer_pid=""
+lease_exit() {
+  if [[ -n "$lease_renewer_pid" ]]; then
+    kill "$lease_renewer_pid" 2>/dev/null || true
+    wait "$lease_renewer_pid" 2>/dev/null || true
   fi
-fi
+  lease_release
+}
+trap lease_exit EXIT
+lease_renew_loop &
+lease_renewer_pid=$!
+
+# ── 拿到租约之后核对源分支的最新提交（L5，见 head_check_superseded）────────────
+if head_check_superseded; then exit 0; fi
 
 # ── 与 Flow run block 完全相同的环境变量契约（I9 的裁判就看这一段）──
 export REVIEW_REPO_DIR="$WORKROOT/business"
@@ -289,7 +345,11 @@ export KIRO_INSTALL_PROFILE=pinned
 export KIRO_PINNED_ARTIFACT=/opt/kiro/kirocli-x86_64-linux-musl.zip
 
 rc=0
-/bin/bash -p "$PKG/scripts/kiro-review.sh" || rc=$?
+# 总时长上限（见租约那一段开头）：超时 124 原样透出——兜底 Lambda 的通用文案写着「任务超时」；
+# 30 秒内不理 TERM 就 KILL（137，与 OOM 同码，兜底文案同样覆盖）。引擎内层 timeout 下的 kiro-cli 自成
+# 进程组、不被这里杀掉，但本文件是 PID 1，它一退出整个任务就结束。
+/usr/bin/timeout -k 30 "$engine_cap" /bin/bash -p "$PKG/scripts/kiro-review.sh" || rc=$?
+if [[ "$rc" -eq 124 ]]; then echo "评审引擎超过总时长上限 ${engine_cap} 秒仍未结束，已终止" >&2; fi
 # 标记只在脚本干净退出（rc=0）时才置位——不能不分退出码都置位。脚本在 MR 定位
 # 之前有三类路径会以非零退出却什么评论都没写：path-gate 的裸 exit、die() 里的
 # 依赖/环境校验、MR 定位歧义（Phase 1 的 I10 契约只保证「MR 定位之后」的失败必定
