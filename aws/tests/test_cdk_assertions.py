@@ -1428,11 +1428,12 @@ def _entry_code():
 
 
 def test_the_guide_documents_the_lease_exit_93_and_every_head_check_result():
-    """运维拿日志里那句话去 §8 找行：93 的两条消息与 head-check 的每个取值都逐字取自 entrypoint.sh，
+    """运维拿日志里那句话去 §8 找行：93 的三条消息与 head-check 的每个取值都逐字取自 entrypoint.sh，
     不在这里另抄一份。每条断言都只在**那一行**里找（整篇或整节里找，别的行碰巧写了同一个词就会假绿）。"""
     code = _entry_code()
     msgs = re.findall(r'echo "([^"]*)" >&2; exit 93', code)
-    assert len(msgs) == 2, msgs   # 等待超限 / 读写失败，两条消息必须不同
+    # 等待超限 / 读写失败 / 读不到本任务 ARN（issue 02），三条消息必须各不相同
+    assert len(msgs) == 3 and len(set(msgs)) == 3, msgs
     results = re.findall(r"head-check result=([a-z-]+)", code)
     assert sorted(set(results)) == ["claim-unknown", "current", "moved-unclaimed", "superseded",
                                     "unknown"], results

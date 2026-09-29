@@ -584,8 +584,9 @@ def dispatch(ecs, table, cfg, fields):
         # 抢锁已经成功，这次投递的副作用已经落地。收尾（释放锁、留痕）再抛异常就会让 handler
         # 以 502 结束。Codeup 对 503 会用**同一个** delivery id 立即重投 2 次（Task 1 实测）；对 502
         # 是否同样重投没有测过，按会重投来设计：
-        # 锁此时可能已经释放，于是同一个 head 可能被再拉起一次（RunTask 报错但服务端其实已经拉起
-        # 的那种客户端错误下，就是两个任务同时评同一个 MR）。所以抢锁之后的每条路径都必须回 200，
+        # 锁此时可能已经释放，于是同一个 head 可能被再拉起一次（RunTask 两次尝试都超时、服务端其实
+        # 已经拉起的那种客户端错误下，就是同一个 LOCK_KEY 的两个任务；执行器的租约持有者带任务 ARN，
+        # 它们先后评、不会并发，issue 02）。所以抢锁之后的每条路径都必须回 200，
         # 收尾失败只留一行固定形状的代号。两步各自 try：释放锁失败不该连带吞掉 I10 的留痕。
         _cleanup(release, table, key, step="release")
         _cleanup(codeup_min.post_comment, cfg["org_id"], fields["repo_id"],

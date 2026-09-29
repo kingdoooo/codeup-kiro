@@ -182,8 +182,18 @@ lease_span=900
 if [[ "${KIRO_TIMEOUT:-}" =~ ^[0-9]+$ ]]; then lease_span=$((10#$KIRO_TIMEOUT)); fi
 lease_span=$((lease_span + 300))
 lease_key=$(/usr/bin/jq -cn --arg k "lease#${CODEUP_REPO_ID}#${MR_LOCAL_ID}" '{pk: {S: $k}}')
+# 持有者 = LOCK_KEY + 本任务 ARN（issue 02）。只记 LOCK_KEY 不够：同一个键可以有两个任务（RunTask 客户端耗尽重试、
+# 服务端其实已经起了，调度器释放锁之后同一报文又被重放），下面的 `#h = :me` 会把第二个当成本人放进去——L1 破。
+# ARN 取自**任务级**端点的 TaskARN（文档保证的字段：v4 只增不删不改名）；容器级响应里的 Labels 是 Docker 标签，
+# 不是契约。读不到或形状不对就 fail closed（93），与上面 N1 门对同一个元数据服务的处理一致。
+# 这个值在任务整个生命期不变，所以 AWS CLI 自己的重试（上一次尝试已经写入、应答丢了）仍被 `#h = :me` 认成本人。
+task_meta=$(/usr/bin/curl -sf "${ECS_CONTAINER_METADATA_URI_V4}/task" || true)
+task_arn=$(printf '%s' "$task_meta" | /usr/bin/jq -r '.TaskARN // empty' 2>/dev/null || true)
+[[ "$task_arn" =~ ^arn:aws[a-z-]*:ecs:[a-z0-9-]+:[0-9]{12}:task/[A-Za-z0-9_/-]+$ ]] || {
+  echo "读不到本任务的 ARN（ECS 任务级元数据端点），无法确定租约持有者，拒绝评审" >&2; exit 93; }
+lease_me="${LOCK_KEY}|${task_arn}"
 # 返回 0 = 拿到；1 = 别人持有（ConditionalCheckFailedException）；2 = 别的错误（代号放进 lease_err）。
-# 持有者记的是 LOCK_KEY（本任务独一份）。每次写都带 expires_at（N4：锁表里不许有不带 TTL 的记录）。
+# 每次写都带 expires_at（N4：锁表里不许有不带 TTL 的记录）。
 lease_acquire() {
   local now until_ts err
   now=$(/bin/date +%s); until_ts=$((now + lease_span))
@@ -192,7 +202,7 @@ lease_acquire() {
         --condition-expression 'attribute_not_exists(pk) OR #u < :now OR #h = :me' \
         --update-expression 'SET #h = :me, #u = :until, #e = :exp' \
         --expression-attribute-names '{"#h":"holder","#u":"lease_until","#e":"expires_at"}' \
-        --expression-attribute-values "$(/usr/bin/jq -cn --arg me "$LOCK_KEY" --arg now "$now" \
+        --expression-attribute-values "$(/usr/bin/jq -cn --arg me "$lease_me" --arg now "$now" \
           --arg until "$until_ts" --arg exp "$((until_ts + 86400))" \
           '{":me":{S:$me},":now":{N:$now},":until":{N:$until},":exp":{N:$exp}}')" \
         2>&1 >/dev/null); then
@@ -212,7 +222,7 @@ lease_release() {
     --condition-expression '#h = :me' \
     --update-expression 'SET #u = :zero' \
     --expression-attribute-names '{"#h":"holder","#u":"lease_until"}' \
-    --expression-attribute-values "$(/usr/bin/jq -cn --arg me "$LOCK_KEY" \
+    --expression-attribute-values "$(/usr/bin/jq -cn --arg me "$lease_me" \
       '{":me":{S:$me},":zero":{N:"0"}}')" >/dev/null 2>&1 || true
 }
 lease_err=""

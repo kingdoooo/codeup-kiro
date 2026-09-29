@@ -53,7 +53,11 @@ done
 # （task 级端点返回本任务下全部容器、无自证身份、无顺序保证——加一个 sidecar 就可能读错容器）。
 # 只看真正取值的那几行（curl/jq/self_digest=），绕开解释这件事本身的注释行，避免注释里出现
 # 反例词汇（比如解释「为什么不能用 .Containers[0]」时提到它）把断言带偏。
-digest_lines=$(LC_ALL=C grep -E 'curl -sf|jq -r|self_digest=' "$ENTRY")
+# 只在 N1 那一段里找：租约那一段为了取本任务 ARN **正当地**读任务级 `/task` 端点（issue 02），全文 grep 的话
+# 这条会为错的理由红。段落边界与 ⑫ 抽 N1 段用的是同一对标题行。
+n1_block=$(awk '/^# ── N1 镜像摘要门/{f=1} /^# ── clone 业务库/{exit} f{print}' "$ENTRY")
+assert_contains "$n1_block" 'exit 90' "⑦ 抽到了 N1 那一段"
+digest_lines=$(printf '%s\n' "$n1_block" | LC_ALL=C grep -E 'curl -sf|jq -r|self_digest=')
 assert_not_contains "$digest_lines" '/task"' "N1：容器级端点不得带 /task 后缀（那是任务级端点）"
 assert_contains "$digest_lines" '.ImageID' "N1：必须读取顶层 .ImageID"
 assert_not_contains "$digest_lines" 'Containers[0]' "N1：不得从 .Containers[0].ImageID 取值（任务级端点的产物）"
@@ -638,13 +642,23 @@ if [ -n "${ENGINE_HOOK:-}" ]; then sh -c "$ENGINE_HOOK"; fi
 echo "engine-end $LOCK_KEY" >> "$EVENTS"
 exit "${ENGINE_RC:-0}"
 STUB
-  chmod +x "$ltmp/aws" "$ltmp/date" "$ltmp/sleep" "$ltmp/engine"
+  # 元数据端点替身：只答任务级端点 `<元数据地址>/task`（别的地址一律当成读取失败，curl -f 的 22），正文是
+  # FAKE_TASK_META；FAKE_TASK_META_FAIL 非空 = 端点读取失败。读容器级端点当持有者来源的改动会在这里读不到。
+  cat > "$ltmp/curl" <<'STUB'
+#!/bin/sh
+for a in "$@"; do url="$a"; done
+case "$url" in "$ECS_CONTAINER_METADATA_URI_V4/task") ;; *) exit 22 ;; esac
+[ -z "${FAKE_TASK_META_FAIL:-}" ] || exit 22
+printf '%s' "$FAKE_TASK_META"
+STUB
+  chmod +x "$ltmp/aws" "$ltmp/date" "$ltmp/sleep" "$ltmp/engine" "$ltmp/curl"
   run_block=$(printf '%s\n%s\n' "$lease_block" "$tail_block" \
     | sed -e "s#/usr/local/bin/aws#$ltmp/aws#g" -e "s#/bin/date#$ltmp/date#g" \
-          -e "s#/bin/sleep#$ltmp/sleep#g" \
+          -e "s#/bin/sleep#$ltmp/sleep#g" -e "s#/usr/bin/curl#$ltmp/curl#g" \
           -e "s#/bin/bash -p \"\$PKG/scripts/kiro-review.sh\"#$ltmp/engine#")
   assert_contains "$run_block" "$ltmp/engine || rc=\$?" "㉒ 引擎调用换成了替身"
   assert_not_contains "$run_block" "/usr/local/bin/aws" "㉒ aws 全部换成了替身（不会碰真的 AWS）"
+  assert_not_contains "$run_block" "/usr/bin/curl" "㉒ curl 全部换成了元数据端点替身"
 
   # 真的本地裸库：源分支 feat 上两个提交，c1 是本任务的 HEAD_SHA；「源分支又被推过」= 把 c2 推进裸库
   lgit() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
@@ -662,6 +676,8 @@ STUB
   push_c2() { lgit -C "$ltmp/work" push -q -f "$ltmp/bare" "$1:refs/heads/feat"; }
 
   LEASE='lease#r1#7'
+  ARN_A='arn:aws:ecs:us-west-2:123456789012:task/codeup-kiro/0123456789abcdef0123456789abcdef'
+  ARN_B='arn:aws:ecs:us-west-2:123456789012:task/codeup-kiro/fedcba9876543210fedcba9876543210'
   reset_lease() {  # 每个用例从一张空表开始；可选参数是初始表的 JSON
     rm -f "$ltmp/state.json" "$ltmp/ddb.log" "$ltmp/sleep.log" "$ltmp/events" "$ltmp/snap.json"
     local init='{}'; if [[ $# -gt 0 ]]; then init="$1"; fi
@@ -673,6 +689,7 @@ STUB
     local me="$1" rc=0; shift
     env AWS_REGION=us-west-2 LOCK_TABLE=t CODEUP_REPO_ID=r1 MR_LOCAL_ID=7 HEAD_SHA="$c1" \
         CI_COMMIT_REF_NAME=feat KIRO_TIMEOUT=60 WORKROOT="$ltmp" LOCK_KEY="$me" PKG=/nonexistent \
+        ECS_CONTAINER_METADATA_URI_V4=http://169.254.170.2/v4/c0 FAKE_TASK_META="{\"TaskARN\":\"$ARN_A\"}" \
         FAKE_DDB_STATE="$ltmp/state.json" FAKE_DDB_LOG="$ltmp/ddb.log" SLEEP_LOG="$ltmp/sleep.log" \
         EVENTS="$ltmp/events" ENGINE_SNAPSHOT="$ltmp/snap.json" \
         GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
@@ -686,12 +703,13 @@ STUB
   reset_lease; push_c2 "$c1"
   assert_eq "$(run_lease 'r1#7#A')" "0" "㉒ 无人持有时拿到租约并评审"
   assert_eq "$(cat "$ltmp/events")" $'engine-start r1#7#A\nengine-end r1#7#A' "㉒ 引擎跑了一次"
-  assert_eq "$(attr "$ltmp/snap.json" "$LEASE" holder)" "r1#7#A" "㉒ 引擎运行期间持有者是自己"
+  assert_eq "$(attr "$ltmp/snap.json" "$LEASE" holder)" "r1#7#A|$ARN_A" \
+    "㉒ 引擎运行期间持有者是自己：抢锁键 + 本任务 ARN（issue 02 L1'）"
   snap_until=$(attr "$ltmp/snap.json" "$LEASE" lease_until)
   assert_eq "$(( $(attr "$ltmp/snap.json" "$LEASE" expires_at) - snap_until ))" "86400" \
     "㉒ 租约记录带 expires_at = lease_until + 1 天（N4：不许有不带 TTL 的记录）"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "0" "㉒ 退出时释放（lease_until 清零）"
-  assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#A" "㉒ 释放不改持有者"
+  assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#A|$ARN_A" "㉒ 释放不改持有者"
   assert_contains "$(cat "$ltmp/err.r1#7#A")" "head-check result=current sha=${c1:0:7}" \
     "㉒ 最新提交就是 HEAD_SHA 时打 current"
   assert_eq "$(sleeps)" "0" "㉒ 无人持有时不等待"
@@ -720,6 +738,47 @@ STUB
     "㉒ L1：同一 MR 的两次引擎运行不重叠（第二个在第一个结束之后才开始）"
   assert_nonzero "$(sleeps)" "㉒ 第二个任务确实等过（轮询过至少一次）"
   assert_contains "$(cat "$ltmp/err.r1#7#1244b")" "等待租约" "㉒ 等待时打一行说明"
+
+  # L1'（issue 02）：同一个 LOCK_KEY 的两个任务（RunTask 客户端耗尽重试、服务端其实已起，调度器释放锁后同一
+  # 报文又被重放）同样互斥。持有者只记 LOCK_KEY 时，第二个任务被 `#h = :me` 当成本人、直接进去 → 两次引擎重叠。
+  reset_lease
+  run_lease 'r1#7#A' ENGINE_SECONDS=1.5 >/dev/null &
+  a_pid=$!
+  for _ in $(seq 1 50); do grep -q 'engine-start r1#7#A' "$ltmp/events" && break; /bin/sleep 0.1; done
+  assert_contains "$(cat "$ltmp/events")" "engine-start r1#7#A" "㉒ 前提：同键的第一个任务的引擎已经在跑"
+  b_rc=$(run_lease 'r1#7#A' REAL_SLEEP=0.2 FAKE_TASK_META="{\"TaskARN\":\"$ARN_B\"}")
+  wait "$a_pid"
+  assert_eq "$b_rc" "0" "㉒ 同键的第二个任务等到租约后正常评审"
+  assert_eq "$(cat "$ltmp/events")" \
+    $'engine-start r1#7#A\nengine-end r1#7#A\nengine-start r1#7#A\nengine-end r1#7#A' \
+    "㉒ L1'：同一个 LOCK_KEY 的两个任务，引擎运行也不重叠"
+  assert_nonzero "$(sleeps)" "㉒ 同键的第二个任务确实等过"
+  assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#A|$ARN_B" "㉒ 最后持有者是第二个任务"
+
+  # L1''：同一个任务的持有者值不变 → AWS CLI 自己的重试（上一次尝试已经写入、应答丢了）被 `#h = :me` 认成本人，
+  # 不等、直接进去。这里用「表里已经是我、而且远未到期」模拟那次已落地的写入。
+  reset_lease "{\"$LEASE\":{\"pk\":{\"S\":\"$LEASE\"},\"holder\":{\"S\":\"r1#7#A|$ARN_A\"},\"lease_until\":{\"N\":\"999999999999\"},\"expires_at\":{\"N\":\"999999999999\"}}}"
+  echo 1000 > "$ltmp/clock"
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock")" "0" "㉒ L1''：本任务自己已写下的租约直接重入"
+  assert_eq "$(sleeps)" "0" "㉒ L1''：重入不等待"
+  # 反向对照：同键、别的任务（ARN 不同）写下的未到期租约 → 必须等（等满上限 93）
+  reset_lease "{\"$LEASE\":{\"pk\":{\"S\":\"$LEASE\"},\"holder\":{\"S\":\"r1#7#A|$ARN_B\"},\"lease_until\":{\"N\":\"999999999999\"},\"expires_at\":{\"N\":\"999999999999\"}}}"
+  echo 1000 > "$ltmp/clock"
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock")" "93" "㉒ 同键别的任务持有时不得重入"
+  assert_eq "$(cat "$ltmp/events")" "" "㉒ 同键别的任务持有时不跑引擎"
+
+  # 读不到本任务 ARN → fail closed（93），不碰租约、不跑引擎。端点失败、字段缺失、形状不对都一样
+  for meta in FAIL '{}' '{"TaskARN":""}' '{"TaskARN":"not-an-arn"}' 'not json' \
+              '{"TaskARN":"arn:aws:ecs:us-west-2:123456789012:task/c/x y"}'; do
+    reset_lease
+    if [[ "$meta" == FAIL ]]; then rc=$(run_lease 'r1#7#A' FAKE_TASK_META_FAIL=1)
+    else rc=$(run_lease 'r1#7#A' FAKE_TASK_META="$meta"); fi
+    assert_eq "$rc" "93" "㉒ 读不到本任务 ARN 时以 93 退出（${meta}）"
+    assert_contains "$(cat "$ltmp/err.r1#7#A")" "读不到本任务的 ARN（ECS 任务级元数据端点），无法确定租约持有者，拒绝评审" \
+      "㉒ 读不到 ARN 的消息固定（${meta}）"
+    assert_eq "$(cat "$ltmp/ddb.log")" "" "㉒ 读不到 ARN 时不碰租约表（${meta}）"
+    assert_eq "$(cat "$ltmp/events")" "" "㉒ 读不到 ARN 时不跑引擎（${meta}）"
+  done
 
   # L5：拿到租约后源分支已前进，且新提交有抢锁记录 → 退出 0、不评审、不发评论，并释放租约
   reset_lease "{\"r1#7#$c2\":{\"pk\":{\"S\":\"r1#7#$c2\"},\"expires_at\":{\"N\":\"99999999999\"}}}"
@@ -759,7 +818,7 @@ STUB
   echo 10000 > "$ltmp/clock"
   assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock")" "0" "㉒ 过期租约被接管"
   assert_eq "$(sleeps)" "0" "㉒ 过期租约不等待"
-  assert_eq "$(attr "$ltmp/snap.json" "$LEASE" holder)" "r1#7#A" "㉒ 接管后引擎运行期间持有者是自己"
+  assert_eq "$(attr "$ltmp/snap.json" "$LEASE" holder)" "r1#7#A|$ARN_A" "㉒ 接管后引擎运行期间持有者是自己"
   reset_lease "{\"$LEASE\":{\"pk\":{\"S\":\"$LEASE\"},\"holder\":{\"S\":\"r1#7#old\"},\"lease_until\":{\"N\":\"10000\"},\"expires_at\":{\"N\":\"96400\"}}}"
   echo 10000 > "$ltmp/clock"
   assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock")" "0" "㉒ 到期那一刻之后接管"
