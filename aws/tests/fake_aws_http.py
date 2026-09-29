@@ -1,4 +1,4 @@
-"""本地 HTTP 替身：说 DynamoDB PutItem 与 ECS RunTask 的 JSON 协议，让**真的** botocore 客户端（生产 `_clients()` 建的
+"""本地 HTTP 替身：说 DynamoDB PutItem / DeleteItem 与 ECS RunTask 的 JSON 协议，让**真的** botocore 客户端（生产 `_clients()` 建的
 那两个，带有界超时与 standard 重试）打过来。
 
 它存在的理由是 issue 02：「已提交、应答却丢了」之后 SDK 的重试会发生什么，靠 Mock 的 side_effect 证明不了——重试发生在
@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _TARGETS = {
     "DynamoDB_20120810.PutItem": ("PutItem", "application/x-amz-json-1.0"),
+    "DynamoDB_20120810.DeleteItem": ("DeleteItem", "application/x-amz-json-1.0"),
     "AmazonEC2ContainerServiceV20141113.RunTask": ("RunTask", "application/x-amz-json-1.1"),
 }
 _DDB_ERR = "com.amazonaws.dynamodb.v20120810#"
@@ -84,6 +85,9 @@ class FakeAws:
     def _handle(self, op, body):
         if op == "PutItem":
             return self._put_item(body)
+        if op == "DeleteItem":
+            self.items.pop(body["Key"]["pk"]["S"], None)
+            return 200, {}
         if op == "RunTask":
             return self._run_task(body)
         return 400, {"__type": "UnknownOperationException", "message": "fake_aws_http: unsupported target"}

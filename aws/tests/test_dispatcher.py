@@ -1466,6 +1466,23 @@ def test_a_run_task_whose_first_attempt_launched_but_timed_out_is_retried_with_t
     assert fake_aws.launched == [arn]
 
 
+def test_a_run_task_that_times_out_on_every_attempt_is_not_retried_again_by_the_dispatcher(fake_aws):
+    # R1：一次 dispatch 对 RunTask 只发起一次 API 调用。上面那条只让第一次尝试超时，SDK 自己的重试就成功了，
+    # 手写在外面的重试根本走不到；这里让两次尝试都超时，外层再调一次就是新 token → 第二个任务。
+    # 同时记下残余（issue 02）：服务端其实已经起了任务，调度器却释放锁、发一条「评审未启动」——任务照常评审。
+    ecs, table = handler_mod._clients({})
+    fake_aws.stall("RunTask", 2)
+    with mock.patch.object(handler_mod.codeup_min, "post_comment") as post:
+        r = handler_mod.dispatch(ecs, table, _full_cfg(), F)
+    assert_alb_response(r, 200, "runtask-failed")
+    tokens = {b.get("clientToken") for op, b in fake_aws.requests if op == "RunTask"}
+    assert len([1 for op, _ in fake_aws.requests if op == "RunTask"]) == 2, "只有 SDK 自己的两次尝试"
+    assert len(tokens) == 1 and None not in tokens
+    assert len(fake_aws.launched) == 1
+    assert "ReadTimeoutError" in post.call_args.args[4]
+    assert "r1#7#abc123" not in fake_aws.items, "失败路径照旧释放锁（N4）"
+
+
 # ── 复审 s3 M-1：本该评审的事件缺字段时必须留痕（以前三条路径一行日志都没有）──────────────
 @pytest.mark.parametrize("drop", [
     lambda b: b["object_attributes"]["last_commit"].pop("id"),
