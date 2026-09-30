@@ -127,6 +127,19 @@ def test_a_frozen_monotonic_clock_still_expires_the_entry_by_the_wall_clock(monk
     assert client.get_secret_value.call_count == 3
 
 
+def test_a_frozen_wall_clock_still_expires_the_entry_by_the_monotonic_clock(monkeypatch):
+    # 收口复审 R-3：墙钟停着（或被拨回原处）、单调钟走满 300 s 也必须重取——另一臂不能替这一臂作证
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
+    client = _boto3(monkeypatch, {"SecretString": "old"}, {"SecretString": "new"})
+    now = _frozen_clock(monkeypatch, wall=[5000.0])
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "old"
+    now[0] += 299.999
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "old"
+    now[0] += 0.001
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "new"
+    assert client.get_secret_value.call_count == 2
+
+
 def test_value_is_cached_per_process_so_a_warm_invocation_does_not_call_aws(monkeypatch):
     monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
     client = _boto3(monkeypatch, {"SecretString": "s3cret"}, {"SecretString": "changed"})

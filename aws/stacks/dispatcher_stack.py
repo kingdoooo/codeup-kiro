@@ -89,13 +89,13 @@ class DispatcherStack(cdk.Stack):
                 # secret_name 对按名导入的密钥就是传进去的那个字面量（同文件 :4728，且已实测
                 # 不是 Token），不会在模板里变成 Fn::Join。
                 "WEBHOOK_SECRET_ID": webhook_secret.secret_name,
-                # 调度器对云效令牌的消费在 Task 5 的 _runtime_cfg() 里才出现；现在就注入是为了让
-                # 下面按函数收紧的 GetSecretValue 授权与对应断言同时成立（注入密钥名不是暴露面）。
+                # 调度器只在 RunTask 失败后的留痕那一步读云效令牌（handler.py 的 _post_failed_comment，
+                # issue 05 G3）；注入的是密钥名，不是暴露面。
                 "YUNXIAO_TOKEN_ID": yunxiao_token.secret_name,
             },
         )
         # 这条授权现在是真在用的代码路径：调度器每次调用都经 secret_fetch.py 读 webhook 密钥
-        # （云效令牌由 Task 5 的 _runtime_cfg() 读，SecretId 已注入，一并授权）。缺了它
+        # （云效令牌只在 RunTask 失败后的留痕那一步读，见 handler.py 的 _post_failed_comment，一并授权）。缺了它
         # GetSecretValue 会抛 AccessDeniedException，handler 按 fail-closed 回 503。
         # 不用 grant_read：那会连 secretsmanager:DescribeSecret 一起给上，两个 Lambda 都不调它
         # （与上面 lock_table 不用 grant_read_write_data 同一条理由）。

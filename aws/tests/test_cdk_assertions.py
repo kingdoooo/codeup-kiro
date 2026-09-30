@@ -848,15 +848,21 @@ def test_setup_guide_documents_the_exact_secret_unavailable_log_line():
     assert len(row_rt) == 1
     for fact in ("`cleanup-failed step=comment reason=PostFailed`",
                  "`cleanup-failed step=comment reason=SecretUnavailable:<代号>`", "`ConnectionResetError`",
-                 "最多一行", "`Task timed out after …`"):
+                 "最多一行", "`Status: timeout`"):
         assert fact in row_rt[0], f"「评审未启动」那一行缺：{fact}"
     assert "每次恰好一行" not in row_rt[0], "函数超时时连 cleanup-failed 那一行都没有（review-B M-4）"
+    # 收口复审 R-2：Text 日志格式下超时只有 REPORT 行的 Status: timeout（sandbox 09-28 实测），没有 Task timed out 行
+    assert "`Task timed out after" not in row_rt[0], row_rt[0]
     assert 'f"cleanup-failed step={step} reason={_failure_reason(exc)}"' in handler, \
         "手册写的是这行日志的形状，handler 必须真的这么打"
     # 兜底那侧确实不打这行（它抛异常走 EventBridge 重试），手册也照实这么写
     backstop = (aws_dir / "lambda" / "backstop" / "handler.py").read_text()
     assert prefix not in backstop
-    assert "不打固定格式的代号日志" in guide
+    silent = [ln for ln in guide.splitlines() if ln.startswith("| 评审任务确实异常结束了，MR 上却**没有**兜底评论")]
+    assert len(silent) == 1
+    assert "不打固定格式的代号日志" in silent[0], silent[0]
+    # G3 之后 503 那一行只讲共享密钥，兜底这一行不能再把人指过去找令牌的日志（review-B M-3）
+    assert "见本表「Codeup 的 webhook 投递记录显示 503」那一行" not in silent[0].split("不打固定格式的代号日志", 1)[1][:200]
 
 
 # ── F4：Codeup 对 503 的重投行为已实测，两处都不得退回「未经核实」 ──────────────
@@ -1711,8 +1717,10 @@ def test_the_troubleshooting_table_refers_to_rows_by_name_and_every_name_resolve
     sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
     for ln in sec8:
         # issue 05 A2：「见下面 `head-check` 那一行」这种中间夹了名字的写法以前漏过了（其中一处方向还是错的）。
-        found = re.findall(r"上一行|下一行|上一条|下一条|上面那一行|下面那一行"
-                           r"|(?:上面|下面|上方|下方|前面|后面|上文|下文)(?:「[^」]*」|[^，。；（）|「」]){0,40}?那一?行", ln)
+        found = re.findall(r"上一行|下一行|上一条|下一条|上一格|下一格|(?<!最)(?:前|后)一[行条格]|上面那一行|下面那一行"
+                           r"|(?:上面|下面|上方|下方|前面|后面|上文|下文)(?:「[^」]*」|[^，。；（）|「」]){0,40}?"
+                           r"(?:[那这]一?[行条格栏]|所在的?行)", ln)
+        # (?<!最)：§8 里「最后一行就是卡住的那一步」「第 3 节最后一条」是合法写法
         # 「…」 整段放行：名字里可能带全角括号（review 变异「见下面「head-check（租约）」那一行」以前漏过）
         assert not found, f"§8 仍有位置引用 {found}：{ln[:60]}"
     firsts = [ln.split(" | ")[0].replace("**", "").replace("`", "") for ln in sec8]
@@ -1729,7 +1737,7 @@ def test_references_into_the_troubleshooting_table_from_other_sections_are_by_na
     """issue 05 A1：上面那条只扫 §8 表内，§0 的「第 8 节最后几行」与 §4.2 的「第 8 节倒数第二行」不在它的范围里，
     而这两处从写下起就指错了（那一行是倒数第六行）。全文一律写「第 8 节「X」那一行」，X 唯一对上 §8 一行的「现象」格。"""
     guide = _guide_text()
-    found = re.findall(r"(?:第\s*8\s*节|§\s*8)[^「」。，）\n]{0,4}?(?:倒数|最后|末尾|第.{1,3}行)", guide)
+    found = re.findall(r"(?:第\s*[8八]\s*节|§\s*8)[^「」。，）\n]{0,4}?(?:倒数|最后|末尾|第.{1,3}行)", guide)
     assert not found, f"仍有指向第 8 节的位置引用：{found}"
     sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
     firsts = [ln.split(" | ")[0].replace("**", "").replace("`", "") for ln in sec8]
@@ -1808,6 +1816,10 @@ def test_the_guide_does_not_claim_no_process_environ_holds_the_token():
     assert "都看不到令牌值本身" not in item, item
     # review-A F-1：引擎调 Codeup API 时令牌就在 curl 的命令行参数里，不能说「任何进程的 cmdline 里都没有」
     assert "不出现在任何进程的" not in item, item
+    # 收口复审 R-1：换个说法（「都看不到」「不会出现在任何进程」）也不行；正向要写出「都读得到令牌」
+    assert "看不到" not in item, item
+    assert not re.search(r"不(?:会)?出现在任何进程", item), item
+    assert "都读得到令牌" in item, item
     for fact in ("`/proc/<pid>/cmdline`", "`YUNXIAO_TOKEN`", "进程树", "不继承", "`scripts/lib/codeup-api.sh`",
                  "curl 的命令行参数", "这只管 git 这一条路"):
         assert fact in item, f"§3「令牌不在 argv」那一条缺：{fact}"
@@ -1843,13 +1855,20 @@ def test_the_executor_runs_in_beijing_time_without_needing_tzdata():
     # review-B N-6：TZ 要一路到得了引擎（它的 date 在 kiro-review.sh 自己的进程里）。引擎不能以 env -i 启动，
     # 也不能把 TZ 摘掉；kiro-cli 的 env -i 许可清单与此无关（模型进程不打时间格）。
     entry = (pathlib.Path(__file__).resolve().parents[1] / "executor" / "entrypoint.sh").read_text()
-    launch = [ln for ln in entry.splitlines() if "kiro-review.sh" in ln and not ln.lstrip().startswith("#")]
-    assert len(launch) == 1, launch
-    assert "env -i" not in launch[0] and "-u TZ" not in launch[0] and "TZ=" not in launch[0], launch[0]
+    code = [ln for ln in entry.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    idx = [i for i, ln in enumerate(code) if "kiro-review.sh" in ln]
+    assert len(idx) == 1, idx
+    assert not code[idx[0] - 1].rstrip().endswith("\\"), "启动引擎那一行不能是续行（前一行可能接了 env -i）"
+    # 收口复审 N-6：只看启动那一行的话，前一行 unset TZ、改用 env --ignore-environment 都漏过——整个文件都不许
+    for bad in ("env -i", "--ignore-environment", "unset TZ", "-u TZ", "TZ="):
+        assert not [ln for ln in code if bad in ln], (bad, [ln for ln in code if bad in ln])
     row = [ln for ln in _guide_text().splitlines() if ln.startswith("| `TZ` |")]
     assert len(row) == 1, "§4.2 缺 TZ 那一行"
     for fact in ("`CST-8`", "tzdata", "`Asia/Shanghai`", "UTC"):
         assert fact in row[0], f"TZ 那一行缺：{fact}"
+    # 收口复审 M-1 残余：debian:stable-slim 带 tzdata（Debian 13 的 required 包），不得再写成「镜像不带」
+    for wrong in ("镜像不带", "没有 tzdata", "无 tzdata"):
+        assert wrong not in row[0], row[0]
 
 
 def test_the_six_required_executor_variables_are_named_where_the_guide_counts_them():
