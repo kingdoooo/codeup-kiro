@@ -23,7 +23,7 @@ import os
 import time
 
 # 按进程缓存：Lambda 执行环境跨调用复用，不必每次调用都取。键用 SecretId，同一个函数里的两个
-# 密钥不会互相串；值是 (value, fetched_at)。**只缓存取到的非空值**——失败绝不入缓存，否则一次
+# 密钥不会互相串；值是 (value, 取到时的单调钟, 取到时的墙钟)。**只缓存取到的非空值**——失败绝不入缓存，否则一次
 # 限流会把这个执行环境钉死在失败态直到它被回收，期间每个 webhook 都被拒。下一次调用必须能重试。
 _CACHE = {}
 
@@ -32,6 +32,8 @@ _CACHE = {}
 # 同一个热环境里、同样 401。5 分钟：轮换后两个函数最多 5 分钟都用上新值、重试耗尽后的回放拿得到新值，
 # GetSecretValue 的费用与配额可以忽略。过期之后重取失败就照常抛，**绝不**回退到旧值——旧值在
 # 轮换场景下恰恰是错的。setup-guide.md 里写的「5 分钟」由测试从这个数算出来。
+# 单调钟**与**墙钟任一走满 TTL 就算过期：Lambda 冻结执行环境期间 time.monotonic() 是否照常前进没有第一手证据
+# （不前进的话，低流量时缓存会远远活过 5 分钟）；墙钟被校时拨动最多只让缓存提前过期、多取一次，无害。
 CACHE_TTL_SECONDS = 300
 
 
@@ -68,8 +70,9 @@ def secret_from_env(var_name):
         raise SecretUnavailable(var_name, "env-unset")
     hit = _CACHE.get(secret_id)
     if hit is not None:
-        value, fetched_at = hit
-        if time.monotonic() - fetched_at < CACHE_TTL_SECONDS:
+        value, at_mono, at_wall = hit
+        if (time.monotonic() - at_mono < CACHE_TTL_SECONDS
+                and abs(time.time() - at_wall) < CACHE_TTL_SECONDS):
             return value
         del _CACHE[secret_id]   # 过期：先扔掉，重取失败时缓存里不留旧值
     import boto3  # 沿用本仓库写法：boto3 在函数内部 import（见 backstop/handler.py 的 handler）
@@ -88,5 +91,5 @@ def secret_from_env(var_name):
     # 去查 Codeup 那侧，永远查不到真正的原因。
     if not value:
         raise SecretUnavailable(var_name, "empty-value")
-    _CACHE[secret_id] = (value, time.monotonic())
+    _CACHE[secret_id] = (value, time.monotonic(), time.time())
     return value

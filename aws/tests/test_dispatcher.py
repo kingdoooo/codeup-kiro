@@ -28,10 +28,17 @@ def test_correct_token_accepted_case_insensitive_header():
     assert handler_mod.verify_token({"X-Codeup-Token": "s3cret"}, "s3cret") is True
 
 def test_uses_constant_time_comparison():
-    # 静态守卫：必须用 hmac.compare_digest，不能用 ==
-    src = (pathlib.Path(handler_mod.__file__)).read_text()
-    assert "compare_digest" in src
-    assert "hmac" in src
+    """静态守卫：verify_token 必须真的调用 hmac.compare_digest，不能用 ==。按 AST 判：以前按全文子串判，
+    注释里提一句 compare_digest 就能让它恒真（review-B M-2）。"""
+    import ast
+    tree = ast.parse(pathlib.Path(handler_mod.__file__).read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "verify_token")
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "compare_digest" and isinstance(n.func.value, ast.Name) and n.func.value.id == "hmac"]
+    assert len(calls) == 1, "verify_token 里没有（或不止一处）hmac.compare_digest 调用"
+    eqs = [n for n in ast.walk(fn) if isinstance(n, ast.Compare)
+           and any(isinstance(op, (ast.Eq, ast.NotEq)) for op in n.ops)]
+    assert not eqs, "verify_token 里出现了 == / != 比较"
 
 
 # ── issue 05 G1（s1 F8）：非 ASCII 的令牌或密钥不能变成 5xx ──────────────────────────
@@ -175,8 +182,7 @@ def _stub_secrets(monkeypatch, *responses):
 
 
 def test_handler_fetches_the_secret_by_the_name_in_the_env_and_accepts_a_valid_token(monkeypatch):
-    # `_runtime_cfg` 换成桩，好让这条用例只管令牌这一段：否则它会连云效令牌一起取，
-    # 下面那句「取的是环境变量里那个密钥名」的断言就会指到第二次调用上（接线本身另有用例覆盖）。
+    # `_runtime_cfg` 换成桩，好让这条用例只管令牌这一段、不必配齐运行时环境变量（接线本身另有用例覆盖）。
     monkeypatch.setattr(handler_mod, "_runtime_cfg", lambda: _full_cfg(org_id=FIX_ORG))
     client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
     # 令牌对了之后这次投递没有事件头 → classify 判 ignore（不是「验完签名就返回 200」）。
@@ -790,14 +796,13 @@ def test_handler_ignores_a_filtered_event_without_launching(monkeypatch):
 
 
 def test_handler_end_to_end_with_the_real_runtime_cfg_passes_the_fixture_values_to_run_task(monkeypatch):
-    """不 stub `_runtime_cfg`：上面那条 e2e 用例把它整个换掉了，所以环境变量名写错、
-    `codeup_token` 忘了经 Secrets Manager 取，它一概发现不了。这条走真实 `_runtime_cfg`
-    与真实 `secret_fetch`，并**钉住 RunTask 的请求形状**（不只是「被调用过」）。
+    """不 stub `_runtime_cfg`：上面那条 e2e 用例把它整个换掉了，所以环境变量名写错它发现不了。
+    这条走真实 `_runtime_cfg` 与真实 `secret_fetch`，并**钉住 RunTask 的请求形状**（不只是「被调用过」）。
     """
     ecs, table = mock.Mock(), mock.Mock()
     ecs.run_task.return_value = {"tasks": [{"taskArn": "arn:task/1"}]}
     monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
-    client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"}, {"SecretString": "t0ken"})
+    client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
     _set_runtime_env(monkeypatch)
     assert_alb_response(handler_mod.handler({
         "headers": {"X-Codeup-Token": "s3cret", "X-Codeup-Event": "Merge Request Hook"},

@@ -91,7 +91,7 @@ export GIT_CONFIG_VALUE_0="$cred_helper"
 # 不允许 URL 里带 userinfo。仍按深度防御把任何 `scheme://…@` 的 userinfo 抹掉。git 的报错会带分支名
 # （MR 作者可控），所以逐行去掉控制字符、截到 200 字节、加固定前缀：伪造不出一行像样的日志。
 # 截断按字节：超过 200 字节的行末尾可能留下半个 UTF-8 字符（日志里显示为替换符），纯外观，有意不处理
-# （issue 05 D2：换成按字符截要引入容器里 mawk 的八进制转义方言依赖，为外观问题不值得）。
+# （issue 05 D2：换成「截到 200 字节再去掉被截断的半个字符」要引入容器里 mawk 的八进制转义方言依赖，为外观问题不值得）。
 GIT_ERR="$WORKROOT/git-stderr.log"
 git_err_tail() {
   [[ -s "$GIT_ERR" ]] || return 0

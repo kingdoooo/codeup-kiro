@@ -278,7 +278,8 @@ else
   echo "SKIP: 无 /usr/bin/git，跳过 ⑯ 凭证行为断言" >&2
 fi
 
-# issue 05 E1：执行器任务定义里的 TZ=CST-8（stacks/executor_stack.py）必须在**没有 tzdata** 的镜像里也生效。
+# issue 05 E1：执行器任务定义里的 TZ=CST-8（stacks/executor_stack.py）不靠时区数据库也得生效（基础镜像目前带
+#   tzdata，但 CST-8 这种 POSIX 写法本来就不依赖它；本机 macOS 与容器里各跑一次）。
 #   这条测的是平台（libc 的 POSIX TZ 解析），所以要在构建机的 debian:stable-slim 容器里也跑一次才算容器证据。
 assert_eq "$(TZ=CST-8 date +%z)" "+0800" "E1 TZ=CST-8 不靠时区数据库也是 +0800"
 

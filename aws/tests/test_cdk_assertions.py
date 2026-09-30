@@ -847,14 +847,16 @@ def test_setup_guide_documents_the_exact_secret_unavailable_log_line():
     row_rt = [ln for ln in guide.splitlines() if ln.startswith("| MR 上出现调度器写的「评审未启动」类评论")]
     assert len(row_rt) == 1
     for fact in ("`cleanup-failed step=comment reason=PostFailed`",
-                 "`cleanup-failed step=comment reason=SecretUnavailable:<代号>`", "`ConnectionResetError`"):
+                 "`cleanup-failed step=comment reason=SecretUnavailable:<代号>`", "`ConnectionResetError`",
+                 "最多一行", "`Task timed out after …`"):
         assert fact in row_rt[0], f"「评审未启动」那一行缺：{fact}"
+    assert "每次恰好一行" not in row_rt[0], "函数超时时连 cleanup-failed 那一行都没有（review-B M-4）"
     assert 'f"cleanup-failed step={step} reason={_failure_reason(exc)}"' in handler, \
         "手册写的是这行日志的形状，handler 必须真的这么打"
     # 兜底那侧确实不打这行（它抛异常走 EventBridge 重试），手册也照实这么写
     backstop = (aws_dir / "lambda" / "backstop" / "handler.py").read_text()
     assert prefix not in backstop
-    assert "不打调度器那行固定格式的日志" in guide
+    assert "不打固定格式的代号日志" in guide
 
 
 # ── F4：Codeup 对 503 的重投行为已实测，两处都不得退回「未经核实」 ──────────────
@@ -1413,7 +1415,7 @@ def test_clean_command_phrases_are_kept_verbatim(good, write_cfg):
 
 
 @pytest.mark.parametrize("bad", [" aliyun:bot", "aliyun:bot ", "aliyun:a,aliyun:b", "\taliyun:bot",
-                                 "aliyun:\x00bot", "aliyun:bot\u200b", 123, True])
+                                 "aliyun:\x00bot", "aliyun:bot\u200b", 123, True, 0, False])
 def test_bot_username_must_be_a_clean_string(bad, write_cfg):
     """issue 05 C2：bot_username 以前只查真值。带首尾空白 → 作者守卫永不命中、引擎按作者找不到上一条
     汇总（每次新建一条）；带逗号 → 默认名单 [bot_username] 被 join/split 拆成两个名字，第二个人的命令被
@@ -1423,6 +1425,14 @@ def test_bot_username_must_be_a_clean_string(bad, write_cfg):
     base.pop("bot_usernames", None)   # 默认名单由 bot_username 派生：正是绕过了名单校验的那条路
     with pytest.raises(ValueError, match=r"bot_username 取值"):
         load_config(write_cfg(dict(base, bot_username=bad)))
+
+
+def test_bot_username_is_checked_even_when_bot_usernames_is_given(write_cfg):
+    # review-A F-5：验收部署正是这种形状（bot_usernames: []），bot_username 照样进 CODEUP_BOT_USERNAME
+    base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    for names in ([], ["aliyun:kirobot"]):
+        with pytest.raises(ValueError, match=r"bot_username 取值"):
+            load_config(write_cfg(dict(base, bot_usernames=names, bot_username=" aliyun:bot")))
 
 
 @pytest.mark.parametrize("good", ["aliyun:kirobot", "aliyun:kingdooo_hvFXC"])
@@ -1575,8 +1585,11 @@ def test_the_backstop_alarms_fire_on_the_first_occurrence_and_notify_one_topic()
             [{"Name": "QueueName", "Value": {"Fn::GetAtt": [q_id, "QueueName"]}}],
             ("AWS/Lambda", "Errors"): [{"Name": "FunctionName", "Value": {"Ref": fn_id}}],
             ("AWS/Lambda", "DestinationDeliveryFailures"): [{"Name": "FunctionName", "Value": {"Ref": fn_id}}]}
+    stats = {("AWS/SQS", "ApproximateNumberOfMessagesVisible"): "Maximum",
+             ("AWS/Lambda", "Errors"): "Sum", ("AWS/Lambda", "DestinationDeliveryFailures"): "Sum"}
     for key, a in alarms.items():
         assert a["Dimensions"] == dims[key], (key, a["Dimensions"])
+        assert a["Statistic"] == stats[key] and a["Period"] == 300, (key, a.get("Statistic"), a.get("Period"))
         # 「> 0」：第一次出现就告警。阈值 0 是有意义的取值（falsy），GreaterThanOrEqual 0 会恒真
         assert a["Threshold"] == 0 and a["ComparisonOperator"] == "GreaterThanThreshold", (key, a)
         assert a["EvaluationPeriods"] == 1 and a["TreatMissingData"] == "notBreaching", (key, a)
@@ -1610,12 +1623,14 @@ def test_the_guide_says_how_to_subscribe_to_and_replay_backstop_failures():
         assert step in row[0], f"「收到兜底告警」那一行缺：{step}"
     # issue 05 B1：函数自己失败时 `aws lambda invoke` 照样退出 0（失败只在 FunctionError 与 out.json 里），
     # 「命令本身就会报错」会让人用 && 把 invoke 与 delete-message 串起来、误删消息。
-    for fact in ("`\"FunctionError\": \"Unhandled\"`", "照样退出 0", "`&&`"):
+    for fact in ("`\"FunctionError\": \"Unhandled\"`", "照样退出 0", "**不要**用 `&&`"):
         assert fact in row[0], f"「收到兜底告警」那一行缺：{fact}"
     assert "命令本身就会报错" not in row[0]
     # issue 05 B6：队列告警只在进入告警状态的那一刻通知一次，回放必须把队列清空。
-    for fact in ("通知**一次**", "清空"):
+    for fact in ("通知**一次**", "清空", "ApproximateNumberOfMessagesNotVisible", "--wait-time-seconds 20",
+                 "一直停在告警状态"):
         assert fact in row[0], f"「收到兜底告警」那一行缺：{fact}"
+    assert "直到 `receive-message` 返回空）" not in row[0], "短轮询返回空不代表队列空了"
 
     silent = [ln for ln in sec8 if ln.startswith("| 评审任务确实异常结束了，MR 上却**没有**兜底评论")]
     assert len(silent) == 1
@@ -1628,8 +1643,11 @@ def test_the_guide_says_how_to_subscribe_to_and_replay_backstop_failures():
         assert fact in silent[0], f"「没有兜底评论」那一行缺：{fact}"
     # issue 05 B2：连上之后读超时 / 被重置时抛的是原始异常、没有 result=failed 那一行（/tmp 实测），
     # 不是 PostFailed。
-    for fact in ("`backstop step=post-comment result=failed`", "`TimeoutError`", "`ConnectionResetError`"):
+    for fact in ("`backstop step=post-comment result=failed`", "`TimeoutError`", "`ConnectionResetError`",
+                 "`RemoteDisconnected`", "没有 `result=failed` 那一行", "`[ERROR] PostFailed: post-comment`"):
         assert fact in silent[0], f"「没有兜底评论」那一行缺：{fact}"
+    # review-A F-2：运行时的错误记录不打 __cause__，别再说「其上还会带原始 AWS 错误正文」
+    assert "其上还会带原始 AWS 错误正文" not in silent[0] and "traceback 末行" not in silent[0]
     assert "不再把失败当成功" not in silent[0]
     # issue 05 B4（Kent 10-01 裁决：只写进文档）：发评论只有每次 socket 操作的超时、没有整体截止时间。
     assert "整体截止时间" in silent[0]
@@ -1694,7 +1712,7 @@ def test_the_troubleshooting_table_refers_to_rows_by_name_and_every_name_resolve
     for ln in sec8:
         # issue 05 A2：「见下面 `head-check` 那一行」这种中间夹了名字的写法以前漏过了（其中一处方向还是错的）。
         found = re.findall(r"上一行|下一行|上一条|下一条|上面那一行|下面那一行"
-                           r"|(?:上面|下面)[^，。；（）|]{0,40}?那一行", ln)
+                           r"|(?:上面|下面|上方|下方|前面|后面|上文|下文)[^，。；（）|]{0,40}?那一?行", ln)
         assert not found, f"§8 仍有位置引用 {found}：{ln[:60]}"
     firsts = [ln.split(" | ")[0].replace("**", "").replace("`", "") for ln in sec8]
     names = set()
@@ -1710,7 +1728,7 @@ def test_references_into_the_troubleshooting_table_from_other_sections_are_by_na
     """issue 05 A1：上面那条只扫 §8 表内，§0 的「第 8 节最后几行」与 §4.2 的「第 8 节倒数第二行」不在它的范围里，
     而这两处从写下起就指错了（那一行是倒数第六行）。全文一律写「第 8 节「X」那一行」，X 唯一对上 §8 一行的「现象」格。"""
     guide = _guide_text()
-    found = re.findall(r"第 8 节(?:倒数|最后)[^）。，]*", guide)
+    found = re.findall(r"(?:第\s*8\s*节|§\s*8)[^「」。，）\n]{0,4}?(?:倒数|最后|末尾|第.{1,3}行)", guide)
     assert not found, f"仍有指向第 8 节的位置引用：{found}"
     sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
     firsts = [ln.split(" | ")[0].replace("**", "").replace("`", "") for ln in sec8]
@@ -1787,8 +1805,13 @@ def test_the_guide_does_not_claim_no_process_environ_holds_the_token():
     end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("  - "))
     item = "\n".join(lines[start:end])
     assert "都看不到令牌值本身" not in item, item
-    for fact in ("`/proc/<pid>/cmdline`", "`YUNXIAO_TOKEN`", "进程树", "不继承"):
+    # review-A F-1：引擎调 Codeup API 时令牌就在 curl 的命令行参数里，不能说「任何进程的 cmdline 里都没有」
+    assert "不出现在任何进程的" not in item, item
+    for fact in ("`/proc/<pid>/cmdline`", "`YUNXIAO_TOKEN`", "进程树", "不继承", "`scripts/lib/codeup-api.sh`",
+                 "curl 的命令行参数", "这只管 git 这一条路"):
         assert fact in item, f"§3「令牌不在 argv」那一条缺：{fact}"
+    api = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "lib" / "codeup-api.sh").read_text()
+    assert '-H "x-yunxiao-token: ${YUNXIAO_TOKEN}"' in api, "引擎不再把令牌放进 curl 参数了：手册这一句要跟着改"
 
 
 def test_the_guide_states_the_secret_cache_ttl_where_rotation_is_discussed():
@@ -1801,18 +1824,27 @@ def test_the_guide_states_the_secret_cache_ttl_where_rotation_is_discussed():
     row = [ln for ln in _guide_section_lines("8.") if ln.startswith("| Codeup 的 webhook 投递记录显示 401")]
     assert len(row) == 1
     assert "没有 TTL" not in row[0], row[0]
-    for fact in (minutes, "**两个**函数"):
-        assert fact in row[0], f"401 那一行缺：{fact}"
+    # webhook 密钥只有调度器读（review-B M-5）：401 那一行不该让人去改兜底
+    assert minutes in row[0] and "只有调度器读" in row[0], row[0]
+    assert "**两个**函数" not in row[0], row[0]
     sec14 = "\n".join(_guide_section_lines("1.")).split("### 1.4", 1)[1].split("### 1.5", 1)[0]
-    assert "轮换" in sec14 and minutes in sec14, "§1.4 讲轮换令牌，要说新值多久生效"
+    for fact in ("轮换", minutes, "**两个**函数"):
+        assert fact in sec14, f"§1.4 讲轮换令牌，缺：{fact}"
 
 
 def test_the_executor_runs_in_beijing_time_without_needing_tzdata():
     """issue 05 E1（Kent 2026-10-01 裁决）：评论里的时间格 Flow 档位是北京时间、AWS 档位以前是 UTC（容器没有 TZ），
-    同一次评审差 8 小时（验收实测）。用 POSIX 写法 `CST-8`：执行器镜像不带 tzdata，写 `Asia/Shanghai` 会静默
-    回落成 UTC（`TZ=CST-8 date +%z` 的行为断言在 tests/test-aws-entrypoint.sh，容器里也跑）。"""
+    同一次评审差 8 小时（验收实测）。用 POSIX 写法 `CST-8` 不依赖时区数据库：基础镜像目前带 tzdata，但写
+    `Asia/Shanghai` 就押在它身上，没有时静默回落成 UTC（`TZ=CST-8 date +%z` 的行为断言在 tests/test-aws-entrypoint.sh，
+    容器里也跑）。"""
     env = _all_envs(_full_cfg())["container"]
     assert env["TZ"] == "CST-8", env.get("TZ")
+    # review-B N-6：TZ 要一路到得了引擎（它的 date 在 kiro-review.sh 自己的进程里）。引擎不能以 env -i 启动，
+    # 也不能把 TZ 摘掉；kiro-cli 的 env -i 许可清单与此无关（模型进程不打时间格）。
+    entry = (pathlib.Path(__file__).resolve().parents[1] / "executor" / "entrypoint.sh").read_text()
+    launch = [ln for ln in entry.splitlines() if "kiro-review.sh" in ln and not ln.lstrip().startswith("#")]
+    assert len(launch) == 1, launch
+    assert "env -i" not in launch[0] and "-u TZ" not in launch[0] and "TZ=" not in launch[0], launch[0]
     row = [ln for ln in _guide_text().splitlines() if ln.startswith("| `TZ` |")]
     assert len(row) == 1, "§4.2 缺 TZ 那一行"
     for fact in ("`CST-8`", "tzdata", "`Asia/Shanghai`", "UTC"):

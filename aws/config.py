@@ -23,13 +23,13 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
 def _has_invisible(s):
-    """含控制字符（C0/DEL/C1，\t\r\n 都算）、格式字符（零宽空格之类）或行/段分隔符。
+    """含控制字符（C0/DEL/C1，\t\r\n 都算）、格式字符（零宽空格之类）、代理项或行/段分隔符。
 
     人手打的评论与用户名里不会有这些，配进去只会让匹配静默失效（issue 05 C1/C2）。普通空格与全角
-    空格不算：看得见、中文输入法打得出来。
+    空格不算：看得见、中文输入法打得出来。私用区（Co）看得见、未分配码位（Cn）的判定随 synth 机器上
+    的 Python 版本变，这两类都不拒。
     """
-    return any(unicodedata.category(ch)[0] == "C" or unicodedata.category(ch) in ("Zl", "Zp")
-               for ch in s)
+    return any(unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Zl", "Zp") for ch in s)
 
 
 def _is_clean_name(n):
@@ -61,16 +61,18 @@ def load_config(path):
                 f"{name} 取值 {cfg[name]!r} 非法：必须严格为 0 或 1（缺省即关闭）。"
                 "刻意不回落默认——拼错的取值静默关闭功能是最难排查的失败")
 
-    for name in ("org_id", "bot_username"):
-        if not cfg.get(name):
-            raise ValueError(f"config 缺少 {name}")
+    if not cfg.get("org_id"):
+        raise ValueError("config 缺少 org_id")
+    # bot_username 只有「没写 / 空值 / 空串」才算缺少：0、false 这类 falsy 取值是写错了，交给下面那条报「取值非法」
+    if cfg.get("bot_username") in (None, ""):
+        raise ValueError("config 缺少 bot_username")
     # bot_username 与 bot_usernames 每一项同一套规则（issue 05 C2）：键不写时默认名单 [bot_username]
     # 不经下面那道名单校验，执行器的 CODEUP_BOT_USERNAME 也直接用它。带首尾空白 → 作者守卫永不命中、
     # 引擎按作者找不到上一条汇总；带逗号 → 默认名单被 join/split 拆成两个名字；非字符串 → 到 CDK 里才抛。
     if not _is_clean_name(cfg["bot_username"]):
         raise ValueError(
             f"bot_username 取值 {cfg['bot_username']!r} 非法：必须是用户名字符串，不带首尾空白、"
-            "不含逗号或控制字符")
+            "不含逗号或控制字符（YAML 里没加引号的数字、true/false 不是字符串，要加引号）")
 
     # 键**不存在**时才填默认（不是 `or`）：显式写成空串/空值是「fail closed，一条命令都不受理」的
     # 既有语义（handler.py 的 `if not phrase` 那一段），用 `or` 回落默认会把它悄悄变成「命令照常生效」。

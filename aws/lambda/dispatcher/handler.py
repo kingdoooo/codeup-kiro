@@ -603,7 +603,7 @@ def _post_failed_comment(cfg, fields, reason):
     """「评审未启动」留痕（I10）。云效令牌到这一步才取（issue 05 G3）：预先取的话，只是这一个密钥取不到
     （改名、IAM 少一条 ARN、限流）就会让每一次评审都 503、事件丢失，而执行器根本不用调度器这一份令牌。
 
-    两件事都在 _cleanup 的 try 里跑（参数也在里面求值），所以都只落成一行代号：取不到令牌是
+    取令牌与发评论都在本函数里、也就都在 _cleanup 的 try 里跑（不在调用点求值），所以都只落成一行代号：取不到令牌是
     `SecretUnavailable:<代号>`，Codeup 拒收是 `PostFailed`（issue 05 N1：以前 post_comment 的 False
     被丢掉，令牌被吊销的 401 一行日志都不留），连上之后断开是原始异常的类型名。
     """

@@ -171,7 +171,8 @@ class ExecutorStack(cdk.Stack):
                 "LOCK_TABLE": state.lock_table.table_name,
                 "AWS_REGION": cfg["region"],
                 # 评论里的时间格与 Flow 档位一致用北京时间（issue 05 E1）。POSIX 写法，不靠时区数据库：
-                # 镜像里没有 tzdata，写 Asia/Shanghai 会静默回落成 UTC。中国没有夏令时，CST-8 就是 UTC+8。
+                # 基础镜像目前带 tzdata，但写 Asia/Shanghai 就依赖它，没有时 glibc 静默回落成 UTC。
+                # 中国没有夏令时，CST-8 就是 UTC+8。
                 "TZ": "CST-8",
                 # 开关与行为变量必须真的进容器：config.py 校验通过、却从没传给评审脚本的开关，
                 # 表现就是「配对了也不生效」且毫无报错（I2）。

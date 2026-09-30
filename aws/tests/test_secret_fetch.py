@@ -63,15 +63,17 @@ def test_returns_the_secret_string_and_asks_for_exactly_the_secret_id_in_the_env
 
 
 def _cached():
-    """缓存里的值（不含取到的时刻）：缓存项是 (value, fetched_at)，issue 05 G2。"""
-    return {k: v for k, (v, _at) in fetch._CACHE.items()}
+    """缓存里的值（不含取到的时刻）：缓存项是 (value, 单调钟, 墙钟)，issue 05 G2。"""
+    return {k: e[0] for k, e in fetch._CACHE.items()}
 
 
-def _frozen_clock(monkeypatch, start=1000.0):
-    """冻结 secret_fetch 自己看到的时钟（只换它模块里的 time，不动全局）。返回可改的 [now]。"""
+def _frozen_clock(monkeypatch, start=1000.0, wall=None):
+    """冻结 secret_fetch 自己看到的两个时钟（只换它模块里的 time，不动全局）。返回可改的 [now]；
+    传了 wall（可改的 [t]）就让墙钟单独走，否则墙钟跟着 now 走。"""
     import types
     now = [start]
-    monkeypatch.setattr(fetch, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(fetch, "time", types.SimpleNamespace(
+        monotonic=lambda: now[0], time=(lambda: wall[0]) if wall is not None else (lambda: now[0] + 1.7e9)))
     return now
 
 
@@ -105,6 +107,24 @@ def test_an_expired_entry_whose_refetch_fails_is_never_served_stale(monkeypatch)
     with pytest.raises(fetch.SecretUnavailable):
         fetch.secret_from_env("WEBHOOK_SECRET_ID")
     assert fetch._CACHE == {}
+
+
+def test_a_frozen_monotonic_clock_still_expires_the_entry_by_the_wall_clock(monkeypatch):
+    """review-B N-7：Lambda 冻结执行环境期间单调钟是否前进没有第一手证据。单调钟停着、墙钟走满 300 s
+    也必须重取；墙钟往回拨 300 s 同样重取（只会提前、多取一次）。"""
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
+    client = _boto3(monkeypatch, {"SecretString": "old"}, {"SecretString": "new"}, {"SecretString": "newer"})
+    wall = [5000.0]
+    _frozen_clock(monkeypatch, wall=wall)
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "old"
+    wall[0] += 299
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "old"
+    assert client.get_secret_value.call_count == 1
+    wall[0] += 1
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "new"
+    wall[0] -= 300
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "newer"
+    assert client.get_secret_value.call_count == 3
 
 
 def test_value_is_cached_per_process_so_a_warm_invocation_does_not_call_aws(monkeypatch):
