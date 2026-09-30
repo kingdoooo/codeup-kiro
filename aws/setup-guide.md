@@ -202,6 +202,7 @@ aws secretsmanager create-secret \
 |---|---|
 | `YUNXIAO_ORG_ID` | 云效组织 ID |
 | `CODEUP_BOT_USERNAME` | 机器人账号用户名（原地更新汇总评论、行内评论按作者去重的前提，同 Flow 档位） |
+| `TZ` | 固定为 `CST-8`（北京时间，UTC+8；不是 `config.yaml` 的键）：评审评论里的时间格与 Flow 档位一致。用 POSIX 写法是因为执行器镜像不带时区数据库（tzdata），写成 `Asia/Shanghai` 会静默回落成 UTC |
 | 部署区域 | 第 1.1 节的九选一，`aws/config.yaml` 的 `region` 字段；三个 stack 都钉到这个区域 |
 
 `aws/config.yaml` 的**全部**键（含默认值与是否必配）列在 [aws/config.example.yaml](config.example.yaml)，

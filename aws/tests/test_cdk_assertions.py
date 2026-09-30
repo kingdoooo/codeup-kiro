@@ -1807,6 +1807,18 @@ def test_the_guide_states_the_secret_cache_ttl_where_rotation_is_discussed():
     assert "轮换" in sec14 and minutes in sec14, "§1.4 讲轮换令牌，要说新值多久生效"
 
 
+def test_the_executor_runs_in_beijing_time_without_needing_tzdata():
+    """issue 05 E1（Kent 2026-10-01 裁决）：评论里的时间格 Flow 档位是北京时间、AWS 档位以前是 UTC（容器没有 TZ），
+    同一次评审差 8 小时（验收实测）。用 POSIX 写法 `CST-8`：执行器镜像不带 tzdata，写 `Asia/Shanghai` 会静默
+    回落成 UTC（`TZ=CST-8 date +%z` 的行为断言在 tests/test-aws-entrypoint.sh，容器里也跑）。"""
+    env = _all_envs(_full_cfg())["container"]
+    assert env["TZ"] == "CST-8", env.get("TZ")
+    row = [ln for ln in _guide_text().splitlines() if ln.startswith("| `TZ` |")]
+    assert len(row) == 1, "§4.2 缺 TZ 那一行"
+    for fact in ("`CST-8`", "tzdata", "`Asia/Shanghai`", "UTC"):
+        assert fact in row[0], f"TZ 那一行缺：{fact}"
+
+
 def test_the_six_required_executor_variables_are_named_where_the_guide_counts_them():
     """复审 s6 N-3：4.1 那一格原来写「上面四项加 LOCK_KEY、HEAD_SHA 共六项」，字面所指的「上面四项」
     含可选的 MR_TARGET_BRANCH 而漏了 CI_COMMIT_REF_NAME。现在逐个点名，并与 entrypoint 的必填守卫核对。"""

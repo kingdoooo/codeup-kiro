@@ -278,6 +278,10 @@ else
   echo "SKIP: 无 /usr/bin/git，跳过 ⑯ 凭证行为断言" >&2
 fi
 
+# issue 05 E1：执行器任务定义里的 TZ=CST-8（stacks/executor_stack.py）必须在**没有 tzdata** 的镜像里也生效。
+#   这条测的是平台（libc 的 POSIX TZ 解析），所以要在构建机的 debian:stable-slim 容器里也跑一次才算容器证据。
+assert_eq "$(TZ=CST-8 date +%z)" "+0800" "E1 TZ=CST-8 不靠时区数据库也是 +0800"
+
 # ⑰ Task 14 第二个验收阻塞：clone 给的是仓库**默认分支**，必须自己检出 MR 的那个提交。
 #   真实运行实测过（Codeup-Demo MR !4：汇总标记写成 master 的头 f29435f，MR 的头是 7baa0cd）。
 #   行为断言用**真的本地裸库**：两个分支、MR 头在非默认分支上，跑抽出来的检出段，断言 HEAD 落在
