@@ -237,8 +237,12 @@ assert_not_contains "$(run_host 'https://evil.example/x.git')" 'evil.example' \
 # ⑯ I-2 / Task 14 行为断言（真 git，不是只看源码里有没有某个字符串）：把凭证那一段原样抽出来，
 #   用 `git credential fill` 问三个主机。本方主机必须拿到 oauth2 + 环境里的令牌；另外两个主机
 #   （完全无关的域名、以及带本方域名前缀的域名）必须什么都拿不到。
-#   `GIT_CONFIG_GLOBAL/SYSTEM=/dev/null`：把开发机自己的全局配置（osxkeychain 之类）隔离掉，
-#   否则负向断言可能被本机 helper 满足、变成假绿；执行器镜像里本来就没有这些配置。
+#   `GIT_CONFIG_GLOBAL/SYSTEM=/dev/null` 加 `GIT_CONFIG_NOSYSTEM=1`：把开发机自己的配置（osxkeychain 之类）
+#   隔离掉，否则负向断言可能被本机 helper 满足、变成假绿；执行器镜像里本来就没有这些配置。
+#   只写 GIT_CONFIG_SYSTEM 不够：macOS 的 /usr/bin/git 另读一份内置配置
+#   （/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig，开着 osxkeychain），只有 NOSYSTEM
+#   关得掉（2026-09-30 实测：钥匙串里存着 codeup.aliyun.com 的凭证时，本方主机拿到的是它、不是环境里的
+#   令牌，失败信息还把它原样打了出来）。所以 fill 的输出里凡不是测试令牌的 password= 一律抹掉再断言。
 if [[ -x /usr/bin/git ]]; then
   cred_block=$(awk '/^cred_helper=/{f=1} f{print} f&&/^export GIT_CONFIG_VALUE_0=/{exit}' "$ENTRY")
   assert_contains "$cred_block" 'GIT_CONFIG_VALUE_0' "⑯ 抽到了凭证那一段"
@@ -248,9 +252,11 @@ if [[ -x /usr/bin/git ]]; then
     local out rc=0
     out=$(printf 'protocol=https\nhost=%s\n\n' "$1" \
       | YUNXIAO_TOKEN="$FAKE_TOKEN" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$NOPASS" \
+        GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$NOPASS" \
         /bin/bash -c "set -euo pipefail; $cred_block
 exec /usr/bin/git credential fill" 2>&1) || rc=$?
+    out=$(printf '%s\n' "$out" \
+      | LC_ALL=C sed -E "/^password=${FAKE_TOKEN}\$/!s/^password=.*/password=<redacted-non-test>/")
     printf '%s %s' "$rc" "$out"
   }
   ours=$(fill codeup.aliyun.com)
