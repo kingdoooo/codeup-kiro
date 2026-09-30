@@ -1712,7 +1712,8 @@ def test_the_troubleshooting_table_refers_to_rows_by_name_and_every_name_resolve
     for ln in sec8:
         # issue 05 A2：「见下面 `head-check` 那一行」这种中间夹了名字的写法以前漏过了（其中一处方向还是错的）。
         found = re.findall(r"上一行|下一行|上一条|下一条|上面那一行|下面那一行"
-                           r"|(?:上面|下面|上方|下方|前面|后面|上文|下文)[^，。；（）|]{0,40}?那一?行", ln)
+                           r"|(?:上面|下面|上方|下方|前面|后面|上文|下文)(?:「[^」]*」|[^，。；（）|「」]){0,40}?那一?行", ln)
+        # 「…」 整段放行：名字里可能带全角括号（review 变异「见下面「head-check（租约）」那一行」以前漏过）
         assert not found, f"§8 仍有位置引用 {found}：{ln[:60]}"
     firsts = [ln.split(" | ")[0].replace("**", "").replace("`", "") for ln in sec8]
     names = set()
