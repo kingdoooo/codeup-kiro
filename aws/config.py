@@ -1,4 +1,5 @@
 import re
+import unicodedata
 
 import yaml
 
@@ -19,6 +20,21 @@ DEFAULT_COMMAND_PHRASE = "/kiro review"
 # 两个 kiro-cli 摘要（安装包 zip / 装好后的入口文件），分工见 ADR-0006；pinned 档位下都是硬要求。
 KIRO_CLI_DIGESTS = ("kiro_pinned_artifact_sha256", "kiro_cli_sha256")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def _has_invisible(s):
+    """含控制字符（C0/DEL/C1，\t\r\n 都算）、格式字符（零宽空格之类）或行/段分隔符。
+
+    人手打的评论与用户名里不会有这些，配进去只会让匹配静默失效（issue 05 C1/C2）。普通空格与全角
+    空格不算：看得见、中文输入法打得出来。
+    """
+    return any(unicodedata.category(ch)[0] == "C" or unicodedata.category(ch) in ("Zl", "Zp")
+               for ch in s)
+
+
+def _is_clean_name(n):
+    """用户名形状：非空字符串，不带首尾空白、不含逗号或看不见的字符（bot_username 与 bot_usernames 共用）。"""
+    return isinstance(n, str) and bool(n.strip()) and n == n.strip() and "," not in n and not _has_invisible(n)
 
 
 def load_config(path):
@@ -48,6 +64,13 @@ def load_config(path):
     for name in ("org_id", "bot_username"):
         if not cfg.get(name):
             raise ValueError(f"config 缺少 {name}")
+    # bot_username 与 bot_usernames 每一项同一套规则（issue 05 C2）：键不写时默认名单 [bot_username]
+    # 不经下面那道名单校验，执行器的 CODEUP_BOT_USERNAME 也直接用它。带首尾空白 → 作者守卫永不命中、
+    # 引擎按作者找不到上一条汇总；带逗号 → 默认名单被 join/split 拆成两个名字；非字符串 → 到 CDK 里才抛。
+    if not _is_clean_name(cfg["bot_username"]):
+        raise ValueError(
+            f"bot_username 取值 {cfg['bot_username']!r} 非法：必须是用户名字符串，不带首尾空白、"
+            "不含逗号或控制字符")
 
     # 键**不存在**时才填默认（不是 `or`）：显式写成空串/空值是「fail closed，一条命令都不受理」的
     # 既有语义（handler.py 的 `if not phrase` 那一段），用 `or` 回落默认会把它悄悄变成「命令照常生效」。
@@ -62,11 +85,10 @@ def load_config(path):
     if "bot_usernames" in cfg:
         names = cfg["bot_usernames"]
         if not isinstance(names, list) or any(
-                not isinstance(n, str) or not n.strip() or n != n.strip() or "," in n
-                for n in names):
+                not _is_clean_name(n) for n in names):
             raise ValueError(
                 f"bot_usernames 取值 {names!r} 非法：必须是用户名字符串的列表，每一项不带首尾空白、"
-                "不含逗号；清空名单请写 `bot_usernames: []`（不要留空值），键整个不写则默认只含 bot_username")
+                "不含逗号或控制字符；清空名单请写 `bot_usernames: []`（不要留空值），键整个不写则默认只含 bot_username")
         if names == []:
             # 空名单是「机器人与人同号」的 PoC 配法（手册 4.2）。它合法，但带着一个只有专用账号才能
             # 消除的隐患，synth 时说一声（与跨区推理那条同一种警告）。
@@ -75,13 +97,14 @@ def load_config(path):
                   "生产请用专用机器人账号（setup-guide.md 第 1.4、4.2 节）。", flush=True)
 
     # command_phrase：键存在时必须是字符串，且要么是空串（fail closed，一律不受理），要么首尾不带空白、
-    # 不含换行（复审 s5 M-1）。全空白的短语是空串的孪生兄弟却**不** fail closed——任何含这串空格的
+    # 不含换行或其他看不见的字符（复审 s5 M-1；issue 05 C1：以前只拒 \n，\r、\t、零宽空格都放行）。全空白的短语是空串的孪生兄弟却**不** fail closed——任何含这串空格的
     # 评论都会拉起一次评审；首尾带空白的短语在评论开头永远匹配不上；null 或数字到 CDK 里只报一句看不懂的
     # 「Unable to deserialize value as aws-cdk-lib.aws_lambda.FunctionProps」。
     phrase = cfg["command_phrase"]
-    if type(phrase) is not str or (phrase and (phrase != phrase.strip() or "\n" in phrase)):
+    if type(phrase) is not str or (phrase and (phrase != phrase.strip() or _has_invisible(phrase))):
         raise ValueError(
-            f"command_phrase 取值 {phrase!r} 非法：必须是加引号的字符串，首尾不带空白、不含换行，"
+            f"command_phrase 取值 {phrase!r} 非法：必须是加引号的字符串，首尾不带空白、不含换行、制表符或"
+            "其他看不见的控制字符，"
             '例如 command_phrase: "/kiro review"；写成空串 "" 表示一条命令都不受理')
 
     # 三个摘要无默认、必配（spec 变量契约；N7 不允许隐式默认）：缺了的话 synth/部署都顺利，要等第一次

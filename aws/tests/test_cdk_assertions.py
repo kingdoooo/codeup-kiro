@@ -1387,7 +1387,11 @@ def test_an_absent_command_phrase_is_filled_but_an_explicit_empty_one_is_kept(wr
 
 
 @pytest.mark.parametrize("bad", [None, 123, True, " ", "   ", " /kiro review", "/kiro review ",
-                                 "/kiro\nreview", "\t/kiro"])
+                                 "/kiro\nreview", "\t/kiro",
+                                 # issue 05 C1：以前只拒 \n，这些都放行了——人手打的评论里不会有它们，
+                                 # 评论命令静默失效，页脚还照样教读者打这句
+                                 "/kiro\rreview", "/kiro\treview", "/kiro\x00review", "/kiro\x7freview",
+                                 "/kiro\x85review", "/kiro\u200breview", "/kiro\u2028review"])
 def test_a_command_phrase_that_is_not_a_clean_string_is_refused_naming_the_key(bad, write_cfg):
     # 全空白是空串的孪生兄弟却不 fail closed：任何含这串空格的评论都会拉起一次评审
     base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
@@ -1395,11 +1399,40 @@ def test_a_command_phrase_that_is_not_a_clean_string_is_refused_naming_the_key(b
         load_config(write_cfg(dict(base, command_phrase=bad)))
 
 
-@pytest.mark.parametrize("good", ["", "/kiro review", "Kiro 重新评审", "/kiro  review"])
+@pytest.mark.parametrize("good", ["", "/kiro review", "Kiro 重新评审", "/kiro  review",
+                                  "Kiro\u3000重新评审"])
 def test_clean_command_phrases_are_kept_verbatim(good, write_cfg):
-    # 正向对照：空串（fail closed 的既有语义）与中间带空白的短语都合法，原样保留
+    # 正向对照：空串（fail closed 的既有语义）与中间带空白的短语都合法，原样保留。全角空格（中文输入法
+    # 打得出来、看得见）也合法：拒的是控制字符与零宽/行分隔这类看不见的字符，不是所有非 ASCII 空白
     base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
     assert load_config(write_cfg(dict(base, command_phrase=good)))["command_phrase"] == good
+
+
+@pytest.mark.parametrize("bad", [" aliyun:bot", "aliyun:bot ", "aliyun:a,aliyun:b", "\taliyun:bot",
+                                 "aliyun:\x00bot", "aliyun:bot\u200b", 123, True])
+def test_bot_username_must_be_a_clean_string(bad, write_cfg):
+    """issue 05 C2：bot_username 以前只查真值。带首尾空白 → 作者守卫永不命中、引擎按作者找不到上一条
+    汇总（每次新建一条）；带逗号 → 默认名单 [bot_username] 被 join/split 拆成两个名字，第二个人的命令被
+    静默忽略；非字符串 → 到 CDK 里才抛一句 TypeError。与 bot_usernames 每一项同一套规则。
+    按「bot_username 取值」匹配：别被 bot_usernames 的报错满足。"""
+    base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    base.pop("bot_usernames", None)   # 默认名单由 bot_username 派生：正是绕过了名单校验的那条路
+    with pytest.raises(ValueError, match=r"bot_username 取值"):
+        load_config(write_cfg(dict(base, bot_username=bad)))
+
+
+@pytest.mark.parametrize("good", ["aliyun:kirobot", "aliyun:kingdooo_hvFXC"])
+def test_clean_bot_usernames_are_kept_verbatim(good, write_cfg):
+    # 正向对照：示例值与验收部署实际用的值的形状
+    base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    assert load_config(write_cfg(dict(base, bot_username=good)))["bot_username"] == good
+
+
+def test_bot_usernames_items_refuse_control_characters_too(write_cfg):
+    # 同一套规则：名单里的每一项也不许带控制字符（以前只查首尾空白与逗号）
+    base = load_config(str(pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"))
+    with pytest.raises(ValueError, match="bot_usernames"):
+        load_config(write_cfg(dict(base, bot_usernames=["aliyun:\x00bot"])))
 
 
 @pytest.mark.parametrize("bad", [[" aliyun:bot"], ["aliyun:bot "], ["a,b"], ["ok", "x,y"], ["\taliyun:bot"]])

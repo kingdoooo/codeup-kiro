@@ -47,7 +47,7 @@ review_command: 0
 #                                   # 恢复办法见第 4.2 节。空名单必须写 `[]`，写成 `bot_usernames:` 是
 #                                   # null、synth 直接报错；写成 `[]` 时 synth 会打一行警告。
 # command_phrase: "/kiro review"    # REVIEW_COMMAND_PHRASE；只在 review_command: 1 时有意义。
-#                                   # 必须是字符串，首尾不带空白、不含换行（synth 时校验）。
+#                                   # 必须是字符串，首尾不带空白、不含换行或其他控制字符（synth 时校验）。
 #                                   # 空串会被调度器 fail closed（一律不受理），别配成会出现在本方
 #                                   # 评论里的词（例如 Kiro 代码评审），见 setup-guide.md 第 4.3 节
 # target_branch_filter: ""          # TARGET_BRANCH_FILTER，正则；空 = 全部 MR
