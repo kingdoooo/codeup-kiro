@@ -33,7 +33,7 @@ assert_contains "$(cat "$tmp/err")" "20 秒后重试" "① 第二次退避 20 �
 assert_eq "$(cat "$tmp/count")" "3" "① 一共跑了 3 次"
 
 # ② 在当前 shell 里调用（不经命令替换）才能数到 sleep：退避序列 10 20 40，最多 4 次尝试，rc 是最后一次的（G2）
-reset; FAIL_TIMES=99 FAIL_RC=128 FAIL_TEXT="error: RPC failed; HTTP 429 curl 22 The requested URL returned error: 429"
+reset; FAIL_TIMES=99 FAIL_RC=128 FAIL_TEXT="error: RPC failed; HTTP 429 curl 22 The requested URL returned error: 429"   # smart HTTP 的 RPC 失败
 retry_git_429 fake >/dev/null 2>"$tmp/err"; rc=$?
 assert_eq "$SLEEPS" "10 20 40" "② 退避 10、20、40 秒（G2：最多等 70 秒）"
 assert_eq "$(cat "$tmp/count")" "4" "② 最多 4 次尝试"
@@ -104,17 +104,39 @@ assert_contains "$eng" 'retry_git_429 git fetch -q origin "+refs/heads/${TARGET_
 assert_contains "$eng" 'retry_git_429 git fetch -q --unshallow origin' "⑦ 引擎 --unshallow 经重试"
 assert_contains "$eng" 'retry_git_429 git fetch --unshallow --quiet' "⑦ 内联解析的加深经重试"
 assert_contains "$eng" 'retry_git_429 git fetch --deepen 100 --quiet' "⑦ 内联解析的 --deepen 经重试"
-assert_eq "$(printf '%s\n' "$eng" | LC_ALL=C grep -E '(^|[;&|[:space:]])git fetch ' | LC_ALL=C grep -vc 'retry_git_429 git fetch' || true)" "0" \
-  "⑦ 引擎里没有漏掉的裸 git fetch"
+# 引擎与 scripts/lib 里所有 git 网络子命令（含 `$(git …`、`git -C 目录 …` 的写法）都经重试；git-retry.sh 自己除外
+net_re='git( -C [^ ]+)? (fetch|clone|ls-remote|pull|push)( |$)'
+bare=$(for f in ../scripts/*.sh ../scripts/lib/*.sh; do [[ "$f" == */git-retry.sh ]] && continue
+         code_of "$f" | LC_ALL=C grep -E "$net_re" | LC_ALL=C grep -vE 'retry_git_429 git '; done)
+assert_eq "$bare" "" "⑦ scripts/ 里没有漏掉的裸网络 git 调用"
+# 加载顺序：source 那一行必须排在第一次用它之前（只看代码行）。挪到后面的话生产里第一次调用就是 command not found
+first_line_of() { LC_ALL=C grep -nE "$2" "$1" | LC_ALL=C grep -vE '^[0-9]+:[[:space:]]*#' | head -1 | cut -d: -f1; }
+e_src=$(first_line_of ../scripts/kiro-review.sh '^source "\$\{SCRIPT_DIR\}/lib/git-retry.sh"$')
+e_use=$(first_line_of ../scripts/kiro-review.sh 'retry_git_429 ')
+assert_eq "$([ -n "$e_src" ] && [ -n "$e_use" ] && [ "$e_src" -lt "$e_use" ] && echo yes)" "yes" "⑦ 引擎先 source 再用（${e_src} < ${e_use}）"
 assert_contains "$eng" 'source "${SCRIPT_DIR}/lib/git-retry.sh"' "⑦ 引擎加载了 git-retry.sh"
 ent=$(code_of ../aws/executor/entrypoint.sh)
 assert_contains "$ent" 'retry_git_429 /usr/bin/git clone --no-tags' "⑦ 入口脚本 clone 经重试"
 assert_contains "$ent" 'retry_git_429 /usr/bin/git -C "$WORKROOT/business" fetch --no-tags origin \' "⑦ 入口脚本补取源分支经重试"
 assert_contains "$ent" 'retry_git_429 /usr/bin/timeout 30 /usr/bin/git -C "$WORKROOT/business" ls-remote origin' "⑦ 入口脚本 ls-remote 经重试"
 assert_not_contains "$ent" 'refs/remotes/origin/${MR_TARGET_BRANCH}' "⑦ 入口脚本不再在 clone 之后取目标分支（G4）"
-assert_eq "$(printf '%s\n' "$ent" | LC_ALL=C grep -E '/usr/bin/git (clone|-C [^ ]+ (fetch|ls-remote))' | LC_ALL=C grep -vc 'retry_git_429' || true)" "0" \
+assert_eq "$(printf '%s\n' "$ent" | LC_ALL=C grep -E "/usr/bin/$net_re" \
+              | LC_ALL=C grep -vE 'retry_git_429 (/usr/bin/timeout [0-9]+ )?/usr/bin/git ' || true)" "" \
   "⑦ 入口脚本里没有漏掉的裸网络 git 调用"
 assert_contains "$ent" 'source "$PKG/scripts/lib/git-retry.sh"' "⑦ 入口脚本加载了 git-retry.sh"
+a_src=$(first_line_of ../aws/executor/entrypoint.sh '^source "\$PKG/scripts/lib/git-retry.sh"$')
+a_use=$(first_line_of ../aws/executor/entrypoint.sh 'retry_git_429 ')
+assert_eq "$([ -n "$a_src" ] && [ -n "$a_use" ] && [ "$a_src" -lt "$a_use" ] && echo yes)" "yes" \
+  "⑦ 入口脚本先 source 再用（${a_src} < ${a_use}；复审把 source 挪到 clone 之后，两套测试都没红——生产里就是每次 clone 失败 91）"
+
+# ⑨ mktemp 失败：退化成不重试地跑一次，退出码与 stdout 原样（绝不因为拿不到临时文件就不执行）
+reset; FAIL_TIMES=0 FAIL_RC=1 FAIL_TEXT=""
+mktemp() { return 1; }
+assert_eq "$(retry_git_429 fake)" $'deadbeef\trefs/heads/feat' "⑨ mktemp 失败时命令照样跑、stdout 原样"
+reset; FAIL_TIMES=99 FAIL_RC=5 FAIL_TEXT="fatal: x"
+retry_git_429 fake >/dev/null 2>/dev/null; rc=$?
+assert_eq "$rc:$(cat "$tmp/count")" "5:1" "⑨ mktemp 失败时只跑一次、退出码原样"
+unset -f mktemp
 
 # ⑧ 运维照着日志里那句提示去手册里找：两个档位的排错表都逐字写出了它（取自库里的 echo，不另抄一份）
 notice=$(LC_ALL=C grep -oE 'echo "git: Codeup 限流（HTTP 429），' ../scripts/lib/git-retry.sh | sed 's/^echo "//')

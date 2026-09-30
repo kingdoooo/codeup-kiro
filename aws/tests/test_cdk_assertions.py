@@ -1465,14 +1465,14 @@ def test_the_guide_opening_explains_the_per_mr_lease():
     paras = [p for p in _guide_text().split("\n\n") if p.startswith("**同一 MR 串行")]
     assert len(paras) == 1, "开头缺少「同一 MR 串行」那一段"
     for fact in ("`lease#<仓库 id>#<MR 编号>`", "租期 120 秒", "每 30 秒续期", "`KIRO_TIMEOUT` + 1800 秒",
-                 "`KIRO_TIMEOUT` + 2100 秒", "退出码 124", "每 10 秒", "只释放自己持有",
+                 "`KIRO_TIMEOUT` + 2400 秒", "退出码 124", "每 10 秒", "只释放自己持有",
                  "`git ls-remote`", "`head-check result=superseded", "退出码 93", "没有抢锁记录"):
         assert fact in paras[0], f"「同一 MR 串行」那一段没写出：{fact}"
     code = _entry_code()
     assert '"lease#${CODEUP_REPO_ID}#${MR_LOCAL_ID}"' in code, "租约键的形状变了，手册那一段要跟着改"
     # 手册里的四个数都从这几行来（issue 04）：租期、续期间隔、引擎总时长上限、等待上限
     for line in ("LEASE_TTL=120", "LEASE_RENEW_EVERY=30", "engine_cap=$((engine_cap + 1800))",
-                 "lease_wait_limit=$((engine_cap + 300))", "/bin/sleep 10", '/bin/sleep "$LEASE_RENEW_EVERY"'):
+                 "lease_wait_limit=$((engine_cap + 600))", "/bin/sleep 10", '/bin/sleep "$LEASE_RENEW_EVERY"'):
         assert line in code, f"{line} 变了，手册「同一 MR 串行」那一段要跟着改"
     # 续期间隔必须远小于租期：连着失败两次（每次最坏约 25 秒）租约还在（L1）
     ttl = int(re.search(r"^LEASE_TTL=(\d+)$", code, re.M).group(1))

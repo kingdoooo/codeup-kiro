@@ -180,14 +180,15 @@ head_now=$(/usr/bin/git -C "$WORKROOT/business" rev-parse HEAD 2>/dev/null || tr
 # PID 1 会跑陷阱、释放租约、以 143 退出——issue 04 复审在 debian:stable-slim 的 bash 5.2 里实验过。）
 # 引擎包在总时长上限 engine_cap = KIRO_TIMEOUT + 1800 秒里：它给续期（也就是持有时长）设了上界，也给挂住的任务的
 # Fargate 费用设了上界。KIRO_TIMEOUT 不是纯数字时按引擎的缺省 900 算：引擎自己会拒绝这个取值并在 MR 上说明
-# （die_review），这里不抢它的活。等待上限 = engine_cap + 300：持有者合法持有的最长时间，加上它死后租约失效的余量。
+# （die_review），这里不抢它的活。等待上限 = engine_cap + 600：持有者合法持有的最长时间（引擎 + KILL 余量 30 秒 +
+# 拿到租约后核对最新提交，其中 ls-remote 被限流时最坏约 190 秒——issue 03 复审），再加上它死后租约失效的 120 秒。
 # 退化：续期失败到租约过期（DynamoDB 持续不可用两分钟以上），别人就会接管、两者并发——就是加租约之前的行为。
 LEASE_TTL=120
 LEASE_RENEW_EVERY=30
 engine_cap=900
 if [[ "${KIRO_TIMEOUT:-}" =~ ^[0-9]+$ ]]; then engine_cap=$((10#$KIRO_TIMEOUT)); fi
 engine_cap=$((engine_cap + 1800))
-lease_wait_limit=$((engine_cap + 300))
+lease_wait_limit=$((engine_cap + 600))
 lease_key=$(/usr/bin/jq -cn --arg k "lease#${CODEUP_REPO_ID}#${MR_LOCAL_ID}" '{pk: {S: $k}}')
 # 持有者 = LOCK_KEY + 本任务 ARN（issue 02）。只记 LOCK_KEY 不够：同一个键可以有两个任务（RunTask 客户端耗尽重试、
 # 服务端其实已经起了，调度器释放锁之后同一报文又被重放），下面的 `#h = :me` 会把第二个当成本人放进去——L1 破。

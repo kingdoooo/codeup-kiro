@@ -282,7 +282,7 @@ if [[ -x /usr/bin/git ]]; then
   # 那个助手（GIT_ERR + git_err_tail）定义在 clone 那一段，原样抽出来垫在前面（㉓ 单独测它）。
   err_block=$(awk '/^GIT_ERR=/{f=1} f{print} f&&/^}$/{exit}' "$ENTRY")
   assert_contains "$err_block" 'git_err_tail()' "⑰ 抽到了 git 报错尾巴的助手"
-  # 检出段现在也读 MR_TARGET_BRANCH（非空时查形状、取目标分支），它的 `:=` 缺省在文件顶部，一并垫上。
+  # 检出段也读 MR_TARGET_BRANCH（非空时查形状；issue 03 起不再取目标分支），它的 `:=` 缺省在文件顶部，一并垫上。
   tb_default=$(LC_ALL=C grep -E '^: "\$\{MR_TARGET_BRANCH:=\}"$' "$ENTRY")
   assert_eq "$tb_default" ': "${MR_TARGET_BRANCH:=}"' "⑰ 抽到了 MR_TARGET_BRANCH 的缺省"
   ck_block="$tb_default
@@ -903,13 +903,13 @@ STUB
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "77777777777" \
     "㉒ L3：退出时绝不放掉别人的租约（lease_until 原样）"
 
-  # 等待有上限：别人一直持有（这里是远未到期的租约）→ 等满 engine_cap + 300 秒（KIRO_TIMEOUT=60 → 2160）后
+  # 等待有上限：别人一直持有（这里是远未到期的租约）→ 等满 engine_cap + 600 秒（KIRO_TIMEOUT=60 → 2460）后
   # 以 93 退出，不跑引擎
   reset_lease "{\"$LEASE\":{\"pk\":{\"S\":\"$LEASE\"},\"holder\":{\"S\":\"r1#7#hung\"},\"lease_until\":{\"N\":\"999999999999\"},\"expires_at\":{\"N\":\"999999999999\"}}}"
   echo 1000 > "$ltmp/clock"
   assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock")" "93" "㉒ 等待超过上限时以 93 退出"
-  assert_eq "$(sleeps)" "216" "㉒ 按 10 秒一轮等满 2160 秒（KIRO_TIMEOUT=60 + 1800 + 300）"
-  assert_contains "$(cat "$ltmp/err.r1#7#A")" "等待同一 MR 的上一次评审超过 2160 秒仍未结束，拒绝评审" \
+  assert_eq "$(sleeps)" "246" "㉒ 按 10 秒一轮等满 2460 秒（KIRO_TIMEOUT=60 + 1800 + 600）"
+  assert_contains "$(cat "$ltmp/err.r1#7#A")" "等待同一 MR 的上一次评审超过 2460 秒仍未结束，拒绝评审" \
     "㉒ 等待超限的消息固定"
   assert_eq "$(cat "$ltmp/events")" "" "㉒ 等待超限时不跑引擎"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#hung" "㉒ 没拿到租约就退出时不碰别人的租约"
