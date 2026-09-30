@@ -333,6 +333,24 @@ $(awk '/^# ── 检出 MR 的那个提交/{f=1} /^# ── 按 MR 的租约/{e
   got=$(run_checkout "$mr_head" mr-src)
   assert_eq "${got##*|}" "$mr_head" "⑰ 检出之后 HEAD 必须是 MR 的提交"
   assert_eq "${got%% *}" "0" "⑰ 正常输入下检出段退出码 0"
+
+  # ⑰ issue 05 G4（s6 m-C）：「检出成功但 HEAD 与 HEAD_SHA 不一致」那道守卫以前没有任何行为用例走得到——
+  #   真实的 `--detach <40hex>` 下 HEAD 按构造恒等于 HEAD_SHA。用一个 post-checkout 钩子在检出之后把 HEAD
+  #   挪回默认分支的头，**原样**跑生产的检出段（一个字不改）。钩子留下的标记文件证明确实走到了这一情形：
+  #   将来 entrypoint 若为安全起见关掉钩子（core.hooksPath=/dev/null），这里红在「钩子没跑」，不会误报守卫失效。
+  rm -rf "$ctmp/business"
+  gitq clone -q "$ctmp/bare" "$ctmp/business"
+  printf '#!/bin/sh\ntouch "%s/hook-ran"\nexec /usr/bin/git update-ref --no-deref HEAD %s\n' "$ctmp" "$def_head" \
+    > "$ctmp/business/.git/hooks/post-checkout"
+  chmod +x "$ctmp/business/.git/hooks/post-checkout"
+  g4_rc=0
+  g4_out=$(WORKROOT="$ctmp" HEAD_SHA="$mr_head" CI_COMMIT_REF_NAME=mr-src \
+           GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+           /bin/bash -c "set -euo pipefail; $ck_block" 2>&1) || g4_rc=$?
+  assert_eq "$([ -e "$ctmp/hook-ran" ] && echo yes)" "yes" "⑰ G4 前提：钩子确实在检出之后跑了"
+  assert_eq "$g4_rc" "92" "⑰ G4 检出成功但 HEAD 被挪走 → 退出码 92"
+  assert_contains "$g4_out" "检出之后 HEAD 与 HEAD_SHA 不一致" "⑰ G4 报的是 HEAD 不一致那一条"
+  assert_not_contains "$g4_out" "检出 MR 的提交失败" "⑰ G4 不是「检出失败」那一条 92"
 # ⑲ 复审 I-1 的端到端复现：源分支名叫 `origin/<默认分支>`（合法分支名，MR 作者随手就能起）。
 #   建本地分支时 `refs/heads/origin/<默认分支>` 会遮蔽 `refs/remotes/origin/<默认分支>`，引擎第 4 步的
 #   `git merge-base "origin/${TARGET_BRANCH}" HEAD` 退化成 HEAD → diff 为空 → 引擎打「diff 为空，跳过评审」
