@@ -59,7 +59,52 @@ def test_returns_the_secret_string_and_asks_for_exactly_the_secret_id_in_the_env
     # 断言请求形状，不只断言「抛/不抛」：把 SECRET_ID 拼错、或把变量名本身当 SecretId 传进去，
     # 都只会在部署后报 ResourceNotFound，单测里除了这条没有别的地方能接住。
     assert client.get_secret_value.call_args.kwargs == {"SecretId": SECRET_ID}
-    assert fetch._CACHE == {SECRET_ID: "s3cret"}
+    assert _cached() == {SECRET_ID: "s3cret"}
+
+
+def _cached():
+    """缓存里的值（不含取到的时刻）：缓存项是 (value, fetched_at)，issue 05 G2。"""
+    return {k: v for k, (v, _at) in fetch._CACHE.items()}
+
+
+def _frozen_clock(monkeypatch, start=1000.0):
+    """冻结 secret_fetch 自己看到的时钟（只换它模块里的 time，不动全局）。返回可改的 [now]。"""
+    import types
+    now = [start]
+    monkeypatch.setattr(fetch, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+    return now
+
+
+def test_a_cached_value_is_refetched_once_the_ttl_has_passed(monkeypatch):
+    """issue 05 G2（s1 F3）：缓存以前永不过期，手册又教轮换令牌——轮换并吊销旧值之后，热执行环境一直用旧值
+    （兜底 401 → 异步重试多半落在同一个热环境 → 进队列；按手册同步回放也可能落在那里，同样失败）。
+    冻结时钟、逐字断言调用次数：只断言「过了很久会重取」的话，TTL 写成一小时也能过。"""
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
+    client = _boto3(monkeypatch, {"SecretString": "old"}, {"SecretString": "new"})
+    now = _frozen_clock(monkeypatch)
+    assert fetch.CACHE_TTL_SECONDS == 300
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "old"
+    now[0] = 1000.0 + 299.999
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "old"
+    assert client.get_secret_value.call_count == 1, "TTL 之内不重取（正向对照）"
+    now[0] = 1000.0 + 300
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "new"
+    assert client.get_secret_value.call_count == 2
+    now[0] = 1000.0 + 300 + 299
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "new"
+    assert client.get_secret_value.call_count == 2, "重新计时从重取的那一刻算起"
+
+
+def test_an_expired_entry_whose_refetch_fails_is_never_served_stale(monkeypatch):
+    # 旧值在轮换场景下恰恰是错的：过期之后重取失败就照常抛，不回退到旧值，缓存里也不留它
+    monkeypatch.setenv("WEBHOOK_SECRET_ID", SECRET_ID)
+    _boto3(monkeypatch, {"SecretString": "old"}, DENIED)
+    now = _frozen_clock(monkeypatch)
+    assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "old"
+    now[0] += 300
+    with pytest.raises(fetch.SecretUnavailable):
+        fetch.secret_from_env("WEBHOOK_SECRET_ID")
+    assert fetch._CACHE == {}
 
 
 def test_value_is_cached_per_process_so_a_warm_invocation_does_not_call_aws(monkeypatch):
@@ -148,7 +193,7 @@ def test_two_different_secret_ids_do_not_share_one_cache_entry(monkeypatch):
     _boto3(monkeypatch, {"SecretString": "s3cret"}, {"SecretString": "pt-t0ken"})
     assert fetch.secret_from_env("WEBHOOK_SECRET_ID") == "s3cret"
     assert fetch.secret_from_env("YUNXIAO_TOKEN_ID") == "pt-t0ken"
-    assert fetch._CACHE == {SECRET_ID: "s3cret", other: "pt-t0ken"}
+    assert _cached() == {SECRET_ID: "s3cret", other: "pt-t0ken"}
 
 
 def test_no_lambda_source_writes_into_os_environ():

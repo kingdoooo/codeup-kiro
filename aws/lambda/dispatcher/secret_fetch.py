@@ -20,11 +20,19 @@ partial ARN 会被当成完整 ARN 解析、从而找不到密钥，文档建议
 `import secrets`（boto3/botocore 或标准库自身的变化）都会拿到这份，而 synth 与单测都接不住。
 """
 import os
+import time
 
-# 按进程缓存：Lambda 执行环境跨调用复用，冷启动取一次就够。键用 SecretId，同一个函数里的两个
-# 密钥不会互相串。**只缓存取到的非空值**——失败绝不入缓存，否则一次限流会把这个执行环境
-# 钉死在失败态直到它被回收，期间每个 webhook 都被拒。下一次调用必须能重试。
+# 按进程缓存：Lambda 执行环境跨调用复用，不必每次调用都取。键用 SecretId，同一个函数里的两个
+# 密钥不会互相串；值是 (value, fetched_at)。**只缓存取到的非空值**——失败绝不入缓存，否则一次
+# 限流会把这个执行环境钉死在失败态直到它被回收，期间每个 webhook 都被拒。下一次调用必须能重试。
 _CACHE = {}
+
+# 缓存项的寿命（issue 05 G2）。以前永不过期，而手册教轮换令牌：轮换并吊销旧值之后，热执行环境
+# 一直拿旧值（Lambda 不承诺执行环境的最长寿命，持续有流量时可能是几个小时）——兜底的重试多半落在
+# 同一个热环境里、同样 401。5 分钟：轮换后两个函数最多 5 分钟都用上新值、重试耗尽后的回放拿得到新值，
+# GetSecretValue 的费用与配额可以忽略。过期之后重取失败就照常抛，**绝不**回退到旧值——旧值在
+# 轮换场景下恰恰是错的。setup-guide.md 里写的「5 分钟」由测试从这个数算出来。
+CACHE_TTL_SECONDS = 300
 
 
 class SecretUnavailable(RuntimeError):
@@ -58,8 +66,12 @@ def secret_from_env(var_name):
     # （falsy 但有意义）。
     if not secret_id:
         raise SecretUnavailable(var_name, "env-unset")
-    if secret_id in _CACHE:
-        return _CACHE[secret_id]
+    hit = _CACHE.get(secret_id)
+    if hit is not None:
+        value, fetched_at = hit
+        if time.monotonic() - fetched_at < CACHE_TTL_SECONDS:
+            return value
+        del _CACHE[secret_id]   # 过期：先扔掉，重取失败时缓存里不留旧值
     import boto3  # 沿用本仓库写法：boto3 在函数内部 import（见 backstop/handler.py 的 handler）
     import bounded_config  # 同目录；兜底 Lambda 经 /opt/dispatcher 导入，与本文件同一手法
     try:
@@ -76,5 +88,5 @@ def secret_from_env(var_name):
     # 去查 Codeup 那侧，永远查不到真正的原因。
     if not value:
         raise SecretUnavailable(var_name, "empty-value")
-    _CACHE[secret_id] = value
+    _CACHE[secret_id] = (value, time.monotonic())
     return value

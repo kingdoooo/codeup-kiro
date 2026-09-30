@@ -1785,6 +1785,22 @@ def test_the_guide_does_not_claim_no_process_environ_holds_the_token():
         assert fact in item, f"§3「令牌不在 argv」那一条缺：{fact}"
 
 
+def test_the_guide_states_the_secret_cache_ttl_where_rotation_is_discussed():
+    """issue 05 G2：401 那一行以前说缓存「没有 TTL」、要立刻生效得改函数配置；§1.4 教轮换令牌，却没说新值
+    多久才生效。数字只写一份：手册里的「N 分钟」从 secret_fetch.py 的 CACHE_TTL_SECONDS 算出来。"""
+    src = (pathlib.Path(__file__).resolve().parents[1] / "lambda" / "dispatcher" / "secret_fetch.py").read_text()
+    m = re.search(r"^CACHE_TTL_SECONDS = (\d+)$", src, re.M)
+    assert m and int(m.group(1)) % 60 == 0, "CACHE_TTL_SECONDS 必须是整分钟"
+    minutes = f"{int(m.group(1)) // 60} 分钟"
+    row = [ln for ln in _guide_section_lines("8.") if ln.startswith("| Codeup 的 webhook 投递记录显示 401")]
+    assert len(row) == 1
+    assert "没有 TTL" not in row[0], row[0]
+    for fact in (minutes, "**两个**函数"):
+        assert fact in row[0], f"401 那一行缺：{fact}"
+    sec14 = "\n".join(_guide_section_lines("1.")).split("### 1.4", 1)[1].split("### 1.5", 1)[0]
+    assert "轮换" in sec14 and minutes in sec14, "§1.4 讲轮换令牌，要说新值多久生效"
+
+
 def test_the_six_required_executor_variables_are_named_where_the_guide_counts_them():
     """复审 s6 N-3：4.1 那一格原来写「上面四项加 LOCK_KEY、HEAD_SHA 共六项」，字面所指的「上面四项」
     含可选的 MR_TARGET_BRANCH 而漏了 CI_COMMIT_REF_NAME。现在逐个点名，并与 entrypoint 的必填守卫核对。"""
