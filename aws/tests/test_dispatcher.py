@@ -1,5 +1,6 @@
 import json
 import pathlib
+import re
 import sys
 from unittest import mock
 
@@ -31,6 +32,22 @@ def test_uses_constant_time_comparison():
     src = (pathlib.Path(handler_mod.__file__)).read_text()
     assert "compare_digest" in src
     assert "hmac" in src
+
+
+# ── issue 05 G1（s1 F8）：非 ASCII 的令牌或密钥不能变成 5xx ──────────────────────────
+@pytest.mark.parametrize("got, expected, want", [
+    ("wröng", "real-secret", False), ("abc", "密钥", False), ("密钥", "密钥", True),
+    ("\udcff", "s3cret", False)])
+def test_non_ascii_tokens_compare_without_raising(got, expected, want):
+    """str 版 hmac.compare_digest 遇到非 ASCII 抛 TypeError：未鉴权的调用方拿到 502 而不是 401，配置的
+    密钥本身非 ASCII 时连带对令牌的投递也 502。按 bytes 比（surrogatepass：孤立代理项也编得出来）。"""
+    assert handler_mod.verify_token({"x-codeup-token": got}, expected) is want
+
+
+def test_handler_answers_401_not_5xx_to_a_non_ascii_token(monkeypatch):
+    _stub_secrets(monkeypatch, {"SecretString": "s3cret"})
+    assert_alb_response(handler_mod.handler({"headers": {"x-codeup-token": "wröng"}, "body": "{}"}, None),
+                        401, "")
 
 
 F = {"repo_id": "r1", "mr_local_id": "7", "head_sha": "abc123", "dedupe_extra": "",
@@ -106,7 +123,16 @@ def test_run_task_never_passes_secrets_in_overrides():
     for forbidden in ("KIRO_API_KEY", "YUNXIAO_TOKEN", "WEBHOOK_SECRET", "secret"):
         assert forbidden not in blob
 
+def _token_ok(monkeypatch):
+    """dispatch 在留痕那一步才取云效令牌（issue 05 G3）。这几条管的是 RunTask 失败的形状、不是取密钥，
+    所以直接给一个取得到的令牌；取密钥本身走真实 secret_fetch 的用例在后面（_stub_token）。"""
+    real = handler_mod.secret_fetch.secret_from_env
+    monkeypatch.setattr(handler_mod.secret_fetch, "secret_from_env",
+                        lambda var: "t0ken" if var == "YUNXIAO_TOKEN_ID" else real(var))
+
+
 def test_run_task_failure_releases_lock_and_posts_to_mr(monkeypatch):
+    _token_ok(monkeypatch)
     posted = []
     monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
                         lambda *a, **k: posted.append(k or a) or True)
@@ -307,6 +333,7 @@ def test_dispatch_duplicate_is_a_full_alb_response():
 
 
 def test_dispatch_runtask_failed_is_a_full_alb_response(monkeypatch):
+    _token_ok(monkeypatch)
     monkeypatch.setattr(handler_mod.codeup_min, "post_comment", lambda *a, **k: True)
     table, ecs = mock.Mock(), mock.Mock()
     ecs.run_task.side_effect = RuntimeError("Throttled")
@@ -372,6 +399,7 @@ def test_run_task_never_emits_the_literal_string_none(field):
 
 # ── M7：评论里的原因是 AWS 错误码，不是异常正文 ─────────────────────────────────
 def _posted_reason(monkeypatch, exc):
+    _token_ok(monkeypatch)
     posted = []
     monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
                         lambda *a, **k: posted.append(a[4]) or True)
@@ -787,9 +815,8 @@ def test_handler_end_to_end_with_the_real_runtime_cfg_passes_the_fixture_values_
                    "LOCK_KEY": "7215683#6#0731ec9d3a8cddf524bca91e6fe799b19d0b01f9"}, env
     # 抢锁必须在 RunTask 之前（N3），且用的是同一个键（I1）
     assert table.put_item.call_args.kwargs["Item"]["pk"] == env["LOCK_KEY"]
-    # 云效令牌只从 Secrets Manager 来，且取的是环境变量里那个密钥名
-    assert [c.kwargs["SecretId"] for c in client.get_secret_value.call_args_list] == \
-        [SECRET_ID, TOKEN_SECRET_ID]
+    # issue 05 G3：云效令牌只在 RunTask 失败后的留痕里用得上，拉起成功时一次都不取
+    assert [c.kwargs["SecretId"] for c in client.get_secret_value.call_args_list] == [SECRET_ID]
 
 
 def test_handler_end_to_end_reads_a_base64_encoded_body(monkeypatch):
@@ -834,34 +861,41 @@ def test_handler_ignored_is_a_full_alb_response(monkeypatch):
     assert not ecs.run_task.called
 
 
-def test_handler_returns_503_when_the_codeup_token_cannot_be_fetched(monkeypatch, capsys):
-    """云效令牌取不到时，必须走与 WEBHOOK_SECRET_ID **同一条** 503 + 固定形状日志路径。"""
+def test_the_codeup_token_is_not_needed_to_launch_a_review(monkeypatch):
+    """issue 05 G3（s1 F9）：以前验签之后就急取云效令牌，只是这一个密钥取不到（改名、IAM 少一条 ARN、
+    限流）时每一次评审都 503、事件丢失——而执行器根本不用调度器这一份令牌（ECS secrets{} 自己注入）。"""
     ecs, table = mock.Mock(), mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "arn:task/1"}]}
     monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
     client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"}, DENIED)
     _set_runtime_env(monkeypatch)
     assert_alb_response(handler_mod.handler({
         "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Merge Request Hook"},
-        "body": (FIX / "mr-opened.json").read_text()}, None), 503, "secret-unavailable")
+        "body": (FIX / "mr-opened.json").read_text()}, None), 200, "dispatched")
+    assert ecs.run_task.called
+    assert [c.kwargs["SecretId"] for c in client.get_secret_value.call_args_list] == [SECRET_ID]
+
+
+def test_an_unavailable_codeup_token_at_the_failure_comment_is_one_line_and_still_200(
+        monkeypatch, capsys, codeup):
+    """G3 的另一半：RunTask 失败、这时才取的令牌又取不到——双重故障，留痕丢了，但必须恰好一行日志
+    （I10 的底线），锁照样释放，响应仍是 200（抢锁之后的 502 会招来重投，见 dispatch 的注释）。"""
+    ecs, table = mock.Mock(), mock.Mock()
+    ecs.run_task.side_effect = RuntimeError("Throttled")
+    monkeypatch.setattr(handler_mod, "_clients", lambda cfg: (ecs, table))
+    client = _stub_secrets(monkeypatch, {"SecretString": "s3cret"}, DENIED)
+    _set_runtime_env(monkeypatch)
+    assert_alb_response(handler_mod.handler({
+        "headers": {"x-codeup-token": "s3cret", "x-codeup-event": "Merge Request Hook"},
+        "body": (FIX / "mr-opened.json").read_text()}, None), 200, "runtask-failed")
     out = capsys.readouterr().out
-    assert "secret-unavailable var=YUNXIAO_TOKEN_ID code=AccessDeniedException" in out, out
-    assert out.count("\n") == 1, f"只留一行：{out!r}"
+    assert out == "cleanup-failed step=comment reason=SecretUnavailable:AccessDeniedException\n", out
     for leak in ("111122223333", "not authorized", "assumed-role", "arn:", FULL_ARN):
         assert leak not in out, (leak, out)
-    assert not ecs.run_task.called, "取不到令牌就不能拉起任务：失败时没法在 MR 上留痕（I10）"
-    # 请求形状，不只是错误处理：第二次问的必须是 YUNXIAO_TOKEN_ID 里那个密钥名
+    assert table.delete_item.called, "取不到令牌不影响释放锁"
+    assert codeup.requests == []
     assert [c.kwargs["SecretId"] for c in client.get_secret_value.call_args_list] == \
         [SECRET_ID, TOKEN_SECRET_ID]
-
-
-def test_the_codeup_token_never_comes_from_a_plaintext_env_var(monkeypatch):
-    # 既有裁决：codeup_token 永远不是 config.yaml / 环境变量的字段。把明文变量设上也不该被用到。
-    monkeypatch.setenv("YUNXIAO_TOKEN", "plaintext-must-not-be-used")
-    client = _stub_secrets(monkeypatch, {"SecretString": "t0ken"})
-    _set_runtime_env(monkeypatch)
-    cfg = handler_mod._runtime_cfg()
-    assert cfg["codeup_token"] == "t0ken"
-    assert client.get_secret_value.call_args.kwargs == {"SecretId": TOKEN_SECRET_ID}
 
 
 # ── Fix round 1 / I-1 + M-1：断环按 `<!-- kiro-` 前缀，覆盖本方写出去的每一种评论 ─────────
@@ -1057,23 +1091,102 @@ def test_an_uppercase_action_still_hits_the_non_push_filter(action):
 # ── Fix round 1 / 重投链加固：抢锁成功之后，收尾失败也必须回 200 ────────────────────
 # Codeup 对非 2xx 会用同一个 delivery id 立即重投 2 次（Task 1 实测）：抢锁之后让异常冒出去
 # 就是 502，锁可能已经释放，同一个 head 会被再拉起一次。
-def test_post_comment_failure_after_a_runtask_failure_still_returns_200(monkeypatch, capsys):
-    monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
-                        mock.Mock(side_effect=bexc.ClientError(
-                            {"Error": {"Code": "ThrottlingException",
-                                       "Message": f"…{FULL_ARN}…"}}, "PostComment")))
+@pytest.fixture
+def codeup(monkeypatch):
+    """本地 Codeup 替身：让**真实** codeup_min.post_comment 打过来。记下每个请求（路径、头、JSON 正文），
+    按 mode 回应：`status` 是状态码；`reset` 为真时读完请求就发 RST 断开（连上之后连接被重置）。
+
+    issue 05 N1：以前这一段的测试都用 `side_effect=ClientError` 造失败，而真 post_comment 从不抛它——
+    它对 401/5xx 返回 False，那条路径从来没被测到，也就没人发现 _cleanup 把 False 丢了。
+    """
+    import http.server
+    import socket
+    import struct
+    import threading
+    import types
+    requests, mode = [], {"status": 201, "reset": False}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            requests.append({"path": self.path,
+                             "headers": {k.lower(): v for k, v in self.headers.items()},
+                             "body": json.loads(self.rfile.read(n) or b"{}")})
+            if mode["reset"]:
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                self.close_connection = True
+                self.connection.close()
+                return
+            self.send_response(mode["status"])
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # 本机若配了代理（环境变量或 macOS 系统代理），urllib 会把 127.0.0.1 也交给它；no_proxy=* 让它直连
+    for v in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setattr(handler_mod.codeup_min, "CODEUP_API_BASE", f"http://127.0.0.1:{srv.server_address[1]}")
+    yield types.SimpleNamespace(requests=requests, mode=mode)
+    srv.shutdown()
+    srv.server_close()
+
+
+def _stub_token(monkeypatch, value="t0ken"):
+    """dispatch 在留痕那一步才取云效令牌（G3）：走真实 secret_fetch，只换掉 boto3。"""
+    monkeypatch.setenv("YUNXIAO_TOKEN_ID", TOKEN_SECRET_ID)
+    return _stub_secrets(monkeypatch, {"SecretString": value})
+
+
+def test_a_rejected_failure_comment_is_logged_not_silent(monkeypatch, capsys, codeup):
+    """issue 05 N1：Codeup 回 401（令牌被吊销）时 post_comment 返回 False、不抛；以前 _cleanup 把返回值
+    丢了，MR 上没有「评审未启动」、日志里也一行都没有——正是 I10 要消灭的那种沉默。"""
+    _stub_token(monkeypatch)
+    codeup.mode["status"] = 401
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.side_effect = RuntimeError("Throttled")
+    assert_alb_response(handler_mod.dispatch(ecs, table, _full_cfg(), F), 200, "runtask-failed")
+    assert capsys.readouterr().out == "cleanup-failed step=comment reason=PostFailed\n"
+    assert len(codeup.requests) == 1, "刻意只发一次：不查重、不重试"
+    assert table.delete_item.called, "留痕失败不影响释放锁（N4）"
+
+
+def test_the_failure_comment_request_has_the_real_codeup_shape(monkeypatch, capsys, codeup):
+    """正向对照，钉住真实请求形状（以前整个仓库没有任何测试打到真 post_comment）。令牌只从
+    Secrets Manager 来：明文环境变量设上了也不该被用到（既有裁决）。"""
+    monkeypatch.setenv("YUNXIAO_TOKEN", "plaintext-must-not-be-used")
+    client = _stub_token(monkeypatch)
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.side_effect = RuntimeError("Throttled")
+    assert_alb_response(handler_mod.dispatch(ecs, table, _full_cfg(), F), 200, "runtask-failed")
+    assert capsys.readouterr().out == ""
+    (req,) = codeup.requests
+    assert req["path"] == "/oapi/v1/codeup/organizations/o1/repositories/r1/changeRequests/7/comments"
+    assert req["headers"]["x-yunxiao-token"] == "t0ken"
+    assert req["body"]["comment_type"] == "GLOBAL_COMMENT"
+    assert req["body"]["content"] == handler_mod.failed_comment("RuntimeError")
+    assert [c.kwargs["SecretId"] for c in client.get_secret_value.call_args_list] == [TOKEN_SECRET_ID]
+
+
+def test_a_connection_reset_while_posting_is_one_line_not_an_escape(monkeypatch, capsys, codeup):
+    # 连上之后连接被重置时 post_comment 抛的是原始异常（不是 False），同样只能留一行、回 200
+    _stub_token(monkeypatch)
+    codeup.mode["reset"] = True
     table, ecs = mock.Mock(), mock.Mock()
     ecs.run_task.side_effect = RuntimeError("Throttled")
     assert_alb_response(handler_mod.dispatch(ecs, table, _full_cfg(), F), 200, "runtask-failed")
     out = capsys.readouterr().out
-    assert out == "cleanup-failed step=comment reason=ThrottlingException\n", out
-    assert table.delete_item.called, "留痕失败不影响释放锁（N4）"
+    assert re.fullmatch(r"cleanup-failed step=comment reason=(ConnectionResetError|RemoteDisconnected)\n", out), out
+    assert len(codeup.requests) == 1
 
 
-def test_release_failure_after_a_runtask_failure_still_posts_and_returns_200(monkeypatch, capsys):
-    posted = []
-    monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
-                        lambda *a, **k: posted.append(a[4]) or True)
+def test_release_failure_after_a_runtask_failure_still_posts_and_returns_200(monkeypatch, capsys, codeup):
+    _stub_token(monkeypatch)
     table, ecs = mock.Mock(), mock.Mock()
     table.delete_item.side_effect = bexc.ClientError(
         {"Error": {"Code": "ProvisionedThroughputExceededException"}}, "DeleteItem")
@@ -1081,19 +1194,7 @@ def test_release_failure_after_a_runtask_failure_still_posts_and_returns_200(mon
     assert_alb_response(handler_mod.dispatch(ecs, table, _full_cfg(), F), 200, "runtask-failed")
     assert capsys.readouterr().out == \
         "cleanup-failed step=release reason=ProvisionedThroughputExceededException\n"
-    assert posted, "释放锁失败不得连带吞掉 I10 的留痕"
-
-
-def test_the_cleanup_log_line_leaks_neither_the_account_id_nor_the_aws_message(monkeypatch, capsys):
-    monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
-                        mock.Mock(side_effect=DENIED))
-    table, ecs = mock.Mock(), mock.Mock()
-    ecs.run_task.side_effect = RuntimeError("Throttled")
-    handler_mod.dispatch(ecs, table, _full_cfg(), F)
-    out = capsys.readouterr().out
-    for leak in ("111122223333", "not authorized", "assumed-role", "arn:", FULL_ARN):
-        assert leak not in out, (leak, out)
-    assert out == "cleanup-failed step=comment reason=AccessDeniedException\n", out
+    assert len(codeup.requests) == 1, "释放锁失败不得连带吞掉 I10 的留痕"
 
 
 def test_a_successful_dispatch_logs_no_cleanup_line(capsys):
@@ -1482,12 +1583,13 @@ def test_a_run_task_whose_first_attempt_launched_but_timed_out_is_retried_with_t
     assert fake_aws.launched == [arn]
 
 
-def test_a_run_task_that_times_out_on_every_attempt_is_not_retried_again_by_the_dispatcher(fake_aws):
+def test_a_run_task_that_times_out_on_every_attempt_is_not_retried_again_by_the_dispatcher(fake_aws, monkeypatch):
     # R1：一次 dispatch 对 RunTask 只发起一次 API 调用。上面那条只让第一次尝试超时，SDK 自己的重试就成功了，
     # 手写在外面的重试根本走不到；这里让两次尝试都超时，外层再调一次就是新 token → 第二个任务。
     # 同时记下残余（issue 02）：服务端其实已经起了任务，调度器却释放锁、发一条「评审未启动」——任务照常评审。
     ecs, table = handler_mod._clients({})
     fake_aws.stall("RunTask", 2)
+    _token_ok(monkeypatch)
     with mock.patch.object(handler_mod.codeup_min, "post_comment") as post:
         r = handler_mod.dispatch(ecs, table, _full_cfg(), F)
     assert_alb_response(r, 200, "runtask-failed")
@@ -1575,6 +1677,7 @@ def test_a_comment_carrying_our_marker_is_ignored_with_a_log_line(capsys):
     (None, "RunTaskFailure:unknown"),
 ])
 def test_an_empty_run_task_result_is_reported_with_the_ecs_failure_reason(failures, want, monkeypatch):
+    _token_ok(monkeypatch)
     posted = []
     monkeypatch.setattr(handler_mod.codeup_min, "post_comment",
                         lambda *a, **k: posted.append(a) or True)

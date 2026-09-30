@@ -26,7 +26,7 @@ def _full_cfg(**over):
         "command_phrase": "/kiro review", "target_branch_filter": "",
         "cluster": "c", "task_definition": "td", "container_name": "review",
         "subnets": ["s1"], "security_groups": ["sg1"],
-        "lock_ttl_seconds": 86400, "codeup_token": "t0ken",
+        "lock_ttl_seconds": 86400,
         "reserved_concurrency": 5,
         "ephemeral_storage_gib": 50, "cpu": 2048, "memory_mib": 8192,
         "kiro_image_digests": "a" * 64 + " " + "b" * 64,

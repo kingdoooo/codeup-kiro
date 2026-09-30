@@ -58,7 +58,11 @@ def verify_token(headers, expected):
     got = token_header(headers)
     if not got:
         return False
-    return hmac.compare_digest(str(got), str(expected))
+    # 按 bytes 比（issue 05 G1）：str 版 compare_digest 遇到非 ASCII 抛 TypeError，未鉴权的调用方就拿到
+    # 502 而不是 401；配置的密钥本身非 ASCII 时连带对令牌的投递也 502。surrogatepass：ALB 转来的头里
+    # 若有孤立代理项也编得出来，照样 fail closed。常量时间的性质不变。
+    return hmac.compare_digest(str(got).encode("utf-8", "surrogatepass"),
+                               str(expected).encode("utf-8", "surrogatepass"))
 
 
 def _dig(d, *path, default=None):
@@ -335,9 +339,8 @@ def _secret_unavailable_code(exc):
 
 
 def _secret_unavailable(exc):
-    """取不到密钥时的唯一出口：一行固定形状日志 + 503。两个密钥（WEBHOOK_SECRET_ID 与
-    YUNXIAO_TOKEN_ID）共用这一份，不复制——复制出来的第二份迟早在日志形状或状态码上分叉，
-    而 setup-guide 的排错表只按一种形状写。
+    """取不到共享密钥（WEBHOOK_SECRET_ID）时的唯一出口：一行固定形状日志 + 503。云效令牌以前也走这里，
+    issue 05 G3 起改成只在留痕那一步取、取不到只落一行 cleanup-failed（见 _post_failed_comment）。
 
     响应正文只给一个固定代号，不带任何 AWS 错误正文（含角色 ARN 与账号 ID，与 _failure_reason
     同一条理由）。
@@ -383,12 +386,8 @@ def handler(event, context):
     # run_task 各自实现并各自测试，却没有任何一步把它们接到入口上：那样 handler 会验完签名就
     # return 200，每一个 webhook 都被接受然后什么都不做，而全套单测照样绿。这段接线是唯一
     # 能证明「部件都对且真的连上了」的地方。
-    try:
-        cfg = _runtime_cfg()
-    except secret_fetch.SecretUnavailable as exc:
-        # 云效令牌也取不到就没法在 MR 上留痕（I10），继续往下走只会在拉起任务失败时静默丢失。
-        # 与 WEBHOOK_SECRET_ID 共用同一条 503 + 同一行日志形状，运维只需按 var= 区分是哪一个密钥。
-        return _secret_unavailable(exc)
+    # 云效令牌不在这里取（issue 05 G3）：它只在 RunTask 失败后的留痕里用得上，见 _post_failed_comment。
+    cfg = _runtime_cfg()
     try:
         body = json.loads(_body_text(event) or "{}")
     except ValueError:
@@ -405,16 +404,14 @@ def handler(event, context):
 
 
 def _runtime_cfg():
-    """非敏感值来自环境变量；云效令牌来自 Secrets Manager（调用时取，见 secret_fetch.py）。
+    """运行时的非敏感值，全部来自环境变量。
 
-    config.yaml 只放非敏感值，`codeup_token` 永远不是它的字段（既有裁决）——所以这里是运行时
-    唯一的令牌来源，也绝不读明文环境变量。取不到时 secret_fetch.SecretUnavailable 原样抛出，
-    由 handler 统一走 503 那条路径。
+    云效令牌不在这里（issue 05 G3）：它只在 RunTask 失败后的留痕里用得上，由 _post_failed_comment
+    在那一步向 Secrets Manager 取；config.yaml 与明文环境变量都不是它的来源（既有裁决）。
     这层间接（连同 _clients）同时让入口可测：单测不必真的有环境变量和 AWS 客户端。
     """
     return {
         "org_id": os.environ["YUNXIAO_ORG_ID"],
-        "codeup_token": secret_fetch.secret_from_env("YUNXIAO_TOKEN_ID"),
         "cluster": os.environ["ECS_CLUSTER"],
         "task_definition": os.environ["ECS_TASK_DEFINITION"],
         "container_name": os.environ["ECS_CONTAINER_NAME"],
@@ -555,6 +552,8 @@ def _failure_reason(exc):
             return code
     if isinstance(exc, RunTaskFailure):
         return f"RunTaskFailure:{exc.reason}"
+    if isinstance(exc, secret_fetch.SecretUnavailable):
+        return f"SecretUnavailable:{_secret_unavailable_code(exc)}"
     return type(exc).__name__
 
 
@@ -591,11 +590,27 @@ def dispatch(ecs, table, cfg, fields):
         # 它们先后评、不会并发，issue 02）。所以抢锁之后的每条路径都必须回 200，
         # 收尾失败只留一行固定形状的代号。两步各自 try：释放锁失败不该连带吞掉 I10 的留痕。
         _cleanup(release, table, key, step="release")
-        _cleanup(codeup_min.post_comment, cfg["org_id"], fields["repo_id"],
-                 fields["mr_local_id"], cfg["codeup_token"],
-                 failed_comment(_failure_reason(exc)), step="comment")
+        _cleanup(_post_failed_comment, cfg, fields, _failure_reason(exc), step="comment")
         return _resp(200, "runtask-failed")
     return _resp(200, "dispatched")
+
+
+class PostFailed(RuntimeError):
+    """Codeup 拒收了「评审未启动」评论（post_comment 返回 False：HTTP 非 2xx 或连不上）。"""
+
+
+def _post_failed_comment(cfg, fields, reason):
+    """「评审未启动」留痕（I10）。云效令牌到这一步才取（issue 05 G3）：预先取的话，只是这一个密钥取不到
+    （改名、IAM 少一条 ARN、限流）就会让每一次评审都 503、事件丢失，而执行器根本不用调度器这一份令牌。
+
+    两件事都在 _cleanup 的 try 里跑（参数也在里面求值），所以都只落成一行代号：取不到令牌是
+    `SecretUnavailable:<代号>`，Codeup 拒收是 `PostFailed`（issue 05 N1：以前 post_comment 的 False
+    被丢掉，令牌被吊销的 401 一行日志都不留），连上之后断开是原始异常的类型名。
+    """
+    token = secret_fetch.secret_from_env("YUNXIAO_TOKEN_ID")
+    if not codeup_min.post_comment(cfg["org_id"], fields["repo_id"], fields["mr_local_id"], token,
+                                   failed_comment(reason)):
+        raise PostFailed("post-comment")
 
 
 def _cleanup(fn, *args, step):

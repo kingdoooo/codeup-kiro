@@ -765,8 +765,7 @@ def test_behaviour_vars_pass_configured_values_through():
 
 # ── I7：app.py / stacks/ 读取的每一个 config 键都写在 config.example.yaml 里 ─────
 # 由 app.py 用 ExecutorStack 的真实资源填入、不是 config.yaml 字段的键（见 app.py 的注释），
-# 以及只存在于运行时 cfg 的 codeup_token（密钥，永远不是 config.yaml 的字段）。
-NOT_CONFIG_KEYS = {"cluster", "task_definition", "subnets", "security_groups", "codeup_token"}
+NOT_CONFIG_KEYS = {"cluster", "task_definition", "subnets", "security_groups"}
 
 
 def test_every_config_key_the_code_reads_is_documented_in_the_example():
@@ -833,20 +832,25 @@ def test_setup_guide_documents_the_exact_secret_unavailable_log_line():
     for code in ("env-unset", "empty-value"):
         assert f'"{code}"' in fetch, f"手册里的代号 {code} 在 secret_fetch.py 里不存在"
         assert f"`{code}`" in guide, code
-    # 入口接线之后 503 有**两个**来源：校验 webhook 令牌的共享密钥，与在 MR 上留痕用的云效令牌
-    # （验签通过之后才取）。二者共用同一行日志形状，只有 var= 不同——手册必须把第二个变量名也
-    # 写出来，否则运维按 var= 只认得一半；代码那侧则必须真的共用同一条路径，不是复制出第二份。
-    # 按**行**判（不是整篇判）：整篇判会被手册里别处任何一次提及满足，而这件事只有写在
-    # 503 那一行才对运维有用——排错表就是按「现象 → 这一行」读的。
+    # issue 05 G3：云效令牌改成 RunTask 失败后的留痕那一步才取，503 只剩**一个**来源（校验 webhook
+    # 令牌的共享密钥）。按**行**判（不是整篇判）：整篇判会被手册里别处任何一次提及满足，而排错表
+    # 是按「现象 → 这一行」读的。留痕那一步取不到令牌 / 发不出评论时的日志写在「评审未启动」那一行。
     row_503 = [ln for ln in guide.splitlines()
                if ln.startswith("|") and "secret-unavailable" in ln and "503" in ln]
     assert len(row_503) == 1, "排错表里 503 / secret-unavailable 那一行找不到（或不止一行）"
-    assert "var=YUNXIAO_TOKEN_ID" in row_503[0], \
-        "503 那一行没写出云效令牌取不到时那行日志的变量名"
+    assert "YUNXIAO_TOKEN_ID" not in row_503[0] and "yunxiao-token-kiro" not in row_503[0], \
+        "503 那一行还在说取不到云效令牌会 503（G3 之后它只在留痕那一步取）"
     assert f"`{prefix}WEBHOOK_SECRET_ID code=" in row_503[0], \
         "503 那一行没按真实形状写共享密钥那个变量名"
-    assert handler.count("return _secret_unavailable(exc)") == 2, \
-        "两个密钥必须共用同一条 503 + 日志路径（复制出第二份迟早在状态码或日志形状上分叉）"
+    assert handler.count("return _secret_unavailable(exc)") == 1, \
+        "503 只剩共享密钥这一个来源"
+    row_rt = [ln for ln in guide.splitlines() if ln.startswith("| MR 上出现调度器写的「评审未启动」类评论")]
+    assert len(row_rt) == 1
+    for fact in ("`cleanup-failed step=comment reason=PostFailed`",
+                 "`cleanup-failed step=comment reason=SecretUnavailable:<代号>`", "`ConnectionResetError`"):
+        assert fact in row_rt[0], f"「评审未启动」那一行缺：{fact}"
+    assert 'f"cleanup-failed step={step} reason={_failure_reason(exc)}"' in handler, \
+        "手册写的是这行日志的形状，handler 必须真的这么打"
     # 兜底那侧确实不打这行（它抛异常走 EventBridge 重试），手册也照实这么写
     backstop = (aws_dir / "lambda" / "backstop" / "handler.py").read_text()
     assert prefix not in backstop
