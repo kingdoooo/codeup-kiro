@@ -1558,18 +1558,23 @@ def test_backstop_failed_async_invocations_land_in_an_encrypted_14_day_queue():
     assert sends == {json.dumps({"Fn::GetAtt": [q_id, "Arn"]}, sort_keys=True)}, sends
 
 
-def test_both_backstop_alarms_fire_on_the_first_occurrence_and_notify_one_topic():
+def test_the_backstop_alarms_fire_on_the_first_occurrence_and_notify_one_topic():
     t = _disp_template()
     fn_id, _ = _only(t, "AWS::Lambda::Function", lambda k, r: k.startswith("BackstopFn"))
     q_id, _ = _only(t, "AWS::SQS::Queue")
     topic_id, _ = _only(t, "AWS::SNS::Topic")
     alarms = {(a["Properties"]["Namespace"], a["Properties"]["MetricName"]): a["Properties"]
               for a in t.find_resources("AWS::CloudWatch::Alarm").values()}
+    # issue 05 B5：第三个告警补上「重试耗尽 → 进队列」这条链上唯一没有告警的一环——事件连队列都没进去
+    # （投递失败）时队列告警没有消息可数。AsyncEventsDropped 不加：配了 OnFailure 目的地时，事件先送进
+    # 目的地再计为 dropped（Lambda 文档 Asynchronous invocation metrics），与队列告警重复。
     assert set(alarms) == {("AWS/SQS", "ApproximateNumberOfMessagesVisible"),
-                           ("AWS/Lambda", "Errors")}, set(alarms)
+                           ("AWS/Lambda", "Errors"),
+                           ("AWS/Lambda", "DestinationDeliveryFailures")}, set(alarms)
     dims = {("AWS/SQS", "ApproximateNumberOfMessagesVisible"):
             [{"Name": "QueueName", "Value": {"Fn::GetAtt": [q_id, "QueueName"]}}],
-            ("AWS/Lambda", "Errors"): [{"Name": "FunctionName", "Value": {"Ref": fn_id}}]}
+            ("AWS/Lambda", "Errors"): [{"Name": "FunctionName", "Value": {"Ref": fn_id}}],
+            ("AWS/Lambda", "DestinationDeliveryFailures"): [{"Name": "FunctionName", "Value": {"Ref": fn_id}}]}
     for key, a in alarms.items():
         assert a["Dimensions"] == dims[key], (key, a["Dimensions"])
         # 「> 0」：第一次出现就告警。阈值 0 是有意义的取值（falsy），GreaterThanOrEqual 0 会恒真
@@ -1595,9 +1600,10 @@ def test_the_guide_says_how_to_subscribe_to_and_replay_backstop_failures():
     for name in ("BackstopAlarmTopicArn", "BackstopFailuresQueueUrl", "BackstopFunctionName"):
         assert name in outputs, f"部署输出里没有 {name}，手册那一行引用的是它"
         assert f"<{name}>" in row[0], f"「收到兜底告警」那一行没用部署输出 {name}"
-    for alarm in ("BackstopFailuresAlarm", "BackstopErrorsAlarm"):
+    for alarm in ("BackstopFailuresAlarm", "BackstopErrorsAlarm", "BackstopDeliveryFailuresAlarm"):
         assert any(k.startswith(alarm) for k in alarms), f"模板里没有 {alarm}"
         assert f"`{alarm}`" in row[0], f"那一行没点名 {alarm}"
+    assert "连队列都没进去" in row[0], "那一行没说 BackstopDeliveryFailuresAlarm 意味着什么"
     for step in ("aws sns subscribe", "aws sqs receive-message", ".requestPayload",
                  "aws lambda invoke", "fileb://event.json", "aws sqs delete-message",
                  '"posted": true', "RetriesExhausted", "14 天"):

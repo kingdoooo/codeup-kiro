@@ -206,7 +206,7 @@ class DispatcherStack(cdk.Stack):
             targets=[targets.LambdaFunction(backstop_fn)],
         )
 
-        # 两个告警都通知同一个主题，运维订阅它即可（手册 §8「兜底告警」）。告警动作写在 CDK 里而不是
+        # 三个告警都通知同一个主题，运维订阅它即可（手册 §8「兜底告警」）。告警动作写在 CDK 里而不是
         # 让运维在控制台手加：手加的动作下一次 `cdk deploy` 就被覆盖掉。
         # 主题**不加** KMS 加密：CloudWatch 告警发不进用 AWS 托管密钥 alias/aws/sns 加密的主题（那个
         # 密钥的策略不允许 cloudwatch.amazonaws.com 解密/生成数据密钥，也改不了），要加密就得另建客户
@@ -235,7 +235,23 @@ class DispatcherStack(cdk.Stack):
             evaluation_periods=1,
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
-        for alarm in (failures_alarm, errors_alarm):
+        # 事件连队列都没进去：Lambda 往 BackstopFailures 投递失败（队列被删、策略被改、兜底角色少了
+        # sqs:SendMessage）。这时上面那个队列告警没有消息可数、不会响（issue 05 B5）。AsyncEventsDropped
+        # 不加：配了 OnFailure 目的地时，事件先送进目的地再计为 dropped（Lambda 文档 Asynchronous
+        # invocation metrics），与队列告警重复。
+        delivery_alarm = cloudwatch.Alarm(
+            self, "BackstopDeliveryFailuresAlarm",
+            alarm_description=(
+                "兜底 Lambda 重试耗尽的事件没能投递进 BackstopFailures 队列（目的地权限或队列本身有问题），"
+                "队列告警不会响，也没有可重放的消息。见 aws/setup-guide.md 第 8 节「兜底告警」"),
+            metric=backstop_fn.metric("DestinationDeliveryFailures",
+                                      period=cdk.Duration.minutes(5), statistic="Sum"),
+            threshold=0,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            evaluation_periods=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        for alarm in (failures_alarm, errors_alarm, delivery_alarm):
             alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
         cdk.CfnOutput(self, "BackstopAlarmTopicArn", value=alarm_topic.topic_arn,
                       description="兜底告警的 SNS 主题：aws sns subscribe 订阅它（手册第 8 节）")

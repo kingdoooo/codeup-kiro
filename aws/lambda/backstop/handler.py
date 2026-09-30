@@ -30,10 +30,17 @@ EXIT_CAUSES = {
 }
 
 
-def backstop_comment(exit_code):
-    """兜底评论的正文。退出码只在确实是整数时写进去（它来自 ECS 事件，不是自由文本；bool 不算）。"""
+def backstop_comment(exit_code, identified=True):
+    """兜底评论的正文。退出码只在确实是整数时写进去（它来自 ECS 事件，不是自由文本；bool 不算）。
+
+    identified 为 False：多容器且没有一个名字对得上评审容器（_exit_code 的第二个返回值），退出码
+    无从判断——这时不能把它说成「没有退出码、容器多半没能启动」（issue 05 D1）。
+    """
     code = exit_code if type(exit_code) is int else None
-    if code in EXIT_CAUSES:
+    if not identified:
+        cause = ("评审任务结束了，但 ECS 事件里有多个容器、没有一个名字对得上评审容器，无从判断退出码；"
+                 "评审脚本也没有留下「已回写」标记")
+    elif code in EXIT_CAUSES:
         cause = (f"{EXIT_CAUSES[code]}（退出码 {code}），评审脚本没有启动。"
                  f"按部署手册 aws/setup-guide.md 第 8 节里标着「退出码 {code}」的行排查")
     elif code is not None:
@@ -119,7 +126,7 @@ def handler(event, context):
     if not should_post(event, table):
         return {"ok": True, "posted": False}
     ov, env = _matched_override(event)
-    exit_code, _ = _exit_code(event, ov.get("name"))
+    exit_code, identified = _exit_code(event, ov.get("name"))
     print("backstop step=fetch-token", flush=True)
     token = secret_fetch.secret_from_env("YUNXIAO_TOKEN_ID")
     # 令牌在真要发评论时才取（见 secret_fetch.py）：绝大多数 Task State Change 事件都被 should_post
@@ -130,7 +137,7 @@ def handler(event, context):
     print("backstop step=post-comment", flush=True)
     posted = codeup_min.post_comment(
         os.environ["YUNXIAO_ORG_ID"], env["CODEUP_REPO_ID"], env["MR_LOCAL_ID"],
-        token, backstop_comment(exit_code))
+        token, backstop_comment(exit_code, identified))
     # 发失败（令牌被轮换吊销 → 401、跨境网络断）也必须抛：以前返回值被丢掉、照样报 posted=True，
     # 这次调用就算「成功」——Lambda 不重试，失败目的地队列也收不到，MR 上一句话都没有，正是
     # 兜底要消灭的那种沉默。抛出之后走 Lambda 的重试，重试耗尽进 BackstopFailures 队列并触发告警

@@ -283,6 +283,25 @@ def test_other_exit_codes_are_stated_without_guessing_an_entrypoint_cause(code, 
     assert "第 8 节里标着" not in text
 
 
+def test_multi_container_no_name_match_posts_a_comment_that_does_not_guess_a_cause(monkeypatch):
+    """issue 05 D1：多容器、没有一个名字对得上评审容器、也没有「已回写」标记时照样发（宁可多发），但以前
+    handler 把「认不出是哪个容器」这个标志丢了，正文照 backstop_comment(None) 猜成「容器多半没能启动」。"""
+    _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
+    posted = []
+    monkeypatch.setattr(backstop.codeup_min, "post_comment",
+                        lambda *a, **k: posted.append(a) or True)
+    ev = _ev(exit_code=1)
+    ev["detail"]["containers"] = [{"name": "sidecar", "exitCode": 0}, {"name": "other", "exitCode": 137}]
+    ev["detail"]["overrides"]["containerOverrides"][0]["name"] = "review"
+    assert backstop.handler(ev, None) == {"ok": True, "posted": True}
+    body = posted[0][4]
+    assert body.startswith("## 🤖 Kiro 代码评审\n" + backstop.BACKSTOP_MARKER), body   # 断环标记仍在
+    assert "容器多半没能启动" not in body, body
+    assert "对得上评审容器" in body, body
+    # 正向对照：真的没有退出码（单容器、容器没起来）时，原来那句判断仍然成立、原样保留
+    assert "容器多半没能启动" in backstop.backstop_comment(None)
+
+
 def test_the_handler_posts_the_comment_for_the_exit_code_of_the_matched_container(monkeypatch):
     _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
     posted = []
