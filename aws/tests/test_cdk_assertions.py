@@ -1565,6 +1565,14 @@ def test_the_guide_says_how_to_subscribe_to_and_replay_backstop_failures():
                  "aws lambda invoke", "fileb://event.json", "aws sqs delete-message",
                  '"posted": true', "RetriesExhausted", "14 天"):
         assert step in row[0], f"「收到兜底告警」那一行缺：{step}"
+    # issue 05 B1：函数自己失败时 `aws lambda invoke` 照样退出 0（失败只在 FunctionError 与 out.json 里），
+    # 「命令本身就会报错」会让人用 && 把 invoke 与 delete-message 串起来、误删消息。
+    for fact in ("`\"FunctionError\": \"Unhandled\"`", "照样退出 0", "`&&`"):
+        assert fact in row[0], f"「收到兜底告警」那一行缺：{fact}"
+    assert "命令本身就会报错" not in row[0]
+    # issue 05 B6：队列告警只在进入告警状态的那一刻通知一次，回放必须把队列清空。
+    for fact in ("通知**一次**", "清空"):
+        assert fact in row[0], f"「收到兜底告警」那一行缺：{fact}"
 
     silent = [ln for ln in sec8 if ln.startswith("| 评审任务确实异常结束了，MR 上却**没有**兜底评论")]
     assert len(silent) == 1
@@ -1575,6 +1583,15 @@ def test_the_guide_says_how_to_subscribe_to_and_replay_backstop_failures():
         assert f"`backstop step={step}`" in silent[0], f"那一行没列出步骤日志 backstop step={step}"
     for fact in ("`PostFailed`", "`BackstopFailures`", "不会被丢掉"):
         assert fact in silent[0], f"「没有兜底评论」那一行缺：{fact}"
+    # issue 05 B2：连上之后读超时 / 被重置时抛的是原始异常、没有 result=failed 那一行（/tmp 实测），
+    # 不是 PostFailed。
+    for fact in ("`backstop step=post-comment result=failed`", "`TimeoutError`", "`ConnectionResetError`"):
+        assert fact in silent[0], f"「没有兜底评论」那一行缺：{fact}"
+    assert "不再把失败当成功" not in silent[0]
+    # issue 05 B4（Kent 10-01 裁决：只写进文档）：发评论只有每次 socket 操作的超时、没有整体截止时间。
+    assert "整体截止时间" in silent[0]
+    codeup_min = (pathlib.Path(__file__).resolve().parents[1] / "lambda" / "dispatcher" / "codeup_min.py").read_text()
+    assert "整体截止时间" in codeup_min and "每次 socket 操作" in codeup_min
 
 
 def test_the_503_row_lists_the_timeout_codes_the_bounded_client_can_now_produce():
@@ -1632,7 +1649,9 @@ def test_the_troubleshooting_table_refers_to_rows_by_name_and_every_name_resolve
     早就指错了）。§8 里一律按名字引用，而且每个名字都要唯一对上一行的「现象」格。"""
     sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
     for ln in sec8:
-        found = re.findall(r"上一行|下一行|上一条|下一条|上面那一行|下面那一行", ln)
+        # issue 05 A2：「见下面 `head-check` 那一行」这种中间夹了名字的写法以前漏过了（其中一处方向还是错的）。
+        found = re.findall(r"上一行|下一行|上一条|下一条|上面那一行|下面那一行"
+                           r"|(?:上面|下面)[^，。；（）|]{0,40}?那一行", ln)
         assert not found, f"§8 仍有位置引用 {found}：{ln[:60]}"
     firsts = [ln.split(" | ")[0].replace("**", "").replace("`", "") for ln in sec8]
     names = set()
@@ -1642,6 +1661,21 @@ def test_the_troubleshooting_table_refers_to_rows_by_name_and_every_name_resolve
     for name in names:
         hits = [f for f in firsts if name in f]
         assert len(hits) == 1, f"本表「{name}」那一行对上了 {len(hits)} 行"
+
+
+def test_references_into_the_troubleshooting_table_from_other_sections_are_by_name():
+    """issue 05 A1：上面那条只扫 §8 表内，§0 的「第 8 节最后几行」与 §4.2 的「第 8 节倒数第二行」不在它的范围里，
+    而这两处从写下起就指错了（那一行是倒数第六行）。全文一律写「第 8 节「X」那一行」，X 唯一对上 §8 一行的「现象」格。"""
+    guide = _guide_text()
+    found = re.findall(r"第 8 节(?:倒数|最后)[^）。，]*", guide)
+    assert not found, f"仍有指向第 8 节的位置引用：{found}"
+    sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
+    firsts = [ln.split(" | ")[0].replace("**", "").replace("`", "") for ln in sec8]
+    names = re.findall(r"第 8 节「([^」]+)」那一行", guide)
+    assert len(names) >= 2, names   # 不是空真：那两处都已换成名字
+    for name in names:
+        hits = [f for f in firsts if name in f]
+        assert len(hits) == 1, f"第 8 节「{name}」那一行对上了 {len(hits)} 行"
 
 
 def test_the_redelivery_row_describes_an_observable_symptom():
@@ -1677,6 +1711,9 @@ def test_the_merged_or_closed_states_are_labelled_doc_derived_and_unmeasured():
     assert len(r8) == 1
     seg = r8[0].split("`mr-not-open`（**正常流量**", 1)[1].split("）。日志里", 1)[0]
     assert "没有实测过" in seg and "确知" not in seg, seg
+    # issue 05 D3：代码注释同一口径（handler.py 以前有两处「确知的取值」，紧接着又说没有实测样本）。
+    handler = (pathlib.Path(__file__).resolve().parents[1] / "lambda" / "dispatcher" / "handler.py").read_text()
+    assert "确知" not in handler
 
 
 def test_the_guide_says_bot_equals_human_is_poc_only_with_the_adoption_hazard_and_recovery():
@@ -1697,6 +1734,18 @@ def test_the_guide_says_bot_equals_human_is_poc_only_with_the_adoption_hazard_an
     example = (pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml").read_text()
     block = example.split("# bot_usernames:", 1)[1].split("# command_phrase:", 1)[0]
     assert "只适合 PoC" in block and "专用机器人账号" in block, block
+
+
+def test_the_guide_does_not_claim_no_process_environ_holds_the_token():
+    """issue 05 G5（s6 m-D）：§3 以前说「任何进程的 /proc/<pid>/environ 都看不到令牌值本身」，紧接着又说
+    YUNXIAO_TOKEN 里就有——entrypoint、git、评审引擎都继承它。只在「令牌不在 argv…」那一条里找。"""
+    lines = _guide_section_lines("3.")
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("  - **令牌不在 argv"))
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("  - "))
+    item = "\n".join(lines[start:end])
+    assert "都看不到令牌值本身" not in item, item
+    for fact in ("`/proc/<pid>/cmdline`", "`YUNXIAO_TOKEN`", "进程树", "不继承"):
+        assert fact in item, f"§3「令牌不在 argv」那一条缺：{fact}"
 
 
 def test_the_six_required_executor_variables_are_named_where_the_guide_counts_them():

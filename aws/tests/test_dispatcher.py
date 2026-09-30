@@ -1201,7 +1201,7 @@ def test_a_command_on_a_merged_or_closed_mr_is_ignored(state, capsys):
 @pytest.mark.parametrize("state", ["opened", "OPENED", " opened ", "accepted", "reopened",
                                    "locked", "unknown-word", "", None])
 def test_a_command_on_any_other_state_is_still_reviewed(state, capsys):
-    """只有确知的两个取值拦门，其余（含没见过的词）一律放行。
+    """只有云效文档列出的两个取值拦门，其余（含没见过的词）一律放行。
 
     merged/closed 只见于云效文档，没有实测样本（Task 1 结论文件 §1：实测到的只有 opened /
     accepted）。所以这道门不能写成 `!= "opened"`：那样云效哪天换个词，评论命令就整体静默失效——

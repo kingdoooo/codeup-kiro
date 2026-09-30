@@ -138,7 +138,7 @@ _URL_UNSAFE_RE = re.compile(r"[@?#%\s\x00-\x1f\x7f]|\.\.")
 # fixture 都是）。它会原样进 LOCK_KEY → 容器环境变量与 DynamoDB 主键，所以必须过形状。
 _NOTE_BIZ_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 # Note 报文里 MR 已经合并/关闭时不受理命令：那时评审无处落地（新评论只会挂在一个已结束的 MR 上），
-# 而抢锁又拦不住（每条评论都是新的 note_biz_id）。**只挡这两个确知的取值**，其余（含没见过的词）
+# 而抢锁又拦不住（每条评论都是新的 note_biz_id）。**只挡云效文档列出的这两个取值**，其余（含没见过的词）
 # 一律放行：`merge_request.state` 与 MR 报文的 state 不是同一套取值（MR 已通过时前者仍是 `opened`，
 # Task 1 实测），而 merged/closed 本身只见于云效文档、没有实测样本（Task 1 结论文件 §1 第 61 行）。
 # 若哪天云效换了词，失败方向是「照常评审」而不是「命令静默失效」。
@@ -227,7 +227,7 @@ def classify(headers, body, cfg):
     两条 Task 1 实测的事实：①同一次投递最多到 3 次（我们回 503 时 Codeup 在约 1 秒内立即重试 2 次，
     `X-Codeup-Delivery` 不变），靠幂等抢锁（N3）吸收，classify 不去重（只影响注释，不影响逻辑）；
     ②Note 报文里的 `merge_request.state` 与 MR 报文的 `state` 不是同一套取值（MR 已通过时前者仍是
-    `opened`），所以评论分支**不**照抄 MR 分支的 `== "opened"`，只挡确知的 merged/closed
+    `opened`），所以评论分支**不**照抄 MR 分支的 `== "opened"`，只挡云效文档列出的 merged/closed（没有实测样本）
     （NOTE_CLOSED_STATES），别的取值一律放行。
     """
     ev = _event_name(headers)

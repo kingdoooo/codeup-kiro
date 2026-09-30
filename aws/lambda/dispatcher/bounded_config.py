@@ -33,6 +33,10 @@ def worst_case_seconds():
 
     standard 模式第 n 次重试之前的退避上限是 min(2^(n-1), 20) 秒（botocore retries/standard.py 的
     ExponentialBackoff：random() × 2^(attempt-1)，封顶 20）。
+
+    不含 DNS 解析（`getaddrinfo` 不受这组超时约束），且按端点只解析出一个地址来算：urllib3 对每个
+    解析结果**各**套一次连接超时，解析出 N 个地址时连接那一项要乘 N（issue 05 B3，/tmp 实测）。
+    只在出网黑洞时才会走到，那时见模块注释里「几个服务同时卡住」那句。
     """
     backoff = sum(min(2 ** i, 20) for i in range(TOTAL_MAX_ATTEMPTS - 1))
     return TOTAL_MAX_ATTEMPTS * (CONNECT_TIMEOUT + READ_TIMEOUT) + backoff
