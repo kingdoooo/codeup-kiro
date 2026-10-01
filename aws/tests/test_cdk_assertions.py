@@ -1808,23 +1808,34 @@ def test_the_guide_says_bot_equals_human_is_poc_only_with_the_adoption_hazard_an
 
 def test_the_guide_does_not_claim_no_process_environ_holds_the_token():
     """issue 05 G5（s6 m-D）：§3 以前说「任何进程的 /proc/<pid>/environ 都看不到令牌值本身」，紧接着又说
-    YUNXIAO_TOKEN 里就有——entrypoint、git、评审引擎都继承它。只在「令牌不在 argv…」那一条里找。"""
+    YUNXIAO_TOKEN 里就有——entrypoint、git、评审引擎都继承它。只在「令牌不在 argv…」那一条里找。
+    issue 09：引擎调 Codeup API 也改成经 stdin 给 curl 请求头，这一条要写出 git、curl 两条路都不进 argv，environ 照旧有。"""
     lines = _guide_section_lines("3.")
     start = next(i for i, ln in enumerate(lines) if ln.startswith("  - **令牌不在 argv"))
     end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("  - "))
     item = "\n".join(lines[start:end])
     assert "都看不到令牌值本身" not in item, item
-    # review-A F-1：引擎调 Codeup API 时令牌就在 curl 的命令行参数里，不能说「任何进程的 cmdline 里都没有」
+    # review-A F-1：environ 里有令牌，不能笼统说「任何进程里都没有」——cmdline 的结论只按 git、curl 两条路各自写
     assert "不出现在任何进程的" not in item, item
     # 收口复审 R-1：换个说法（「都看不到」「不会出现在任何进程」）也不行；正向要写出「都读得到令牌」
     assert "看不到" not in item, item
     assert not re.search(r"不(?:会)?出现在任何进程", item), item
     assert "都读得到令牌" in item, item
     for fact in ("`/proc/<pid>/cmdline`", "`YUNXIAO_TOKEN`", "进程树", "不继承", "`scripts/lib/codeup-api.sh`",
-                 "curl 的命令行参数", "这只管 git 这一条路"):
+                 "curl 用 `-H @-` 从 stdin 读请求头", "令牌值不出现在 git 或 curl 进程的 `/proc/<pid>/cmdline` 里"):
         assert fact in item, f"§3「令牌不在 argv」那一条缺：{fact}"
-    api = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "lib" / "codeup-api.sh").read_text()
-    assert '-H "x-yunxiao-token: ${YUNXIAO_TOKEN}"' in api, "引擎不再把令牌放进 curl 参数了：手册这一句要跟着改"
+    # issue 09：旧说法（引擎把令牌写在 curl 的命令行参数里、这只管 git 这一条路、另开票）一句都不能留——整句的方向反了
+    for stale in ("这只管 git 这一条路", "另开票"):
+        assert stale not in item, item
+    assert not re.search(r"令牌(?:就)?(?:写|放)在\s*curl\s*的命令行参数", item), item
+    # 手册说的是代码事实：两处 curl 都经 stdin 拿请求头，引擎里不再有把令牌写进 -H 参数的写法
+    root = pathlib.Path(__file__).resolve().parents[2]
+    header_via_stdin = re.compile(r"""printf 'x-yunxiao-token: %s\\n' "\$\{YUNXIAO_TOKEN(?::-)?\}" \\\n\s*\|\s*\S*curl -q """)
+    for rel in ("scripts/lib/codeup-api.sh", "aws/executor/entrypoint.sh"):
+        src = (root / rel).read_text()
+        assert header_via_stdin.search(src), f"{rel}：令牌不再经 printf 管道给 curl 了，手册 §3 这一条要跟着改"
+        assert "-H @-" in src, rel
+        assert not re.search(r"""-H\s*["']x-yunxiao-token""", src), f"{rel}：令牌又写回 curl 的 -H 参数里了"
 
 
 def test_the_guide_states_the_secret_cache_ttl_where_rotation_is_discussed():

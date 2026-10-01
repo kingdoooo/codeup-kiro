@@ -165,13 +165,12 @@ aws secretsmanager create-secret \
   `aws/executor/entrypoint.sh` 在 clone 之前导出三个变量——`GIT_CONFIG_COUNT=1`、
   `GIT_CONFIG_KEY_0=credential.https://codeup.aliyun.com.helper`、`GIT_CONFIG_VALUE_0=<helper 程序>`。
   要点有三个，改动这一段之前请先读 `tests/test-aws-entrypoint.sh` 的 ⑭/⑮/⑯（都有断言守着）：
-  - **令牌不在 argv、不在 URL、不进 `.git/config`**：`GIT_CONFIG_VALUE_0` 里存的是 helper 的**程序
-    文本**，其中的 `$YUNXIAO_TOKEN` 未展开（entrypoint 里那行用的是单引号）；git 在真的需要凭证时
-    才把这段交给 `sh -c` 执行，那时才从环境里读出令牌。所以在 git 这条路上，令牌值不出现在 git 进程的
-    `/proc/<pid>/cmdline` 里，也不出现在 `GIT_CONFIG_*` 这几个变量里。**这只管 git 这一条路**：评审引擎
-    调 Codeup API 时把令牌写在 curl 的命令行参数里（`scripts/lib/codeup-api.sh` 的
-    `-H "x-yunxiao-token: …"`），每次请求期间它就在那个 curl 进程的 `/proc/<pid>/cmdline` 里（两个档位
-    相同，另开票）。环境里带着它的只有 `YUNXIAO_TOKEN` 这一个变量：ECS 从 Secrets Manager 注入，执行器的
+  - **令牌不在 argv、不在 URL、不进 `.git/config`**：git 这条路，`GIT_CONFIG_VALUE_0` 里存的是 helper 的
+    **程序文本**，其中的 `$YUNXIAO_TOKEN` 未展开（entrypoint 里那行用的是单引号）；git 在真的需要凭证时
+    才把这段交给 `sh -c` 执行，那时才从环境里读出令牌。curl 这条路（执行器按仓库 id 查业务库地址、评审引擎
+    调 Codeup API 的 `scripts/lib/codeup-api.sh`，两个档位相同），令牌由 `printf` 内建写进管道，
+    curl 用 `-H @-` 从 stdin 读请求头。所以令牌值不出现在 git 或 curl 进程的 `/proc/<pid>/cmdline` 里，
+    也不出现在 `GIT_CONFIG_*` 这几个变量里。环境里带着它的只有 `YUNXIAO_TOKEN` 这一个变量：ECS 从 Secrets Manager 注入，执行器的
     进程树（entrypoint、git、评审引擎）都继承它。所以同一容器里能读别的进程 `/proc` 的进程都读得到令牌；
     Kiro 模型进程不继承（见下面最后一条）。
   - **经环境变量而不是 `git -c`**：`-c` 只作用于执行器自己发起的那一次 git 调用，而评审引擎

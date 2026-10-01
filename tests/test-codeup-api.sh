@@ -581,8 +581,11 @@ logpath = sys.argv[1]
 class H(http.server.BaseHTTPRequestHandler):
     def _log(self):
         tok = self.headers.get('x-yunxiao-token', '')
+        # issue 09 还要看 Content-Type 与请求体照样送到（令牌改经 stdin 给 curl 之后，--data 不能被挤掉）
+        ct = self.headers.get('Content-Type', '')
+        body = self.rfile.read(int(self.headers.get('Content-Length') or 0)).decode('utf-8', 'replace')
         with open(logpath, 'a') as f:
-            f.write("%s %s token=%s\n" % (self.command, self.path, tok))
+            f.write("%s %s token=%s ct=%s body=%s\n" % (self.command, self.path, tok, ct, body))
         self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
         self.wfile.write(b'[]')
     do_GET = do_POST = do_PUT = do_DELETE = _log
@@ -640,10 +643,81 @@ PY
   assert_eq "$(leaks)" "0" "R7-B：CURL_HOME=业务库时，API curl -q 同样不读 .curlrc → 额外地址零请求"
   assert_eq "$([[ "$(apihits)" -ge 1 ]] && echo yes)" "yes" "R7-B：正常 API 请求仍然发出"
 
+  # ---- issue 09：令牌不进 curl 的 argv，只以请求头的形式经 stdin 给 curl ----
+  # 同样只有真实 curl 测得到。PATH 最前面放两个替身：
+  #   curl   = 把自己收到的 argv 逐行记下来，再 exec 真 curl（argv、stdin 原样），回环服务记录真正发出去的请求头与请求体；
+  #   printf = 外部同名程序，被调用就留一个记号并失败——写请求头那一步必须是 bash 内建，不 exec 任何东西（不变式 3）。
+  # 断言的是行为（argv 里没有令牌、服务端收到了令牌），不是某种写法：换成 here-string、fd 都照样绿，放回 argv 就红。
+  r9bin="$r7tmp/bin9"; mkdir -p "$r9bin"
+  r9realcurl=$(command -v curl)
+  r9argv="$r7tmp/curl-argv"; r9ext="$r7tmp/external-printf-called"
+  cat > "$r9bin/curl" <<STUB
+#!/bin/sh
+for a in "\$@"; do printf '%s\n' "\$a"; done > "$r9argv"
+exec "$r9realcurl" "\$@"
+STUB
+  cat > "$r9bin/printf" <<STUB
+#!/bin/sh
+: > "$r9ext"
+exit 1
+STUB
+  chmod +x "$r9bin/curl" "$r9bin/printf"
+  # hash -r：父 shell 前面的用例已经把 curl 记进命令哈希表，子 shell 继承它；不清的话改了 PATH 也照样直奔真 curl
+  r9run() {  # method path [body]
+    rm -f "$r9argv" "$r9ext"; : > "$srvlog"
+    ( eval "$r7_isolate"; export PATH="$r9bin:$PATH"; hash -r
+      CODEUP_API_BASE="$R7BASE" HOME="$r7safe" YUNXIAO_TOKEN="$R7CANARY" _codeup_request "$@" ) >/dev/null 2>&1 || true
+  }
+
+  r9run GET "/api/probe9"
+  assert_eq "$([ -s "$r9argv" ] && echo captured || echo none)" "captured" "issue 09：请求确实经过 curl 替身（argv 已记下）"
+  assert_not_contains "$(cat "$r9argv")" "$R7CANARY" "issue 09：GET 时 curl 的 argv 里没有令牌"
+  assert_eq "$(LC_ALL=C grep -cFx "GET /api/probe9 token=$R7CANARY ct=application/json body=" "$srvlog")" "1" "issue 09：GET 时服务端照样收到令牌与 Content-Type"
+  assert_eq "$(LC_ALL=C grep -x -A1 -- '-H' "$r9argv" | LC_ALL=C grep -cx -- '@-')" "1" "issue 09：curl 用 -H @- 从 stdin 读请求头"
+  assert_eq "$(head -n 1 "$r9argv")" "-q" "issue 09：-q 仍是 curl 的第一个参数（R7）"
+  assert_eq "$([ -e "$r9ext" ] && echo called || echo none)" "none" "issue 09：写请求头不调用外部 printf（内建）"
+
+  r9run POST "/api/probe9" '{"k":"v9"}'
+  assert_not_contains "$(cat "$r9argv" 2>/dev/null)" "$R7CANARY" "issue 09：POST 时 curl 的 argv 里没有令牌"
+  assert_eq "$(LC_ALL=C grep -cFx "POST /api/probe9 token=$R7CANARY ct=application/json body={\"k\":\"v9\"}" "$srvlog")" "1" \
+    "issue 09：POST 时令牌、Content-Type、请求体都送到（--data 与 -H @- 不抢 stdin）"
+
+  # 正控 1：令牌真写在 -H 参数里时，curl 替身的 argv 记录看得到它（证明上面「argv 里没有令牌」这两条能红）
+  rm -f "$r9argv"
+  ( eval "$r7_isolate"; export PATH="$r9bin:$PATH"; hash -r
+    curl -q -sS --connect-timeout 10 --max-time 30 -o /dev/null -H "x-yunxiao-token: $R7CANARY" "$R7BASE/api/pc9" ) >/dev/null 2>&1 || true
+  assert_contains "$(cat "$r9argv" 2>/dev/null)" "$R7CANARY" "issue 09 正控：令牌在 -H 参数里时 argv 记录确实看得到"
+  # 正控 2：外部 printf 真被调用时记号会出现（证明「不调用外部 printf」这条能红）
+  rm -f "$r9ext"
+  ( export PATH="$r9bin:$PATH"; hash -r; env printf x ) >/dev/null 2>&1 || true
+  assert_eq "$([ -e "$r9ext" ] && echo called || echo none)" "called" "issue 09 正控：外部 printf 被调用时记号确实出现"
+
   # 静态守卫：_codeup_request 的真实 curl 必须以 `-q` 为第一个选项（换写法/挪位置都会让上面的行为回归悄悄失效时这条先红）
   assert_eq "$(grep -c 'curl -q -sS -o "\$tmp"' ../scripts/lib/codeup-api.sh)" "1" "R7 静态：API 客户端的 curl 第一个选项是 -q"
 
   r7_cleanup; trap - EXIT   # 正常路径主动回收；trap 只兜断言失败 / 启动失败
 fi
+
+
+# ---- issue 09 不变式 4：scripts/ 里引用 YUNXIAO_TOKEN 的非注释行是一份已知清单 ----
+# 新增一个令牌消费点（又一个 curl、一行日志、写进文件……）就让这里红：确认它不进 argv、不进日志之后，再把那一行加进清单。
+# 比对去掉行首空白后的整行（不带行号：别处增删行不该让它红）；只跳过整行注释，行尾注释算进内容。
+# 只认字面的变量名：`${!name}` 这类间接引用不在守卫范围（真实请求的形状由上面 issue 09 的回环用例守）。
+r9_token_lines=$(cd .. && LC_ALL=C grep -rn --exclude='*.md' 'YUNXIAO_TOKEN' scripts \
+  | LC_ALL=C sed -E 's/^([^:]*):[0-9]+:[[:space:]]*/\1:/' | LC_ALL=C grep -v '^[^:]*:#' | LC_ALL=C sort)
+# 期望清单先写进文件再排序：heredoc 放在 $(…) 里时，正文里的 `$(` 与括号会把 bash 的命令替换配对搞乱
+r9exp=$(mktemp)
+cat > "$r9exp" <<'EOF'
+scripts/kiro-review.sh:: "${YUNXIAO_TOKEN:?缺少 YUNXIAO_TOKEN}"
+scripts/lib/codeup-api.sh:CODEUP_HTTP_CODE=$(printf 'x-yunxiao-token: %s\n' "${YUNXIAO_TOKEN}" \
+scripts/probe/probe-codeup-inline.sh:: "${YUNXIAO_TOKEN:?缺少 YUNXIAO_TOKEN（或 YUNXIAO_TOKEN_FILE）}"
+scripts/probe/probe-codeup-inline.sh:YUNXIAO_TOKEN=$(tr -d '\r\n' < "$YUNXIAO_TOKEN_FILE"); export YUNXIAO_TOKEN
+scripts/probe/probe-codeup-inline.sh:if [[ -z "${YUNXIAO_TOKEN:-}" && -n "${YUNXIAO_TOKEN_FILE:-}" ]]; then
+scripts/probe/probe-flow-run.sh:: "${YUNXIAO_TOKEN:?缺少 YUNXIAO_TOKEN（或 YUNXIAO_TOKEN_FILE）}"
+scripts/probe/probe-flow-run.sh:YUNXIAO_TOKEN=$(tr -d '\r\n' < "$YUNXIAO_TOKEN_FILE"); export YUNXIAO_TOKEN
+scripts/probe/probe-flow-run.sh:if [[ -z "${YUNXIAO_TOKEN:-}" && -n "${YUNXIAO_TOKEN_FILE:-}" ]]; then
+EOF
+r9_token_expected=$(LC_ALL=C sort "$r9exp"); rm -f "$r9exp"
+assert_eq "$r9_token_lines" "$r9_token_expected" "issue 09 不变式 4：scripts/ 里引用 YUNXIAO_TOKEN 的非注释行与已知清单一致"
 
 report

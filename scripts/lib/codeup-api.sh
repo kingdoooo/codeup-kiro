@@ -207,15 +207,18 @@ _codeup_request() {
   tmp=$(mktemp)
   # `-q` 必须是**第一个选项**（CodeX 2026-09-17 复审 R7）：禁用 curl 默认配置文件加载
   # （`$CURL_HOME/.curlrc`，未设 CURL_HOME 时是 `$HOME/.curlrc`）。否则业务库里一个 `.curlrc`（`url = "..."`）
-  # 会给这个请求追加一个额外地址，而命令行上的 `x-yunxiao-token` 请求头会**一并发给那个地址**——令牌泄露。
+  # 会给这个请求追加一个额外地址，而这次请求的 `x-yunxiao-token` 请求头（经 stdin 给的也一样）会**一并发给那个地址**——令牌泄露。
   # 关键在时点：查询旧汇总（第 1.5 步）跑在任何 HOME 检查之前，所以「脚本最终退出 1」拦不住已经发出去的请求；
   # 而 HOME 门也识别不出 `CURL_HOME=<业务库>` 这条来源。`-q` 从根上关掉默认配置，两条来源一起挡。
   # 与第 2 步安装用的 `curl -q` 同一道理（那条另外还套 env -i 收紧凭证环境；API 请求本就需要令牌，靠 `-q` 即可）。
-  CODEUP_HTTP_CODE=$(curl -q -sS -o "$tmp" -w '%{http_code}' \
+  # 令牌经 printf 内建写进管道、curl 用 `-H @-` 从 stdin 读请求头（issue 09）：写在 `-H` 参数里的话，每次请求期间它都在
+  # curl 进程的 argv（`/proc/<pid>/cmdline`）里，同机任何用户都读得到。请求体走 `--data`，不占 stdin。
+  CODEUP_HTTP_CODE=$(printf 'x-yunxiao-token: %s\n' "${YUNXIAO_TOKEN}" \
+    | curl -q -sS -o "$tmp" -w '%{http_code}' \
     --connect-timeout 10 --max-time 60 \
     -X "$method" \
     -H "Content-Type: application/json" \
-    -H "x-yunxiao-token: ${YUNXIAO_TOKEN}" \
+    -H @- \
     ${body:+--data "$body"} \
     "${CODEUP_API_BASE}${path}" 2>/dev/null) || CODEUP_HTTP_CODE=000
   cat "$tmp"; rm -f "$tmp"
