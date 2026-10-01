@@ -1029,7 +1029,7 @@ printf '%s\n' "$@" > "$FAKE_DIR/argv"
 cat > "$FAKE_DIR/stdin"
 for a in "$@"; do url="$a"; done
 printf '%s' "$url" > "$FAKE_DIR/url"
-[ -z "${FAKE_REPO_FAIL:-}" ] || exit 22
+[ -z "${FAKE_REPO_FAIL:-}" ] || { echo "curl: (22) The requested URL returned error: 429" >&2; exit 22; }
 printf '%s' "$FAKE_REPO_JSON"
 STUB
   chmod +x "$atmp/curl"
@@ -1041,8 +1041,8 @@ STUB
   run_api() {  # 仓库 id、报文地址、API 正文、[失败] → "rc|输出"
     local out rc=0
     rm -f "$atmp/argv" "$atmp/stdin" "$atmp/url"
-    out=$(FAKE_DIR="$atmp" FAKE_REPO_JSON="$3" FAKE_REPO_FAIL="${4:-}" CODEUP_REPO_ID="$1" repo_url="$2" \
-          YUNXIAO_ORG_ID="$A_ORG" YUNXIAO_TOKEN="$A_TOKEN" \
+    out=$(WORKROOT="$atmp" FAKE_DIR="$atmp" FAKE_REPO_JSON="$3" FAKE_REPO_FAIL="${4:-}" CODEUP_REPO_ID="$1" repo_url="$2" \
+          YUNXIAO_ORG_ID="${A_ORG_OVERRIDE-$A_ORG}" YUNXIAO_TOKEN="$A_TOKEN" \
           /bin/bash -c "set -euo pipefail; $ablock
 printf 'CLONE=%s' \"\$clone_url\"" 2>&1) || rc=$?
     printf '%s|%s' "$rc" "$out"
@@ -1057,8 +1057,10 @@ printf 'CLONE=%s' \"\$clone_url\"" 2>&1) || rc=$?
     "㉕ 请求的是这个仓库 id 的 GetRepository"
   assert_contains "$(cat "$atmp/stdin")" "x-yunxiao-token: $A_TOKEN" "㉕ 令牌经 stdin 的请求头给 curl"
   assert_not_contains "$(cat "$atmp/argv")" "$A_TOKEN" "㉕ 令牌不在 curl 的 argv 里"
-  assert_contains "$(cat "$atmp/argv")" "@-" "㉕ curl 从 stdin 读请求头（-H @-）"
-  assert_contains "$(cat "$atmp/argv")" "--max-time" "㉕ 这次请求有总时长上限"
+  assert_eq "$(LC_ALL=C grep -x -A1 -- '-H' "$atmp/argv" | LC_ALL=C grep -cx -- '@-')" "1" "㉕ curl 用 -H @- 从 stdin 读请求头"
+  for flag in -q -sSf --connect-timeout --max-time --retry --retry-delay --retry-max-time; do
+    assert_eq "$(LC_ALL=C grep -cx -- "$flag" "$atmp/argv")" "1" "㉕ curl 带 $flag"
+  done
   # 报文地址指向别的仓库：照常评审，但 clone 的是仓库 id 的地址，并留一行固定代号、不回显取值
   got=$(run_api 7215683 "https://codeup.aliyun.com/$A_ORG/secret-repo.git" "{\"id\":7215683,\"httpUrlToRepo\":\"$A_GOOD\"}")
   assert_eq "${got%%|*}" "0" "㉕ 报文地址不符时照常评审（Kent 裁决）"
@@ -1070,7 +1072,13 @@ printf 'CLONE=%s' \"\$clone_url\"" 2>&1) || rc=$?
               "不是 JSON|<html>|" "主机不对|{\"id\":7215683,\"httpUrlToRepo\":\"https://evil.example/$A_ORG/demo-app.git\"}|" \
               "组织不对|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/other/demo-app.git\"}|" \
               "带 userinfo|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/a@b.git\"}|" \
-              "不以 .git 结尾|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/demo-app\"}|"; do
+              "不以 .git 结尾|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/demo-app\"}|" \
+              "带空格|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/a b.git\"}|" \
+              "带制表符|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/a\\tb.git\"}|" \
+              "带问号|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/a.git?x=.git\"}|" \
+              "带井号|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/a#b.git\"}|" \
+              "带百分号|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/%2e%2e/x.git\"}|" \
+              "带上级目录|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/../other/x.git\"}|"; do
     name=${case%%|*}; rest=${case#*|}; json=${rest%|*}; fail=${rest##*|}
     got=$(run_api 7215683 "$A_GOOD" "$json" "$fail")
     assert_eq "${got%%|*}" "91" "㉕ $name → exit 91"
@@ -1078,6 +1086,12 @@ printf 'CLONE=%s' \"\$clone_url\"" 2>&1) || rc=$?
   done
   got=$(run_api 7215683 "$A_GOOD" "{}" 1)
   assert_contains "$got" "按仓库 id 查不到业务库" "㉕ API 失败的固定消息"
+  assert_contains "$got" "  curl: (22) The requested URL returned error: 429" "㉕ API 失败时带一行 curl 报错（限流看得出来）"
+  assert_not_contains "$got" "$A_TOKEN" "㉕ 报错尾巴里没有令牌"
+  # YUNXIAO_ORG_ID 没配：一次请求都不发
+  got=$(A_ORG_OVERRIDE="" run_api 7215683 "$A_GOOD" "{\"id\":7215683,\"httpUrlToRepo\":\"$A_GOOD\"}")
+  assert_eq "${got%%|*}" "91" "㉕ YUNXIAO_ORG_ID 为空 → exit 91"
+  assert_eq "$([ -e "$atmp/argv" ] && echo called || echo none)" "none" "㉕ YUNXIAO_ORG_ID 为空时一次 API 请求都不发"
   # 仓库 id 进 URL 之前就要查形状：不是纯数字时一次请求都不发
   got=$(run_api "7215683/../7205392" "$A_GOOD" "{\"id\":7215683,\"httpUrlToRepo\":\"$A_GOOD\"}")
   assert_eq "${got%%|*}" "91" "㉕ 仓库 id 不是纯数字 → exit 91"
@@ -1092,10 +1106,14 @@ clone_text=$(LC_ALL=C grep -E '^retry_git_429 /usr/bin/git clone ' "$ENTRY")
 clone_arg=$(printf '%s\n' "$clone_text" | LC_ALL=C sed -E 's#^retry_git_429 /usr/bin/git clone( --[a-z-]+)* ("[^"]*").*#\2#')
 assert_eq "$clone_arg" '"$clone_url"' "㉕ clone 的地址参数恰好是 \"\$clone_url\""
 assert_not_contains "$clone_text" 'repo_url' "㉕ clone 那一行不再碰报文地址"
+unset_line=$(entry_code_line '^unset repo_url BUSINESS_REPO_URL$')
+last_use=$(LC_ALL=C grep -nE 'repo_url|BUSINESS_REPO_URL' "$ENTRY" | LC_ALL=C grep -vE '^[0-9]+:[[:space:]]*#' | tail -1 | cut -d: -f1)
+assert_eq "$([ -n "$unset_line" ] && [ "$last_use" = "$unset_line" ] && echo yes)" "yes" \
+  "㉕ 报文地址比对完就 unset，之后没有任何代码行再碰 repo_url / BUSINESS_REPO_URL"
 api_line=$(entry_code_line '^repo_json=')
 clone_line2=$(entry_code_line '^retry_git_429 /usr/bin/git clone ')
-assert_eq "$([ -n "$api_line" ] && [ -n "$clone_line2" ] && [ "$api_line" -lt "$clone_line2" ] && echo yes)" "yes" \
-  "㉕ 顺序：按仓库 id 取地址 → clone"
+assert_eq "$([ -n "$api_line" ] && [ -n "$clone_line2" ] && [ "$api_line" -lt "$unset_line" ] && [ "$unset_line" -lt "$clone_line2" ] && echo yes)" "yes" \
+  "㉕ 顺序：按仓库 id 取地址 → 扔掉报文地址 → clone"
 
 # ㉔ 元数据端点的每一次读取都有上限（issue 04）：端点挂住时 curl 永远不返回，任务永远不结束、也没有兜底评论。
 curl_code=$(LC_ALL=C grep -nE '/usr/bin/curl ' "$ENTRY" | LC_ALL=C grep -vE '^[0-9]+:[[:space:]]*#')

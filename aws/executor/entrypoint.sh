@@ -46,10 +46,9 @@ done
 
 # ── clone 业务库（受信代码决定不受信的树落在哪里）────────────────────
 /bin/rm -rf "$WORKROOT"; /bin/mkdir -p "$WORKROOT"
-# clone 地址来自 webhook 报文（`repository.git_http_url`），而 webhook 鉴权只是一个共享密钥：
-# 谁拿到它就能把地址改成任意主机，凭证 helper 随后会把云效组织令牌交给那台主机——弱密钥就此
-# 升级成组织令牌。调度器的 classify 已经校验过前缀，这里再查一次是深度防御：执行器不假设
-# 上游一定校验过（今天同一个仓库，明天可能不是）。
+# 报文里的 clone 地址（`repository.git_http_url`）外部可控，而 webhook 鉴权只是一个共享密钥：谁拿到它
+# 就能把地址改成任意主机。issue 01 起 git 只拿到下面按仓库 id 查到的地址，报文地址只拿来比对；这里对它
+# 的主机检查保留，是提前 fail closed 的深度防御（调度器的 classify 也查过前缀）。
 repo_url="https://${BUSINESS_REPO_URL#https://}"
 repo_host="${repo_url#https://}"; repo_host="${repo_host%%/*}"
 # 主机必须**逐字**等于 codeup.aliyun.com：`user@evil.com`、`codeup.aliyun.com@evil.com`、
@@ -70,16 +69,25 @@ repo_host="${repo_url#https://}"; repo_host="${repo_host%%/*}"
 [[ "${YUNXIAO_ORG_ID:-}" =~ ^[A-Za-z0-9_-]+$ ]] \
   || { echo "YUNXIAO_ORG_ID 没配或形状不对，拒绝 clone" >&2; exit 91; }
 repo_api="https://openapi-rdc.aliyuncs.com/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/repositories/${CODEUP_REPO_ID}"
+# --retry-delay 5：Codeup 限流（429）时别 1、2 秒就重试完；--retry-max-time 60 给重试设上界（curl 会照
+# Retry-After 等，不设上界就由服务端决定等多久）。最坏约 60 + 30 秒。curl 的报错只打最后一行、带固定前缀
+# （与 git 报错尾巴同一种处理）：`curl: (22) … 429` 这类信息是排错要的，令牌不会出现在里面（请求头不回显）。
 repo_json=$(printf 'x-yunxiao-token: %s\n' "${YUNXIAO_TOKEN:-}" \
-  | /usr/bin/curl -q -sSf --connect-timeout 10 --max-time 30 --retry 2 -H @- "$repo_api" 2>/dev/null) \
-  || { echo "按仓库 id 查不到业务库（云效令牌权限、网络或仓库 id），拒绝 clone" >&2; exit 91; }
+  | /usr/bin/curl -q -sSf --connect-timeout 10 --max-time 30 --retry 2 --retry-delay 5 --retry-max-time 60 \
+      -H @- "$repo_api" 2>"$WORKROOT/repo-api.err") \
+  || { echo "按仓库 id 查不到业务库（云效令牌权限、网络、Codeup 限流或仓库 id），拒绝 clone" >&2
+       /usr/bin/tail -n 1 "$WORKROOT/repo-api.err" | LC_ALL=C /usr/bin/tr -d '\000-\010\013-\037\177' \
+         | LC_ALL=C /usr/bin/cut -c1-200 | LC_ALL=C /usr/bin/sed -e 's/^curl: //' -e 's/^/  curl: /' >&2 || true
+       exit 91; }
 clone_url=$(printf '%s' "$repo_json" | /usr/bin/jq -r --arg id "$CODEUP_REPO_ID" \
   'if type == "object" and ((.id | tostring) == $id) then (.httpUrlToRepo // "") else "" end' 2>/dev/null || true)
 [[ "$clone_url" == "https://codeup.aliyun.com/${YUNXIAO_ORG_ID}/"*.git \
-   && "$clone_url" != *[[:space:][:cntrl:]@?#]* ]] \
+   && "$clone_url" != *[[:space:][:cntrl:]@?#%]* && "$clone_url" != *..* ]] \
   || { echo "按仓库 id 查到的业务库地址缺失、仓库 id 不符或形状不对，拒绝 clone" >&2; exit 91; }
 [[ "$repo_url" == "$clone_url" ]] \
   || echo "clone-url-mismatch：报文里的业务库地址与按仓库 id 查到的不一致，按仓库 id 的地址 clone" >&2
+# 不变式 1 不只守 clone 这一行：之后的 remote set-url、fetch、引擎（它继承环境）都不能再拿到报文地址。
+unset repo_url BUSINESS_REPO_URL
 # ── 按仓库 id 取业务库地址：结束 ──
 # 令牌只经 credential helper 回调时从环境读取，不拼进 URL 或任何命令行参数——
 # 命令行参数经 /proc/<pid>/cmdline、ps 等对同机其他进程可见，比日志更容易泄露。
@@ -294,7 +302,7 @@ lease_release() {
 # 或已经评过），这个任务就被取代了：退出 0、不发任何评论（退出 0 兜底 Lambda 也不吭声），由新任务
 # 评审最新提交。新提交**没有**抢锁记录（那次投递丢了，比如撞上 503）时照常评自己的提交——
 # 否则最新的推送就没人评了。ls-remote 或读抢锁记录失败时同样照常评审：退化成加租约之前的行为。
-# ls-remote 经上面导出的凭证 helper 访问 origin（即主机检查过的那个地址），不需要任何新 API；
+# ls-remote 经上面导出的凭证 helper 访问 origin（即按仓库 id 查到、过了检查的那个地址），不需要任何新 API；
 # 包在 30 秒上限里（issue 04：挂住的连接会让任务永远不结束），超时同样算「核对未知」；撞上 429 按 issue 03 重试——
 # 限流下核对失败会让本任务照常评审旧提交，那正是会把汇总评论改回旧结论的场景。
 # 新提交的抢锁键是调度器 lock_key() 对 MR 事件的形状（仓库#MR#提交，不带评论 id）；

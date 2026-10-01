@@ -1906,17 +1906,24 @@ def test_the_guide_documents_the_repo_id_clone_binding_messages():
     clone-url-mismatch 不是错误，单独一行讲它意味着什么。兜底评论里 91 的成因也要提到这一步。"""
     entry = (pathlib.Path(__file__).resolve().parents[1] / "executor" / "entrypoint.sh").read_text()
     seg = entry.split("# ── 按仓库 id 取业务库地址（issue 01）", 1)[1].split("# ── 按仓库 id 取业务库地址：结束", 1)[0]
-    msgs = re.findall(r'echo "([^"]+?)，拒绝 clone" >&2; exit 91', seg)
+    msgs = re.findall(r'echo "([^"]+?)，拒绝 clone" >&2', seg)
     assert len(msgs) == 4, msgs
     sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
     row91 = [ln for ln in sec8 if "退出码 91" in ln.split(" | ")[0]]
     assert len(row91) == 1
     for m in msgs:
         assert m in row91[0], f"§8 退出码 91 那一行缺这条消息：{m}"
+    for fact in ("`curl: `", "429", "GetRepository", "`httpUrlToRepo`"):
+        assert fact in row91[0], f"§8 退出码 91 那一行缺：{fact}"
     mm = [ln for ln in sec8 if ln.startswith("| 日志里有 `clone-url-mismatch`")]
     assert len(mm) == 1, "§8 缺 clone-url-mismatch 那一行"
-    for fact in ("照常评审", "按仓库 id", "改名", "轮换"):
+    for fact in ("照常评审", "按仓库 id", "改名", "轮换", "`httpUrlToRepo`", "平台口径"):
         assert fact in mm[0], f"clone-url-mismatch 那一行缺：{fact}"
+    assert "持续出现时按第 3 节轮换" not in mm[0], "持续出现不一定是伪造：先比对两个地址（issue 01 复审 M-8）"
+    row41 = [ln for ln in _guide_text().splitlines() if ln.startswith("| 业务库 clone URL（`BUSINESS_REPO_URL`） |")]
+    assert len(row41) == 1 and "不用它 clone" in row41[0], row41
+    sec14 = "\n".join(_guide_section_lines("1.")).split("### 1.4", 1)[1].split("### 1.5", 1)[0]
+    assert "GetRepository" in sec14, "§1.4 要说执行器还要用令牌调 GetRepository（令牌权限）"
     backstop = (pathlib.Path(__file__).resolve().parents[1] / "lambda" / "backstop" / "handler.py").read_text()
     cause91 = re.search(r'^    91: "([^"]+)"', backstop, re.M)
     assert cause91 and "按仓库 id" in cause91.group(1), cause91
