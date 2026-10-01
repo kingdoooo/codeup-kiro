@@ -1888,12 +1888,35 @@ def test_the_six_required_executor_variables_are_named_where_the_guide_counts_th
     assert "可选" in sent and "上面四项" not in row[0], sent
 
 
-def test_the_webhook_secret_row_states_the_trust_boundary_and_that_the_fix_is_tracked():
-    """复审 s3 I-2 / s4 O-1（Kent 裁决：跟踪、本轮不修）：一个共享密钥填进每个接入仓库的 webhook，
-    持有者能让执行器评审组织里令牌读得到的任何仓库。手册要把这条边界写在那个密钥的那一行里。"""
+def test_the_webhook_secret_row_states_the_trust_boundary_with_content_bound_to_the_repo_id():
+    """复审 s3 I-2 / s4 O-1：一个共享密钥填进每个接入仓库的 webhook，持有者能触发组织里令牌读得到的任何仓库的评审。
+    issue 01 之后评审内容总是来自 MR 所在的仓库（执行器按仓库 id 取 clone 地址），「把 A 的评审贴到 B」不再成立。"""
     guide = _guide_text()
     row = [ln for ln in guide.splitlines() if ln.startswith("| `codeup-kiro/webhook-secret` |")]
     assert len(row) == 1
-    for fact in ("**信任边界**", "只有这一个共享密钥", "任何仓库", "另一个仓库的 MR", "轮换", "跟踪"):
+    for fact in ("**信任边界**", "只有这一个共享密钥", "任何仓库", "按仓库 id", "`clone-url-mismatch`", "轮换"):
         assert fact in row[0], f"webhook 密钥那一行缺：{fact}"
+    for stale in ("修好之前", "另一个仓库的 MR 上", "后续工作跟踪"):
+        assert stale not in row[0], f"webhook 密钥那一行还在说修复之前的边界：{stale}"
     assert ".scratch" not in guide, "公开手册不得链接本地的 .scratch 路径"
+
+
+def test_the_guide_documents_the_repo_id_clone_binding_messages():
+    """issue 01：按仓库 id 取地址那一段的每一条固定消息都要在 §8 退出码 91 那一行里（取自 entrypoint，不另写一份）；
+    clone-url-mismatch 不是错误，单独一行讲它意味着什么。兜底评论里 91 的成因也要提到这一步。"""
+    entry = (pathlib.Path(__file__).resolve().parents[1] / "executor" / "entrypoint.sh").read_text()
+    seg = entry.split("# ── 按仓库 id 取业务库地址（issue 01）", 1)[1].split("# ── 按仓库 id 取业务库地址：结束", 1)[0]
+    msgs = re.findall(r'echo "([^"]+?)，拒绝 clone" >&2; exit 91', seg)
+    assert len(msgs) == 4, msgs
+    sec8 = [ln for ln in _guide_section_lines("8.") if ln.startswith("|")]
+    row91 = [ln for ln in sec8 if "退出码 91" in ln.split(" | ")[0]]
+    assert len(row91) == 1
+    for m in msgs:
+        assert m in row91[0], f"§8 退出码 91 那一行缺这条消息：{m}"
+    mm = [ln for ln in sec8 if ln.startswith("| 日志里有 `clone-url-mismatch`")]
+    assert len(mm) == 1, "§8 缺 clone-url-mismatch 那一行"
+    for fact in ("照常评审", "按仓库 id", "改名", "轮换"):
+        assert fact in mm[0], f"clone-url-mismatch 那一行缺：{fact}"
+    backstop = (pathlib.Path(__file__).resolve().parents[1] / "lambda" / "backstop" / "handler.py").read_text()
+    cause91 = re.search(r'^    91: "([^"]+)"', backstop, re.M)
+    assert cause91 and "按仓库 id" in cause91.group(1), cause91
