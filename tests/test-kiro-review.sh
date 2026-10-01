@@ -2265,6 +2265,21 @@ assert_eq "$(LC_ALL=C grep -c '^ *kiro_env_exec _kr_inst_env curl -q -fsSL ' "$_
 assert_eq "$(LC_ALL=C grep -cE '^[[:space:]]*curl ' "$_kr_src2" || true)" "0" \
   "安装分支：没有裸 curl（唯一那处 curl 前面必须有 kiro_env_exec + -q）"
 unset _kr_src2
+# ⑦ issue 10 复审 M-1：安装管道两侧（curl、右侧 bash）与安装脚本的 argv 里都没有清单取值——固定名单里的代理变量可以带 user:pass@。
+#    PATH 最前面挂 timeout / env 记录替身（helpers.sh 的 make_argv_recorders），代理变量给一个只在这里出现的 canary。
+CASE_INSTARGV="$tmp/case-instargv"; make_installer "$CASE_INSTARGV"
+iaw="$tmp/instargv-wrap"; make_argv_recorders "$iaw"
+run_case instargv PATH="$iaw:$PATH_NO_KIRO" KIRO_INSTALL_URL="file://$CASE_INSTARGV/tools/installer.sh" \
+  HTTPS_PROXY='http://u:CANARY_K10_INST_PROXY@proxy.invalid:1'
+assert_rc "$RC" 0 "issue 10 安装分支：挂着记录替身也照常装完、评审完成"
+iawlog=$(cat "$iaw/log" 2>/dev/null || true)
+# 正控：curl 经 kiro_env_exec 启动——env 替身在两跳（`env -i` 起垫片、垫片里 `exec env -u … --`）的 argv 里各记到一次 curl；
+# 代理取值确实进了安装器的环境（所以「argv 里没有」不是因为根本没传）
+assert_eq "$(printf '%s\n' "$iawlog" | LC_ALL=C grep -c -x -- 'curl')" "2" "issue 10 安装分支正控：curl 经 kiro_env_exec 的两跳启动（env 替身各记到一次）"
+assert_contains "$(cat "$CASE_INSTARGV/installer-env.txt" 2>/dev/null)" "HTTPS_PROXY=http://u:CANARY_K10_INST_PROXY@" \
+  "issue 10 安装分支正控：代理变量的取值确实传给了安装器（走 environ）"
+assert_not_contains "$iawlog" "CANARY_K10_INST_PROXY" "issue 10 安装分支：curl / bash / env 的 argv 里都没有代理凭证"
+unset iaw iawlog
 # ⑥ **curl 之前**先确认 HOME 不在业务库内（第六轮复审 P0）。旧版这里等安装器跑完、PATH 改写后才拒绝，
 #    可 curl 已经用业务库的 HOME 读过 `$HOME/.curlrc`、安装器也已经跑过了。现在 HOME 在业务库内时**安装器根本不启动**。
 CASE_INST2="$tmp/case-instrepo"; make_installer "$CASE_INST2"
@@ -2571,6 +2586,21 @@ else
     "钉版安装：内层 install.sh 把入口装到 \$HOME/.local/bin"
   assert_eq "$([[ -e "$CASE/home/.kirocli-setup-ran" ]] && echo ran || echo skipped)" "skipped" \
     "钉版安装：KIRO_CLI_SKIP_SETUP=1 生效，内层不跑 kiro-cli setup"
+  # issue 10 复审 M-1：unzip 与内层 install.sh 的 argv 里都没有清单取值（代理凭证），KIRO_CLI_SKIP_SETUP=1 也走 environ
+  paw="$tmp/pinnedargv-wrap"; make_argv_recorders "$paw"
+  run_case pinnedargv PATH="$paw:$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$ART" KIRO_PINNED_ARTIFACT_SHA256="$ART_SHA" \
+    KIRO_CLI_SHA256="$ART_ENTRY_SHA" KIRO_INSTALL_URL=http://127.0.0.1:1/must-not-be-used \
+    HTTPS_PROXY='http://u:CANARY_K10_PIN_PROXY@proxy.invalid:1'
+  assert_rc "$RC" 0 "issue 10 钉版安装：挂着记录替身也照常装完、评审完成"
+  pawlog=$(cat "$paw/log" 2>/dev/null || true)
+  assert_eq "$(printf '%s\n' "$pawlog" | LC_ALL=C grep -c -x -- 'unzip')" "2" "issue 10 钉版安装正控：unzip 经 kiro_env_exec 的两跳启动"
+  assert_eq "$(printf '%s\n' "$pawlog" | LC_ALL=C grep -c -x -- './install.sh')" "2" "issue 10 钉版安装正控：内层 install.sh 经 kiro_env_exec 的两跳启动"
+  assert_eq "$([[ -e "$CASE/home/.kirocli-setup-ran" ]] && echo ran || echo skipped)" "skipped" \
+    "issue 10 钉版安装：KIRO_CLI_SKIP_SETUP=1 经 environ 照样生效"
+  assert_not_contains "$pawlog" "CANARY_K10_PIN_PROXY" "issue 10 钉版安装：unzip / install.sh / env 的 argv 里都没有代理凭证"
+  assert_not_contains "$pawlog" "KIRO_CLI_SKIP_SETUP=1" "issue 10 钉版安装：KIRO_CLI_SKIP_SETUP=1 也不在 argv 里"
+  unset paw pawlog
   # 安装包摘要不一致 → 拒绝，且未解压、未执行 kiro-cli
   run_case pinnedshabad PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
     KIRO_PINNED_ARTIFACT="$ART" KIRO_PINNED_ARTIFACT_SHA256="$zero64" KIRO_CLI_SHA256="$ART_ENTRY_SHA"
@@ -3186,10 +3216,10 @@ k10w="$tmp/k10wrap"; make_argv_recorders "$k10w"
 run_case k10argv PATH="$k10w:$PATH" KIRO_API_KEY=CANARY_K10_E2E_KEY
 assert_rc "$RC" 0 "issue 10 端到端：PATH 上带记录替身时成功路径照常退出 0"
 k10wlog=$(cat "$k10w/log" 2>/dev/null || true)
-# 正控：替身确实被走到——每一次 kiro-cli 调用都经过 timeout 替身（chat --help、--version、settings、chat；--list-models 只在配了模型核对时跑）
-assert_eq "$(printf '%s\n' "$k10wlog" | LC_ALL=C grep -c -x -e '--- timeout' -e '--- gtimeout')" "$(grep -c . "$MD/calls")" \
-  "issue 10 端到端正控：每一次 kiro-cli 调用都经过 timeout 替身（替身日志里的 timeout 次数 = 替身 kiro-cli 记下的调用次数）"
-assert_eq "$([[ $(grep -c . "$MD/calls") -ge 4 ]] && echo yes)" "yes" "issue 10 端到端正控：至少 4 次 kiro-cli 调用"
+# 正控：替身确实被走到——五处 kiro-cli 调用（chat --help、--list-models、--version、settings、chat）各一次，每次都经过 timeout 替身
+assert_eq "$(LC_ALL=C sort "$MD/calls" | paste -sd' ' -)" "chat help listmodels settings version" "issue 10 端到端正控：五处 kiro-cli 调用各一次"
+assert_eq "$(printf '%s\n' "$k10wlog" | LC_ALL=C grep -c -x -e '--- timeout' -e '--- gtimeout')" "5" \
+  "issue 10 端到端正控：五次 kiro-cli 调用都经过 timeout 替身"
 assert_not_contains "$k10wlog" "CANARY_K10_E2E_KEY" "issue 10 端到端：timeout / env 的 argv 里没有 KIRO_API_KEY 的取值"
 assert_not_contains "$(cat "$MD/args")" "CANARY_K10_E2E_KEY" "issue 10 端到端：kiro-cli 的 argv 里没有 KIRO_API_KEY 的取值"
 assert_eq "$(grep -c -x -- 'KIRO_API_KEY' "$MD/env")" "1" "issue 10 端到端：kiro-cli 的环境里照样有 KIRO_API_KEY"

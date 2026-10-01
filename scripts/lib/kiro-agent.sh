@@ -474,24 +474,32 @@ kiro_env_allowlist_names() { printf '%s\n' "${KIRO_ENV_ALLOW[@]%%=*}"; }
 # 做法：`env -i` 起一个空环境里的 bash 垫片，清单按 NUL 分隔从 fd 3 读进来（进程替换里的 printf 是内建，不 exec），逐条 export，
 # 关掉 fd 3，再 `exec env -u … -- 命令`：bash 自己加的 `_` / PWD / OLDPWD / SHLVL 由 env -u 去掉（清单本身带的不去）。
 # 链上全是 exec（env → bash → env → 命令），进程树、退出码、stdin/stdout/stderr、cwd 都与原写法相同；垫片不碰 stdin。
-# 已知边角：清单里若有 SHLVL 或 `_`，bash 在 exec 时会改写它们的值（没有人会透传这两个名字）。
-KIRO_ENV_EXEC_SHIM='_seen=" "
-while IFS= read -r -d "" _kv; do
-  [[ -n "$_kv" ]] || continue
-  export -- "$_kv"
-  _seen+="${_kv%%=*} "
-done <&3
+# 导出那一段的 stderr 丢掉：清单里的 LC_ALL / LC_* 指向执行器上没装的 locale 时，bash 每次赋值都打一行 setlocale 警告，
+# 旧写法（env 直接 exec）不会打（issue 10 复审 N-2）。名字都已由 kiro_env_allowlist 校验过，这里没有别的错误可丢。
+# 已知边角（issue 10 复审 N-3）：清单名字是 bash 的特殊变量时，最终环境不保证原样——`_` 被去掉，SHLVL 被 bash 减一，
+# UID / EUID / PPID / SHELLOPTS / BASHOPTS 这类只读变量取 bash 自己的值，RANDOM / LINENO / SECONDS 这类每次求值都变。
+# 固定名单里没有这些名字，只有 KIRO_ENV_PASSTHROUGH 点名时才会碰上。垫片自己的变量带 __kiro_env_ 前缀，免得与清单撞名。
+KIRO_ENV_EXEC_SHIM='__kiro_env_seen=" "
+while IFS= read -r -d "" __kiro_env_kv; do
+  [[ -n "$__kiro_env_kv" ]] || continue
+  export -- "$__kiro_env_kv"
+  __kiro_env_seen+="${__kiro_env_kv%%=*} "
+done <&3 2>/dev/null
 exec 3<&-
-_u=()
-for _n in _ PWD OLDPWD SHLVL; do [[ "$_seen" == *" $_n "* ]] || _u+=(-u "$_n"); done
-unset -v _kv _seen _n
-exec env "${_u[@]}" -- "$@"'
+__kiro_env_u=()
+for __kiro_env_n in _ PWD OLDPWD SHLVL; do [[ "$__kiro_env_seen" == *" $__kiro_env_n "* ]] || __kiro_env_u+=(-u "$__kiro_env_n"); done
+unset -v __kiro_env_kv __kiro_env_seen __kiro_env_n
+exec env "${__kiro_env_u[@]}" -- "$@"'
 kiro_env_exec() {
-  local arr="${1-}"; shift || true
-  # 数组按名字间接取（bash 3.2 没有 nameref）；名字先校验，不 eval
-  [[ "$arr" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "kiro_env_exec: 数组名不合法" >&2; return 2; }
+  # 局部变量带 __kiro_env_ 前缀：间接展开按动态作用域找名字，调用方的数组若叫 arr / ref 就会取到这里的局部变量（复审 N-8）
+  local __kiro_env_arr="${1-}"; shift || true
+  # 数组按名字间接取（bash 3.2 没有 nameref）；名字先校验，不 eval——`${!ref}` 会对带下标的名字做算术求值，`a[$(命令)]` 就是代码执行
+  [[ "$__kiro_env_arr" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "$__kiro_env_arr" != __kiro_env_* ]] \
+    || { echo "kiro_env_exec: 数组名不合法" >&2; return 2; }
   [[ "$#" -ge 1 ]] || { echo "kiro_env_exec: 缺少要执行的命令" >&2; return 2; }
-  local ref="${arr}[@]"
-  # `${!ref+…}`：空数组在 set -u 下展开不报错（bash 3.2 / 4.3 对 "${a[@]}" 会报 unbound variable）
-  env -i "${BASH:-/bin/bash}" --norc --noprofile -c "$KIRO_ENV_EXEC_SHIM" kiro-env "$@" 3< <(printf '%s\0' ${!ref+"${!ref}"})
+  local __kiro_env_ref="${__kiro_env_arr}[@]"
+  # `${!ref+…}`：空数组在 set -u 下展开不报错（bash 3.2 / 4.3 对 "${a[@]}" 会报 unbound variable）。
+  # 进程替换管道的原描述符（/dev/fd/63 一类）读空之后仍会被命令继承——里面没有数据（复审 N-1）。
+  env -i "${BASH:-/bin/bash}" --norc --noprofile -c "$KIRO_ENV_EXEC_SHIM" kiro-env "$@" \
+    3< <(printf '%s\0' ${!__kiro_env_ref+"${!__kiro_env_ref}"})
 }

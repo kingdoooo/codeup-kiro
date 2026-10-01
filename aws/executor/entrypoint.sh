@@ -108,7 +108,7 @@ cred_helper='!f() { echo "username=oauth2"; echo "password=$YUNXIAO_TOKEN"; }; f
 # helper 对任何主机的凭证询问都会作答，所以一次重定向（或上面那道主机检查将来被绕过）就足以把
 # 令牌交出去。限定之后 git 只在向 codeup.aliyun.com 询问凭证时才调它，别的主机拿不到任何东西。
 #
-# 这三个变量**不会**进 Kiro 进程：kiro-cli 一律以 `env -i` + 固定许可清单启动
+# 这三个变量**不会**进 Kiro 进程：kiro-cli 一律以固定许可清单的空环境启动（kiro_env_exec，取值经 fd 交给垫片）
 # （scripts/lib/kiro-agent.sh:387 的 KIRO_ENV_FIXED_NAMES，里面没有 GIT_CONFIG_*，也没有
 # YUNXIAO_TOKEN；逃生口 KIRO_ENV_PASSTHROUGH 另有 `YUNXIAO_*` 这条拒绝规则，:412）。
 export GIT_CONFIG_COUNT=1

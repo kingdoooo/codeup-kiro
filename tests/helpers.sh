@@ -117,6 +117,8 @@ fake_token() {
 # make_argv_recorders <目录>：在目录里为本机有的 timeout、gtimeout、env 各建一个替身，把每次调用的 argv 追加进 <目录>/log
 # （每次以一行 `--- <名字>` 开头），再 exec 真程序。日志路径与真程序路径写死在替身里：kiro_env_exec 之后的环境只有许可清单，
 # 测试变量到不了替身。用法：PATH="<目录>:$PATH" 跑被测脚本，再读 <目录>/log。
+# 注意（issue 10 复审 N-4）：`#!/bin/sh` 替身 exec 真程序时会给后续进程补 PWD（bash-as-sh 还补 SHLVL=0），所以挂着替身的用例
+# 只能断言 argv，不能断言下游环境「恰好是清单」——那一条由 test-agent-config.sh 用不经替身的真 env 守。
 make_argv_recorders() {
   local d="$1" t real
   mkdir -p "$d"
