@@ -1827,15 +1827,19 @@ def test_the_guide_does_not_claim_no_process_environ_holds_the_token():
     # issue 09：旧说法（引擎把令牌写在 curl 的命令行参数里、这只管 git 这一条路、另开票）一句都不能留——整句的方向反了
     for stale in ("这只管 git 这一条路", "另开票"):
         assert stale not in item, item
-    assert not re.search(r"令牌(?:就)?(?:写|放)在\s*curl\s*的命令行参数", item), item
-    # 手册说的是代码事实：两处 curl 都经 stdin 拿请求头，引擎里不再有把令牌写进 -H 参数的写法
+    # 近义句同样算（复审 N-6）：同一句（不跨句号）里「令牌……写/放 在/进……curl……参数」或「……argv」就红。
+    # 宁可把否定式（「不写进 curl 的参数」）也误判成红——这一条请用正面说法写。
+    assert not re.search(r"令牌[^。]*?(?:写|放)(?:在|进)[^。]*?(?:curl[^。]*?参数|argv)", item), item
+    # 代码侧只核对「写法与手册同向」：argv 里到底有没有令牌由 bash 行为测试守（tests/test-codeup-api.sh 的 issue 09
+    # 回环段、tests/test-aws-entrypoint.sh ㉕），这里不冒充那一层。只看非注释行——两份源码的注释里都写着 `-H @-`（复审 N-5）。
     root = pathlib.Path(__file__).resolve().parents[2]
     header_via_stdin = re.compile(r"""printf 'x-yunxiao-token: %s\\n' "\$\{YUNXIAO_TOKEN(?::-)?\}" \\\n\s*\|\s*\S*curl -q """)
     for rel in ("scripts/lib/codeup-api.sh", "aws/executor/entrypoint.sh"):
-        src = (root / rel).read_text()
-        assert header_via_stdin.search(src), f"{rel}：令牌不再经 printf 管道给 curl 了，手册 §3 这一条要跟着改"
-        assert "-H @-" in src, rel
-        assert not re.search(r"""-H\s*["']x-yunxiao-token""", src), f"{rel}：令牌又写回 curl 的 -H 参数里了"
+        code = "\n".join(ln for ln in (root / rel).read_text().splitlines() if not ln.lstrip().startswith("#"))
+        assert header_via_stdin.search(code), f"{rel}：令牌不再经 printf 管道给 curl 了，手册 §3 这一条要跟着改"
+        assert re.search(r"(?m)^\s*-H @-(?:\s|$)", code), f"{rel}：curl 不再用 -H @- 读请求头了"
+        assert not re.search(r"""(?:-H|--header)\s*["']?[^"'\n]*x-yunxiao-token""", code, re.I), \
+            f"{rel}：x-yunxiao-token 又写进 curl 的 -H/--header 参数了"
 
 
 def test_the_guide_states_the_secret_cache_ttl_where_rotation_is_discussed():

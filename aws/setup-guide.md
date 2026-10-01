@@ -167,9 +167,9 @@ aws secretsmanager create-secret \
   要点有三个，改动这一段之前请先读 `tests/test-aws-entrypoint.sh` 的 ⑭/⑮/⑯（都有断言守着）：
   - **令牌不在 argv、不在 URL、不进 `.git/config`**：git 这条路，`GIT_CONFIG_VALUE_0` 里存的是 helper 的
     **程序文本**，其中的 `$YUNXIAO_TOKEN` 未展开（entrypoint 里那行用的是单引号）；git 在真的需要凭证时
-    才把这段交给 `sh -c` 执行，那时才从环境里读出令牌。curl 这条路（执行器按仓库 id 查业务库地址、评审引擎
-    调 Codeup API 的 `scripts/lib/codeup-api.sh`，两个档位相同），令牌由 `printf` 内建写进管道，
-    curl 用 `-H @-` 从 stdin 读请求头。所以令牌值不出现在 git 或 curl 进程的 `/proc/<pid>/cmdline` 里，
+    才把这段交给 `sh -c` 执行，那时才从环境里读出令牌。curl 这条路（评审引擎调 Codeup API 的
+    `scripts/lib/codeup-api.sh`，两个档位相同；执行器按仓库 id 查业务库地址的那一次请求同样如此），
+    令牌由 `printf` 内建写进管道，curl 用 `-H @-` 从 stdin 读请求头。所以令牌值不出现在 git 或 curl 进程的 `/proc/<pid>/cmdline` 里，
     也不出现在 `GIT_CONFIG_*` 这几个变量里。环境里带着它的只有 `YUNXIAO_TOKEN` 这一个变量：ECS 从 Secrets Manager 注入，执行器的
     进程树（entrypoint、git、评审引擎）都继承它。所以同一容器里能读别的进程 `/proc` 的进程都读得到令牌；
     Kiro 模型进程不继承（见下面最后一条）。
@@ -328,6 +328,11 @@ entrypoint 核对前会剥掉它，所以名单里存的**必须是裸十六进�
 「升级 kiro-cli 之后」流程）→ 改 `Dockerfile` 的 `ARG KIRO_CLI_VERSION` 与 `KIRO_PINNED_ARTIFACT_SHA256`
 → 重新构建 → 把新摘要**追加**进 `KIRO_IMAGE_DIGESTS`（先追加新的、确认新任务都已切到新摘要后再
 从名单里删旧的，避免切换窗口内正在跑的旧任务被自己的摘要门拒绝）。
+
+不只是升级 kiro-cli：镜像构建上下文里**任何东西**变了都会换摘要——评审引擎 `scripts/`、提示词 `prompts/`、
+受信 agent 定义 `kiro/`、`aws/executor/entrypoint.sh`（见 `aws/executor/Dockerfile` 的 `COPY`）。所以升级本集成包
+（哪怕只改了引擎里的一行）同样要走上面第 2、3 步：不登记就 `exit 90`，所有评审被拒、MR 上是兜底的「评审未完成」。
+旧摘要先留在名单里：回滚到上一版时它还能直接用。
 
 ## 6. CDK 部署
 

@@ -646,8 +646,10 @@ PY
   # ---- issue 09：令牌不进 curl 的 argv，只以请求头的形式经 stdin 给 curl ----
   # 同样只有真实 curl 测得到。PATH 最前面放两个替身：
   #   curl   = 把自己收到的 argv 逐行记下来，再 exec 真 curl（argv、stdin 原样），回环服务记录真正发出去的请求头与请求体；
-  #   printf = 外部同名程序，被调用就留一个记号并失败——写请求头那一步必须是 bash 内建，不 exec 任何东西（不变式 3）。
-  # 断言的是行为（argv 里没有令牌、服务端收到了令牌），不是某种写法：换成 here-string、fd 都照样绿，放回 argv 就红。
+  #   printf = 外部同名程序，被调用就留一个记号并失败：经 PATH 找 printf（`env printf` 一类）就会落到它（不变式 3）。
+  #   绝对路径的 `/usr/bin/printf` 不经 PATH，这里看不见——那一种由文件末尾不变式 4 的整行清单守。
+  # 断言分两类：行为（每次请求都经过替身、argv 里没有令牌、服务端收到令牌与请求体）与一条写法（`-H` 后紧跟 `@-`）。
+  # 换成 here-string 这类同样安全的写法时行为断言照绿，写法断言与清单守卫变红——有意如此：换写法要有人看过再改断言。
   r9bin="$r7tmp/bin9"; mkdir -p "$r9bin"
   r9realcurl=$(command -v curl)
   r9argv="$r7tmp/curl-argv"; r9ext="$r7tmp/external-printf-called"
@@ -662,27 +664,38 @@ STUB
 exit 1
 STUB
   chmod +x "$r9bin/curl" "$r9bin/printf"
-  # hash -r：父 shell 前面的用例已经把 curl 记进命令哈希表，子 shell 继承它；不清的话改了 PATH 也照样直奔真 curl
+  # 每次调用之后都断言请求确实经过了 curl 替身：替身没被调用时 argv 记录文件不存在，「argv 里没有令牌」会读到空串而空转
+  # （复审 M-1：POST 改走绝对路径的 curl、令牌放回 argv，原先只有 GET 断言了替身被调用，POST 那条照绿）。
+  # hash -r 只是保险：bash 给 PATH 赋值时本就会清空命令哈希表（复审 N-3，bash 3.2 / 5.2 实测）。
   r9run() {  # method path [body]
     rm -f "$r9argv" "$r9ext"; : > "$srvlog"
     ( eval "$r7_isolate"; export PATH="$r9bin:$PATH"; hash -r
       CODEUP_API_BASE="$R7BASE" HOME="$r7safe" YUNXIAO_TOKEN="$R7CANARY" _codeup_request "$@" ) >/dev/null 2>&1 || true
+    assert_eq "$([ -s "$r9argv" ] && echo captured || echo none)" "captured" "issue 09：$1 请求确实经过 curl 替身（argv 已记下）"
   }
 
   r9run GET "/api/probe9"
-  assert_eq "$([ -s "$r9argv" ] && echo captured || echo none)" "captured" "issue 09：请求确实经过 curl 替身（argv 已记下）"
   assert_not_contains "$(cat "$r9argv")" "$R7CANARY" "issue 09：GET 时 curl 的 argv 里没有令牌"
   assert_eq "$(LC_ALL=C grep -cFx "GET /api/probe9 token=$R7CANARY ct=application/json body=" "$srvlog")" "1" "issue 09：GET 时服务端照样收到令牌与 Content-Type"
   assert_eq "$(LC_ALL=C grep -x -A1 -- '-H' "$r9argv" | LC_ALL=C grep -cx -- '@-')" "1" "issue 09：curl 用 -H @- 从 stdin 读请求头"
   assert_eq "$(head -n 1 "$r9argv")" "-q" "issue 09：-q 仍是 curl 的第一个参数（R7）"
   assert_eq "$([ -e "$r9ext" ] && echo called || echo none)" "none" "issue 09：写请求头不调用外部 printf（内建）"
 
+  # 四种方法都走同一条路径，各打一次：带请求体的（POST / PUT）还要证明 --data 与 -H @- 不抢 stdin
   r9run POST "/api/probe9" '{"k":"v9"}'
-  assert_not_contains "$(cat "$r9argv" 2>/dev/null)" "$R7CANARY" "issue 09：POST 时 curl 的 argv 里没有令牌"
+  assert_not_contains "$(cat "$r9argv")" "$R7CANARY" "issue 09：POST 时 curl 的 argv 里没有令牌"
   assert_eq "$(LC_ALL=C grep -cFx "POST /api/probe9 token=$R7CANARY ct=application/json body={\"k\":\"v9\"}" "$srvlog")" "1" \
     "issue 09：POST 时令牌、Content-Type、请求体都送到（--data 与 -H @- 不抢 stdin）"
+  r9run PUT "/api/probe9" '{"k":"put9"}'
+  assert_not_contains "$(cat "$r9argv")" "$R7CANARY" "issue 09：PUT 时 curl 的 argv 里没有令牌"
+  assert_eq "$(LC_ALL=C grep -cFx "PUT /api/probe9 token=$R7CANARY ct=application/json body={\"k\":\"put9\"}" "$srvlog")" "1" \
+    "issue 09：PUT 时令牌、Content-Type、请求体都送到"
+  r9run DELETE "/api/probe9"
+  assert_not_contains "$(cat "$r9argv")" "$R7CANARY" "issue 09：DELETE 时 curl 的 argv 里没有令牌"
+  assert_eq "$(LC_ALL=C grep -cFx "DELETE /api/probe9 token=$R7CANARY ct=application/json body=" "$srvlog")" "1" \
+    "issue 09：DELETE 时服务端照样收到令牌"
 
-  # 正控 1：令牌真写在 -H 参数里时，curl 替身的 argv 记录看得到它（证明上面「argv 里没有令牌」这两条能红）
+  # 正控 1：令牌真写在 -H 参数里时，curl 替身的 argv 记录看得到它（证明上面「argv 里没有令牌」这几条能红）
   rm -f "$r9argv"
   ( eval "$r7_isolate"; export PATH="$r9bin:$PATH"; hash -r
     curl -q -sS --connect-timeout 10 --max-time 30 -o /dev/null -H "x-yunxiao-token: $R7CANARY" "$R7BASE/api/pc9" ) >/dev/null 2>&1 || true
@@ -702,8 +715,9 @@ fi
 # ---- issue 09 不变式 4：scripts/ 里引用 YUNXIAO_TOKEN 的非注释行是一份已知清单 ----
 # 新增一个令牌消费点（又一个 curl、一行日志、写进文件……）就让这里红：确认它不进 argv、不进日志之后，再把那一行加进清单。
 # 比对去掉行首空白后的整行（不带行号：别处增删行不该让它红）；只跳过整行注释，行尾注释算进内容。
+# `-a`：GNU grep ≥ 3.5 对二进制文件只往 stderr 打「binary file matches」，不加就看不见带 NUL 的文件里的引用（复审 N-7）。
 # 只认字面的变量名：`${!name}` 这类间接引用不在守卫范围（真实请求的形状由上面 issue 09 的回环用例守）。
-r9_token_lines=$(cd .. && LC_ALL=C grep -rn --exclude='*.md' 'YUNXIAO_TOKEN' scripts \
+r9_token_lines=$(cd .. && LC_ALL=C grep -rna --exclude='*.md' 'YUNXIAO_TOKEN' scripts \
   | LC_ALL=C sed -E 's/^([^:]*):[0-9]+:[[:space:]]*/\1:/' | LC_ALL=C grep -v '^[^:]*:#' | LC_ALL=C sort)
 # 期望清单先写进文件再排序：heredoc 放在 $(…) 里时，正文里的 `$(` 与括号会把 bash 的命令替换配对搞乱
 r9exp=$(mktemp)
