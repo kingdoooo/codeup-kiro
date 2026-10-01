@@ -475,13 +475,13 @@ kiro_env_allowlist_names() { printf '%s\n' "${KIRO_ENV_ALLOW[@]%%=*}"; }
 # 关掉 fd 3，再 `exec env -u … -- 命令`：bash 自己加的 `_` / PWD / OLDPWD / SHLVL 由 env -u 去掉（清单本身带的不去）。
 # 链上全是 exec（env → bash → env → 命令），进程树、退出码、stdin/stdout/stderr、cwd 都与原写法相同；垫片不碰 stdin。
 # 导出那一段的 stderr 丢掉：清单里的 LC_ALL / LC_* 指向执行器上没装的 locale 时，bash 每次赋值都打一行 setlocale 警告，
-# 旧写法（env 直接 exec）不会打（issue 10 复审 N-2）。名字都已由 kiro_env_allowlist 校验过，这里没有别的错误可丢。
+# 旧写法（env 直接 exec）不会打（issue 10 复审 N-2）。名字都已由 kiro_env_allowlist 校验过，这里没有别的错误可丢；
+# 空数组时 printf 对零个参数也输出一个 NUL，`export -- ""` 的报错同样被丢掉、什么也不导出。
 # 已知边角（issue 10 复审 N-3）：清单名字是 bash 的特殊变量时，最终环境不保证原样——`_` 被去掉，SHLVL 被 bash 减一，
 # UID / EUID / PPID / SHELLOPTS / BASHOPTS 这类只读变量取 bash 自己的值，RANDOM / LINENO / SECONDS 这类每次求值都变。
 # 固定名单里没有这些名字，只有 KIRO_ENV_PASSTHROUGH 点名时才会碰上。垫片自己的变量带 __kiro_env_ 前缀，免得与清单撞名。
 KIRO_ENV_EXEC_SHIM='__kiro_env_seen=" "
 while IFS= read -r -d "" __kiro_env_kv; do
-  [[ -n "$__kiro_env_kv" ]] || continue
   export -- "$__kiro_env_kv"
   __kiro_env_seen+="${__kiro_env_kv%%=*} "
 done <&3 2>/dev/null

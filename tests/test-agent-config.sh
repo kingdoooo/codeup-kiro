@@ -572,7 +572,7 @@ assert_eq "$([ -e "$k10/recargv" ] && echo ran || echo none)" "none" "issue 10�
 # `</dev/null`：stdin 是 socket 时（某些 CI / 代理终端）非交互 bash 会按「rshd 启动」读 ~/.bashrc，那份输出不是垫片打的
 k10err=$(env -i PATH="$PATH" bash -c 'set -euo pipefail; source "$1"; E=(); kiro_env_exec E "$2"' _ "$LIB" "$k10realenv" 2>&1 >/dev/null </dev/null)
 assert_eq "$(env -i PATH="$PATH" bash -c 'set -euo pipefail; source "$1"; E=(); kiro_env_exec E "$2"' _ "$LIB" "$k10realenv")" "" "issue 10：空数组 → 子进程环境为空（set -u 下不报错）"
-assert_eq "$k10err" "" "issue 10：空数组时垫片不往 stderr 打任何东西（printf 对零个参数也输出一个 NUL，垫片跳过空项）"
+assert_eq "$k10err" "" "issue 10：空数组时垫片不往 stderr 打任何东西（printf 对零个参数也输出一个 NUL，那一项的报错被丢掉）"
 # 数组名是间接展开的：`${!ref}` 遇到带下标的名字会对下标做算术求值，`a[$(命令)]` 就是代码执行。名字先校验才不执行任何东西
 rm -f "$k10/injected"
 rc=0; env -i PATH="$PATH" bash -c 'source "$1"; kiro_env_exec "a[\$(: > $2)]" true' _ "$LIB" "$k10/injected" 2>/dev/null || rc=$?
@@ -587,7 +587,11 @@ for k10nm in arr ref; do
 done
 rc=0; env -i PATH="$PATH" bash -c 'source "$1"; __kiro_env_x=(A=1); kiro_env_exec __kiro_env_x true' _ "$LIB" 2>/dev/null || rc=$?
 assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "issue 10：数组名占用函数自己的 __kiro_env_ 前缀 → 拒绝"
-# LC_ALL 指向没装的 locale：垫片导出时 bash 会打 setlocale 警告，旧写法没有（复审 N-2）——kiro_env_exec 本身的 stderr 必须是空的
+# LC_ALL 指向没装的 locale：垫片导出时 bash 会打 setlocale 警告，旧写法没有（复审 N-2）——kiro_env_exec 本身的 stderr 必须是空的。
+# 平台正控：macOS 的 bash 3.2 从不打这条警告（2026-10-02 实测），这条断言在那里恒真；Debian bash 5.2 会打，能红。如实打一行 NOTE。
+if [[ -z "$(env -i LC_ALL=xx_YY.UTF-8 "$BASH" --norc --noprofile -c 'export LC_ALL=xx_YY.UTF-8' 2>&1 </dev/null)" ]]; then
+  echo "NOTE: 本机 bash（${BASH_VERSION}）不打 setlocale 警告，issue 10 N-2 那条断言在这里不能红，只在 Linux（构建机容器测）上有意义" >&2
+fi
 k10lc=$(env -i PATH="$PATH" HOME="$tmp/h" LC_ALL=xx_YY.UTF-8 bash -c 'source "$1"; kiro_env_allowlist 2>/dev/null; kiro_env_exec KIRO_ENV_ALLOW true 2>&1 >/dev/null' _ "$LIB" 2>/dev/null </dev/null)
 assert_eq "$k10lc" "" "issue 10：LC_ALL 指向没装的 locale 时 kiro_env_exec 不多打 setlocale 警告"
 k10lcv=$(env -i PATH="$PATH" HOME="$tmp/h" LC_ALL=xx_YY.UTF-8 bash -c 'source "$1"; kiro_env_allowlist 2>/dev/null; kiro_env_exec KIRO_ENV_ALLOW printenv LC_ALL' _ "$LIB" 2>/dev/null </dev/null)
