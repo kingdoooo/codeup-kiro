@@ -1088,8 +1088,10 @@ else
 fi
 # ㉕ 静态：git clone 只用按仓库 id 取到的地址，报文地址永远不进 git；取地址那一段排在 clone 之前
 clone_text=$(LC_ALL=C grep -E '^retry_git_429 /usr/bin/git clone ' "$ENTRY")
-assert_contains "$clone_text" '"$clone_url"' "㉕ clone 用的是 clone_url"
-assert_not_contains "$clone_text" '"$repo_url"' "㉕ clone 不再用报文地址"
+# 逐字取 clone 的地址参数（不是子串判断：`"${repo_url:-$clone_url}"` 这类写法也得红）
+clone_arg=$(printf '%s\n' "$clone_text" | LC_ALL=C sed -E 's#^retry_git_429 /usr/bin/git clone( --[a-z-]+)* ("[^"]*").*#\2#')
+assert_eq "$clone_arg" '"$clone_url"' "㉕ clone 的地址参数恰好是 \"\$clone_url\""
+assert_not_contains "$clone_text" 'repo_url' "㉕ clone 那一行不再碰报文地址"
 api_line=$(entry_code_line '^repo_json=')
 clone_line2=$(entry_code_line '^retry_git_429 /usr/bin/git clone ')
 assert_eq "$([ -n "$api_line" ] && [ -n "$clone_line2" ] && [ "$api_line" -lt "$clone_line2" ] && echo yes)" "yes" \
