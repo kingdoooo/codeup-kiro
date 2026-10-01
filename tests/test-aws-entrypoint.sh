@@ -559,7 +559,7 @@ git_err_tail" 2>&1)" "" "㉓ 没有报错时什么都不打"
   #（主机检查是另一段，⑮ 单独测）
   clone_block=$(awk '/^retry_git_429 \/usr\/bin\/git clone /{f=1} f{print} f&&/exit 91; }$/{exit}' "$ENTRY")
   assert_contains "$clone_block" 'exit 91' "㉓ 抽到了 clone 那一行"
-  out=$(WORKROOT="$gtmp" repo_url="$gtmp/no-such-repo" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+  out=$(WORKROOT="$gtmp" clone_url="$gtmp/no-such-repo" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
         /bin/bash -c "set -euo pipefail; $err_block
 $RETRY_SRC
 $clone_block" 2>&1) && rc=0 || rc=$?
@@ -1016,10 +1016,90 @@ assert_eq "$([ -n "$headnow_line" ] && [ -n "$acquire_line" ] && [ -n "$trap_lin
   && [ "$lsremote_line" -lt "$engine_line" ] && echo yes)" "yes" \
   "㉒ 顺序：检出核对 → 拿租约 → 挂释放陷阱 → 核对最新提交 → 调引擎"
 
+# ㉕ issue 01：clone 的地址按 CODEUP_REPO_ID 向 Codeup OpenAPI 取（GetRepository 的 httpUrlToRepo，2026-10-01 真实探测），
+#   报文里的 git_http_url 只拿来比对（Kent 裁决：不一致记一行、照常评审）。以前只查主机：持有 webhook 共享密钥的人能让
+#   执行器 clone 仓库 A、把 A 的评审贴到仓库 B 的 MR 上。抽出那一段原样跑，curl 换成记录 argv 与 stdin 的替身。
+if [[ -x /usr/bin/jq ]]; then
+  api_block=$(awk '/^# ── 按仓库 id 取业务库地址（issue 01）/{f=1} f{print} /^# ── 按仓库 id 取业务库地址：结束/{exit}' "$ENTRY")
+  assert_contains "$api_block" 'httpUrlToRepo' "㉕ 抽到了按仓库 id 取地址那一段"
+  atmp=$(mktemp -d)
+  cat > "$atmp/curl" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$@" > "$FAKE_DIR/argv"
+cat > "$FAKE_DIR/stdin"
+for a in "$@"; do url="$a"; done
+printf '%s' "$url" > "$FAKE_DIR/url"
+[ -z "${FAKE_REPO_FAIL:-}" ] || exit 22
+printf '%s' "$FAKE_REPO_JSON"
+STUB
+  chmod +x "$atmp/curl"
+  ablock=$(printf '%s\n' "$api_block" | sed -e "s#/usr/bin/curl#$atmp/curl#g")
+  assert_not_contains "$ablock" "/usr/bin/curl" "㉕ curl 全部换成了替身"
+  A_ORG=0123456789abcdef01234567
+  A_GOOD="https://codeup.aliyun.com/$A_ORG/demo-app.git"
+  A_TOKEN='t0k3n-api-test'
+  run_api() {  # 仓库 id、报文地址、API 正文、[失败] → "rc|输出"
+    local out rc=0
+    rm -f "$atmp/argv" "$atmp/stdin" "$atmp/url"
+    out=$(FAKE_DIR="$atmp" FAKE_REPO_JSON="$3" FAKE_REPO_FAIL="${4:-}" CODEUP_REPO_ID="$1" repo_url="$2" \
+          YUNXIAO_ORG_ID="$A_ORG" YUNXIAO_TOKEN="$A_TOKEN" \
+          /bin/bash -c "set -euo pipefail; $ablock
+printf 'CLONE=%s' \"\$clone_url\"" 2>&1) || rc=$?
+    printf '%s|%s' "$rc" "$out"
+  }
+  # 正向：id 对得上、地址一致 → clone API 地址，不打比对那一行
+  got=$(run_api 7215683 "$A_GOOD" "{\"id\":7215683,\"httpUrlToRepo\":\"$A_GOOD\"}")
+  assert_eq "${got%%|*}" "0" "㉕ 正常响应退出码 0"
+  assert_contains "$got" "CLONE=$A_GOOD" "㉕ clone 的是 API 返回的地址"
+  assert_not_contains "$got" "clone-url-mismatch" "㉕ 地址一致时不打比对那一行"
+  # 请求形状：GetRepository 的路径；令牌只在 stdin 的请求头里，不在 argv、不在 URL
+  assert_eq "$(cat "$atmp/url")" "https://openapi-rdc.aliyuncs.com/oapi/v1/codeup/organizations/$A_ORG/repositories/7215683" \
+    "㉕ 请求的是这个仓库 id 的 GetRepository"
+  assert_contains "$(cat "$atmp/stdin")" "x-yunxiao-token: $A_TOKEN" "㉕ 令牌经 stdin 的请求头给 curl"
+  assert_not_contains "$(cat "$atmp/argv")" "$A_TOKEN" "㉕ 令牌不在 curl 的 argv 里"
+  assert_contains "$(cat "$atmp/argv")" "@-" "㉕ curl 从 stdin 读请求头（-H @-）"
+  assert_contains "$(cat "$atmp/argv")" "--max-time" "㉕ 这次请求有总时长上限"
+  # 报文地址指向别的仓库：照常评审，但 clone 的是仓库 id 的地址，并留一行固定代号、不回显取值
+  got=$(run_api 7215683 "https://codeup.aliyun.com/$A_ORG/secret-repo.git" "{\"id\":7215683,\"httpUrlToRepo\":\"$A_GOOD\"}")
+  assert_eq "${got%%|*}" "0" "㉕ 报文地址不符时照常评审（Kent 裁决）"
+  assert_contains "$got" "CLONE=$A_GOOD" "㉕ 报文地址不符时 clone 的仍是仓库 id 的地址"
+  assert_eq "$(printf '%s' "$got" | LC_ALL=C grep -c 'clone-url-mismatch')" "1" "㉕ 不符时恰好一行 clone-url-mismatch"
+  assert_not_contains "$got" "secret-repo" "㉕ 不回显报文里的地址"
+  # 失败一律 clone 之前 exit 91
+  for case in "fail|{}|1" "id 不符|{\"id\":999,\"httpUrlToRepo\":\"$A_GOOD\"}|" "缺字段|{\"id\":7215683}|" \
+              "不是 JSON|<html>|" "主机不对|{\"id\":7215683,\"httpUrlToRepo\":\"https://evil.example/$A_ORG/demo-app.git\"}|" \
+              "组织不对|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/other/demo-app.git\"}|" \
+              "带 userinfo|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/a@b.git\"}|" \
+              "不以 .git 结尾|{\"id\":7215683,\"httpUrlToRepo\":\"https://codeup.aliyun.com/$A_ORG/demo-app\"}|"; do
+    name=${case%%|*}; rest=${case#*|}; json=${rest%|*}; fail=${rest##*|}
+    got=$(run_api 7215683 "$A_GOOD" "$json" "$fail")
+    assert_eq "${got%%|*}" "91" "㉕ $name → exit 91"
+    assert_not_contains "$got" "CLONE=" "㉕ $name → 走不到 clone"
+  done
+  got=$(run_api 7215683 "$A_GOOD" "{}" 1)
+  assert_contains "$got" "按仓库 id 查不到业务库" "㉕ API 失败的固定消息"
+  # 仓库 id 进 URL 之前就要查形状：不是纯数字时一次请求都不发
+  got=$(run_api "7215683/../7205392" "$A_GOOD" "{\"id\":7215683,\"httpUrlToRepo\":\"$A_GOOD\"}")
+  assert_eq "${got%%|*}" "91" "㉕ 仓库 id 不是纯数字 → exit 91"
+  assert_eq "$([ -e "$atmp/argv" ] && echo called || echo none)" "none" "㉕ 仓库 id 形状不对时一次 API 请求都不发"
+  rm -rf "$atmp"
+else
+  echo "SKIP: 无 /usr/bin/jq，跳过 ㉕ 按仓库 id 取地址的行为断言" >&2
+fi
+# ㉕ 静态：git clone 只用按仓库 id 取到的地址，报文地址永远不进 git；取地址那一段排在 clone 之前
+clone_text=$(LC_ALL=C grep -E '^retry_git_429 /usr/bin/git clone ' "$ENTRY")
+assert_contains "$clone_text" '"$clone_url"' "㉕ clone 用的是 clone_url"
+assert_not_contains "$clone_text" '"$repo_url"' "㉕ clone 不再用报文地址"
+api_line=$(entry_code_line '^repo_json=')
+clone_line2=$(entry_code_line '^retry_git_429 /usr/bin/git clone ')
+assert_eq "$([ -n "$api_line" ] && [ -n "$clone_line2" ] && [ "$api_line" -lt "$clone_line2" ] && echo yes)" "yes" \
+  "㉕ 顺序：按仓库 id 取地址 → clone"
+
 # ㉔ 元数据端点的每一次读取都有上限（issue 04）：端点挂住时 curl 永远不返回，任务永远不结束、也没有兜底评论。
 curl_code=$(LC_ALL=C grep -nE '/usr/bin/curl ' "$ENTRY" | LC_ALL=C grep -vE '^[0-9]+:[[:space:]]*#')
-assert_eq "$(printf '%s\n' "$curl_code" | wc -l | tr -d ' ')" "2" "㉔ entrypoint 里正好两处 curl（N1 摘要、租约持有者 ARN）"
-assert_eq "$(printf '%s\n' "$curl_code" | LC_ALL=C grep -c -- '--max-time 10')" "2" "㉔ 两处 curl 都带 --max-time 10"
+assert_eq "$(printf '%s\n' "$curl_code" | wc -l | tr -d ' ')" "3" "㉔ entrypoint 里正好三处 curl（N1 摘要、仓库地址 issue 01、租约持有者 ARN）"
+assert_eq "$(printf '%s\n' "$curl_code" | LC_ALL=C grep -c -- '--max-time 10')" "2" "㉔ 两处元数据 curl 都带 --max-time 10"
+assert_eq "$(printf '%s\n' "$curl_code" | LC_ALL=C grep -c -- '--max-time 30')" "1" "㉔ 仓库地址那一处带 --max-time 30"
 
 # ㉑ 元断言（复审 M-1 的收口）：本文件所有顺序断言的行号都必须落在**非注释行**上。注释里正当地
 #   提到同一个词就会让「A 必须排在 B 之前」恒真——③ 的 call_line 已经踩过一次（注释里写了

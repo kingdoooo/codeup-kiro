@@ -58,6 +58,29 @@ repo_host="${repo_url#https://}"; repo_host="${repo_host%%/*}"
 # `https://oauth2:<令牌>@…` 时回显就等于把令牌打进日志（与 ⑤ 同一条理由）。
 [[ "$repo_host" == "codeup.aliyun.com" ]] || {
   echo "业务库地址的主机不是 codeup.aliyun.com，拒绝 clone" >&2; exit 91; }
+# ── 按仓库 id 取业务库地址（issue 01）──
+# 报文里的 clone 地址与仓库 id 是两个各自外部可控的字段：只查主机的话，持有 webhook 共享密钥的人能让执行器
+# clone 组织令牌读得到的任意仓库 A，再把 A 的评审（引用代码）贴到仓库 B 的 MR 上。所以 clone 的地址一律按
+# CODEUP_REPO_ID 向 Codeup OpenAPI 取（GetRepository 的 httpUrlToRepo，2026-10-01 真实探测），报文地址只拿来
+# 比对：不一致打一行固定代号、照常评审（Kent 裁决：大小写、改名时间窗这类合法差异不该误拒；持密钥的人最多
+# 触发 B 自己的评审，那本来就是共享密钥模型允许的）。
+# 令牌经 printf 内建写进管道、curl 用 `-H @-` 从 stdin 读请求头：不进任何进程的 argv（issue 09）。
+[[ "$CODEUP_REPO_ID" =~ ^[0-9]+$ ]] \
+  || { echo "CODEUP_REPO_ID 形状不对（必须全是数字），拒绝 clone" >&2; exit 91; }
+[[ "${YUNXIAO_ORG_ID:-}" =~ ^[A-Za-z0-9_-]+$ ]] \
+  || { echo "YUNXIAO_ORG_ID 没配或形状不对，拒绝 clone" >&2; exit 91; }
+repo_api="https://openapi-rdc.aliyuncs.com/oapi/v1/codeup/organizations/${YUNXIAO_ORG_ID}/repositories/${CODEUP_REPO_ID}"
+repo_json=$(printf 'x-yunxiao-token: %s\n' "${YUNXIAO_TOKEN:-}" \
+  | /usr/bin/curl -q -sSf --connect-timeout 10 --max-time 30 --retry 2 -H @- "$repo_api" 2>/dev/null) \
+  || { echo "按仓库 id 查不到业务库（云效令牌权限、网络或仓库 id），拒绝 clone" >&2; exit 91; }
+clone_url=$(printf '%s' "$repo_json" | /usr/bin/jq -r --arg id "$CODEUP_REPO_ID" \
+  'if type == "object" and ((.id | tostring) == $id) then (.httpUrlToRepo // "") else "" end' 2>/dev/null || true)
+[[ "$clone_url" == "https://codeup.aliyun.com/${YUNXIAO_ORG_ID}/"*.git \
+   && "$clone_url" != *[[:space:][:cntrl:]@?#]* ]] \
+  || { echo "按仓库 id 查到的业务库地址缺失、仓库 id 不符或形状不对，拒绝 clone" >&2; exit 91; }
+[[ "$repo_url" == "$clone_url" ]] \
+  || echo "clone-url-mismatch：报文里的业务库地址与按仓库 id 查到的不一致，按仓库 id 的地址 clone" >&2
+# ── 按仓库 id 取业务库地址：结束 ──
 # 令牌只经 credential helper 回调时从环境读取，不拼进 URL 或任何命令行参数——
 # 命令行参数经 /proc/<pid>/cmdline、ps 等对同机其他进程可见，比日志更容易泄露。
 # 这一行的**单引号**是承重的：`$YUNXIAO_TOKEN` 在这里不被外层 bash 展开，cred_helper 里存的只是
@@ -108,7 +131,7 @@ git_err_tail() {
 # Codeup 的 git HTTP 限流（429）有界重试（issue 03，scripts/lib/git-retry.sh）：clone、补取源分支、ls-remote 都经它，
 # 只重试 429（10/20/40 秒）；别的失败原样立刻返回。重试时的「N 秒后重试」提示与最后一次的报错一起进 GIT_ERR。
 source "$PKG/scripts/lib/git-retry.sh"
-retry_git_429 /usr/bin/git clone --no-tags "$repo_url" \
+retry_git_429 /usr/bin/git clone --no-tags "$clone_url" \
   "$WORKROOT/business" >/dev/null 2>"$GIT_ERR" \
   || { echo "clone 业务库失败（凭证、网络或仓库权限）" >&2; git_err_tail; exit 91; }
 
