@@ -237,7 +237,7 @@ _probe_run() {
   printf '%s\n' "$prompt" > "$KEEP/$name.stdin"
   start=$(date +%s)
   if [[ "$envmode" == "allowenv" ]]; then
-    ( cd "$KIRO_CWD" && "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" env -i "${KIRO_ENV_ALLOW[@]}" "${cmd[@]}" ) \
+    ( cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "${cmd[@]}" ) \
       < "$KEEP/$name.stdin" > "$KEEP/$name.jsonl" 2> "$KEEP/$name.err" || rc=$?
   else
     ( cd "$KIRO_CWD" && KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "${cmd[@]}" ) \

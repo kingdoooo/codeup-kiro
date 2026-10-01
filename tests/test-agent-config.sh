@@ -514,6 +514,91 @@ assert_eq "$(printf '%s\n' "$seen" | grep -c -x -- "KIRO_API_KEY")" "1" "env -i 
 assert_eq "$(printf '%s\n' "$seen" | grep -c -x -- "YUNXIAO_TOKEN")" "0" "env -i 后子进程看不到 YUNXIAO_TOKEN"
 assert_eq "$(printf '%s\n' "$seen" | grep -c -x -- "KIRO_FOO")" "0" "env -i 后子进程看不到 KIRO_FOO（不在固定名单）"
 
+# --- issue 10：kiro_env_exec——清单取值经 fd 3 交给空环境里的 bash 垫片，不进任何进程的 argv；子进程环境与清单逐名逐值相同 ---
+# 旧写法 `timeout … env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli`：timeout 是父进程、活到评审结束，它的 cmdline 里一直是 KIRO_API_KEY=<值>。
+# PATH 最前面放一个 env 替身：把每次调用的 argv 追加进日志，再 exec 真 env——kiro_env_exec 链上的两次 env（`env -i` 起垫片、垫片里
+# `exec env -u …`）都经过它；垫片 bash 的 argv 就是第一次 env 的参数尾巴，最终命令的 argv 由 rec 自己记。这样链上每个进程的 argv 都看得到。
+k10="$tmp/k10"; mkdir -p "$k10/bin"
+k10realenv=$(command -v env)
+cat > "$k10/bin/env" <<STUB
+#!/bin/sh
+{ printf '%s\n' '--- env'; for a in "\$@"; do printf '%s\n' "\$a"; done; } >> "$k10/envlog"
+exec "$k10realenv" "\$@"
+STUB
+cat > "$k10/rec" <<STUB
+#!/bin/sh
+for a in "\$@"; do printf '%s\n' "\$a"; done > "$k10/recargv"
+STUB
+chmod +x "$k10/bin/env" "$k10/rec"
+K10KEY='CANARY_K10_KEY with space=eq'
+K10PROXY='http://u:CANARY_K10_PROXY@proxy.invalid:3128'
+# 在可控环境里建清单（与生产同一个 kiro_env_allowlist），再跑 kiro_env_exec；$1… = kiro_env_exec 的参数（数组名固定 KIRO_ENV_ALLOW）
+k10run() {
+  env -i PATH="$k10/bin:$PATH" HOME="$tmp/h" KIRO_API_KEY="$K10KEY" HTTPS_PROXY="$K10PROXY" YUNXIAO_TOKEN=CANARY_K10_YX \
+    'a-b=1' 'BASH_FUNC_k10%%=() { :; }' FOO=bar \
+    bash -c 'set -euo pipefail; source "$1"; shift; kiro_env_allowlist; kiro_env_exec KIRO_ENV_ALLOW "$@"' _ "$LIB" "$@"
+}
+rm -f "$k10/envlog" "$k10/recargv"
+rc=0; k10run "$k10/rec" one 'two words' || rc=$?
+assert_rc "$rc" 0 "issue 10：kiro_env_exec 跑完命令、退出码 0"
+assert_eq "$(cat "$k10/recargv" 2>/dev/null)" "$(printf 'one\ntwo words')" "issue 10：命令拿到的 argv 与调用方给的逐个相同"
+k10log=$(cat "$k10/envlog" 2>/dev/null || true)
+assert_eq "$(printf '%s\n' "$k10log" | grep -c -x -- '--- env')" "2" "issue 10：链上恰好两次 env（起垫片、垫片里 exec env -u）都经过替身"
+assert_eq "$(printf '%s\n' "$k10log" | awk '$0=="--- env"{getline; print; exit}')" "-i" "issue 10：第一次 env 是 env -i（垫片从空环境起）"
+for c in CANARY_K10_KEY CANARY_K10_PROXY; do
+  assert_not_contains "$k10log" "$c" "issue 10：env / 垫片 bash 的 argv 里没有清单取值（${c}）"
+  assert_not_contains "$(cat "$k10/recargv")" "$c" "issue 10：最终命令的 argv 里没有清单取值（${c}）"
+done
+# 环境逐名逐值：最终命令改成真 env（绝对路径，不经替身），它打印的就是自己的 environ。取值不含换行，可以按行排序比对
+k10want=$(env -i PATH="$k10/bin:$PATH" HOME="$tmp/h" KIRO_API_KEY="$K10KEY" HTTPS_PROXY="$K10PROXY" \
+  bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; printf "%s\n" "${KIRO_ENV_ALLOW[@]}"' _ "$LIB" | LC_ALL=C sort)
+k10got=$(k10run "$k10realenv" | LC_ALL=C sort)
+assert_eq "$k10got" "$k10want" "issue 10：子进程环境与清单逐名逐值相同（没有 _ / PWD / SHLVL / a-b / BASH_FUNC_* / FOO / YUNXIAO_TOKEN）"
+assert_contains "$k10got" "KIRO_API_KEY=$K10KEY" "issue 10：KIRO_API_KEY 取值原样（含空格与 =）"
+# 值里有换行：单独取这一个变量逐字节比对（按行排序会把它切开）
+k10nl=$(printf 'k10\nSECOND=line\n')
+k10nlgot=$(env -i PATH="$k10/bin:$PATH" HOME="$tmp/h" KIRO_API_KEY="$k10nl" \
+  bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; kiro_env_exec KIRO_ENV_ALLOW printenv KIRO_API_KEY' _ "$LIB" | od -c)
+assert_eq "$k10nlgot" "$(printf '%s\n' "$k10nl" | od -c)" "issue 10：取值含换行时逐字节原样"
+# 退出码、stdin 透传（垫片只读 fd 3）
+rc=0; k10run sh -c 'exit 7' || rc=$?
+assert_rc "$rc" 7 "issue 10：命令的退出码原样传回"
+assert_eq "$(printf 'from-stdin\n' | k10run cat)" "from-stdin" "issue 10：stdin 原样交给命令"
+# 数组名不合法 → 非零、命令不跑；空数组 → 空环境
+rm -f "$k10/recargv"
+rc=0; env -i PATH="$PATH" bash -c 'source "$1"; kiro_env_exec "a-b" "$2" x' _ "$LIB" "$k10/rec" 2>/dev/null || rc=$?
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "issue 10：数组名不合法 → 非零"
+assert_eq "$([ -e "$k10/recargv" ] && echo ran || echo none)" "none" "issue 10：数组名不合法时命令不跑"
+# `</dev/null`：stdin 是 socket 时（某些 CI / 代理终端）非交互 bash 会按「rshd 启动」读 ~/.bashrc，那份输出不是垫片打的
+k10err=$(env -i PATH="$PATH" bash -c 'set -euo pipefail; source "$1"; E=(); kiro_env_exec E "$2"' _ "$LIB" "$k10realenv" 2>&1 >/dev/null </dev/null)
+assert_eq "$(env -i PATH="$PATH" bash -c 'set -euo pipefail; source "$1"; E=(); kiro_env_exec E "$2"' _ "$LIB" "$k10realenv")" "" "issue 10：空数组 → 子进程环境为空（set -u 下不报错）"
+assert_eq "$k10err" "" "issue 10：空数组时垫片不往 stderr 打任何东西（printf 对零个参数也输出一个 NUL，垫片跳过空项）"
+# 数组名是间接展开的：`${!ref}` 遇到带下标的名字会对下标做算术求值，`a[$(命令)]` 就是代码执行。名字先校验才不执行任何东西
+rm -f "$k10/injected"
+rc=0; env -i PATH="$PATH" bash -c 'source "$1"; kiro_env_exec "a[\$(: > $2)]" true' _ "$LIB" "$k10/injected" 2>/dev/null || rc=$?
+assert_eq "$([ -e "$k10/injected" ] && echo executed || echo none)" "none" "issue 10：数组名里的命令替换不会被执行（名字先校验）"
+assert_eq "$([[ $rc -ne 0 ]] && echo nonzero)" "nonzero" "issue 10：带下标的数组名 → 非零"
+# 子进程不继承 fd 3（垫片读完就关）：kiro-cli 不该拿到一个指向本脚本管道的多余描述符
+assert_eq "$(k10run sh -c 'if { true <&3; } 2>/dev/null; then echo open; else echo closed; fi')" "closed" "issue 10：命令启动时 fd 3 已关闭"
+# 正控：旧写法（env -i 直接带 NAME=value）经过同一个 env 替身时，日志里确实看得到取值——证明上面「argv 里没有」能红
+rm -f "$k10/envlog"
+env -i PATH="$k10/bin:$PATH" HOME="$tmp/h" KIRO_API_KEY="$K10KEY" \
+  bash -c 'set -euo pipefail; source "$1"; kiro_env_allowlist; env -i "${KIRO_ENV_ALLOW[@]}" true' _ "$LIB"
+assert_contains "$(cat "$k10/envlog")" "CANARY_K10_KEY" "issue 10 正控：旧写法的 env argv 里确实有 KIRO_API_KEY 取值"
+# 不变式 5（文档）：§12 那一条写清机制与方向——取值不进命令行参数（整句方向，不是关键词在不在）
+k10doc=$(grep -F -A2 -e '- **Kiro 进程环境只含固定名单变量**' "$ROOT/pipeline/setup-guide.md")
+assert_contains "$k10doc" "kiro_env_exec" "issue 10 文档：§12 写明 kiro-cli 经 kiro_env_exec 启动"
+assert_contains "$k10doc" "清单取值经 fd 交给它再 export，**不进** timeout / env / kiro-cli 的命令行参数" "issue 10 文档：§12 写明取值不进命令行参数"
+assert_contains "$(grep -F '**哪些数据不会出境**' "$ROOT/pipeline/setup-guide.md")" "引擎起的进程的命令行参数里都没有它们" "issue 10 文档：数据治理那句写明两种凭证都不进命令行参数"
+# 不变式 4（静态）：scripts/ 里非注释的 `env -i` 只剩 kiro_env_exec 起垫片那一行；任何 `env -i NAME=value` / `env -i "${数组[@]}"` 都不许回来。
+# 守的是写法——取值进没进 argv 由上面的行为用例与 test-kiro-review.sh 的端到端用例守。只认命令形状（`env -i` / `--ignore-environment`
+# 后面跟引号、`$` 或 `NAME=`），日志文案里提到「env -i 许可清单」不算。
+k10envi=$(cd "$ROOT" && LC_ALL=C grep -rnaE --exclude='*.md' 'env (-i|--ignore-environment) +("|\$|[A-Za-z_][A-Za-z0-9_]*=)' scripts \
+  | LC_ALL=C grep -vE '^[^:]*:[0-9]+:[[:space:]]*#')
+assert_eq "$(printf '%s\n' "$k10envi" | grep -c .)" "1" "issue 10 不变式 4：scripts/ 里非注释的 env -i 命令只有一处"
+assert_contains "$k10envi" 'scripts/lib/kiro-agent.sh:' "issue 10 不变式 4：那一处在 kiro-agent.sh"
+assert_contains "$k10envi" 'env -i "${BASH:-/bin/bash}" --norc --noprofile -c "$KIRO_ENV_EXEC_SHIM" kiro-env "$@" 3< <(printf' "issue 10 不变式 4：那一处是起垫片的写法（取值只经 fd 3）"
+
 # --- KIRO_ENV_PASSTHROUGH：逗号分隔的变量名，只放名字不放值 ---
 pt_names=$(names_under HOME="$tmp/h" KIRO_FOO=1 LD_LIBRARY_PATH=/opt/lib JAVA_HOME=/jdk YUNXIAO_TOKEN=t \
   KIRO_ENV_PASSTHROUGH=' KIRO_FOO, LD_LIBRARY_PATH ,,JAVA_HOME,NOT_SET_ANYWHERE,')

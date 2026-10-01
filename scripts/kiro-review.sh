@@ -1172,7 +1172,7 @@ if ! command -v kiro-cli >/dev/null; then
   #      门是时点判断，而安装是全脚本唯一「把控制权交给一个新的 bash」的地方，值得自己把环境收干净。
   #   ② 安装脚本 / curl 没有任何理由拿到 KIRO_API_KEY / YUNXIAO_TOKEN / CODEUP_*：固定名单（KIRO_ENV_FIXED_NAMES，
   #      与五处 kiro-cli 调用同一份）**再去掉 KIRO_API_KEY**，剩下的只有 PATH/HOME/locale/代理/证书/XDG 这些它们真需要的。
-  #      **curl 也套 env -i**（不只右侧 bash）：否则一个恶意 `.curlrc` 能借 curl 左侧继承的凭证环境做 upload/额外请求，
+  #      **curl 也经 kiro_env_exec 的最小环境启动**（不只右侧 bash）：否则一个恶意 `.curlrc` 能借 curl 左侧继承的凭证环境做 upload/额外请求，
   #      绕开「右侧不传凭证」的设计目标（第六轮 P0）。
   # 将来官方安装脚本需要别的变量时，把变量名加进 KIRO_ENV_FIXED_NAMES（或在这里显式补一个），
   # **不要**改回继承整个环境——那会把 `BASH_FUNC_*` 与凭证一起交出去。
@@ -1204,14 +1204,15 @@ if ! command -v kiro-cli >/dev/null; then
       || die_review "执行器缺 unzip，无法解压钉版安装包（官方 Linux 安装包是 .zip；alinux3 / alinux4 镜像预装了 unzip）"
     _art_dir="$WORK/kirocli-artifact"
     mkdir -p "$_art_dir" || die_review "无法创建安装包解压目录"
-    ( cd "$_art_dir" && env -i "${_kr_inst_env[@]}" unzip -q -o "$KIRO_PINNED_ARTIFACT" ) \
+    ( cd "$_art_dir" && kiro_env_exec _kr_inst_env unzip -q -o "$KIRO_PINNED_ARTIFACT" ) \
       || die_review "钉版安装包解压失败（文件损坏或不是 zip）"
     [[ -f "$_art_dir/kirocli/install.sh" ]] \
       || die_review "钉版安装包结构不认：缺 kirocli/install.sh。官方安装包解开之后是 kirocli/{install.sh,BUILD-INFO,bin/}，请确认对象是官方按版本直链下载的那个 .zip"
     # 用安装包**内层**的 install.sh，不要手工拷贝二进制：它会校验 `uname` 与 BUILD_TARGET_TRIPLE、并在 gnu 变体上
     # 检查 glibc 下限（musl 变体跳过该分支），跳过它就把一个明确报错换成运行时的费解崩溃。
     # KIRO_CLI_SKIP_SETUP=1 让它只做 `install -m 755` 拷贝，不跑 `kiro-cli setup`（那会写交互式配置）。
-    ( cd "$_art_dir/kirocli" && env -i "${_kr_inst_env[@]}" KIRO_CLI_SKIP_SETUP=1 "${BASH:-/bin/bash}" -p ./install.sh ) \
+    _kr_inst_env_setup=(${_kr_inst_env[@]+"${_kr_inst_env[@]}"} KIRO_CLI_SKIP_SETUP=1)
+    ( cd "$_art_dir/kirocli" && kiro_env_exec _kr_inst_env_setup "${BASH:-/bin/bash}" -p ./install.sh ) \
       || die_review "钉版安装包内层 install.sh 失败：常见原因是安装包的平台变体与执行器不匹配（gnu 变体要求 glibc ≥ 2.34；云托管执行器请用 musl 变体）。详见流水线日志里它自己打的报错"
   else
     # --- 现装档位：官方安装脚本，只装最新版 ---
@@ -1221,11 +1222,11 @@ if ! command -v kiro-cli >/dev/null; then
     # 与 ⓪ 的 HOME 检查互为纵深（HOME 检查挡业务库里的 `.curlrc`，`-q` 连合法 HOME 里别的进程写的 `.curlrc` 也不读）。
     # 右边用 `${BASH:-/bin/bash}` 而不是裸 `bash`：`-p` 必须显式带上（BASH 由 bash 自己在启动时写入，不取环境里的旧值）。
     log "kiro-cli 不存在，用官方安装脚本安装最新版（安装档位 latest）……"
-    env -i "${_kr_inst_env[@]}" curl -q -fsSL --connect-timeout 10 --max-time 300 "$KIRO_INSTALL_URL" \
-      | env -i "${_kr_inst_env[@]}" "${BASH:-/bin/bash}" -p \
+    kiro_env_exec _kr_inst_env curl -q -fsSL --connect-timeout 10 --max-time 300 "$KIRO_INSTALL_URL" \
+      | kiro_env_exec _kr_inst_env "${BASH:-/bin/bash}" -p \
       || die_review "kiro-cli 安装失败。网络受限时请改用钉版档位（把安装包预先备好，见 ADR-0006）或自建执行器预装固定版本，或配置 HTTP_PROXY/HTTPS_PROXY（见 pipeline/setup-guide.md）"
   fi
-  unset _v _kr_inst_env _art_rc _art_have _art_dir
+  unset _v _kr_inst_env _kr_inst_env_setup _art_rc _art_have _art_dir
   if ! command -v kiro-cli >/dev/null; then
     # 第 0 步的门只保证**调用它那一刻**的 PATH（CodeX 2026-09-13 第四轮复审 P1）：这里往 PATH 最前面插了一个
     # 由 HOME 拼出来的目录，所以要**先重新过门、再让 command -v 去搜它**。HOME 是相对路径（PATH 里出现相对条目
@@ -1314,12 +1315,12 @@ else
 fi
 # 打出安装文件里**实际**的许可路径（不是打参数）：首次联调按 setup-guide §8 核对它们与本次 checkout 一致
 log "受信 agent 许可路径：$(jq -r '.toolsSettings.read.allowedPaths | join("、")' "$INSTALLED_AGENT")（read/grep/glob 三处一致）"
-# 五处 kiro-cli 调用（这里的 --help、--list-models 与 --version、第 5.5 步的 settings、第 6 步的 chat）都以 env -i + 许可清单启动（15-fix #8）：
+# 五处 kiro-cli 调用（这里的 --help、--list-models 与 --version、第 5.5 步的 settings、第 6 步的 chat）都经 kiro_env_exec 以许可清单启动（15-fix #8；issue 10）：
 # 第 2 步可能刚把 ~/.local/bin 加进 PATH，所以许可清单在这里重算一次（第 1.6 步那次只为校验 KIRO_ENV_PASSTHROUGH）。
 env_allowlist_or_die
 # 所有 kiro-cli 子命令都在 $KIRO_CWD（空目录）下执行，绝不在业务库工作树里（15-fix4 #1）
 log "Kiro 运行目录：${KIRO_CWD}（空目录；业务库 ${WS_P} 只在 allowedPaths 里，模型按绝对路径读取）"
-KIRO_CHAT_HELP=$(cd "$KIRO_CWD" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" chat --help 2>&1 || true)
+KIRO_CHAT_HELP=$(cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" 60 "$KIRO_CLI_CMD" chat --help 2>&1 || true)
 # 两种拼法**任一**存在即通过（issue 04）：2.21.4 里 `--agent-engine <v1|v2|v3>` 与 `--v2` / `--v3` 简写并存，`--agent-engine`
 # 仍标 "v2" (default)、没有任何废弃公告——「同一件事出现第二种拼法」是典型的废弃前兆，只认一种拼法的话，官方哪天把帮助文本
 # 收敛到简写，所有使用方的评审会在同一天停在这道门上。这道门要判的只是「这个 CLI 还能不能钉引擎」，两种拼法都答得了这个问题。
@@ -1358,7 +1359,7 @@ else
   # 与第 6 步主 chat 调用（`-k 30`）同口径补上 kill-after。（同段的 --help / settings 能力门失败即 die_review，
   # 不是 fail-open 语义，卡住属另一类问题、且不在本次改动范围——见交付说明。）
   _lm=""; _lm_rc=0
-  _lm=$(cd "$KIRO_CWD" && "$TIMEOUT_BIN" -k 30 60 env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" chat --list-models 2>/dev/null) || _lm_rc=$?
+  _lm=$(cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" -k 30 60 "$KIRO_CLI_CMD" chat --list-models 2>/dev/null) || _lm_rc=$?
   # 解析：真实输出每行形如 `[*] <id>  <倍率>x credits  <说明>`（首行是标题、其后一空行）。只认「行首可选 *、
   # 接一个 id、再接一个**真实数字**倍率（`4.40` / `1` 这类，不接受单独的 `.` / `..`——否则一条形如
   # `ERROR .x credits` 的垃圾行会被当成名叫 ERROR 的模型，CodeX 复审 R1）+ `x credits`」这个形态；
@@ -1544,7 +1545,7 @@ unset _iso_agents _iso_kiro _iso_links _iso_lsp
 # 执行环境：禁止 Kiro 继承工作区默认资源（AGENTS.md/README.md 等），只对 v2 引擎有效（ADR-0004）。
 # 它依赖上面对 .kiro/ 的删除（见 ①），本身只覆盖「AGENTS.md 没删干净 / 藏在别处」这一种漏网情形。
 # 写入的是执行器 $HOME 的全局设置且刻意不回滚（spec I1）：常驻执行器上它保持为 true 只会更严格。
-( cd "$KIRO_CWD" && "$TIMEOUT_BIN" 60 env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" settings chat.disableInheritingDefaultResources true ) || die_review "隔离失败：无法设置 kiro-cli chat.disableInheritingDefaultResources=true"
+( cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" 60 "$KIRO_CLI_CMD" settings chat.disableInheritingDefaultResources true ) || die_review "隔离失败：无法设置 kiro-cli chat.disableInheritingDefaultResources=true"
 log "隔离：已设置 chat.disableInheritingDefaultResources=true"
 
 # --- 5.6 行内评论的版本对预采样（票 17-fix3 ⑥；只在 INLINE_COMMENT=1 时打这一次接口）---
@@ -1561,11 +1562,12 @@ inline_presample
 #     读者会以为 trust 才是免确认的来源（实测它不覆盖 allow 之外的路径，P1-15 T6，但仍去掉）。
 #   · **绝不传 --trust-all-tools**：拒绝信息里推荐的这个开关实测**绕过** allowedPaths（P1-15 T7）。
 #     端到端测试断言参数里没有任何 --trust-*。
-# 子进程环境：env -i + 许可清单（kiro_env_allowlist，scripts/lib/kiro-agent.sh）——**固定名单**（PATH / HOME（登录态与
+# 子进程环境：空环境 + 许可清单（kiro_env_allowlist + kiro_env_exec，scripts/lib/kiro-agent.sh）——**固定名单**（PATH / HOME（登录态与
 # agent 目录）/ USER / TERM / TMPDIR / LANG / LANGUAGE / LC_ALL / LC_CTYPE / LC_MESSAGES / KIRO_API_KEY / KIRO_LOG_NO_COLOR /
 # 代理十个 / 证书三个 / XDG 五个，名单以 KIRO_ENV_FIXED_NAMES 为准）加 KIRO_ENV_PASSTHROUGH 点名的变量（凭证形状的名字硬拒绝）。
 # Kiro 进程看不到 YUNXIAO_* / CODEUP_* 与 Flow 注入的其它变量。
-# "$TIMEOUT_BIN" 放在 env -i **外面**（timeout 自身不需要清洗，PATH 已透传）。许可清单让 kiro-cli 起不来时走下面的
+# "$TIMEOUT_BIN" 放在 kiro_env_exec **里面**（issue 10）：放在外面的话 timeout 是父进程、整次评审期间 argv 里都是清单取值
+# （`env -i … KIRO_API_KEY=<值> …`）；放进来它与 kiro-cli 一样只拿清单环境，取值只在 environ 里。许可清单让 kiro-cli 起不来时走下面的
 # 退出码路径（I10 失败可见），绝不回退到继承完整环境。第 3 步的 --help 与 --version、第 5.5 步的 settings 用的是同一份清单。
 # --output-format stream-json 只在 v2/v3 引擎上被接受（v1 直接报错），结构化输出契约依赖它：
 # 评审报告要从 runFinished.data.finalText 里取（spec §4.1、§4.7.1 P1-08）。
@@ -1615,7 +1617,7 @@ LC_ALL=C grep -qF -- "<<<KIRO_REVIEW_JSON:${REVIEW_NONCE}>>>" "$WORK/kiro-stdin.
 unset _p _i _s _n
 kiro_rc=0
 # 在 $KIRO_CWD（空目录）下运行（15-fix4 #1）；业务库路径只在 allowedPaths 与提示词里
-( cd "$KIRO_CWD" && "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" chat --no-interactive \
+( cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "$KIRO_CLI_CMD" chat --no-interactive \
   --agent-engine "$KIRO_ENGINE" --output-format stream-json \
   --agent "$AGENT_NAME" ) \
   < "$WORK/kiro-stdin.txt" > "$WORK/stream.jsonl" 2> "$WORK/kiro-stderr.log" || kiro_rc=$?

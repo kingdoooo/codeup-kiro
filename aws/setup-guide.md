@@ -178,7 +178,8 @@ aws secretsmanager create-secret \
     分支。环境变量会被所有子进程继承，一处下发即可——凭证只有这一个来源。
   - **按主机限定**（`credential.<url>.helper` 而不是 `credential.helper`）：全局 helper 对任何主机的
     凭证询问都会作答，一次重定向就足以把组织令牌交给别人。限定之后只有 `codeup.aliyun.com` 问得到。
-  - 这三个变量**不会**进 Kiro 模型进程：kiro-cli 一律以 `env -i` + 固定许可清单启动
+  - 这三个变量**不会**进 Kiro 模型进程：kiro-cli 一律以固定许可清单的空环境启动（`kiro_env_exec`，清单取值经 fd 交给垫片，
+    不进 timeout / kiro-cli 的命令行参数）
     （`scripts/lib/kiro-agent.sh` 的 `KIRO_ENV_FIXED_NAMES`，里面既没有 `GIT_CONFIG_*` 也没有
     `YUNXIAO_TOKEN`；逃生口 `KIRO_ENV_PASSTHROUGH` 另有 `YUNXIAO_*` 这条拒绝规则）。
 

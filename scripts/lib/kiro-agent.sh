@@ -301,7 +301,7 @@ kiro_cli_version() {
   errf=$(mktemp) || { KIRO_CLI_VERSION_ERROR="无法创建临时文件"; return 1; }
   # 入口用 KIRO_CLI_CMD（kiro-review.sh 第 2.2 步解析出的绝对路径，与摘要门核对的是同一个入口——CodeX 2026-09-11 复审 P2）；
   # 探测脚本不设它，回落裸命令、行为不变。
-  out=$(cd "$cwd" && "$tbin" "$secs" env -i "${KIRO_ENV_ALLOW[@]}" "${KIRO_CLI_CMD:-kiro-cli}" --version 2>"$errf") || rc=$?
+  out=$(cd "$cwd" && kiro_env_exec KIRO_ENV_ALLOW "$tbin" "$secs" "${KIRO_CLI_CMD:-kiro-cli}" --version 2>"$errf") || rc=$?
   err=$(cat "$errf" 2>/dev/null || true); rm -f "$errf"
   if [[ "$rc" -ne 0 ]]; then
     KIRO_CLI_VERSION_ERROR="kiro-cli --version 失败（退出码 ${rc}$([[ "$rc" == "124" ]] && printf '，超时 %ss' "$secs")）；stderr 尾部：$(printf '%s\n' "$err" | tail -n 3 | tr '\n' ' ')"
@@ -358,8 +358,8 @@ kiro_cli_sha256_check() {
 
 # ── kiro_env_allowlist ──────────────────────────────────────────────────────────────────────────
 # Kiro 子进程环境的许可清单（票 15，spec §4.2 修订；15-fix #11/#12；15-fix2 #12 #13 #14 #17）：填充数组 KIRO_ENV_ALLOW，
-# 每个元素是 `VAR=value`，供 `env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli …` 使用（用数组而不是按行输出：取值里若有换行，
-# 按行读回去会把半个取值当成 env 的命令名）。
+# 每个元素是 `VAR=value`，供 `kiro_env_exec KIRO_ENV_ALLOW <命令…>` 使用（见下；用数组而不是按行输出：取值里若有换行，
+# 按行读回去会把半个取值当成变量名）。
 # **固定名单**（不做形状匹配：KIRO_* / *_PROXY / XDG_* 这类模式会放行 CORP_SECRET_PROXY、客户自定义的 KIRO_…）：
 #   PATH、HOME（登录态与 ~/.kiro/agents 都靠它）、USER、TERM、TMPDIR、LANG、LANGUAGE、LC_ALL、LC_CTYPE、LC_MESSAGES、
 #   KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY/HTTPS_PROXY/FTP_PROXY/ALL_PROXY/NO_PROXY 与小写五个、
@@ -464,3 +464,34 @@ kiro_env_allowlist() {
 }
 # 日志用：只打变量名、不打取值。按数组元素取 `%%=*`，绝不按行切——取值含换行时按行 cut 会把半个取值当成名字放出来（15-fix #7）。
 kiro_env_allowlist_names() { printf '%s\n' "${KIRO_ENV_ALLOW[@]%%=*}"; }
+
+# --- 以「恰好一份清单」的环境 exec 命令，清单里的取值不进任何进程的 argv（issue 10）---
+# 用法：kiro_env_exec <数组名> <命令> [参数…]   数组元素是 `NAME=value`（KIRO_ENV_ALLOW、安装器的 _kr_inst_env）。
+# 为什么不是 `env -i "${数组[@]}" 命令`：取值就成了 env 的命令行参数；前面再套 timeout（kiro-cli 的五处调用都是）时，timeout 是父进程、
+# 活到子进程结束，整次评审期间它的 /proc/<pid>/cmdline 都是 `… KIRO_API_KEY=<值> …`。cmdline 对同一 PID 命名空间里的任何用户可读，
+# environ 只对同 uid / root。也不能在子 shell 里 unset 掉清单外的变量再直接 exec：bash 会把名字非法的环境项（`a-b=…`、`BASH_FUNC_x%%`）
+# 原样传下去、unset 不掉，exec 时还自己补 SHLVL（2026-10-01 bash 3.2 实测），清单就不再是「恰好这些」。
+# 做法：`env -i` 起一个空环境里的 bash 垫片，清单按 NUL 分隔从 fd 3 读进来（进程替换里的 printf 是内建，不 exec），逐条 export，
+# 关掉 fd 3，再 `exec env -u … -- 命令`：bash 自己加的 `_` / PWD / OLDPWD / SHLVL 由 env -u 去掉（清单本身带的不去）。
+# 链上全是 exec（env → bash → env → 命令），进程树、退出码、stdin/stdout/stderr、cwd 都与原写法相同；垫片不碰 stdin。
+# 已知边角：清单里若有 SHLVL 或 `_`，bash 在 exec 时会改写它们的值（没有人会透传这两个名字）。
+KIRO_ENV_EXEC_SHIM='_seen=" "
+while IFS= read -r -d "" _kv; do
+  [[ -n "$_kv" ]] || continue
+  export -- "$_kv"
+  _seen+="${_kv%%=*} "
+done <&3
+exec 3<&-
+_u=()
+for _n in _ PWD OLDPWD SHLVL; do [[ "$_seen" == *" $_n "* ]] || _u+=(-u "$_n"); done
+unset -v _kv _seen _n
+exec env "${_u[@]}" -- "$@"'
+kiro_env_exec() {
+  local arr="${1-}"; shift || true
+  # 数组按名字间接取（bash 3.2 没有 nameref）；名字先校验，不 eval
+  [[ "$arr" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "kiro_env_exec: 数组名不合法" >&2; return 2; }
+  [[ "$#" -ge 1 ]] || { echo "kiro_env_exec: 缺少要执行的命令" >&2; return 2; }
+  local ref="${arr}[@]"
+  # `${!ref+…}`：空数组在 set -u 下展开不报错（bash 3.2 / 4.3 对 "${a[@]}" 会报 unbound variable）
+  env -i "${BASH:-/bin/bash}" --norc --noprofile -c "$KIRO_ENV_EXEC_SHIM" kiro-env "$@" 3< <(printf '%s\0' ${!ref+"${!ref}"})
+}

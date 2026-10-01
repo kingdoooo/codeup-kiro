@@ -113,6 +113,24 @@ fake_token() {
   esac
 }
 
+# ---- issue 10：argv 记录替身（timeout / gtimeout / env）----
+# make_argv_recorders <目录>：在目录里为本机有的 timeout、gtimeout、env 各建一个替身，把每次调用的 argv 追加进 <目录>/log
+# （每次以一行 `--- <名字>` 开头），再 exec 真程序。日志路径与真程序路径写死在替身里：kiro_env_exec 之后的环境只有许可清单，
+# 测试变量到不了替身。用法：PATH="<目录>:$PATH" 跑被测脚本，再读 <目录>/log。
+make_argv_recorders() {
+  local d="$1" t real
+  mkdir -p "$d"
+  for t in timeout gtimeout env; do
+    real=$(command -v "$t" 2>/dev/null) || continue
+    cat > "$d/$t" <<STUB
+#!/bin/sh
+{ printf '%s\n' '--- $t'; for a in "\$@"; do printf '%s\n' "\$a"; done; } >> "$d/log"
+exec "$real" "\$@"
+STUB
+    chmod +x "$d/$t"
+  done
+}
+
 # 端到端 fixture 里机器人账号的用户名（取自 spec §4.7.1 P1-00 实测值）
 TEST_BOT_USERNAME='aliyun:kingdooo_hvFXC'
 

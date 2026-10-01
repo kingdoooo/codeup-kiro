@@ -2258,12 +2258,12 @@ assert_contains "$inst_env" "HOME=" "安装分支：HOME 传给了安装器"
 # ④ 安装器自己是 privileged（`-p`）：BASH_ENV/ENV 与导入函数在它那一侧同样不生效
 assert_contains "$(cat "$CASE_INST/installer-dash.txt" 2>/dev/null || true)" "p" "安装分支：安装器以 bash -p 运行（\$- 里有 p）"
 # ⑤ curl 侧的加固（第六轮复审 P0）——curl 的环境与选项没法用真 curl + file:// 在这里行为验证（它就是取文件那一下），
-#    用**静态**断言：curl 也套在同一个 env -i 里（不只右侧 bash），且 `-q` 是第一个选项（禁用 $HOME/.curlrc 等默认配置）。
+#    用**静态**断言：curl 也经同一个最小环境启动（kiro_env_exec _kr_inst_env，不只右侧 bash），且 `-q` 是第一个选项（禁用 $HOME/.curlrc 等默认配置）。
 _kr_src2="$ROOT/scripts/kiro-review.sh"
-assert_eq "$(LC_ALL=C grep -c '^ *env -i "\${_kr_inst_env\[@\]}" curl -q -fsSL ' "$_kr_src2")" "1" \
-  "安装分支：curl 也套 env -i（curl 左侧同样不带凭证/BASH_FUNC_*），且 -q 是第一个选项"
+assert_eq "$(LC_ALL=C grep -c '^ *kiro_env_exec _kr_inst_env curl -q -fsSL ' "$_kr_src2")" "1" \
+  "安装分支：curl 也经 kiro_env_exec 的最小环境启动（curl 左侧同样不带凭证/BASH_FUNC_*），且 -q 是第一个选项"
 assert_eq "$(LC_ALL=C grep -cE '^[[:space:]]*curl ' "$_kr_src2" || true)" "0" \
-  "安装分支：没有裸 curl（唯一那处 curl 前面必须有 env -i + -q）"
+  "安装分支：没有裸 curl（唯一那处 curl 前面必须有 kiro_env_exec + -q）"
 unset _kr_src2
 # ⑥ **curl 之前**先确认 HOME 不在业务库内（第六轮复审 P0）。旧版这里等安装器跑完、PATH 改写后才拒绝，
 #    可 curl 已经用业务库的 HOME 读过 `$HOME/.curlrc`、安装器也已经跑过了。现在 HOME 在业务库内时**安装器根本不启动**。
@@ -2431,7 +2431,7 @@ assert_not_contains "$mk_fail" "本次评审仍已完成" "R2-2②：失败评�
 assert_eq "$(LC_ALL=C grep -c 'log "警告：kiro-cli chat --list-models 取不到可用模型清单' "$ROOT/scripts/kiro-review.sh")" "1" \
   "issue 16 静态：取不到清单时只写日志（fail-open），不挂 notice"
 assert_eq "$(LC_ALL=C grep -cE '^ *_lm=\$\(cd "\$KIRO_CWD".*chat --list-models' "$ROOT/scripts/kiro-review.sh")" "1" \
-  "issue 16 静态：--list-models 只在一处真正调用，且在 \$KIRO_CWD 空目录下走 env -i"
+  "issue 16 静态：--list-models 只在一处真正调用，且在 \$KIRO_CWD 空目录下走 kiro_env_exec"
 assert_eq "$(LC_ALL=C grep -c 'die_review.*list-models' "$ROOT/scripts/kiro-review.sh" || true)" "0" \
   "issue 16 静态：模型核对的任何分支都不 die_review（口径是 notice，不是拒绝）"
 # CodeX 复审 R1：退出码必须单独捕获并 fail-open（不能 `|| true` 吞掉后据部分输出下结论）；正则倍率不接受单独的 `.`
@@ -2442,7 +2442,7 @@ assert_eq "$(LC_ALL=C grep -c 'if \[\[ "\$_lm_rc" != "0" \]\]' "$ROOT/scripts/ki
 assert_eq "$(LC_ALL=C grep -cF '[0-9]\{1,\}\(\.[0-9]\{1,\}\)\{0,1\}x' "$ROOT/scripts/kiro-review.sh" || true)" "1" \
   "R1 静态：倍率正则要求真实数字（不接受单独的 . / ..）"
 # CodeX 复审 R2-1：advisory 的 --list-models 必须 `-k`（TERM-ignore 时不能把评审卡到外层超时才结束）
-assert_eq "$(LC_ALL=C grep -c 'TIMEOUT_BIN" -k 30 60 env -i .* chat --list-models' "$ROOT/scripts/kiro-review.sh")" "1" \
+assert_eq "$(LC_ALL=C grep -c 'kiro_env_exec KIRO_ENV_ALLOW "\$TIMEOUT_BIN" -k 30 60 "\$KIRO_CLI_CMD" chat --list-models' "$ROOT/scripts/kiro-review.sh")" "1" \
   "R2-1 静态：--list-models 带 -k 30（fail-open 检查绝不阻塞评审）"
 # CodeX 复审 R2-2：模型提示走独立 MODEL_NOTICE（不能塞进 REVIEW_NOTICE——版本门 break-glass 会覆盖它），
 # 且措辞不得断言「评审已完成」（那条会同时进失败评论、与「评审未完成」自相矛盾）
@@ -2452,11 +2452,12 @@ assert_eq "$(LC_ALL=C grep -c 'MODEL_NOTICE' "$ROOT/scripts/kiro-review.sh" | aw
   "R2-2 静态：MODEL_NOTICE 至少三处（定义 + all_notice + degrade_notice 都合并它）"
 assert_eq "$(LC_ALL=C grep -c '本次评审仍已完成' "$ROOT/scripts/kiro-review.sh" || true)" "0" \
   "R2-2 静态：模型 notice 不再断言「评审已完成」（否则失败评论会自相矛盾）"
-# CodeX 复审 R2-3：每处直接执行 kiro-cli 入口的行都必须在 \$KIRO_CWD 空目录下、走 env -i（隔离不变式，
-# 新增第 5 处 --list-models 后仍成立；将来加第 6 处若漏了 env -i / cd，这条先红）
+# CodeX 复审 R2-3：每处直接执行 kiro-cli 入口的行都必须在 \$KIRO_CWD 空目录下、走 kiro_env_exec 许可清单（隔离不变式，
+# 新增第 5 处 --list-models 后仍成立；将来加第 6 处若漏了 kiro_env_exec / cd，这条先红）。issue 10 起 timeout 排在 kiro_env_exec 之后：
+# 清单取值只经 fd 交给垫片，timeout 的 argv 里不再有 KIRO_API_KEY=<值>。
 _kexec=$(LC_ALL=C grep -nE '"\$KIRO_CLI_CMD" (chat|settings)' "$ROOT/scripts/kiro-review.sh")
 assert_eq "$(printf '%s\n' "$_kexec" | grep -c .)" "4" "R2-3 静态：直接执行 kiro-cli 入口的行恰好 4 处（help/list-models/settings/chat；version 走 helper）"
-assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'env -i')" "0" "R2-3 静态：每处执行都走 env -i"
+assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'kiro_env_exec KIRO_ENV_ALLOW "\$TIMEOUT_BIN" ')" "0" "R2-3 静态：每处执行都走 kiro_env_exec KIRO_ENV_ALLOW，且 timeout 在它之后"
 assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'cd "\$KIRO_CWD"')" "0" "R2-3 静态：每处执行都在 \$KIRO_CWD 空目录下"
 unset _kexec
 # CodeX 复审 R3-1 / R4 / R5：**发布出去的文本**（脚本、手册、文档、agent 定义、提示词）都不得再留那句
@@ -3176,5 +3177,21 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 1 条已标注在「文件改动」对应行" "票 17 C：统计行按合并后计数"
 assert_contains "$comment" "P0 1 · P1 0 · P2 0" "票 17 C：级别计数按合并后算"
 assert_eq "$(inline_bodies "$OUT" | jq -r '.content' | grep -c '直接写入源码')" "1" "票 17 C：发出的是首条（保留首条的正文）"
+
+
+# ============ issue 10：kiro-cli 的每次调用，链上没有任何进程的 argv 带着清单取值 ============
+# 旧写法 `timeout … env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli`：timeout 是父进程、活到 kiro-cli 结束，它的 argv 里一直是 KIRO_API_KEY=<值>。
+# PATH 最前面放 timeout / gtimeout / env 的记录替身（helpers.sh 的 make_argv_recorders）。取值用一个只在这里出现的 canary。
+k10w="$tmp/k10wrap"; make_argv_recorders "$k10w"
+run_case k10argv PATH="$k10w:$PATH" KIRO_API_KEY=CANARY_K10_E2E_KEY
+assert_rc "$RC" 0 "issue 10 端到端：PATH 上带记录替身时成功路径照常退出 0"
+k10wlog=$(cat "$k10w/log" 2>/dev/null || true)
+# 正控：替身确实被走到——每一次 kiro-cli 调用都经过 timeout 替身（chat --help、--version、settings、chat；--list-models 只在配了模型核对时跑）
+assert_eq "$(printf '%s\n' "$k10wlog" | LC_ALL=C grep -c -x -e '--- timeout' -e '--- gtimeout')" "$(grep -c . "$MD/calls")" \
+  "issue 10 端到端正控：每一次 kiro-cli 调用都经过 timeout 替身（替身日志里的 timeout 次数 = 替身 kiro-cli 记下的调用次数）"
+assert_eq "$([[ $(grep -c . "$MD/calls") -ge 4 ]] && echo yes)" "yes" "issue 10 端到端正控：至少 4 次 kiro-cli 调用"
+assert_not_contains "$k10wlog" "CANARY_K10_E2E_KEY" "issue 10 端到端：timeout / env 的 argv 里没有 KIRO_API_KEY 的取值"
+assert_not_contains "$(cat "$MD/args")" "CANARY_K10_E2E_KEY" "issue 10 端到端：kiro-cli 的 argv 里没有 KIRO_API_KEY 的取值"
+assert_eq "$(grep -c -x -- 'KIRO_API_KEY' "$MD/env")" "1" "issue 10 端到端：kiro-cli 的环境里照样有 KIRO_API_KEY"
 
 report

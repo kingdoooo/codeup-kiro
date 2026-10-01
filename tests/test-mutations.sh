@@ -342,7 +342,7 @@ assert_not_contains "$OUT" "${_ghp}_" "M-cx-p0log 对照：原实现只报状态
 # **双变异**（与 M-cx-path 同理，纵深就该这样）：① 拆掉第 0.1 步的 environ 检查；② 安装器退回裸 `bash`（不再 env -i）。
 # 只杀任一道都还挡得住——0.1 会拒绝，或者 env -i 让 BASH_FUNC_* 到不了安装器。两道都杀，载荷才在安装器里执行。
 pkg=$(make_mutant m-cx-envfn-gate 's#^if \[\[ "\$_kr_env_fns" != "0" \]\]; then$#if [[ "0" != "0" ]]; then#')
-mutate_more "$pkg" 's#| env -i "${_kr_inst_env\[@\]}" "${BASH:-/bin/bash}" -p#| bash#'
+mutate_more "$pkg" 's#| kiro_env_exec _kr_inst_env "${BASH:-/bin/bash}" -p#| bash#'
 FN_MARK_E="$tmp/installer-fn.log"; : > "$FN_MARK_E"
 # 安装器：调一次 `pwd`（同名导出函数就在这里落地），然后把替身装进 $HOME/.local/bin
 mk_installer_m() {  # $1=用例目录
@@ -547,8 +547,8 @@ assert_rc "$RC" 0 "M-cx6b：变异体仍能跑完"
 assert_eq "$([[ -e "$(cat "$MD/agent-path")" ]] && echo present || echo gone)" "present" "M-cx6b：退出后本次 agent 文件还在——端到端「已删除」断言会失败"
 assert_eq "$(ls "$CASE/home/.kiro/agents" | wc -l | tr -d ' ')" "3" "M-cx6b：agent 文件 + kiro-cli 写的两份 backup 都留下了——端到端「目录为空」断言会失败"
 
-# --- M5c：去掉 env -i 许可清单 → Kiro 进程继承完整环境，YUNXIAO_TOKEN 可见（票 15）---
-pkg=$(make_mutant m5c-env-i 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" "\$KIRO_CLI_CMD" chat --no-interactive/"$KIRO_CLI_CMD" chat --no-interactive/')
+# --- M5c：去掉许可清单（kiro_env_exec）→ Kiro 进程继承完整环境，YUNXIAO_TOKEN 可见（票 15）---
+pkg=$(make_mutant m5c-env-i 's/kiro_env_exec KIRO_ENV_ALLOW \("\$TIMEOUT_BIN" -k 30 "\$KIRO_TIMEOUT" "\$KIRO_CLI_CMD" chat --no-interactive\)/\1/')
 run_case m5c "$pkg"
 assert_rc "$RC" 0 "M5c：变异体仍能跑完"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "1" "M5c：Kiro 进程环境里出现 YUNXIAO_TOKEN——端到端断言「没有 YUNXIAO_TOKEN」会失败"
@@ -606,23 +606,32 @@ assert_contains "$(cat "$MD/cwdscan")" "link-to-hosts" "M5f：Kiro 启动时符�
 assert_contains "$(cat "$MD/cwdscan")" "link-to-etc-dir" "M5f：指向目录的符号链接同样残留"
 # 对照见 test-kiro-review.sh 的 symlinks 用例（15-fix2 #8：不在这里重复跑一遍未变异实现）
 
-# --- M5g / M5h：另两处 kiro-cli 调用（chat --help、settings）去掉 env -i → 那次调用继承完整环境（15-fix #8）---
-pkg=$(make_mutant m5g-help-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" "\$KIRO_CLI_CMD" chat --help/"$KIRO_CLI_CMD" chat --help/')
+# --- M5g / M5h：另两处 kiro-cli 调用（chat --help、settings）去掉许可清单（kiro_env_exec）→ 那次调用继承完整环境（15-fix #8）---
+pkg=$(make_mutant m5g-help-env 's/kiro_env_exec KIRO_ENV_ALLOW \("\$TIMEOUT_BIN" 60 "\$KIRO_CLI_CMD" chat --help\)/\1/')
 run_case m5g "$pkg"
 assert_rc "$RC" 0 "M5g：变异体仍能跑完"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-help")" "1" "M5g：--help 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-help 没有 YUNXIAO_TOKEN」断言会失败"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "0" "M5g：chat 那次仍干净（变异只动了 --help）"
-pkg=$(make_mutant m5h-settings-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" "\$KIRO_CLI_CMD" settings/"$KIRO_CLI_CMD" settings/')
+pkg=$(make_mutant m5h-settings-env 's/kiro_env_exec KIRO_ENV_ALLOW \("\$TIMEOUT_BIN" 60 "\$KIRO_CLI_CMD" settings\)/\1/')
 run_case m5h "$pkg"
 assert_rc "$RC" 0 "M5h：变异体仍能跑完"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-settings")" "1" "M5h：settings 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-settings 没有 YUNXIAO_TOKEN」断言会失败"
 
-# --- M5gv：kiro-cli 的 --version 调用（在库函数 kiro_cli_version 里）去掉 env -i → 那次调用继承完整环境（15-fix4 #18）---
-pkg=$(make_mutant m5gv-version-env 's/env -i "\${KIRO_ENV_ALLOW\[@\]}" "\${KIRO_CLI_CMD:-kiro-cli}" --version/"${KIRO_CLI_CMD:-kiro-cli}" --version/' scripts/lib/kiro-agent.sh)
+# --- M5gv：kiro-cli 的 --version 调用（在库函数 kiro_cli_version 里）去掉许可清单（kiro_env_exec）→ 那次调用继承完整环境（15-fix4 #18）---
+pkg=$(make_mutant m5gv-version-env 's/kiro_env_exec KIRO_ENV_ALLOW \("\$tbin" "\$secs" "\${KIRO_CLI_CMD:-kiro-cli}" --version\)/\1/' scripts/lib/kiro-agent.sh)
 run_case m5gv "$pkg"
 assert_rc "$RC" 0 "M5gv：变异体仍能跑完"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env-version")" "1" "M5gv：--version 那次调用的环境里出现 YUNXIAO_TOKEN——端到端「env-version 没有 YUNXIAO_TOKEN」断言会失败"
 assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "0" "M5gv：chat 那次仍干净（变异只动了 --version）"
+
+# --- M-i10：主 chat 调用退回 `timeout … env -i "${KIRO_ENV_ALLOW[@]}" kiro-cli`（issue 10）→ timeout 的 argv 里带着 KIRO_API_KEY=<值> ---
+# 环境照样干净（env -i 还在），只有 argv 记录看得出差别：端到端「timeout / env 的 argv 里没有 KIRO_API_KEY 的取值」断言会失败。
+pkg=$(make_mutant m-i10-chat-argv 's/kiro_env_exec KIRO_ENV_ALLOW "\$TIMEOUT_BIN" -k 30 "\$KIRO_TIMEOUT" "\$KIRO_CLI_CMD" chat --no-interactive/"$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" env -i "${KIRO_ENV_ALLOW[@]}" "$KIRO_CLI_CMD" chat --no-interactive/')
+i10w="$tmp/i10wrap"; make_argv_recorders "$i10w"
+run_case m-i10 "$pkg" PATH="$i10w:$PATH" KIRO_API_KEY=CANARY_I10_MUT_KEY
+assert_rc "$RC" 0 "M-i10：变异体仍能跑完"
+assert_contains "$(cat "$i10w/log" 2>/dev/null)" "KIRO_API_KEY=CANARY_I10_MUT_KEY" "M-i10：timeout 的 argv 里出现 KIRO_API_KEY=<值>——端到端「argv 里没有取值」断言会失败"
+assert_eq "$(grep -c -x -- 'YUNXIAO_TOKEN' "$MD/env")" "0" "M-i10：环境仍干净（这一类缺陷只在 argv 上看得见）"
 
 # --- M5i：日志里的变量名清单改回按行 cut → 取值含换行时半个取值进日志（15-fix #7）---
 pkg=$(make_mutant m5i-names-cut 's/"\${KIRO_ENV_ALLOW\[@\]%%=\*}"/"${KIRO_ENV_ALLOW[@]}" | cut -d= -f1/' scripts/lib/kiro-agent.sh)
@@ -948,7 +957,7 @@ rc5zc=0; ( set +e; source "$ROOT/scripts/lib/kiro-agent.sh"; kiro_agent_selfchec
 assert_eq "$rc5zc" "1" "M5z 对照：未变异实现拒绝双对象定义文件"
 
 # --- M5ab：chat 改回在业务库 checkout 下运行（15-fix4 #1）→ 替身记录的 chatcwd 就是业务库、目录非空 ---
-pkg=$(make_mutant m5ab-chat-in-repo 's|( cd "\$KIRO_CWD" \&\& "\$TIMEOUT_BIN" -k 30|( cd "$REVIEW_REPO_DIR" \&\& "$TIMEOUT_BIN" -k 30|')
+pkg=$(make_mutant m5ab-chat-in-repo 's|( cd "\$KIRO_CWD" \&\& kiro_env_exec KIRO_ENV_ALLOW "\$TIMEOUT_BIN" -k 30|( cd "$REVIEW_REPO_DIR" \&\& kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" -k 30|')
 run_case m5ab "$pkg"
 assert_rc "$RC" 0 "M5ab：变异体仍能跑完"
 assert_eq "$(cat "$MD/chatcwd")" "$(cd "$CASE/work" && pwd -P)" "M5ab：chat 的 cwd 是业务库 checkout——端到端「Kiro 运行目录不是业务库」断言会失败"

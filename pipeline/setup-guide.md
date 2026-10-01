@@ -54,7 +54,7 @@ Codeup 无第三方 App/Bot 平台身份能力，专用成员账号是最接近�
    diff 超限时被省略的文件也是由评审员自己读取的；
 3. MR 元信息：源分支名、目标分支名、提交 SHA（不含 MR 标题/描述以外的 Codeup 侧数据）。
 
-**哪些数据不会出境**：云效令牌与 Kiro API Key（只经环境变量进入进程，日志与评论中对疑似凭证做掩码）；
+**哪些数据不会出境**：云效令牌与 Kiro API Key（只经环境变量进入进程——引擎起的进程的命令行参数里都没有它们：云效令牌经 stdin 给 curl，Kiro API Key 经 fd 交给许可清单垫片（第 12 节）；日志与评论中对疑似凭证做掩码）；
 业务库的完整副本（Flow 档位只上传 diff 与评审员读取的那些文件，**不**上传整个仓库）。
 
 **必须确认的三件事**：
@@ -390,8 +390,8 @@ EOL 公告;遇到这类失败别照「回到已探测版本」的常规 runbook(
    *本进程*不导入函数，原始的 `BASH_FUNC_x%%=() {…}` 变量**还留在 environ 里**，任何普通 bash 子进程都会把它们
    重新导入（父进程 `declare -F` 为空、子进程 `type -t pwd` 是 function）。而 `BASH_FUNC_*` 不是合法变量名、
    脚本 `unset` 不掉。所以：① PATH 门之后紧跟一步检查——`env` 里还有 `BASH_FUNC_*` 就拒绝运行（同样只报个数）；
-   ② 第 2 步的安装管道**两侧都套 `env -i <固定名单，去掉 KIRO_API_KEY>`**（不只右边 bash），并让 curl 带 `-q`：
-   `env -i … curl -q -fsSL … | env -i … /bin/bash -p`。在线安装脚本与 curl 都拿不到 `BASH_FUNC_*`、也拿不到 Kiro/云效的凭证。
+   ② 第 2 步的安装管道**两侧都以 `<固定名单，去掉 KIRO_API_KEY>` 的空环境启动**（`kiro_env_exec`，见第 12 节；不只右边 bash），并让 curl 带 `-q`：
+   `kiro_env_exec _kr_inst_env curl -q -fsSL … | kiro_env_exec _kr_inst_env /bin/bash -p`。在线安装脚本与 curl 都拿不到 `BASH_FUNC_*`、也拿不到 Kiro/云效的凭证。
    ③ **安装前先确认 `$HOME` 不在业务库内**（curl 会读 `$HOME/.curlrc`、安装器会写 `$HOME/.local/bin`，都发生在
    安装后那次 PATH 重新过门之前）：`$HOME` 指进业务库时，业务库里提交一个 `.curlrc`（`url = "file://<业务库>/evil.sh"`）
    就能让 curl 先把业务库脚本打到 stdout、与受信安装脚本一起被右侧 bash 执行（本机 curl 8.7 复现）——所以 `$HOME`
@@ -950,7 +950,7 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   `payload -> /root/.aws/credentials`，请求路径字面上就在 allowedPaths 之内，而 kiro-cli 是否先解析链接再比对未经实测
   （探测 P1-15 T8 记录事实，生产不依赖它）。diff 已从 git 对象算好，删链接不影响评审输入——链接本身的改动在 diff 里照样可见。
 - **Kiro 进程环境只含固定名单变量**：五处 kiro-cli 调用（能力检查 `chat --help`、`--list-models` 与 `--version`、隔离 `settings`、评审 `chat`）
-  都以 `env -i` 启动，只透传**固定名单**（下一行与代码 `KIRO_ENV_FIXED_NAMES` 逐名比对，由 `tests/test-agent-config.sh` 守卫；HOME 承载登录态与 agent 目录）：
+  都以空环境启动（`kiro_env_exec`：`env -i` 起一个 bash 垫片，清单取值经 fd 交给它再 export，**不进** timeout / env / kiro-cli 的命令行参数——写成 `env -i NAME=value` 的话，套在外面的 timeout 整次评审期间 cmdline 里都是 `KIRO_API_KEY=<值>`），只透传**固定名单**（下一行与代码 `KIRO_ENV_FIXED_NAMES` 逐名比对，由 `tests/test-agent-config.sh` 守卫；HOME 承载登录态与 agent 目录）：
   固定名单（KIRO_ENV_FIXED_NAMES）：PATH、HOME、USER、TERM、TMPDIR、LANG、LANGUAGE、LC_ALL、LC_CTYPE、LC_MESSAGES、KIRO_API_KEY、KIRO_LOG_NO_COLOR、HTTP_PROXY、HTTPS_PROXY、FTP_PROXY、ALL_PROXY、NO_PROXY、http_proxy、https_proxy、ftp_proxy、all_proxy、no_proxy、SSL_CERT_FILE、SSL_CERT_DIR、CURL_CA_BUNDLE、XDG_CONFIG_HOME、XDG_DATA_HOME、XDG_CACHE_HOME、XDG_STATE_HOME、XDG_RUNTIME_DIR
   **不做形状匹配**（`KIRO_*`、`*_PROXY` 这类模式会放行 `CORP_SECRET_PROXY`、客户自定义的 `KIRO_…`）。自建执行器需要别的变量时
   用 `KIRO_ENV_PASSTHROUGH` 点名（第 11 节；只放名字，非法名字拒绝运行；`YUNXIAO_*`/`CODEUP_*`/`AWS_*`（`AWS_PROFILE`/`AWS_REGION`/

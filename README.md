@@ -74,7 +74,7 @@
   读取边界是**许可清单**（`allowedPaths`：业务库 checkout 与本次 diff chunk 目录，其它路径 headless 下直接被拒；
   业务库里的符号链接在启动前全部删除，免得 `payload -> /root/.aws/credentials` 借 allow 内的路径名读到 allow 外），
   `~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、`/var/run/secrets`、`**/.git/**` 等拒绝清单是第二道；
-  Kiro 进程的五处 kiro-cli 调用（`chat --help`、`--list-models`、`--version`、`settings`、`chat`）都以 `env -i` 固定名单环境启动，看不到云效令牌与 Flow 注入的其它变量。
+  Kiro 进程的五处 kiro-cli 调用（`chat --help`、`--list-models`、`--version`、`settings`、`chat`）都以固定名单的空环境启动（取值经 fd 交给垫片，不进任何进程的命令行参数），看不到云效令牌与 Flow 注入的其它变量。
 - Kiro 固定以 `--agent-engine v2` 运行：实测 headless 的默认引擎（v1）与预览版 v3 都不阻断
   工作区 `AGENTS.md` 注入，只有 v2 配合 `chat.disableInheritingDefaultResources` 才阻断
   （见 [docs/adr/0004-pin-kiro-cli-v2-engine.md](docs/adr/0004-pin-kiro-cli-v2-engine.md)）。
