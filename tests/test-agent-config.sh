@@ -816,11 +816,15 @@ mkdir -p "$tmp/vh/.kiro-mock"; mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_WAR
 TB=""; command -v timeout >/dev/null && TB=timeout; [[ -z "$TB" ]] && command -v gtimeout >/dev/null && TB=gtimeout
 ver_run() { env -i PATH="$ROOT/tests/mockbin:$PATH" HOME="$tmp/vh" bash -c 'set -uo pipefail; source "$1"; kiro_env_allowlist; kiro_cli_version "$3" "$2"; rc=$?; printf "rc=%s ver=[%s] err=[%s]" "$rc" "$KIRO_CLI_VERSION" "$KIRO_CLI_VERSION_ERROR"' _ "$LIB" "$tmp" "$TB" 2>/dev/null; }
 if command -v timeout >/dev/null || command -v gtimeout >/dev/null; then
-  assert_eq "$(ver_run)" "rc=0 ver=[2.21.1] err=[]" "kiro_cli_version：替身 stderr 先打升级提示 → 取到已装 2.21.1、无错误"
+  # 替身的已装版本是 mock_config_write 写进去的「本平台名单内的第一个版本」（darwin/arm64 是 2.21.1、linux/x86_64 是 2.21.3）。
+  # 原先这里写死 2.21.1，只在 macOS 上成立——2026-10-02 构建机容器（Debian 13 / AlmaLinux 8）里第一次跑这个文件才暴露。
+  host_ver=$(listed_version_for_host)
+  [[ -n "$host_ver" ]] || { echo "FAIL: 本平台在 KIRO_TESTED_TARGETS 里没有条目，kiro_cli_version 用例无法表达「已装版本」" >&2; exit 1; }
+  assert_eq "$(ver_run)" "rc=0 ver=[${host_ver}] err=[]" "kiro_cli_version：替身 stderr 先打升级提示 → 取到已装版本 ${host_ver}、无错误"
   mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_STDERR=1 MOCK_KIRO_VERSION=3.0.0
   assert_eq "$(ver_run)" "rc=0 ver=[3.0.0] err=[]" "kiro_cli_version：stdout 空、版本在 stderr → 回退到 stderr 取到 3.0.0"
   mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_WARN=1 MOCK_KIRO_VERSION_STDERR=1
-  assert_eq "$(ver_run)" "rc=0 ver=[2.21.1] err=[]" "kiro_cli_version：升级提示与版本都在 stderr → 锚定程序名仍取 2.21.1"
+  assert_eq "$(ver_run)" "rc=0 ver=[${host_ver}] err=[]" "kiro_cli_version：升级提示与版本都在 stderr → 锚定程序名仍取 ${host_ver}"
   mock_config_write "$tmp/vh" MOCK_KIRO_VERSION_RC=127
   ver_out=$(ver_run)
   assert_contains "$ver_out" "rc=1 ver=[]" "kiro_cli_version：--version 退出 127 → 返回 1、版本为空"
