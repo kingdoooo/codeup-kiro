@@ -71,6 +71,6 @@ security_agent: 0
 # container_name: review
 
 # ── 可选：扫描任务（Phase 2b，任一扫描开关为 1 时才有）──────────────────
-# inspector_max_scan_calls: 3       # 每次评审的 ScanSbom 调用上限（每次约 $0.03；引入的组件总是先扫）
+# inspector_max_scan_calls: 3       # 每次评审的 ScanSbom 调用上限（每次约 $0.03）；只约束存量——本 MR 引入的组件总是全部送检，必要时超出它
 # scan_cpu: 512                     # 扫描任务的 CPU（扫描员只调 API、不跑模型，小规格即可）
 # scan_memory_mib: 1024             # 扫描任务的内存

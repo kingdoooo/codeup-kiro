@@ -451,8 +451,8 @@ merge-base 两棵树（删掉全部符号链接），以非 root 用户、空环
 评论里写一行固定的失败原因与代号（见第 8 节「scan-prep reviewer=inspector status=failed」那一行，以及「Inspector ScanSbom 调用失败」那一行）。
 
 **成本**：每次 `ScanSbom` 约 $0.03（us-east-1 价；每个账号一次性 25 次免费）。一次 ScanSbom 最多送 1,900 个组件（服务上限是 5,000，
-但单次响应上限 10 MB，留了余量），每次评审最多 `inspector_max_scan_calls`（缺省 3，可配 1–20）次——引入的组件总是排在最前面先送，
-存量超出时折叠区写明只扫了一部分。另有扫描任务的 Fargate 时长与 S3 输入桶（`inspector/` 前缀 1 天后过期）。
+但单次响应上限 10 MB，留了余量）。`inspector_max_scan_calls`（缺省 3，可配 1–20）只约束存量：本 MR 引入的组件**总是全部送检**，
+多到 3 块装不下时就为它们多调几次（引入上万个组件的 MR 才会这样）；存量在剩下的次数里尽力而为，超出时折叠区写明只扫了一部分。另有扫描任务的 Fargate 时长与 S3 输入桶（`inspector/` 前缀 1 天后过期）。
 
 **镜像**：sbomgen **总是**烤在镜像里（版本与两道 SHA-256 钉在 `aws/executor/Dockerfile` 的 `SBOMGEN_VERSION` / `SBOMGEN_ZIP_SHA256`），
 所以换开关不会改镜像摘要、不用重新登记 `kiro_image_digests`。升级 sbomgen = 改那两个 ARG、重建镜像、按第 5.2 节登记新摘要。

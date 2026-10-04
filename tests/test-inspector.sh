@@ -37,6 +37,13 @@ assert_eq "$(ls "$tmp/c2"/chunk-*.json | wc -l | tr -d ' ')" "2" "② 只写出 
 assert_eq "$(lib "inspector_plan_chunks '$tmp/h7.json' '$tmp/i2.json' 0 2 '$tmp/c3'" >/dev/null 2>&1; echo $?)" "2" "② 每块组件数必须 ≥ 1"
 cdx '[]' > "$tmp/h0.json"
 assert_eq "$(lib "inspector_plan_chunks '$tmp/h0.json' '$tmp/i2.json' 3 2 '$tmp/c4'")" "0 0" "② 没有组件 → 0 块"
+# 引入的组件多于「每块 × 上限」：引入的总是全部送检（为它们超出上限），被丢下的只可能是存量（spec「调用」：引入的组件总是被扫描）
+jq '.components' "$tmp/h7.json" > "$tmp/i7.json"
+assert_eq "$(lib "inspector_plan_chunks '$tmp/h7.json' '$tmp/i7.json' 3 2 '$tmp/c5'")" "3 0" "② 7 个组件全是引入的、每块 3 个、上限 2 → 照样送 3 块，一个引入的都不丢"
+jq '.components[0:5]' "$tmp/h7.json" > "$tmp/i5.json"
+assert_eq "$(lib "inspector_plan_chunks '$tmp/h7.json' '$tmp/i5.json' 3 1 '$tmp/c6'")" "2 1" "② 5 个引入 + 2 个存量、每块 3 个、上限 1 → 2 块装下全部引入的，丢下的 1 个是存量"
+assert_eq "$(jq -r '[.components[].purl] | join(",")' "$tmp/c6/chunk-2.json")" "pkg:pypi/p3@1,pkg:pypi/p4@1,pkg:pypi/p5@1" \
+  "② 超出上限的那一块里引入的在前，空位才给存量"
 
 # ③ 合并与严重级别
 vuln() { jq -n --arg id "$1" --argjson r "$2" --arg ref "$3" '{id: $id, ratings: $r, affects: [{ref: $ref}]}'; }

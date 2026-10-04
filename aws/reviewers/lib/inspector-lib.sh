@@ -32,7 +32,8 @@ inspector_introduced() {  # <head.cdx.json> <base.cdx.json>
     | [(.components // [])[] | select((.purl | type) == "string") | select((.purl | ckey) as $k | ($b | index($k)) == null)]' "$1"
 }
 
-# ScanSbom 调用计划：引入的组件在前（总是扫），其余在后（尽力而为），每块 ≤ <每次组件数>，最多 <调用上限> 块。
+# ScanSbom 调用计划：引入的组件在前（总是全部送检：装下它们要几块就几块，哪怕超出上限），其余在后（尽力而为），
+# 每块 ≤ <每次组件数>，总块数 = max(<调用上限>, 装下引入组件所需的块数)——上限只约束存量。
 # 写出 <目录>/chunk-<n>.json（最小的 CycloneDX 1.5 文档）；stdout 一行「<块数> <被丢下的存量组件数>」。
 inspector_plan_chunks() {  # <head.cdx.json> <introduced.json> <每次组件数> <调用上限> <目录>
   local head="$1" intro="$2" per="$3" max="$4" dir="$5" n
@@ -41,10 +42,12 @@ inspector_plan_chunks() {  # <head.cdx.json> <introduced.json> <每次组件数>
   jq -c --slurpfile intro "$intro" --argjson per "$per" --argjson max "$max" "${_INSPECTOR_JQ_DEFS}"'
     ([$intro[0][] | .purl | ckey]) as $ik
     | [(.components // [])[] | select((.purl | type) == "string")] as $all
-    | ([$all[] | select((.purl | ckey) as $k | ($ik | index($k)) != null)]
-       + [$all[] | select((.purl | ckey) as $k | ($ik | index($k)) == null)]) as $ordered
+    | [$all[] | select((.purl | ckey) as $k | ($ik | index($k)) != null)] as $in
+    | ($in + [$all[] | select((.purl | ckey) as $k | ($ik | index($k)) == null)]) as $ordered
     | [range(0; ($ordered | length); $per) as $i | $ordered[$i:$i + $per]] as $chunks
-    | {chunks: $chunks[0:$max], dropped: ([$chunks[$max:][][]] | length)}' "$head" > "$dir/plan.json" || return 1
+    # 引入的组件总是全部送检：装下它们要几块就送几块（哪怕超出上限），上限只约束存量
+    | ([$max, ((($in | length) + $per - 1) / $per | floor)] | max) as $lim
+    | {chunks: $chunks[0:$lim], dropped: ([$chunks[$lim:][][]] | length)}' "$head" > "$dir/plan.json" || return 1
   n=$(jq '.chunks | length' "$dir/plan.json") || return 1
   local i=0
   while (( i < n )); do
