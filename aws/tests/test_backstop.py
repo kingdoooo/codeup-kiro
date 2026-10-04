@@ -474,3 +474,16 @@ def test_scan_task_causes(code, want):
 def test_a_scanner_the_executor_recorded_as_disabled_is_not_posted():
     assert _decide_with({"pk": "k", "posted": True, "disabled_inspector": True},
                         exit_code=0, reviewers_env="kiro,inspector") == (False, [])
+
+
+def test_the_scan_exit_causes_are_exactly_the_scan_entrypoints_fail_closed_exits_and_the_guide_has_each_row():
+    import re
+    scan = (ROOT / "executor" / "scan-entrypoint.sh").read_text()
+    code = "\n".join(ln for ln in scan.splitlines() if not ln.lstrip().startswith("#"))
+    exits = {int(n) for n in re.findall(r"\bexit (9[0-9])\b", code)}
+    assert exits == set(backstop.SCAN_EXIT_CAUSES) == {90, 95, 96}, exits
+    lines = GUIDE.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("## 8."))
+    for c in exits:
+        rows = [ln for ln in lines[start:] if ln.startswith("|") and f"扫描退出码 {c}" in ln.split(" | ")[0]]
+        assert rows, f"§8 没有标着「扫描退出码 {c}」的行，扫描员兜底评论里的指针指空了"

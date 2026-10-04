@@ -52,3 +52,13 @@ def test_installs_the_hard_dependencies_kiro_review_checks():
     src = DOCKERFILE.read_text()
     for pkg in ("git", "jq", "unzip", "coreutils"):
         assert pkg in src
+
+
+# ── Phase 2b：扫描任务的文件进镜像（issue 05）──────────────────────────────────────────────
+
+def test_the_scan_task_files_are_in_the_image():
+    src = DOCKERFILE.read_text()
+    for line in ("COPY aws/executor/lib /opt/integration/lib",
+                 "COPY aws/executor/scan-entrypoint.sh /opt/integration/scan-entrypoint.sh",
+                 "COPY aws/reviewers /opt/integration/reviewers"):
+        assert line in src, line

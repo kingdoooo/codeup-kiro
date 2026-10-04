@@ -41,8 +41,11 @@ COPY scripts /opt/integration/scripts
 COPY prompts /opt/integration/prompts
 COPY kiro    /opt/integration/kiro
 COPY aws/executor/entrypoint.sh /opt/integration/entrypoint.sh
-# 执行器与扫描任务共用的 bash 库（Phase 2b：租约等）
+# 执行器与扫描任务共用的 bash 库（Phase 2b：租约、派发、扫描输入）、扫描任务的入口与扫描员驱动
 COPY aws/executor/lib /opt/integration/lib
+COPY aws/executor/scan-entrypoint.sh /opt/integration/scan-entrypoint.sh
+COPY aws/reviewers /opt/integration/reviewers
+RUN chmod +x /opt/integration/scan-entrypoint.sh
 RUN chmod +x /opt/integration/entrypoint.sh
 
 ENTRYPOINT ["/bin/bash", "-p", "/opt/integration/entrypoint.sh"]
