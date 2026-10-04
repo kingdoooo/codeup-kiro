@@ -9,6 +9,7 @@ import botocore.exceptions
 
 import codeup_min
 import secret_fetch  # 本目录下的 secret_fetch.py：调用时向 Secrets Manager 取密钥
+import reviewers  # noqa: E402 — 评审员档案的 Lambda 侧常量表（Phase 2b）
 # 入口是内网 ALB 的 Lambda target：每条返回路径都走 _resp（G5），正文一律经 _body_text 取（G6）。
 from http_shape import body_text as _body_text
 from http_shape import resp as _resp
@@ -32,7 +33,7 @@ REVIEW_MARKER = "<!-- kiro-"
 # 新的 note_biz_id，抢锁拦不住）。取值刻意不带冒号参数，与脚本那几种（`kiro-xxx:<载荷>`）区分开。
 # （兜底 Lambda 的那一个叫 `<!-- kiro-backstop -->`，定义在 backstop/handler.py 里——它自己发那条
 # 评论，标记跟着发出去的地方走；断环这侧按前缀认，不需要逐个枚举。）
-DISPATCH_FAILED_MARKER = "<!-- kiro-dispatch-failed -->"
+DISPATCH_FAILED_MARKER = reviewers.PROFILES["kiro"]["dispatch_failed_marker"]
 
 
 def token_header(headers):
@@ -256,6 +257,7 @@ def classify(headers, body, cfg):
             return "ignore", None
         if not _accept(fields, cfg):
             return "ignore", None
+        fields["reviewers"] = reviewers.join(_enabled(cfg))   # MR 事件：本部署启用的全部评审员（spec「调度器」）；字符串，fields 全是字符串
         return "review", fields
 
     if ev == NOTE_EVENT:
@@ -286,12 +288,13 @@ def classify(headers, body, cfg):
             # 不留痕的话「命令静默失效」查不下去（复审 s5 I-1）。本方评论也会打这一行，量是每次评审一两行。
             _log_ignored("kiro-marker")
             return "ignore", None
-        phrase = cfg.get("command_phrase") or ""
-        if not phrase:
-            # falsy 但有意义：`"" in note` 恒真 → 每条评论都触发评审（含本方那条）→ 循环。
-            # 短语没配好时 fail closed，绝不退化成「谁说话都评」。
-            return "ignore", None
-        if phrase not in note:
+        # 按评审员的命令（Phase 2b R5）：正文里出现哪几句，就评哪几位（只取已启用的），`/review` 一类的「全部」= 全部已启用。
+        # 每一句都是 falsy 但有意义：`"" in note` 恒真 → 每条评论都触发评审（含本方那条）→ 循环。空短语一律不参与匹配，
+        # 全部为空时 fail closed，绝不退化成「谁说话都评」。
+        wanted, disabled_hit = _reviewers_named_in(note, cfg)
+        if not wanted:
+            if disabled_hit:
+                _log_ignored("reviewer-disabled")   # 点名的评审员本部署没启用：正常流量，但要能在日志里看见
             return "ignore", None
         fields = _fields_from(_dig(body, "merge_request"), _dig(body, "repository"))
         if fields is None:
@@ -317,9 +320,31 @@ def classify(headers, body, cfg):
         if _norm(_dig(body, "merge_request", "state")) in NOTE_CLOSED_STATES:
             _log_ignored("mr-not-open")
             return "ignore", None
+        fields["reviewers"] = reviewers.join(wanted)
         return "review", fields
 
     return "ignore", None
+
+
+def _enabled(cfg):
+    """本部署启用的评审员（按 reviewers.ORDER）。cfg 里没有 enabled 键（2a 的调用方 / 测试）= 只有 Kiro。"""
+    return tuple(cfg.get("enabled") or ("kiro",))
+
+
+def _reviewers_named_in(note, cfg):
+    """正文点名了哪几位已启用的评审员 → (评审员元组, 是否点名了未启用的评审员)。
+
+    短语表：Kiro 用 2a 的 command_phrase；扫描员用 cfg["phrases"][rid]；「全部」用 cfg["phrases"]["all"]。
+    cfg 里没有 phrases（2a 的调用方 / 测试）时只有 Kiro 那一句。子串冲突在 synth 时已经拒绝（config.py），这里不再判。
+    """
+    enabled = _enabled(cfg)
+    phrases = dict(cfg.get("phrases") or {})
+    phrases["kiro"] = cfg.get("command_phrase") or ""
+    hits = {rid for rid in reviewers.ORDER if phrases.get(rid) and phrases[rid] in note}
+    if phrases.get("all") and phrases["all"] in note:
+        hits |= set(enabled)
+    wanted = tuple(r for r in reviewers.ORDER if r in hits and r in enabled)
+    return wanted, bool(hits - set(enabled))
 
 
 def _norm(v):
@@ -421,8 +446,22 @@ def _runtime_cfg():
         "bot_usernames": [u for u in os.environ.get("BOT_USERNAMES", "").split(",") if u],
         "review_command": int(os.environ.get("REVIEW_COMMAND", "0")),
         "command_phrase": os.environ.get("REVIEW_COMMAND_PHRASE", "/kiro review"),
+        # Phase 2b：启用的评审员由两个开关派生（与 config.yaml 同名的环境变量，缺失 = 0，即 2a 部署的形状）。
+        # 取值只认 "0"/"1"：那是我们自己 CDK 写的值，坏了就该在第一次投递时响亮地失败（ALB 502 + Lambda Errors 指标），不猜。
+        "enabled": reviewers.enabled({k: _toggle_env(k.upper()) for k in ("inspector", "security_agent")}),
+        "phrases": {"inspector": os.environ.get("INSPECTOR_COMMAND_PHRASE", ""),
+                    "security": os.environ.get("SECURITY_COMMAND_PHRASE", ""),
+                    "all": os.environ.get("ALL_COMMAND_PHRASE", "")},
         "target_branch_filter": os.environ.get("TARGET_BRANCH_FILTER", ""),
     }
+
+
+def _toggle_env(name):
+    """开关环境变量：缺失 = 0；只认 "0"/"1"，别的取值抛 ValueError（N7：不回落默认）。"""
+    v = os.environ.get(name, "0")
+    if v not in ("0", "1"):
+        raise ValueError(f"{name} 必须是 0 或 1")
+    return int(v)
 
 
 def _clients(cfg):
@@ -509,6 +548,8 @@ def run_task(ecs, cfg, fields, key):
         ("HEAD_SHA", fields["head_sha"]),
         ("BUSINESS_REPO_URL", fields["clone_url"]),
         ("LOCK_KEY", key),
+        # 被请求的评审员（Phase 2b）：缺失时（2a 的调用方）只有 Kiro，与执行器那侧的缺省一致
+        ("REVIEWERS", fields.get("reviewers") or "kiro"),
     ) if v is not None]
     resp = ecs.run_task(
         cluster=cfg["cluster"], taskDefinition=cfg["task_definition"],
@@ -557,7 +598,7 @@ def _failure_reason(exc):
     return type(exc).__name__
 
 
-def failed_comment(reason):
+def failed_comment(reason, rid="kiro"):
     """「评审未启动」评论的正文。正文里必须带本方标记（DISPATCH_FAILED_MARKER）——这条评论会触发
     Note Hook，没有标记时唯一的防线是「命令短语不是它的子串」，而短语是可配的（比如配成
     `Kiro 代码评审`）：那时拉起任务持续失败就变成失败评论 → Note Hook → 又一次评审 → 又一条失败
@@ -566,7 +607,8 @@ def failed_comment(reason):
     标记单独占一行、紧跟标题：与评审脚本渲染的评论形状一致，且不会与脚本的
     `<!-- kiro-review:<sha> run:N -->` 混淆（后者带载荷，正则匹配不到这一行）。
     """
-    return ("## 🤖 Kiro 代码评审\n" + DISPATCH_FAILED_MARKER +
+    prof = reviewers.PROFILES[rid]
+    return (prof["lambda_heading"] + "\n" + prof["dispatch_failed_marker"] +
             "\n\n**评审未启动**：调度器无法拉起评审任务。\n\n"
             f"原因：`{reason}`。稍后重新推送可再次触发。")
 
@@ -590,7 +632,10 @@ def dispatch(ecs, table, cfg, fields):
         # 它们先后评、不会并发，issue 02）。所以抢锁之后的每条路径都必须回 200，
         # 收尾失败只留一行固定形状的代号。两步各自 try：释放锁失败不该连带吞掉 I10 的留痕。
         _cleanup(release, table, key, step="release")
-        _cleanup(_post_failed_comment, cfg, fields, _failure_reason(exc), step="comment")
+        # 每位被请求的评审员各发一条、用各自的令牌（S2）；各条独立 _cleanup，一条失败不吞别的。Kiro 的 step 名保持 2a 的 "comment"。
+        for rid in reviewers.parse(fields.get("reviewers") or "kiro"):
+            _cleanup(_post_failed_comment, cfg, fields, _failure_reason(exc), rid,
+                     step="comment" if rid == "kiro" else f"comment-{rid}")
         return _resp(200, "runtask-failed")
     return _resp(200, "dispatched")
 
@@ -599,7 +644,7 @@ class PostFailed(RuntimeError):
     """Codeup 拒收了「评审未启动」评论（post_comment 返回 False：HTTP 非 2xx 或连不上）。"""
 
 
-def _post_failed_comment(cfg, fields, reason):
+def _post_failed_comment(cfg, fields, reason, rid="kiro"):
     """「评审未启动」留痕（I10）。云效令牌到这一步才取（issue 05 G3）：预先取的话，只是这一个密钥取不到
     （改名、IAM 少一条 ARN、限流）就会让每一次评审都 503、事件丢失，而执行器根本不用调度器这一份令牌。
 
@@ -607,9 +652,9 @@ def _post_failed_comment(cfg, fields, reason):
     `SecretUnavailable:<代号>`，Codeup 拒收是 `PostFailed`（issue 05 N1：以前 post_comment 的 False
     被丢掉，令牌被吊销的 401 一行日志都不留），连上之后断开是原始异常的类型名。
     """
-    token = secret_fetch.secret_from_env("YUNXIAO_TOKEN_ID")
+    token = secret_fetch.secret_from_env(reviewers.PROFILES[rid]["token_secret_env"])
     if not codeup_min.post_comment(cfg["org_id"], fields["repo_id"], fields["mr_local_id"], token,
-                                   failed_comment(reason)):
+                                   failed_comment(reason, rid)):
         raise PostFailed("post-comment")
 
 

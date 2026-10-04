@@ -22,7 +22,7 @@ def _full_cfg(**over):
     cfg = {
         "region": "us-west-2", "org_id": "o1", "bot_username": "aliyun:kirobot",
         "bot_usernames": ["aliyun:kirobot"],
-        "inline_comment": 0, "review_command": 1,
+        "inline_comment": 0, "review_command": 1, "inspector": 0, "security_agent": 0,
         "command_phrase": "/kiro review", "target_branch_filter": "",
         "cluster": "c", "task_definition": "td", "container_name": "review",
         "subnets": ["s1"], "security_groups": ["sg1"],

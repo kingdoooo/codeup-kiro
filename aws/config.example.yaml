@@ -29,6 +29,10 @@ inline_comment: 0       # 执行器：INLINE_COMMENT
 # 这个开关还决定汇总评论页脚那句「怎么重新评审」（REVIEW_RERUN_HINT，派生值，不是本文件的键）：
 # 1 → 「评论 `<command_phrase>` 可重新评审」；0 → 「向源分支推送新提交可重新评审」。
 review_command: 0
+# 扫描评审员（Phase 2b）：Inspector（依赖漏洞）与 Security Agent（安全分析）。任一为 1 → 部署扫描任务（Task B）与输入桶；
+# 都为 0 → 二者都不存在、MR 上与 2a 相同。各自要一个云效令牌密钥（setup-guide.md 第 3 节；PoC 可与 Kiro 用同一个 PAT）。
+inspector: 0
+security_agent: 0
 
 # ── 可选：评审行为（执行器环境；默认值与 scripts/ 里的缺省值逐项一致，取值语义同 Flow 档位）──
 # inline_profile: quiet         # INLINE_PROFILE：quiet / balanced / critical
@@ -50,6 +54,12 @@ review_command: 0
 #                                   # 必须是字符串，首尾不带空白、不含换行或其他控制字符（synth 时校验）。
 #                                   # 空串会被调度器 fail closed（一律不受理），别配成会出现在本方
 #                                   # 评论里的词（例如 Kiro 代码评审），见 setup-guide.md 第 4.3 节
+# inspector_command_phrase: "/inspector review"   # 只重跑 Inspector；仅 inspector: 1 时生效
+# security_command_phrase: "/security review"     # 只重跑 Security Agent；仅 security_agent: 1 时生效
+# all_command_phrase: "/review"                   # 重跑全部已启用的评审员；空串 "" = 不提供这一句
+#                                   # 四句生效的短语两两不得互为子串（synth 时校验），否则一条评论会同时触发两句。
+# inspector_bot_username: aliyun:kirobot   # Inspector 的机器人账号；缺省 = bot_username（三位共用一个账号）
+# security_bot_username: aliyun:kirobot    # Security Agent 的机器人账号；缺省 = bot_username
 # target_branch_filter: ""          # TARGET_BRANCH_FILTER，正则；空 = 全部 MR
 # lock_ttl_seconds: 86400           # 幂等锁 TTL（N4）
 # reserved_concurrency: 5           # 调度器与兜底 Lambda 各自的保留并发（支出闸门）
@@ -59,3 +69,6 @@ review_command: 0
 # memory_mib: 8192
 # ephemeral_storage_gib: 25         # 必须大于 20（Fargate 默认值）
 # container_name: review
+
+# ── 可选：扫描任务（Phase 2b，任一扫描开关为 1 时才有）──────────────────
+# inspector_max_scan_calls: 3       # 每次评审的 ScanSbom 调用上限（每次约 $0.03；引入的组件总是先扫）

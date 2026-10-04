@@ -1,4 +1,5 @@
 import os
+import sys
 
 import aws_cdk as cdk
 from aws_cdk import (
@@ -16,6 +17,12 @@ from aws_cdk import (
 from constructs import Construct
 
 from stacks.ingress import WebhookIngress
+
+REPO_ROOT_FOR_IMPORT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# 评审员档案的 Lambda 侧常量表（aws/lambda/dispatcher/reviewers.py）：CDK 与两个 Lambda 读同一份，不在栈里抄第二份。
+# 模块名 reviewers 在仓库里唯一（不像 handler.py 两个 Lambda 同名），按路径插进 sys.path 不会串。
+sys.path.insert(0, os.path.join(REPO_ROOT_FOR_IMPORT, "aws", "lambda", "dispatcher"))
+import reviewers as _reviewers  # noqa: E402
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 LAMBDA_ROOT = os.path.join(REPO_ROOT, "aws", "lambda")
@@ -42,6 +49,15 @@ class DispatcherStack(cdk.Stack):
 
         yunxiao_token = secretsmanager.Secret.from_secret_name_v2(
             self, "YunxiaoTokenSecret", "codeup-kiro/yunxiao-token-kiro")
+        # 扫描员的云效令牌（Phase 2b）：只为启用了的扫描员引用，只在「评审未启动」/兜底评论那一步按需取（S2）。
+        # 环境变量里只放密钥名（secret_fetch 的约定），授权只给到这几个密钥。
+        scanner_tokens = {
+            rid: secretsmanager.Secret.from_secret_name_v2(
+                self, f"YunxiaoToken{rid.capitalize()}Secret", _reviewers.PROFILES[rid]["secret_name"])
+            for rid in _reviewers.enabled(cfg) if rid != "kiro"}
+        scanner_token_env = {_reviewers.PROFILES[rid]["token_secret_env"]: sec.secret_name
+                             for rid, sec in scanner_tokens.items()}
+        scanner_token_arns = [f"{sec.secret_arn}-??????" for sec in scanner_tokens.values()]
         webhook_secret = secretsmanager.Secret.from_secret_name_v2(
             self, "WebhookSecret", "codeup-kiro/webhook-secret")
 
@@ -68,6 +84,12 @@ class DispatcherStack(cdk.Stack):
                 "BOT_USERNAMES": ",".join(cfg["bot_usernames"]),
                 "REVIEW_COMMAND": str(cfg["review_command"]),
                 "REVIEW_COMMAND_PHRASE": cfg["command_phrase"],
+                # Phase 2b：两个扫描员开关（与 config.yaml 同名，调度器据此算出启用的评审员）与扫描员的命令短语
+                "INSPECTOR": str(cfg.get("inspector", 0)),
+                "SECURITY_AGENT": str(cfg.get("security_agent", 0)),
+                "INSPECTOR_COMMAND_PHRASE": cfg.get("inspector_command_phrase", ""),
+                "SECURITY_COMMAND_PHRASE": cfg.get("security_command_phrase", ""),
+                "ALL_COMMAND_PHRASE": cfg.get("all_command_phrase", ""),
                 "TARGET_BRANCH_FILTER": cfg.get("target_branch_filter", ""),
                 # 两个密钥只注入 **SecretId**（GetSecretValue 的入参名，接受 ARN 或密钥名），
                 # 值由 handler 在调用时自己向 Secrets Manager 取
@@ -92,6 +114,7 @@ class DispatcherStack(cdk.Stack):
                 # 调度器只在 RunTask 失败后的留痕那一步读云效令牌（handler.py 的 _post_failed_comment，
                 # issue 05 G3）；注入的是密钥名，不是暴露面。
                 "YUNXIAO_TOKEN_ID": yunxiao_token.secret_name,
+                **scanner_token_env,
             },
         )
         # 这条授权现在是真在用的代码路径：调度器每次调用都经 secret_fetch.py 读 webhook 密钥
@@ -107,7 +130,7 @@ class DispatcherStack(cdk.Stack):
         dispatcher_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["secretsmanager:GetSecretValue"],
             resources=[f"{webhook_secret.secret_arn}-??????",
-                       f"{yunxiao_token.secret_arn}-??????"]))
+                       f"{yunxiao_token.secret_arn}-??????", *scanner_token_arns]))
 
         # claim/release 只做 PutItem/DeleteItem（见 handler.py），不用 grant_read_write_data——
         # 那会连 Query/Scan/GetItem 都给上，超出这两个函数实际动的写路径。
@@ -184,6 +207,7 @@ class DispatcherStack(cdk.Stack):
                 # 同调度器：只给密钥名（理由见上），值由 handler.py 在真要发评论时经
                 # secret_fetch.py 取。
                 "YUNXIAO_TOKEN_ID": yunxiao_token.secret_name,
+                **scanner_token_env,
             },
         )
         state.lock_table.grant(backstop_fn, "dynamodb:GetItem")
@@ -191,7 +215,7 @@ class DispatcherStack(cdk.Stack):
         # 两个函数各自只拿到自己真正会读的那些 ARN。
         backstop_fn.add_to_role_policy(iam.PolicyStatement(
             actions=["secretsmanager:GetSecretValue"],
-            resources=[f"{yunxiao_token.secret_arn}-??????"]))
+            resources=[f"{yunxiao_token.secret_arn}-??????", *scanner_token_arns]))
 
         # 只要本集群、已 STOPPED 的任务：ECS 每次状态迁移都发这个事件，不筛 lastStatus 会在任务
         # 还在跑时就触发兜底（backstop/handler.py 的 should_post 另有同一道判断）；不筛 clusterArn，

@@ -1054,7 +1054,7 @@ def test_setup_guide_lists_every_shape_rejection_code_the_dispatcher_can_emit():
     assert arg_forms == {"literal", "reject-reason"}, arg_forms
     assert codes == {"org-unset", "clone-url-prefix", "clone-url-chars", "head-sha",
                      "repo-id", "mr-local-id", "branch", "note-biz-id", "mr-not-open",
-                     "missing-field", "kiro-marker"}, codes
+                     "missing-field", "kiro-marker", "reviewer-disabled"}, codes
     # 选行的条件要挑出**枚举那一行**：别处（4.3 的 REVIEW_COMMAND 一行）也会正当地提到某个具体代号
     # （`ignored reason=mr-not-open`），只按 `ignored reason=` 选会一下选中两行。
     row = [ln for ln in guide.splitlines()
@@ -1942,3 +1942,71 @@ def test_the_guide_documents_the_repo_id_clone_binding_messages():
     backstop = (pathlib.Path(__file__).resolve().parents[1] / "lambda" / "backstop" / "handler.py").read_text()
     cause91 = re.search(r'^    91: "([^"]+)"', backstop, re.M)
     assert cause91 and "按仓库 id" in cause91.group(1), cause91
+
+
+# ── Phase 2b：扫描员开关、按评审员的短语与机器人账号（issue 04）──────────────────────────────
+def _base_cfg(**over):
+    from config import load_config  # noqa: F401
+    cfg = {"region": "us-west-2", "org_id": "o1", "bot_username": "aliyun:kirobot",
+           "kiro_image_digests": "a" * 64, "kiro_pinned_artifact_sha256": "c" * 64, "kiro_cli_sha256": "d" * 64}
+    cfg.update(over)
+    return cfg
+
+
+def test_scanner_toggles_default_off_and_phrases_default_to_the_spec_values(write_cfg):
+    from config import load_config
+    cfg = load_config(write_cfg(_base_cfg()))
+    assert (cfg["inspector"], cfg["security_agent"]) == (0, 0)
+    assert (cfg["inspector_command_phrase"], cfg["security_command_phrase"], cfg["all_command_phrase"]) == \
+        ("/inspector review", "/security review", "/review")
+    assert cfg["inspector_bot_username"] == cfg["security_bot_username"] == "aliyun:kirobot"
+
+
+@pytest.mark.parametrize("over", [
+    {"inspector": 1, "inspector_command_phrase": "/review all"},        # "/review" 是它的子串
+    {"inspector": 1, "all_command_phrase": "review"},                   # "review" 是 "/kiro review" 的子串
+    {"security_agent": 1, "security_command_phrase": "/kiro review"},   # 与 Kiro 那句相同（互为子串）
+])
+def test_overlapping_live_phrases_are_rejected(write_cfg, over):
+    from config import load_config
+    with pytest.raises(ValueError, match="子串"):
+        load_config(write_cfg(_base_cfg(**over)))
+
+
+def test_an_overlapping_phrase_of_a_disabled_reviewer_is_not_checked(write_cfg):
+    # 没启用的评审员的短语调度器根本不读：不能因为它拒绝部署（正向对照：上一条不是「凡有重叠就拒」的空转）
+    from config import load_config
+    load_config(write_cfg(_base_cfg(inspector=0, inspector_command_phrase="/review all")))
+    load_config(write_cfg(_base_cfg(inspector=1, all_command_phrase="")))   # 空串不参与比较
+
+
+@pytest.mark.parametrize("over", [{"inspector": True}, {"security_agent": "1"}, {"inspector": 2},
+                                  {"inspector_bot_username": " aliyun:x"}, {"security_bot_username": "a,b"},
+                                  {"inspector_max_scan_calls": 0}, {"inspector_max_scan_calls": 21},
+                                  {"inspector_max_scan_calls": True}, {"inspector_command_phrase": " /x"}])
+def test_scanner_settings_are_strictly_validated(write_cfg, over):
+    from config import load_config
+    with pytest.raises(ValueError):
+        load_config(write_cfg(_base_cfg(**over)))
+
+
+def test_default_bot_usernames_cover_every_enabled_reviewer_once():
+    from config import default_bot_usernames
+    assert default_bot_usernames(_base_cfg()) == ["aliyun:kirobot"]
+    assert default_bot_usernames(_base_cfg(inspector=1, inspector_bot_username="aliyun:insp",
+                                           security_agent=1, security_bot_username="aliyun:kirobot")) \
+        == ["aliyun:kirobot", "aliyun:insp"]
+    assert default_bot_usernames(_base_cfg(inspector=True, inspector_bot_username="x")) == ["aliyun:kirobot"]
+
+
+def test_dispatcher_and_backstop_get_scanner_token_names_only_for_enabled_scanners():
+    from aws_cdk.assertions import Template  # noqa: F401
+    envs = _all_envs(_full_cfg(inspector=1, security_agent=0))
+    disp = next(env for src, env in envs.items() if "DispatcherFn" in src)
+    back = next(env for src, env in envs.items() if "BackstopFn" in src)
+    for env in (disp, back):
+        assert env["YUNXIAO_TOKEN_INSPECTOR_ID"] == "codeup-kiro/yunxiao-token-inspector"
+        assert "YUNXIAO_TOKEN_SECURITY_ID" not in env
+    assert disp["INSPECTOR"] == "1" and disp["SECURITY_AGENT"] == "0"
+    off = _all_envs(_full_cfg())
+    assert not any("YUNXIAO_TOKEN_INSPECTOR_ID" in env for env in off.values())

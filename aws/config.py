@@ -10,16 +10,41 @@ VALID_REGIONS = frozenset({
 # 这三个区域用 global 跨区推理，会把推理请求路由到任意商业区域（仅在启用 Security Agent 后生效）
 GLOBAL_INFERENCE_REGIONS = frozenset({"ap-south-1", "ap-southeast-1", "sa-east-1"})
 
-TOGGLES = ("inline_comment", "review_command")
+TOGGLES = ("inline_comment", "review_command", "inspector", "security_agent")
 
 # 评论命令的触发短语：默认值只在这里写一份。它有**两个**消费者——调度器（判评论正文里有没有这句）
 # 与执行器（页脚那句「怎么重新评审」要把同一句短语印给读者，见 stacks/executor_stack.py::rerun_hint）。
 # 两边各自 `cfg.get(..., "/kiro review")` 的话，改默认值时漏掉一处就是「页脚教的短语触发不了评审」。
 DEFAULT_COMMAND_PHRASE = "/kiro review"
 
+# 按评审员的评论命令（Phase 2b R5）：键 → 默认短语。Kiro 那一句沿用 2a 的 command_phrase 与 DEFAULT_COMMAND_PHRASE。
+# 「全部」那一句不属于某位评审员：它点名的是本部署启用的全部评审员。
+PHRASE_DEFAULTS = {
+    "command_phrase": DEFAULT_COMMAND_PHRASE,
+    "inspector_command_phrase": "/inspector review",
+    "security_command_phrase": "/security review",
+    "all_command_phrase": "/review",
+}
+# 短语键 → 它属于哪位评审员的开关（None = Kiro 或「全部」，总是生效）。只有生效的短语参与子串冲突检查。
+PHRASE_TOGGLE = {"command_phrase": None, "inspector_command_phrase": "inspector",
+                 "security_command_phrase": "security_agent", "all_command_phrase": None}
+# 扫描员的机器人账号用户名（选择器按作者 + 标记找自己的汇总）。缺省 = bot_username：R7 的 PoC 形态是三位评审员共用一个账号。
+SCANNER_BOT_KEYS = ("inspector_bot_username", "security_bot_username")
+
 # 两个 kiro-cli 摘要（安装包 zip / 装好后的入口文件），分工见 ADR-0006；pinned 档位下都是硬要求。
 KIRO_CLI_DIGESTS = ("kiro_pinned_artifact_sha256", "kiro_cli_sha256")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def default_bot_usernames(cfg):
+    """调度器缺省忽略名单 = 启用了的评审员各自的机器人账号（去重、保持顺序）。三位共用一个账号（R7 的 PoC 形态）时只有一个名字。
+    开关按 `type(v) is int` 读（与 lambda/dispatcher/reviewers.enabled 同一理由：True == 1）。"""
+    names = [cfg["bot_username"]]
+    for key, toggle in (("inspector_bot_username", "inspector"), ("security_bot_username", "security_agent")):
+        v = cfg.get(toggle)
+        if type(v) is int and v == 1:
+            names.append(cfg.get(key, cfg["bot_username"]))
+    return list(dict.fromkeys(names))
 
 
 def _has_invisible(s):
@@ -77,7 +102,8 @@ def load_config(path):
 
     # 键**不存在**时才填默认（不是 `or`）：显式写成空串/空值是「fail closed，一条命令都不受理」的
     # 既有语义（handler.py 的 `if not phrase` 那一段），用 `or` 回落默认会把它悄悄变成「命令照常生效」。
-    cfg.setdefault("command_phrase", DEFAULT_COMMAND_PHRASE)
+    for key, default in PHRASE_DEFAULTS.items():
+        cfg.setdefault(key, default)
 
     # bot_usernames 只校验形状，不校验内容：它会被 `",".join(...)` 写进 Lambda 环境变量。
     # YAML 里想清空名单**必须**写 `[]`；写成 `bot_usernames:`（空值）会被解析成 None，
@@ -103,12 +129,32 @@ def load_config(path):
     # 不含换行或其他看不见的字符（复审 s5 M-1；issue 05 C1：以前只拒 \n，\r、\t、零宽空格都放行）。全空白的短语是空串的孪生兄弟却**不** fail closed——任何含这串空格的
     # 评论都会拉起一次评审；首尾带空白的短语在评论开头永远匹配不上；null 或数字到 CDK 里只报一句看不懂的
     # 「Unable to deserialize value as aws-cdk-lib.aws_lambda.FunctionProps」。
-    phrase = cfg["command_phrase"]
-    if type(phrase) is not str or (phrase and (phrase != phrase.strip() or _has_invisible(phrase))):
-        raise ValueError(
-            f"command_phrase 取值 {phrase!r} 非法：必须是加引号的字符串，首尾不带空白、不含换行、制表符或"
-            "其他看不见的控制字符，"
-            '例如 command_phrase: "/kiro review"；写成空串 "" 表示一条命令都不受理')
+    for key in PHRASE_DEFAULTS:
+        phrase = cfg[key]
+        if type(phrase) is not str or (phrase and (phrase != phrase.strip() or _has_invisible(phrase))):
+            raise ValueError(
+                f"{key} 取值 {phrase!r} 非法：必须是加引号的字符串，首尾不带空白、不含换行、制表符或"
+                "其他看不见的控制字符，"
+                f'例如 {key}: "{PHRASE_DEFAULTS[key]}"；写成空串 "" 表示'
+                + ("一条命令都不受理" if key == "command_phrase" else "这一句命令不受理"))
+    # 生效短语两两不得互为子串：调度器按「正文含短语」判定，`/review` 若是 `/kiro review all` 的子串，一条只想重跑 Kiro 的
+    # 评论就会把全部评审员都拉起来（也可能反过来）。空串不参与（它表示不受理）。只看生效的：没启用的评审员的短语调度器根本不读。
+    live = {k: cfg[k] for k, t in PHRASE_TOGGLE.items() if cfg[k] and (t is None or cfg[t] == 1)}
+    for a, pa in live.items():
+        for b, pb in live.items():
+            if a != b and pa in pb:
+                raise ValueError(
+                    f"{a} 的取值 {pa!r} 是 {b} 的取值 {pb!r} 的子串：一条评论会同时触发两句命令。请改成互不包含的短语")
+
+    for key in SCANNER_BOT_KEYS:
+        cfg.setdefault(key, cfg["bot_username"])
+        if not _is_clean_name(cfg[key]):
+            raise ValueError(
+                f"{key} 取值 {cfg[key]!r} 非法：规则与 bot_username 相同（用户名字符串，不带首尾空白、不含逗号或控制字符）")
+
+    calls = cfg.setdefault("inspector_max_scan_calls", 3)
+    if type(calls) is not int or not 1 <= calls <= 20:
+        raise ValueError(f"inspector_max_scan_calls 取值 {calls!r} 非法：1–20 的整数（每次 ScanSbom 调用约 $0.03）")
 
     # 三个摘要无默认、必配（spec 变量契约；N7 不允许隐式默认）：缺了的话 synth/部署都顺利，要等第一次
     # 真实评审才在容器里失败，MR 上只看到兜底那句笼统的「可能是拉取镜像失败…」。

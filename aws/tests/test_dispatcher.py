@@ -400,7 +400,7 @@ def test_run_task_never_emits_the_literal_string_none(field):
     handler_mod.run_task(ecs, _full_cfg(), dict(F, **{field: None}), "k")
     env = ecs.run_task.call_args.kwargs["overrides"]["containerOverrides"][0]["environment"]
     assert all(e["value"] != "None" for e in env), env
-    assert len(env) == 6, "值为 None 的那一项不传，其余照传"
+    assert len(env) == 7, "值为 None 的那一项不传，其余照传（六个报文标量 + LOCK_KEY + REVIEWERS，减去为 None 的那一项）"
 
 
 # ── M7：评论里的原因是 AWS 错误码，不是异常正文 ─────────────────────────────────
@@ -646,7 +646,7 @@ def test_mr_fields_are_strings_because_they_flow_into_container_env():
                  "source_branch": "probe/p2a08-20260927", "target_branch": "master",
                  "head_sha": "0731ec9d3a8cddf524bca91e6fe799b19d0b01f9",
                  "clone_url": "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app.git",
-                 "dedupe_extra": ""}
+                 "dedupe_extra": "", "reviewers": "kiro"}
     assert all(isinstance(v, str) for v in f.values()), f
 
 def test_note_fields_come_from_the_merge_request_object():
@@ -817,7 +817,9 @@ def test_handler_end_to_end_with_the_real_runtime_cfg_passes_the_fixture_values_
                    "HEAD_SHA": "0731ec9d3a8cddf524bca91e6fe799b19d0b01f9",
                    "BUSINESS_REPO_URL":
                        "https://codeup.aliyun.com/0123456789abcdef01234567/demo-app.git",
-                   "LOCK_KEY": "7215683#6#0731ec9d3a8cddf524bca91e6fe799b19d0b01f9"}, env
+                   "LOCK_KEY": "7215683#6#0731ec9d3a8cddf524bca91e6fe799b19d0b01f9",
+                   # Phase 2b：_set_runtime_env 不设 ENABLED_REVIEWERS（2a 部署的形状）→ 只有 Kiro
+                   "REVIEWERS": "kiro"}, env
     # 抢锁必须在 RunTask 之前（N3），且用的是同一个键（I1）
     assert table.put_item.call_args.kwargs["Item"]["pk"] == env["LOCK_KEY"]
     # issue 05 G3：云效令牌只在 RunTask 失败后的留痕里用得上，拉起成功时一次都不取
@@ -1722,3 +1724,116 @@ def test_an_empty_run_task_result_is_reported_with_the_ecs_failure_reason(failur
     body = posted[0][4]
     assert f"原因：`{want}`" in body, body
     assert "IndexError" not in body and "111122223333" not in body
+
+
+# ── Phase 2b R5：按评审员的评论命令（spec「调度器」，issue 04）───────────────────────────────
+ALL_ON = dict(CFG, enabled=("kiro", "inspector", "security"),
+              phrases={"inspector": "/inspector review", "security": "/security review", "all": "/review"})
+
+
+def _cmd(text, cfg):
+    body = _fix("note-mr-new.json")
+    _set_note_text(body, text)
+    kind, f = handler_mod.classify(NOTE_HDR, body, cfg)
+    return kind, (f or {}).get("reviewers")
+
+
+@pytest.mark.parametrize("text, want", [
+    ("/kiro review", "kiro"),
+    ("/inspector review", "inspector"),
+    ("/security review", "security"),
+    ("/kiro review 和 /inspector review", "kiro,inspector"),   # 一条评论点名两位 = 并集
+    ("麻烦 /review 一下", "kiro,inspector,security"),          # 「全部」= 全部已启用
+    ("/inspector review /review", "kiro,inspector,security"),
+])
+def test_a_command_reviews_exactly_the_reviewers_it_names(text, want):
+    assert _cmd(text, ALL_ON) == ("review", want)
+
+
+def test_a_command_for_a_disabled_reviewer_is_ignored_and_logged(capsys):
+    cfg = dict(ALL_ON, enabled=("kiro",))
+    assert _cmd("/inspector review", cfg) == ("ignore", None)
+    assert capsys.readouterr().out == "ignored reason=reviewer-disabled\n"
+    # 点名的里面有一位启用了：只评那一位，不打 reviewer-disabled
+    assert _cmd("/inspector review /kiro review", cfg) == ("review", "kiro")
+    assert capsys.readouterr().out == ""
+    # 「全部」只覆盖启用了的
+    assert _cmd("/review", cfg) == ("review", "kiro")
+
+
+def test_an_ordinary_comment_naming_nobody_is_ignored_silently(capsys):
+    assert _cmd("看起来不错", ALL_ON) == ("ignore", None)
+    assert capsys.readouterr().out == "", "普通评论不打任何日志（否则 reviewer-disabled 会被淹没）"
+
+
+def test_every_empty_phrase_is_skipped_and_all_empty_fails_closed():
+    # falsy 但有意义：`"" in note` 恒真
+    cfg = dict(ALL_ON, command_phrase="", phrases={"inspector": "", "security": "", "all": ""})
+    assert _cmd("随便说点什么", cfg) == ("ignore", None)
+    cfg = dict(ALL_ON, phrases={"inspector": "", "security": "/security review", "all": ""})
+    assert _cmd("随便说点什么", cfg) == ("ignore", None)
+    assert _cmd("/security review", cfg) == ("review", "security")
+
+
+def test_an_mr_event_reviews_every_enabled_reviewer():
+    kind, f = handler_mod.classify(MR_HDR, _fix("mr-opened.json"), ALL_ON)
+    assert (kind, f["reviewers"]) == ("review", "kiro,inspector,security")
+    kind, f = handler_mod.classify(MR_HDR, _fix("mr-opened.json"), CFG)   # 没有 enabled 键（2a 形状）
+    assert (kind, f["reviewers"]) == ("review", "kiro")
+
+
+def test_a_scanner_comment_never_triggers_a_review_even_though_its_footer_names_a_command():
+    # N5 扩写：扫描员的每种评论都带 kiro- 族标记，页脚印的是它们自己的短语
+    bk = load_lambda("backstop_handler_n5", ROOT / "lambda" / "backstop" / "handler.py")
+    bodies = [handler_mod.failed_comment("X", "inspector") + "\n评论 `/inspector review` 可重新评审",
+              bk.scanner_comment("inspector", 96) + "\n/review",
+              "# Inspector 依赖漏洞扫描\n<!-- kiro-inspector-review:abc1234 run:1 -->\n/inspector review"]
+    for text in bodies:
+        assert _cmd(text, dict(ALL_ON, bot_usernames=[])) == ("ignore", None), text
+
+
+def test_run_task_passes_reviewers_as_a_plain_string():
+    ecs = mock.Mock(); ecs.run_task.return_value = {"tasks": [{"taskArn": "a"}]}
+    handler_mod.run_task(ecs, _full_cfg(), dict(F, reviewers="kiro,inspector"), "k")
+    env = {e["name"]: e["value"] for e in
+           ecs.run_task.call_args.kwargs["overrides"]["containerOverrides"][0]["environment"]}
+    assert env["REVIEWERS"] == "kiro,inspector"
+
+
+def test_runtask_failure_posts_one_not_started_comment_per_reviewer_with_its_own_token(monkeypatch, capsys):
+    table, ecs = mock.Mock(), mock.Mock()
+    ecs.run_task.side_effect = bexc.ClientError({"Error": {"Code": "ThrottlingException"}}, "RunTask")
+    tokens = {"codeup-kiro/yunxiao-token-kiro": "pt-kiro", "codeup-kiro/yunxiao-token-inspector": "pt-insp"}
+    monkeypatch.setenv("YUNXIAO_TOKEN_ID", "codeup-kiro/yunxiao-token-kiro")
+    monkeypatch.setenv("YUNXIAO_TOKEN_INSPECTOR_ID", "codeup-kiro/yunxiao-token-inspector")
+    import os
+    monkeypatch.setattr(handler_mod.secret_fetch, "secret_from_env", lambda var: tokens[os.environ[var]])
+    posted = []
+    def post(org, repo, mr, token, body):
+        posted.append((token, body.splitlines()[1]))
+        return token != "pt-kiro"             # Kiro 那条被拒收：不得吞掉 Inspector 那条
+    monkeypatch.setattr(handler_mod.codeup_min, "post_comment", post)
+    resp = handler_mod.dispatch(ecs, table, _full_cfg(), dict(F, reviewers="kiro,inspector"))
+    assert resp["statusCode"] == 200
+    assert posted == [("pt-kiro", "<!-- kiro-dispatch-failed -->"),
+                      ("pt-insp", "<!-- kiro-dispatch-failed-inspector -->")]
+    assert capsys.readouterr().out == "cleanup-failed step=comment reason=PostFailed\n"
+
+
+@pytest.mark.parametrize("env, want", [({}, ("kiro",)), ({"INSPECTOR": "1"}, ("kiro", "inspector")),
+                                       ({"INSPECTOR": "1", "SECURITY_AGENT": "1"}, ("kiro", "inspector", "security"))])
+def test_runtime_cfg_derives_enabled_reviewers_from_the_two_toggles(monkeypatch, env, want):
+    _set_runtime_env(monkeypatch)
+    for k in ("INSPECTOR", "SECURITY_AGENT"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert handler_mod._runtime_cfg()["enabled"] == want
+
+
+@pytest.mark.parametrize("bad", ["", "true", "2", " 1"])
+def test_runtime_cfg_rejects_a_malformed_toggle_instead_of_defaulting(monkeypatch, bad):
+    _set_runtime_env(monkeypatch)
+    monkeypatch.setenv("INSPECTOR", bad)
+    with pytest.raises(ValueError):
+        handler_mod._runtime_cfg()
