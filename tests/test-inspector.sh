@@ -70,6 +70,17 @@ mkres '[{"bom-ref":"x","purl":"pkg:pypi/b@1"}]' "[$(vuln CVE-9 '[{"source":{"nam
 mkres '[{"bom-ref":"y","purl":"pkg:pypi/a@1"}]' "[$(vuln CVE-9 '[{"source":{"name":"NVD"},"severity":"low","method":"CVSSv31"}]' y)]" > "$tmp/r3.json"
 assert_eq "$(lib "inspector_merge '$tmp/ia.json' '$tmp/r2.json' '$tmp/r3.json' | jq -c '[.vulns[] | {id, introduced, n: (.components | length)}]'")" \
   '[{"id":"CVE-9","introduced":true,"n":2}]' "③ 跨块的同一个 id 合并；任一受影响组件是引入的 → 这条算引入"
+# 同一个 id 的各条记录严重级别不同：合并取最高的，与块的先后无关（复审 R1-2：原来取第一条，顺序一换结论就变）
+mkres '[{"bom-ref":"x","purl":"pkg:pypi/b@1"}]' "[$(vuln CVE-8 '[{"source":{"name":"NVD"},"severity":"low","method":"CVSSv31"}]' x)]" > "$tmp/r4.json"
+mkres '[{"bom-ref":"y","purl":"pkg:pypi/a@1"}]' "[$(vuln CVE-8 '[{"source":{"name":"NVD"},"severity":"critical","method":"CVSSv31"}]' y)]" > "$tmp/r5.json"
+for order in "r4 r5" "r5 r4"; do
+  set -- $order
+  assert_eq "$(lib "inspector_merge '$tmp/ia.json' '$tmp/$1.json' '$tmp/$2.json' | jq -c '[.vulns[] | {id, severity, rank}] + [.counts.introduced.critical]'")" \
+    '[{"id":"CVE-8","severity":"critical","rank":0},1]' "③ 同一个 id 跨块严重级别不同 → 取最高（块顺序 ${order}）"
+done
+mkres "$C" "[$(vuln CVE-7 '[{"source":{"name":"EPSS"},"severity":"none","method":"other"}]' a), $(vuln CVE-7 '[{"source":{"name":"GITHUB"},"severity":"high","method":"CVSSv31"}]' b)]" > "$tmp/r6.json"
+assert_eq "$(lib "inspector_merge '$tmp/ia.json' '$tmp/r6.json' | jq -r '.vulns[] | \"\(.id):\(.severity)\"'")" "CVE-7:high" \
+  "③ 同一块里重复的 id：unknown 在前、high 在后 → high"
 
 # ④ 与 Inspector 的 metadata 计数一致（规则是从真实输出里定下来的；fixture 换成真实输出后这条才有意义）
 got=$(lib "inspector_counts_vs_metadata '$FIX/scan-response.json'")

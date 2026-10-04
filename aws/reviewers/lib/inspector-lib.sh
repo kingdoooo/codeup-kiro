@@ -84,7 +84,9 @@ inspector_merge() {  # <introduced.json> <结果文件…>
                                            // prop("amazon:inspector:sbom_generator:source_path") // "")),
                               introduced: (($c.purl | ckey) as $k | ($ik | index($k)) != null) } ] } ]
     | group_by(.id)
-    | map(.[0] + {components: ([.[].components[]] | unique_by(.purl)),
+    # 同一个 id 的各条记录（多块、多组件）严重级别可能不同：取最高的，与记录先后无关（复审 R1-2）
+    | map(.[0] + {severity: ([.[].severity] | sort_by(sevrank) | .[0]),
+                  components: ([.[].components[]] | unique_by(.purl)),
                   kev: any(.[]; .kev), exploit: any(.[]; .exploit), malicious: any(.[]; .malicious)})
     | map(. + {rank: (.severity | sevrank), introduced: any(.components[]; .introduced)})
     | sort_by(.rank, .id)
