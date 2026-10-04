@@ -7,11 +7,12 @@ from aws_cdk import (
     aws_ecs as ecs,
     aws_iam as iam,
     aws_logs as logs,
+    aws_s3 as s3,
     aws_secretsmanager as secretsmanager,
 )
 from constructs import Construct
 
-from config import DEFAULT_COMMAND_PHRASE
+from config import DEFAULT_COMMAND_PHRASE, PHRASE_DEFAULTS
 
 # aws/executor/Dockerfile 的构建上下文是仓库根（COPY scripts/ prompts/ kiro/ 都是相对仓库根的路径），
 # 这里必须给出同一个根，否则 DockerImageAsset 的目录内容与 Dockerfile 里的 COPY 源路径对不上。
@@ -37,6 +38,24 @@ def rerun_hint(cfg):
     if cfg.get("review_command", 0) == 1 and phrase:
         return f"评论 `{phrase}` 可重新评审"
     return RERUN_HINT_PUSH
+
+def scanner_rerun_hint(cfg, phrase_key):
+    """扫描员页脚那句「怎么重新评审」：与 rerun_hint 同一规则（开关为 1 且这一句短语非空才承诺评论命令）。"""
+    phrase = str(cfg.get(phrase_key, PHRASE_DEFAULTS[phrase_key]) or "")
+    if cfg.get("review_command", 0) == 1 and phrase:
+        return f"评论 `{phrase}` 可重新评审"
+    return RERUN_HINT_PUSH
+
+
+def scanners_on(cfg):
+    """启用了的扫描员（按 reviewers 的固定顺序）。开关按 `type(v) is int` 读（True == 1 的坑，见 config.default_bot_usernames）。"""
+    out = []
+    for rid, toggle in (("inspector", "inspector"), ("security", "security_agent")):
+        v = cfg.get(toggle)
+        if type(v) is int and v == 1:
+            out.append(rid)
+    return out
+
 
 # 评审行为变量：config.yaml 键 → (容器环境变量名, 缺省值)。缺省值与 scripts/ 里的 `${VAR:-默认}`
 # 逐项一致（tests/test_cdk_assertions.py 读脚本比对），写进任务定义是为了让取值在任务定义里看得见，
@@ -194,3 +213,112 @@ class ExecutorStack(cdk.Stack):
         # 「任务角色需要 dynamodb:UpdateItem 与 logs」（租约之后多一个 GetItem），两个角色都持有虽有重叠但各自都是最小授权
         # （都只scope 到这一个日志组），不是通配符。
         log_group.grant_write(self.task_role)
+
+        # ── Phase 2b：扫描任务（Task B）与输入桶。任一扫描开关为 1 才存在（I7：都为 0 时模板与 2a 相同）──
+        self.scan_task_definition = None
+        self.scan_bucket = None
+        scanners = scanners_on(cfg)
+        if scanners:
+            self._add_scan_task(cfg, state, image_asset, log_group, scanners)
+
+    def _add_scan_task(self, cfg, state, image_asset, log_group, scanners):
+        account = cdk.Aws.ACCOUNT_ID
+        # 输入桶（spec S3）：名字由 CloudFormation 生成（不可预测——AWS 安全公告 2026-105 的抢注教训）；公共访问全挡、
+        # BucketOwnerEnforced、只许 TLS、SSE-S3；按前缀的生命周期：inspector/ 1 天（SBOM）、security/ 7 天（ADR-0003 的归档）。
+        # RETAIN：里面可能有客户源码的归档，删栈不该顺手删数据（与两张表、日志组同一策略；删不删由运维决定）。
+        self.scan_bucket = s3.Bucket(
+            self, "ScanInputs",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+            object_ownership=s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+            removal_policy=cdk.RemovalPolicy.RETAIN,
+            lifecycle_rules=[
+                s3.LifecycleRule(id="inspector-1d", prefix="inspector/", expiration=cdk.Duration.days(1)),
+                s3.LifecycleRule(id="security-7d", prefix="security/", expiration=cdk.Duration.days(7)),
+            ],
+        )
+        prefixes = [f"{rid}/" for rid in scanners]
+
+        self.scan_task_role = iam.Role(
+            self, "ScanTaskRole", assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"))
+        # 扫描任务的密钥只有启用了的扫描员各自的云效令牌（S2）；**没有** Kiro API Key 与 Kiro 的令牌
+        scan_secrets = {}
+        if "inspector" in scanners:
+            scan_secrets["YUNXIAO_TOKEN_INSPECTOR"] = ecs.Secret.from_secrets_manager(
+                secretsmanager.Secret.from_secret_name_v2(
+                    self, "YunxiaoTokenInspector", "codeup-kiro/yunxiao-token-inspector"))
+        if "security" in scanners:
+            scan_secrets["YUNXIAO_TOKEN_SECURITY"] = ecs.Secret.from_secrets_manager(
+                secretsmanager.Secret.from_secret_name_v2(
+                    self, "YunxiaoTokenSecurity", "codeup-kiro/yunxiao-token-security"))
+
+        self.scan_task_definition = ecs.FargateTaskDefinition(
+            self, "ScanTaskDef",
+            cpu=cfg.get("scan_cpu", 512),
+            memory_limit_mib=cfg.get("scan_memory_mib", 1024),
+            task_role=self.scan_task_role,
+            runtime_platform=ecs.RuntimePlatform(
+                cpu_architecture=ecs.CpuArchitecture.X86_64,
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+            ),
+        )
+        self.scan_container_name = "scan"
+        self.scan_task_definition.add_container(
+            self.scan_container_name,
+            container_name=self.scan_container_name,
+            # 同一个镜像资产（R2）：一份已探测摘要名单、一次摘要引导；只换启动命令
+            image=ecs.ContainerImage.from_docker_image_asset(image_asset),
+            entry_point=["/bin/bash", "-p", "/opt/integration/scan-entrypoint.sh"],
+            logging=ecs.LogDrivers.aws_logs(stream_prefix="scan", log_group=log_group),
+            environment={
+                "KIRO_IMAGE_DIGESTS": cfg["kiro_image_digests"],
+                "YUNXIAO_ORG_ID": cfg["org_id"],
+                "LOCK_TABLE": state.lock_table.table_name,
+                "AWS_REGION": cfg["region"],
+                "TZ": "CST-8",
+                "MAX_COMMENT_BYTES": str(cfg.get("max_comment_bytes", 60000)),
+                "SCAN_BUCKET": self.scan_bucket.bucket_name,
+                "SCAN_BUCKET_OWNER": account,
+                "INSPECTOR_BOT_USERNAME": cfg.get("inspector_bot_username", cfg["bot_username"]),
+                "SECURITY_BOT_USERNAME": cfg.get("security_bot_username", cfg["bot_username"]),
+                "INSPECTOR_RERUN_HINT": scanner_rerun_hint(cfg, "inspector_command_phrase"),
+                "SECURITY_RERUN_HINT": scanner_rerun_hint(cfg, "security_command_phrase"),
+                "INSPECTOR_MAX_SCAN_CALLS": str(cfg.get("inspector_max_scan_calls", 3)),
+            },
+            secrets=scan_secrets,
+        )
+        state.lock_table.grant(self.scan_task_role, "dynamodb:UpdateItem", "dynamodb:GetItem")
+        log_group.grant_write(self.scan_task_role)
+        self.scan_task_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:GetObject"],
+            resources=[self.scan_bucket.arn_for_objects(f"{p}*") for p in prefixes]))
+        if "inspector" in scanners:
+            # ScanSbom 不支持资源级授权（docs：Resource "*"）；Inspector 不需要在账号里启用
+            self.scan_task_role.add_to_policy(iam.PolicyStatement(
+                actions=["inspector-scan:ScanSbom"], resources=["*"]))
+
+        # 执行器（Task A）这一侧：只写自己那几个前缀、只能拉起这一个扫描任务定义、只能把那两个角色交给 ECS
+        self.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:PutObject"],
+            resources=[self.scan_bucket.arn_for_objects(f"{p}*") for p in prefixes]))
+        self.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["ecs:RunTask"],
+            resources=[f"arn:{cdk.Aws.PARTITION}:ecs:{cdk.Aws.REGION}:{account}"
+                       f":task-definition/{self.scan_task_definition.family}:*"],
+            conditions={"ArnEquals": {"ecs:cluster": self.cluster.cluster_arn}}))
+        self.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:PassRole"],
+            resources=[self.scan_task_role.role_arn, self.scan_task_definition.execution_role.role_arn],
+            conditions={"StringEquals": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}}))
+        for name, value in (
+                ("INSPECTOR", str(cfg.get("inspector", 0))),
+                ("SECURITY_AGENT", str(cfg.get("security_agent", 0))),
+                ("SCAN_CLUSTER", self.cluster.cluster_name),
+                ("SCAN_TASK_DEFINITION", self.scan_task_definition.family),
+                ("SCAN_CONTAINER_NAME", self.scan_container_name),
+                ("SCAN_SUBNETS", ",".join(s.subnet_id for s in self.vpc.public_subnets)),
+                ("SCAN_SECURITY_GROUPS", self.task_security_group.security_group_id),
+                ("SCAN_BUCKET", self.scan_bucket.bucket_name),
+                ("SCAN_BUCKET_OWNER", account)):
+            self.container.add_environment(name, value)

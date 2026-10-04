@@ -2012,3 +2012,103 @@ def test_dispatcher_and_backstop_get_scanner_token_names_only_for_enabled_scanne
     assert disp["INSPECTOR"] == "1" and disp["SECURITY_AGENT"] == "0"
     off = _all_envs(_full_cfg())
     assert not any("YUNXIAO_TOKEN_INSPECTOR_ID" in env for env in off.values())
+
+
+# ── Phase 2b：扫描任务（Task B）与输入桶（issue 05，spec「S2」「S3」「I7」）─────────────────────
+def _scan_templates(**over):
+    app = cdk.App()
+    state = StateStack(app, "S", cfg={"region": "us-west-2"})
+    executor = ExecutorStack(app, "E", cfg=_full_cfg(**over), state=state)
+    return executor, Template.from_stack(executor)
+
+
+def _td_by_container(t, name):
+    hits = [v for v in t.find_resources("AWS::ECS::TaskDefinition").values()
+            if v["Properties"]["ContainerDefinitions"][0]["Name"] == name]
+    assert len(hits) == 1, (name, len(hits))
+    return hits[0]["Properties"]
+
+
+def _policy_statements(t, role_logical_prefix):
+    out = []
+    for k, v in t.find_resources("AWS::IAM::Policy").items():
+        roles = json.dumps(v["Properties"].get("Roles", []))
+        # 按 Ref 的逻辑 id **开头**匹配：只写子串的话 "TaskRole" 会把 "ScanTaskRole" 一起算进来
+        if f'"Ref": "{role_logical_prefix}' in roles:
+            out += v["Properties"]["PolicyDocument"]["Statement"]
+    return out
+
+
+def test_with_both_toggles_off_there_is_no_scan_task_no_bucket_and_no_new_executor_env():
+    _, t = _scan_templates()
+    assert len(t.find_resources("AWS::ECS::TaskDefinition")) == 1
+    assert t.find_resources("AWS::S3::Bucket") == {}
+    env = {e["Name"] for e in _td_by_container(t, "review")["ContainerDefinitions"][0]["Environment"]}
+    assert not {n for n in env if n.startswith("SCAN_") or n in ("INSPECTOR", "SECURITY_AGENT")}, env
+
+
+def test_inspector_on_adds_a_scan_task_on_the_same_image_with_its_own_entrypoint():
+    _, t = _scan_templates(inspector=1)
+    review, scan = _td_by_container(t, "review"), _td_by_container(t, "scan")
+    rc, sc = review["ContainerDefinitions"][0], scan["ContainerDefinitions"][0]
+    assert sc["Image"] == rc["Image"], "R2：扫描任务与执行器同一个镜像"
+    assert sc["EntryPoint"] == ["/bin/bash", "-p", "/opt/integration/scan-entrypoint.sh"]
+    assert scan["RuntimePlatform"]["CpuArchitecture"] == "X86_64"
+    senv = {e["Name"]: e["Value"] for e in sc["Environment"]}
+    assert senv["KIRO_IMAGE_DIGESTS"] == {e["Name"]: e["Value"] for e in rc["Environment"]}["KIRO_IMAGE_DIGESTS"], \
+        "同一份已探测摘要名单"
+    assert senv["INSPECTOR_MAX_SCAN_CALLS"] == "3"
+    # S2：扫描任务只有扫描员的令牌；没有 Kiro 的密钥
+    assert {s["Name"] for s in sc["Secrets"]} == {"YUNXIAO_TOKEN_INSPECTOR"}
+    assert {s["Name"] for s in rc["Secrets"]} == {"KIRO_API_KEY", "YUNXIAO_TOKEN"}, "执行器不拿扫描员的令牌"
+    renv = {e["Name"] for e in rc["Environment"]}
+    assert {"SCAN_CLUSTER", "SCAN_TASK_DEFINITION", "SCAN_CONTAINER_NAME", "SCAN_SUBNETS",
+            "SCAN_SECURITY_GROUPS", "SCAN_BUCKET", "SCAN_BUCKET_OWNER", "INSPECTOR", "SECURITY_AGENT"} <= renv
+
+
+def test_the_scan_bucket_is_private_tls_only_owner_enforced_and_expires_by_prefix():
+    _, t = _scan_templates(inspector=1)
+    (b,) = t.find_resources("AWS::S3::Bucket").values()
+    p = b["Properties"]
+    assert "BucketName" not in p, "S3：桶名由 CloudFormation 生成，不可预测"
+    assert p["PublicAccessBlockConfiguration"] == {"BlockPublicAcls": True, "BlockPublicPolicy": True,
+                                                   "IgnorePublicAcls": True, "RestrictPublicBuckets": True}
+    assert p["OwnershipControls"]["Rules"] == [{"ObjectOwnership": "BucketOwnerEnforced"}]
+    assert p["BucketEncryption"]["ServerSideEncryptionConfiguration"][0]["ServerSideEncryptionByDefault"]["SSEAlgorithm"] == "AES256"
+    rules = {r["Prefix"]: r["ExpirationInDays"] for r in p["LifecycleConfiguration"]["Rules"]}
+    assert rules == {"inspector/": 1, "security/": 7}
+    assert b["DeletionPolicy"] == "Retain"
+    (pol,) = t.find_resources("AWS::S3::BucketPolicy").values()
+    deny = [s for s in pol["Properties"]["PolicyDocument"]["Statement"] if s["Effect"] == "Deny"]
+    assert any(s.get("Condition", {}).get("Bool", {}).get("aws:SecureTransport") == "false" for s in deny)
+
+
+def test_the_scan_task_role_can_only_read_its_prefixes_and_call_scansbom():
+    _, t = _scan_templates(inspector=1)
+    st = _policy_statements(t, "ScanTaskRole")
+    actions = sorted({a for s in st for a in ([s["Action"]] if isinstance(s["Action"], str) else s["Action"])})
+    assert actions == ["dynamodb:GetItem", "dynamodb:UpdateItem", "inspector-scan:ScanSbom",
+                       "logs:CreateLogStream", "logs:PutLogEvents", "s3:GetObject"], actions
+    s3_res = json.dumps([s["Resource"] for s in st if s["Action"] == "s3:GetObject"])
+    assert "inspector/*" in s3_res and "security/*" not in s3_res, s3_res
+
+
+def test_the_executor_may_only_put_its_prefixes_run_the_scan_task_and_pass_its_two_roles():
+    executor, t = _scan_templates(inspector=1)
+    st = _policy_statements(t, "TaskRole")
+    st = [s for s in st if (s["Action"] if isinstance(s["Action"], str) else s["Action"][0]).split(":")[0] in ("s3", "ecs", "iam")]
+    by = {s["Action"] if isinstance(s["Action"], str) else tuple(s["Action"]): s for s in st}
+    assert set(by) == {"s3:PutObject", "ecs:RunTask", "iam:PassRole"}, set(by)
+    assert "inspector/*" in json.dumps(by["s3:PutObject"]["Resource"])
+    assert "ecs:cluster" in json.dumps(by["ecs:RunTask"]["Condition"])
+    assert by["iam:PassRole"]["Condition"] == {"StringEquals": {"iam:PassedToService": "ecs-tasks.amazonaws.com"}}
+    assert len(by["iam:PassRole"]["Resource"]) == 2
+
+
+def test_security_agent_on_adds_only_its_own_token_and_prefix():
+    _, t = _scan_templates(security_agent=1)
+    sc = _td_by_container(t, "scan")["ContainerDefinitions"][0]
+    assert {s["Name"] for s in sc["Secrets"]} == {"YUNXIAO_TOKEN_SECURITY"}
+    st = _policy_statements(t, "ScanTaskRole")
+    assert not any("inspector-scan" in json.dumps(s["Action"]) for s in st), "Inspector 没启用就不给 ScanSbom"
+    assert "security/*" in json.dumps([s["Resource"] for s in st if s["Action"] == "s3:GetObject"])
