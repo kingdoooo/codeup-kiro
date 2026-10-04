@@ -143,6 +143,8 @@ source "$PKG/scripts/lib/git-retry.sh"
 source "$PKG/lib/lease.sh"
 # 锁记录上的状态标记与扫描任务派发（lib/scan-dispatch.sh，Phase 2b）：同样只有函数定义。
 source "$PKG/lib/scan-dispatch.sh"
+# 扫描员的输入准备（lib/scan-input.sh：钉死属性的 git 导出、sbomgen；只有函数定义）
+source "$PKG/lib/scan-input.sh"
 retry_git_429 /usr/bin/git clone --no-tags "$clone_url" \
   "$WORKROOT/business" >/dev/null 2>"$GIT_ERR" \
   || { echo "clone 业务库失败（凭证、网络或仓库权限）" >&2; git_err_tail; exit 91; }
