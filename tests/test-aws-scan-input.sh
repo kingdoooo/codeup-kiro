@@ -117,10 +117,13 @@ hj="$tmp/work/scan/inspector/head.cdx.json"
 assert_eq "$(/usr/bin/jq -r '.components[0].properties[0].value' "$hj" 2>/dev/null)" "requirements.txt" \
   "③ 组件路径改写成相对树根（执行器内部路径不进 S3、Inspector 与 MR 评论——Task 1 Q9）"
 assert_eq "$(/usr/bin/jq -r '.metadata.component.name' "$hj" 2>/dev/null)" "." "③ 根组件名（被扫目录的绝对路径）改成 ."
+assert_eq "$(ls -A "$tmp/work/scan/inspector" | sort | tr '\n' ' ')" "base.cdx.json head.cdx.json " \
+  "③ 导出的两棵树用完即删、只留两份清单：不在 Kiro 评审期间占着两份仓库大小的磁盘（F2；复审 I-3）"
 assert_eq "$(prep MR_TARGET_BRANCH=)" "failed:no-target-branch" "③ 没有目标分支 → failed:no-target-branch"
 assert_eq "$(prep MR_TARGET_BRANCH=nope)" "failed:merge-base" "③ 目标分支在 clone 里没有 → failed:merge-base"
 assert_eq "$(prep STUB_MODE=fail)" "failed:sbomgen" "③ sbomgen 失败 → failed:sbomgen"
 assert_contains "$(cat "$tmp/err")" "  sbomgen: boom" "③ sbomgen 的报错尾巴进日志（固定前缀）"
+assert_eq "$(ls -A "$tmp/work/scan/inspector" 2>/dev/null | LC_ALL=C grep -vE '\.cdx\.json$' || true)" "" "③ 失败路径上导出的树同样删掉"
 assert_eq "$(prep FAKE_TIMEOUT=1)" "failed:sbomgen-timeout" "③ sbomgen 超时 → failed:sbomgen-timeout"
 assert_eq "$(prep STUB_MODE=notcdx)" "failed:sbom-not-cyclonedx" "③ 输出不是 CycloneDX → failed:sbom-not-cyclonedx"
 assert_eq "$(prep SBOM_MAX_BYTES=10)" "failed:sbom-too-large" "③ 输出超过上限 → failed:sbom-too-large"

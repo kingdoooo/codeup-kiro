@@ -63,7 +63,16 @@ scan_put() {  # <评审员> <名字> <本地文件>
 }
 
 # Inspector 的输入：head 与 merge-base 两棵树各一份 CycloneDX。输出一行输入状态（scan_prep 的约定）。
+# 导出的树每跑完一次 sbomgen 就删，任何返回路径上也都删（只留两份清单）：两份仓库大小的副本不能在 Kiro 评审期间
+# 占着同一块临时盘（F2：扫描员的输入准备不改变 Kiro 的执行；复审 I-3）。
 scan_prep_inspector() {
+  local st
+  st=$(_scan_prep_inspector_run)
+  /bin/rm -rf "$WORKROOT/scan/inspector/head" "$WORKROOT/scan/inspector/base"
+  printf '%s' "$st"
+}
+
+_scan_prep_inspector_run() {
   local base dir="$WORKROOT/scan/inspector" side rc
   [[ -n "${MR_TARGET_BRANCH:-}" ]] || { printf 'failed:no-target-branch'; return 0; }
   # 目标分支用完整的 refs/remotes/ 名字：短名字会被同名的本地分支或标签遮蔽（entrypoint 检出段那两个坑的同一类）
@@ -73,6 +82,7 @@ scan_prep_inspector() {
     if [[ "$side" == head ]]; then scan_export_tree "$HEAD_SHA" "$dir/$side" || { printf 'failed:export'; return 0; }
     else scan_export_tree "$base" "$dir/$side" || { printf 'failed:export'; return 0; }; fi
     rc=0; scan_sbomgen "$dir/$side" "$dir/$side.cdx.json" || rc=$?
+    /bin/rm -rf "${dir:?}/$side"
     case "$rc" in
       0) ;;
       124|137) printf 'failed:sbomgen-timeout'; return 0 ;;
