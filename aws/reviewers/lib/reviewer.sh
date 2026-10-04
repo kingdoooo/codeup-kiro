@@ -21,6 +21,11 @@ SHORT_SHA="${HEAD_SHA:0:7}"
 log() { echo "[${REVIEWER_ID}] $*" >&2; }
 # 还没定位过上一条汇总时的初值（set -u 下 summary_post 要读它们）
 PRIOR_COMMENT_ID=""; PRIOR_HISTORY_FILE=""; REVIEW_RUN=1; BOT_USERNAME=""
+# 本次发布随机串：与 kiro-review.sh 同一机制、同一处时机（任何评论渲染之前）。评论头据此写发布随机串行，汇总 POST 应答丢失时
+# codeup_post_comment 的探针靠它分辨「本次建的」与旧评论，否则只能重发、在 MR 上留下两条同一评审员的汇总（I4；复审 R1-1）。
+# 只用强随机；取不到就留空并留痕（探针本次不作数），不用低熵回退。
+REVIEW_POST_NONCE=$(review_new_nonce_strict) \
+  || { log "警告：取不到强随机数（/dev/urandom 不可读），本次不写发布随机串，汇总 POST 应答丢失时的探针本次不作数"; REVIEW_POST_NONCE=""; }
 
 # 本评审员的失败评论（同一渲染器、同一标记族）。固定文案 + 枚举代号（F3）：调用方不得把服务端自由文本拼进来。
 # 发出去 → exit 0（这也是终态：MR 上有这位评审员自己的说明）；发不出去 → exit 1（兜底接手）。
