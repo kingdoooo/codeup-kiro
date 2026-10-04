@@ -23,27 +23,36 @@ scan_export_tree() {  # <40 位提交> <目标目录> → rc 0 / 非 0
 
 # 以非 root、空环境、空 cwd、有界时长跑 sbomgen（S1）：以 root 跑时 /proc/1/environ（entrypoint 的环境，含云效令牌与
 # Kiro API Key）对它可读；非 root 让 root 进程的 environ 不可读（内核按属主 0400），是独立于「删符号链接」的第二道。
+# HOME 是每次新建、只属于 65534 的 0700 私有目录：sbomgen 要在 $HOME/.inspector-sbomgen 建工作目录（issue 01 实测：不可写的
+# HOME 让它必然以 WorkDirInitFailed 失败）。--skip-cloud-metadata：不探测实例元数据（行为不随所在环境变）。
+# 成功后把组件路径改写成相对树根、根组件名改成 .：执行器内部路径不进 S3、Inspector 与 MR 评论。
 # rc：0 = 写好了 <输出文件>；124 = 超时；3 = 输出超过 SBOM_MAX_BYTES；4 = 输出不是 CycloneDX；其它 = sbomgen 失败。
 scan_sbomgen() {  # <树> <输出文件>
-  local tree="$1" out="$2" od cwd rc=0 size
-  od=$(/usr/bin/mktemp -d) && cwd=$(/usr/bin/mktemp -d) || return 1
-  /bin/chmod 0777 "$od" && /bin/chmod 0755 "$cwd" && /bin/chmod -R a+rX "$tree" || return 1
+  local tree="$1" out="$2" od cwd home rc=0 size
+  od=$(/usr/bin/mktemp -d) && cwd=$(/usr/bin/mktemp -d) && home=$(/usr/bin/mktemp -d) || return 1
+  /bin/chmod 0777 "$od" && /bin/chmod 0755 "$cwd" && /bin/chmod 0700 "$home" && /bin/chmod -R a+rX "$tree" || return 1
+  if [[ "$(/usr/bin/id -u)" == 0 ]]; then /bin/chown 65534:65534 "$home" || return 1; fi
   ( cd "$cwd" && /usr/bin/timeout -k 10 "${SBOMGEN_TIMEOUT:-300}" \
       /usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs \
-      /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
-      /opt/sbomgen/inspector-sbomgen directory --path "$tree" -o "$od/sbom.json" --disable-progress-bar ) \
+      /usr/bin/env -i PATH=/usr/bin:/bin HOME="$home" \
+      /opt/sbomgen/inspector-sbomgen directory --path "$tree" -o "$od/sbom.json" --skip-cloud-metadata ) \
     >/dev/null 2>"$od/err" || rc=$?
   if [[ "$rc" != 0 ]]; then
     # 报错尾巴只进容器日志（不进 MR 评论）：逐行去控制字符、截到 200 字节、加固定前缀（与 git 报错尾巴同一处理）
     /usr/bin/tail -n 3 "$od/err" | LC_ALL=C /usr/bin/tr -d '\000-\010\013-\037\177' \
       | LC_ALL=C /usr/bin/cut -c1-200 | LC_ALL=C /usr/bin/sed 's/^/  sbomgen: /' >&2 || true
-    /bin/rm -rf "$od" "$cwd"; return "$rc"
+    /bin/rm -rf "$od" "$cwd" "$home"; return "$rc"
   fi
+  /bin/rm -rf "$home"
   size=$(/usr/bin/wc -c < "$od/sbom.json" 2>/dev/null | /usr/bin/tr -d ' ') || size=""
   if [[ ! "$size" =~ ^[0-9]+$ ]] || (( size > ${SBOM_MAX_BYTES:-52428800} )); then /bin/rm -rf "$od" "$cwd"; return 3; fi
-  /usr/bin/jq -e '.bomFormat == "CycloneDX" and (.components | type) == "array"' "$od/sbom.json" >/dev/null 2>&1 \
+  /usr/bin/jq -e --arg t "$tree" '
+      select(.bomFormat == "CycloneDX" and (.components | type) == "array")
+      | (.components[].properties[]? | select(.name == "amazon:inspector:sbom_generator:source_path") | .value) |= ltrimstr($t + "/")
+      | if (.metadata.component | type) == "object" then .metadata.component.name = "." else . end' \
+      "$od/sbom.json" > "$od/rel.json" 2>/dev/null \
     || { /bin/rm -rf "$od" "$cwd"; return 4; }
-  /bin/mv "$od/sbom.json" "$out" && /bin/rm -rf "$od" "$cwd"
+  /bin/mv "$od/rel.json" "$out" && /bin/rm -rf "$od" "$cwd"
 }
 
 # 上传到输入桶（S3：不可变键 <评审员>/<仓库>/<提交>/<run_id>/<名字>，每次调用都带 ExpectedBucketOwner）

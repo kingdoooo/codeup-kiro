@@ -52,13 +52,14 @@ printf '#!/bin/sh\nshift\n[ -n "${FAKE_TIMEOUT:-}" ] && exit 124\nexec "$@"\n' >
 cat > "$tmp/sbomgen" <<STUB
 #!/bin/sh
 env > "$tmp/env.out"
+{ echo "home=\$HOME"; if [ -d "\$HOME" ] && [ -w "\$HOME" ]; then echo homeok=yes; else echo homeok=no; fi; } > "$tmp/home.out"
 STUB_MODE=\$(cat "$tmp/stub.mode" 2>/dev/null || echo ok)
 STUB
 cat >> "$tmp/sbomgen" <<'STUB'
-# 参数：directory --path <树> -o <输出> --disable-progress-bar
-[ "$1" = directory ] && [ "$2" = --path ] && [ "$4" = -o ] && [ "$6" = --disable-progress-bar ] || exit 9
+# 参数：directory --path <树> -o <输出> --skip-cloud-metadata（Task 1：--disable-progress-bar 已废弃、升级后会报错，不再传）
+[ "$#" = 6 ] && [ "$1" = directory ] && [ "$2" = --path ] && [ "$4" = -o ] && [ "$6" = --skip-cloud-metadata ] || exit 9
 case "${STUB_MODE:-ok}" in
-  ok) printf '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"name":"requests","purl":"pkg:pypi/requests@x"}]}' > "$5" ;;
+  ok) printf '{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{"component":{"bom-ref":"comp-1","type":"file","name":"%s"}},"components":[{"name":"requests","purl":"pkg:pypi/requests@x","properties":[{"name":"amazon:inspector:sbom_generator:source_path","value":"%s/requirements.txt"}]}]}' "$3" "$3" > "$5" ;;
   fail) echo "boom" >&2; exit 1 ;;
   notcdx) echo '{"hello":1}' > "$5" ;;
 esac
@@ -108,6 +109,14 @@ assert_eq "$(grep -c -- '--expected-bucket-owner' "$tmp/aws.argv")" "2" "③ 每
 assert_eq "$(awk 'p{print; p=0} $0=="--expected-bucket-owner"{p=1}' "$tmp/aws.argv" | sort -u)" "123456789012" "③ 期望的属主是本账号"
 envnames=$(sed 's/=.*//' "$tmp/env.out" | LC_ALL=C grep -vE '^(PWD|SHLVL|_|OLDPWD)$' | sort | tr '\n' ' ')
 assert_eq "$envnames" "HOME PATH " "③ S1：sbomgen 在空环境里跑（env -i，只有 PATH 与 HOME）"
+home=$(sed -n 's/^home=//p' "$tmp/home.out")
+assert_eq "$(sed -n 's/^homeok=//p' "$tmp/home.out")" "yes" "③ sbomgen 的 HOME 是一个存在且可写的目录（Task 1：它要在 \$HOME/.inspector-sbomgen 建工作目录，不可写就必然失败）"
+assert_eq "$([ "$home" != /nonexistent ] && [ -n "$home" ] && echo yes)" "yes" "③ HOME 不是 /nonexistent"
+assert_eq "$([ -e "$home" ] && echo yes || echo no)" "no" "③ 私有 HOME 用完删掉"
+hj="$tmp/work/scan/inspector/head.cdx.json"
+assert_eq "$(/usr/bin/jq -r '.components[0].properties[0].value' "$hj" 2>/dev/null)" "requirements.txt" \
+  "③ 组件路径改写成相对树根（执行器内部路径不进 S3、Inspector 与 MR 评论——Task 1 Q9）"
+assert_eq "$(/usr/bin/jq -r '.metadata.component.name' "$hj" 2>/dev/null)" "." "③ 根组件名（被扫目录的绝对路径）改成 ."
 assert_eq "$(prep MR_TARGET_BRANCH=)" "failed:no-target-branch" "③ 没有目标分支 → failed:no-target-branch"
 assert_eq "$(prep MR_TARGET_BRANCH=nope)" "failed:merge-base" "③ 目标分支在 clone 里没有 → failed:merge-base"
 assert_eq "$(prep STUB_MODE=fail)" "failed:sbomgen" "③ sbomgen 失败 → failed:sbomgen"
@@ -121,14 +130,16 @@ assert_eq "$(prep FAKE_S3_FAIL=1)" "failed:upload" "③ 上传失败 → failed:
 if [[ "$(uname -s)" == Linux && "$(id -u)" == 0 && -x /usr/bin/setpriv ]]; then
     cat > "$tmp/sbomgen" <<STUB
 #!/bin/sh
-{ echo "uid=\$(id -u)"; if cat /proc/1/environ >/dev/null 2>&1; then echo environ=readable; else echo environ=denied; fi; } > "$tmp/s1.out"
+{ echo "uid=\$(id -u)"; if cat /proc/1/environ >/dev/null 2>&1; then echo environ=readable; else echo environ=denied; fi; } > "$tmp/s1/s1.out"
 printf '{"bomFormat":"CycloneDX","components":[]}' > "\$5"
 STUB
   chmod +x "$tmp/sbomgen"
+  # mktemp -d 是 0700：不放开，uid 65534 连替身都执行不了（④ 就会因为权限而不是因为 S1 红）。结果写进一个 0777 的子目录。
+  chmod 0755 "$tmp"; mkdir -p "$tmp/s1"; chmod 0777 "$tmp/s1"
   rm -rf "$tmp/work/scan"; mkdir -p "$tmp/tree"; echo x > "$tmp/tree/a"
   SETPRIV="/usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs" \
     run_lib "scan_sbomgen '$tmp/tree' '$tmp/s1.json'" 2>"$tmp/err"
-  assert_eq "$(cat "$tmp/s1.out")" "uid=65534
+  assert_eq "$(cat "$tmp/s1/s1.out")" "uid=65534
 environ=denied" "④ S1：sbomgen 以 uid 65534 运行、读不到 PID 1（root）的 environ"
 else
   echo "SKIP: ④ S1 真跑需要 Linux + root + /usr/bin/setpriv（构建机容器测 ct.sh 里会跑）" >&2
