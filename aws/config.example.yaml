@@ -32,7 +32,7 @@ review_command: 0
 # 扫描评审员（Phase 2b）：Inspector（依赖漏洞）与 Security Agent（安全分析）。任一为 1 → 部署扫描任务（Task B）与输入桶；
 # 都为 0 → 二者都不存在、MR 上与 2a 相同。各自要一个云效令牌密钥（setup-guide.md 第 3 节；PoC 可与 Kiro 用同一个 PAT）。
 inspector: 0
-security_agent: 0
+security_agent: 0   # 预留：Security Agent 评审员尚未实现，写 1 会被 synth 拒绝
 
 # ── 可选：评审行为（执行器环境；默认值与 scripts/ 里的缺省值逐项一致，取值语义同 Flow 档位）──
 # inline_profile: quiet         # INLINE_PROFILE：quiet / balanced / critical

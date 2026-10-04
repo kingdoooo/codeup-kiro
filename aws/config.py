@@ -194,4 +194,10 @@ def load_config(path):
             "源码的模型推理可能被路由到 any commercial AWS Region；"
             "其余六个区域为地理跨区推理，留在本地理边界内。", flush=True)
 
+    # 开关、档案与 security/ 前缀是为 Security Agent 预留的接口，评审员本身还没有实现（没有 reviewers/security.sh）：
+    # 开了它每个 MR 都只得到一条兜底，SA 的令牌密钥（按手册不该创建）缺失时扫描任务起不来、Inspector 也跟着只剩兜底。
+    if cfg["security_agent"] == 1:
+        raise ValueError(
+            "security_agent: 1 被拒绝：Security Agent 评审员尚未实现（开关是为后续里程碑预留的接口）。请保持 0 或不写")
+
     return cfg

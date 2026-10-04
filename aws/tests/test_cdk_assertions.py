@@ -2000,6 +2000,16 @@ def test_scanner_settings_are_strictly_validated(write_cfg, over):
         load_config(write_cfg(_base_cfg(**over)))
 
 
+def test_security_agent_cannot_be_enabled_until_its_reviewer_exists(write_cfg):
+    # 复审 I-4：Security Agent 评审员还没有实现（没有 reviewers/security.sh、没有 scan_prep_security）。开了它，每个 MR 上
+    # 都是一条 SA 兜底；SA 的令牌密钥按手册不该创建，缺了它扫描任务起不来，连 Inspector 也只剩兜底——一个扫描员拖垮另一个。
+    # 开关与档案保留（2b 后半的接口），synth 先拒绝。
+    from config import load_config
+    with pytest.raises(ValueError, match="Security Agent 评审员尚未实现"):
+        load_config(write_cfg(_base_cfg(security_agent=1)))
+    load_config(write_cfg(_base_cfg(security_agent=0, inspector=1)))   # 正向对照
+
+
 def test_default_bot_usernames_cover_every_enabled_reviewer_once():
     from config import default_bot_usernames
     assert default_bot_usernames(_base_cfg()) == ["aliyun:kirobot"]
