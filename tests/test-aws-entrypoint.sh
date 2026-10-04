@@ -301,7 +301,7 @@ if [[ -x /usr/bin/git ]]; then
   ck_block="$tb_default
 $err_block
 $RETRY_SRC
-$(awk '/^# ── 检出 MR 的那个提交/{f=1} /^# ── 按 MR 的租约/{exit} f{print}' "$ENTRY")"
+$(awk '/^# ── 检出 MR 的那个提交/{f=1} /^# ── (评审员清单与扫描员派发|按 MR 的租约)/{exit} f{print}' "$ENTRY")"
   # 只验证「抽到了」，**不钉具体写法**：钉写法的话，任何改动都先在这里红，后面真正的行为断言
   # （⑲ 的引用遮蔽复现）就跑不到了——变异测试会得出「守卫有用」的错误结论。
   assert_contains "$ck_block" 'checkout -q' "⑰ 抽到了检出那一段"
@@ -1153,5 +1153,129 @@ for fn in aws_err_code lease_acquire lease_renew_loop lease_release head_check_s
   assert_eq "$(LC_ALL=C grep -cE "^${fn}\(\) \{" "$ENTRY")" "0" "㉖ ${fn} 不再在 entrypoint 里定义（只有一份，在 lease.sh）"
   assert_eq "$(LC_ALL=C grep -cE "^${fn}\(\) \{" "$LEASE_LIB")" "1" "㉖ ${fn} 在 lease.sh 里定义一次"
 done
+
+# ㉗ Phase 2b：评审员清单与扫描员派发（spec「Task A」「F1」「F2」「N7 扩写」）。把那一段与两个库原样抽出来跑：
+#   aws 替身里 dynamodb 走 fake-aws-dynamodb.py（真的求值条件），ecs run-task 记下参数、按 FAKE_ECS 应答；
+#   head_check_superseded 在这里换成按 FAKE_SUPERSEDED 返回的桩——它本身的行为 ㉒ 已经用真 git 测过。
+if [[ -x /usr/bin/jq ]] && command -v python3 >/dev/null; then
+  stmp=$(mktemp -d)
+  scan_section=$(awk '/^# ── 评审员清单与扫描员派发/{f=1} /^# ── 按 MR 的租约/{exit} f{print}' "$ENTRY")
+  assert_contains "$scan_section" 'scan_dispatch "$scan_rids"' "㉗ 抽到了评审员清单与扫描员派发那一段"
+  cat > "$stmp/aws" <<STUB
+#!/bin/sh
+if [ "\$1" = ecs ]; then
+  n=\$(( \$(cat "$stmp/ecs.count" 2>/dev/null || echo 0) + 1 )); echo \$n > "$stmp/ecs.count"
+  printf '%s\n' "\$@" > "$stmp/ecs.argv.\$n"
+  case "\${FAKE_ECS:-ok}" in
+    ok) echo '{"tasks":[{"taskArn":"arn:aws:ecs:us-west-2:123456789012:task/c/1"}],"failures":[]}' ;;
+    failures) echo '{"tasks":[],"failures":[{"reason":"RESOURCE:ENI"}]}' ;;
+    error) echo "An error occurred (ThrottlingException) when calling the RunTask operation: Rate exceeded" >&2; exit 254 ;;
+  esac
+  exit 0
+fi
+exec python3 "$PWD/fake-aws-dynamodb.py" "\$@"
+STUB
+  chmod +x "$stmp/aws"
+  scan_run() {  # REVIEWERS 的取值（UNSET = 不设）[KEY=VAL …] → 打印 rc；stdout 末尾的 FELL_THROUGH 表示「接着走 Kiro」
+    local rv="$1"; shift
+    rm -f "$stmp"/ecs.* "$stmp/out" "$stmp/err"
+    printf '{"%s": {"pk": {"S": "%s"}}}' "r1#7#abc" "r1#7#abc" > "$stmp/state.json"
+    local prog
+    prog=$(printf '%s\n%s\n%s\n%s\n%s\n' "$(cat "$LEASE_LIB")" "$(cat ../aws/executor/lib/scan-dispatch.sh)" \
+             'head_check_superseded() { return "${FAKE_SUPERSEDED:-1}"; }' "${SCAN_PREP_STUB:-}" "$scan_section" \
+           | sed -e "s#/usr/local/bin/aws#$stmp/aws#g")
+    local rc=0
+    ( [[ "$rv" == UNSET ]] || export REVIEWERS="$rv"
+      # 缺省在前、用例的 KEY=VAL 在后：后写的赢，用例才改得动缺省值
+      export FAKE_DDB_STATE="$stmp/state.json" FAKE_DDB_LOG="$stmp/ddb.log" AWS_REGION=us-west-2 LOCK_TABLE=t \
+             LOCK_KEY='r1#7#abc' CODEUP_REPO_ID=r1 MR_LOCAL_ID=7 HEAD_SHA="$(printf 'a%.0s' {1..40})" CI_COMMIT_REF_NAME=feat \
+             MR_TARGET_BRANCH=main SCAN_CLUSTER=c SCAN_TASK_DEFINITION=td SCAN_CONTAINER_NAME=scan SCAN_SUBNETS=s1,s2 \
+             SCAN_SECURITY_GROUPS=sg1 "$@"
+      clone_url=https://codeup.aliyun.com/o1/r1.git /bin/bash --norc --noprofile -c "set -euo pipefail; $prog
+echo FELL_THROUGH" ) > "$stmp/out" 2> "$stmp/err" </dev/null || rc=$?
+    echo "$rc"
+  }
+  attr_true() { /usr/bin/jq -r --arg k 'r1#7#abc' --arg a "$1" '.[$k][$a].BOOL // false' "$stmp/state.json"; }
+  ecs_arg() { awk -v f="$1" 'p{print; exit} $0==f{p=1}' "$stmp/ecs.argv.$2"; }
+
+  # a. 未设置 REVIEWERS = 只有 Kiro：不派发、不核对、接着走 Kiro（2a 的行为）
+  assert_eq "$(scan_run UNSET)" "0" "㉗a 未设置 REVIEWERS 正常往下走"
+  assert_eq "$(cat "$stmp/out")" "FELL_THROUGH" "㉗a 未设置 REVIEWERS → 接着走 Kiro"
+  assert_eq "$([ -e "$stmp/ecs.argv.1" ] && echo yes || echo no)" "no" "㉗a Kiro-only 不拉起扫描任务"
+  # b. kiro + inspector（已启用）：派发一次，环境覆盖形状正确，置 dispatched_inspector，然后接着走 Kiro
+  assert_eq "$(scan_run kiro,inspector INSPECTOR=1)" "0" "㉗b 派发后正常往下走"
+  assert_eq "$(cat "$stmp/out")" "FELL_THROUGH" "㉗b 派发之后接着走 Kiro"
+  assert_eq "$(cat "$stmp/ecs.count")" "1" "㉗b 只调一次 RunTask"
+  tok=$(ecs_arg --client-token 1)
+  assert_eq "$([[ "$tok" =~ ^[0-9a-f]{32}$ ]] && echo ok)" "ok" "㉗b clientToken 是 32 位十六进制的 run_id"
+  envj=$(ecs_arg --overrides 1)
+  envmap=$(printf '%s' "$envj" | /usr/bin/jq -c '.containerOverrides[0] | {name, env: (.environment | map({(.name): .value}) | add)}')
+  assert_eq "$(printf '%s' "$envmap" | /usr/bin/jq -r '.name')" "scan" "㉗b 覆盖的是扫描容器"
+  assert_eq "$(printf '%s' "$envmap" | /usr/bin/jq -r '.env | [.REVIEWERS, .TASK_KIND, .LOCK_KEY, .SCAN_RUN_ID == "'"$tok"'", .SCAN_REPO_URL, .INSPECTOR_INPUT, .MR_TARGET_BRANCH] | join(" ")')" \
+    "inspector scan r1#7#abc true https://codeup.aliyun.com/o1/r1.git failed:not-implemented main" "㉗b 环境覆盖：扫描员子集、任务类型、锁键、run_id、已核对的仓库地址、输入状态"
+  assert_not_contains "$envj" "KIRO_API_KEY" "㉗b 环境覆盖里没有任何密钥（I3）"
+  assert_not_contains "$envj" "YUNXIAO_TOKEN" "㉗b 环境覆盖里没有任何密钥（I3）"
+  assert_eq "$(ecs_arg --network-configuration 1 | /usr/bin/jq -c '.awsvpcConfiguration')" \
+    '{"subnets":["s1","s2"],"securityGroups":["sg1"],"assignPublicIp":"ENABLED"}' "㉗b 网络配置来自 SCAN_SUBNETS / SCAN_SECURITY_GROUPS"
+  assert_eq "$(attr_true dispatched_inspector)" "true" "㉗b 派发成功后置 dispatched_inspector"
+  # c. 扫描员专用命令：派发完就退出 0，不走 Kiro
+  assert_eq "$(scan_run inspector INSPECTOR=1)" "0" "㉗c 扫描员专用命令退出 0"
+  assert_eq "$(cat "$stmp/out")" "" "㉗c 不含 kiro 时不走 Kiro"
+  # d. 点名了没启用的扫描员：不派发、记 disabled_inspector（兜底的终态）、照常走 Kiro
+  assert_eq "$(scan_run kiro,inspector INSPECTOR=0)" "0" "㉗d 未启用的扫描员不拦 Kiro"
+  assert_eq "$(cat "$stmp/out")" "FELL_THROUGH" "㉗d 未启用的扫描员 → 接着走 Kiro"
+  assert_eq "$([ -e "$stmp/ecs.argv.1" ] && echo yes || echo no)" "no" "㉗d 未启用的扫描员不派发"
+  assert_eq "$(attr_true disabled_inspector)" "true" "㉗d 置 disabled_inspector"
+  # e. F2：RunTask 两次都失败——同一个 clientToken 试两次、不置 dispatched、Kiro 照常、退出码不变
+  assert_eq "$(scan_run kiro,inspector INSPECTOR=1 FAKE_ECS=error)" "0" "㉗e RunTask 失败不改变退出码（F2）"
+  assert_eq "$(cat "$stmp/out")" "FELL_THROUGH" "㉗e RunTask 失败 → 照常走 Kiro"
+  assert_eq "$(cat "$stmp/ecs.count")" "2" "㉗e 失败重试一次"
+  assert_eq "$(ecs_arg --client-token 1)" "$(ecs_arg --client-token 2)" "㉗e 两次尝试用同一个 clientToken"
+  assert_eq "$(attr_true dispatched_inspector)" "false" "㉗e 派发失败时不置 dispatched（交给兜底）"
+  assert_contains "$(cat "$stmp/err")" "scan-dispatch attempt=1 result=failed code=ThrottlingException" "㉗e 日志里是 AWS 错误码"
+  # f. RunTask 200 但 failures[] 非空 = 失败
+  assert_eq "$(scan_run kiro,inspector INSPECTOR=1 FAKE_ECS=failures)" "0" "㉗f failures[] 非空同样不改变退出码"
+  assert_eq "$(attr_true dispatched_inspector)" "false" "㉗f failures[] 非空不算派发成功"
+  assert_contains "$(cat "$stmp/err")" "code=RESOURCE:ENI" "㉗f 日志里是 failures[].reason 的枚举"
+  # g. 已被新推送取代：置 superseded、退出 0、不派发、不走 Kiro
+  assert_eq "$(scan_run kiro,inspector INSPECTOR=1 FAKE_SUPERSEDED=0)" "0" "㉗g 被取代时退出 0"
+  assert_eq "$(cat "$stmp/out")" "" "㉗g 被取代时不走 Kiro"
+  assert_eq "$(attr_true superseded)" "true" "㉗g 置 superseded"
+  assert_eq "$([ -e "$stmp/ecs.argv.1" ] && echo yes || echo no)" "no" "㉗g 被取代时不派发"
+  # h. N7：REVIEWERS 与开关形状不对一律 94，什么都不做
+  for bad in "" "kiro," ",kiro" "kiro,kiro" "Kiro" "kiro inspector" "inspectr"; do
+    assert_eq "$(scan_run "$bad" INSPECTOR=1)" "94" "㉗h REVIEWERS='${bad}' → 94"
+    assert_eq "$(cat "$stmp/out")" "" "㉗h REVIEWERS='${bad}' 什么都不做"
+  done
+  assert_eq "$(scan_run kiro INSPECTOR=true)" "94" "㉗h INSPECTOR=true → 94（只认 0/1）"
+  # i. 输入准备：有 scan_prep_<评审员> 时用它的状态；状态形状不对按 failed:bad-status
+  SCAN_PREP_STUB='scan_prep_inspector() { printf "skipped:no-deps"; }' scan_run inspector INSPECTOR=1 >/dev/null
+  assert_eq "$(ecs_arg --overrides 1 | /usr/bin/jq -r '.containerOverrides[0].environment[] | select(.name == "INSPECTOR_INPUT") | .value')" \
+    "skipped:no-deps" "㉗i 输入状态取自 scan_prep_inspector"
+  SCAN_PREP_STUB='scan_prep_inspector() { printf "ok; rm -rf /"; }' scan_run inspector INSPECTOR=1 >/dev/null
+  assert_eq "$(ecs_arg --overrides 1 | /usr/bin/jq -r '.containerOverrides[0].environment[] | select(.name == "INSPECTOR_INPUT") | .value')" \
+    "failed:bad-status" "㉗i 形状不对的输入状态按 failed:bad-status"
+  # j. 环境覆盖超过 8,192 字符：不调 RunTask
+  assert_eq "$(scan_run inspector INSPECTOR=1 CI_COMMIT_REF_NAME="$(printf 'b%.0s' {1..8200})")" "0" "㉗j 超长不改变退出码"
+  assert_eq "$([ -e "$stmp/ecs.argv.1" ] && echo yes || echo no)" "no" "㉗j 超过 8,192 字符不调 RunTask"
+  assert_contains "$(cat "$stmp/err")" "code=overrides-too-long" "㉗j 日志说明原因"
+  # k. 写标记失败不中断（只留代号）：DynamoDB 一直限流时仍然派发、仍然走 Kiro
+  assert_eq "$(scan_run kiro,inspector INSPECTOR=1 FAKE_DDB_FAIL=update-item)" "0" "㉗k 写标记失败不中断"
+  assert_eq "$(cat "$stmp/out")" "FELL_THROUGH" "㉗k 写标记失败照常走 Kiro"
+  assert_contains "$(cat "$stmp/err")" "mark-lock attr=dispatched_inspector result=failed code=ProvisionedThroughputExceededException" "㉗k 写标记失败留代号"
+  rm -rf "$stmp"
+else
+  echo "SKIP: 无 /usr/bin/jq 或 python3，跳过 ㉗ 扫描员派发行为断言" >&2
+fi
+# ㉗ 静态：扫描员派发那一段在检出核对之后、Kiro 的租约之前（Kiro 的排队不拖慢扫描员）；Kiro-only 的路径不多一次核对
+sd_line=$(entry_code_line '^  if ! scan_dispatch "\$scan_rids"; then')
+assert_eq "$([ -n "$sd_line" ] && [ -n "$headnow_line" ] && [ -n "$acquire_line" ] && [ "$headnow_line" -lt "$sd_line" ] \
+  && [ "$sd_line" -lt "$acquire_line" ] && echo yes)" "yes" "㉗ 顺序：检出核对 → 扫描员派发 → Kiro 的租约"
+early=$(awk '/^# ── 评审员清单与扫描员派发/{f=1} /^# ── 按 MR 的租约/{exit} f{print}' "$ENTRY" | LC_ALL=C grep -vE '^[[:space:]]*#' \
+        | LC_ALL=C grep -n 'head_check_superseded' | cut -d: -f1)
+guard=$(awk '/^# ── 评审员清单与扫描员派发/{f=1} /^# ── 按 MR 的租约/{exit} f{print}' "$ENTRY" | LC_ALL=C grep -vE '^[[:space:]]*#' \
+        | LC_ALL=C grep -n '^if \[\[ -n "\$scan_rids" \]\]; then$' | cut -d: -f1)
+assert_eq "$([ -n "$early" ] && [ -n "$guard" ] && [ "$guard" -lt "$early" ] && echo yes)" "yes" \
+  "㉗ 提前那次核对只在有扫描员时做（在 if [[ -n \$scan_rids ]] 里）"
 
 report

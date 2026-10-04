@@ -141,6 +141,8 @@ git_err_tail() {
 source "$PKG/scripts/lib/git-retry.sh"
 # 按 MR 的租约与「核对最新提交」（lib/lease.sh）：函数定义，不执行任何动作；租约那一段才调用它们。
 source "$PKG/lib/lease.sh"
+# 锁记录上的状态标记与扫描任务派发（lib/scan-dispatch.sh，Phase 2b）：同样只有函数定义。
+source "$PKG/lib/scan-dispatch.sh"
 retry_git_429 /usr/bin/git clone --no-tags "$clone_url" \
   "$WORKROOT/business" >/dev/null 2>"$GIT_ERR" \
   || { echo "clone 业务库失败（凭证、网络或仓库权限）" >&2; git_err_tail; exit 91; }
@@ -196,6 +198,45 @@ fi
 head_now=$(/usr/bin/git -C "$WORKROOT/business" rev-parse HEAD 2>/dev/null || true)
 [[ "$head_now" == "$HEAD_SHA" ]] \
   || { echo "检出之后 HEAD 与 HEAD_SHA 不一致，拒绝评审（避免静默评错提交）" >&2; exit 92; }
+
+# ── 评审员清单与扫描员派发（Phase 2b，spec「Task A」）────────────────────
+# REVIEWERS 由调度器传：MR 事件 = 本部署启用的全部评审员；评论命令 = 点名的那几位。**未设置** = 旧调度器拉起的任务，只有 Kiro
+# （滚动部署期间的向后兼容）；设置了但为空串、或形状不对（未知评审员、重复、空项）→ 94，什么都不评（N7：不回落默认——
+# 空串是「falsy 但有意义」的那一类，`:=` 会把它悄悄变成 kiro，所以这里用不带冒号的 `=`）。
+# 扫描员（inspector / security）在 Kiro 的租约**之前**派发：Kiro 的按 MR 租约最长要等约 45 分钟（lease_wait_limit），扫描员不该排在
+# 上一次 Kiro 后面；它们自己的串行由扫描任务里按评审员的租约负责（spec L7）。派发的任何失败都不改变 Kiro 的执行与退出码（F2）：
+# 失败只体现为锁记录上缺 dispatched_<评审员>，兜底 Lambda 据此以那位评审员的机器人回写（F1）。
+: "${REVIEWERS=kiro}"
+[[ "$REVIEWERS" =~ ^(kiro|inspector|security)(,(kiro|inspector|security))*$ ]] \
+  || { echo "REVIEWERS 形状不对（只认逗号分隔的 kiro / inspector / security），拒绝评审（取值不回显）" >&2; exit 94; }
+# 两个扫描开关由任务定义给（与 config.yaml 同名），缺失 = 0；只认 0/1
+: "${INSPECTOR:=0}" "${SECURITY_AGENT:=0}"
+[[ "$INSPECTOR" =~ ^[01]$ && "$SECURITY_AGENT" =~ ^[01]$ ]] \
+  || { echo "INSPECTOR / SECURITY_AGENT 必须是 0 或 1，拒绝评审" >&2; exit 94; }
+want_kiro=0; scan_rids=""; seen=","
+for rid in ${REVIEWERS//,/ }; do
+  [[ "$seen" != *",${rid},"* ]] || { echo "REVIEWERS 里有重复的评审员，拒绝评审" >&2; exit 94; }
+  seen="${seen}${rid},"
+  case "$rid" in
+    kiro) want_kiro=1 ;;
+    inspector|security)
+      if { [[ "$rid" == inspector ]] && [[ "$INSPECTOR" == 1 ]]; } || { [[ "$rid" == security ]] && [[ "$SECURITY_AGENT" == 1 ]]; }; then
+        scan_rids="${scan_rids:+$scan_rids,}${rid}"
+      else
+        # 调度器与执行器的开关一时不一致（滚动部署的那几分钟）：这位扫描员本部署没启用，不评；在锁记录上留一个终态，兜底不必替它说话
+        echo "scan-dispatch reviewer=${rid} result=disabled" >&2
+        mark_lock "disabled_${rid}"
+      fi ;;
+  esac
+done
+if [[ -n "$scan_rids" ]]; then
+  # 只在有扫描员时才先核对一次最新提交（Kiro-only 的运行与 2a 逐行相同，不多一次 ls-remote）。此时不持有任何租约。
+  if head_check_superseded; then mark_lock superseded; exit 0; fi
+  if ! scan_dispatch "$scan_rids"; then
+    echo "scan-dispatch result=failed reviewers=${scan_rids}（兜底 Lambda 会以各扫描员的机器人回写）" >&2
+  fi
+fi
+[[ "$want_kiro" == 1 ]] || exit 0
 
 # ── 按 MR 的租约：同一 MR 同时最多一次引擎运行（spec I6 ②）────────────
 # 调度器的抢锁键含 head SHA（I6 ①），只能去重「同一次投递」，挡不住同一 MR 的两次推送各起一个任务。

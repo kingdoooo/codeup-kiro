@@ -246,7 +246,7 @@ def test_a_successful_post_logs_each_step_once_and_reports_posted(monkeypatch, c
 GUIDE = ROOT / "setup-guide.md"
 
 
-@pytest.mark.parametrize("code", [90, 91, 92, 93])
+@pytest.mark.parametrize("code", [90, 91, 92, 93, 94])
 def test_each_entrypoint_exit_code_gets_its_own_cause_and_a_pointer_that_resolves(code):
     text = backstop.backstop_comment(code)
     assert f"（退出码 {code}）" in text, text
@@ -266,7 +266,7 @@ def test_the_four_codes_are_exactly_the_entrypoints_fail_closed_exits():
     entry = (ROOT / "executor" / "entrypoint.sh").read_text()
     code = "\n".join(ln for ln in entry.splitlines() if not ln.lstrip().startswith("#"))
     exits = {int(n) for n in re.findall(r"\bexit (9[0-9])\b", code)}
-    assert exits == set(backstop.EXIT_CAUSES) == {90, 91, 92, 93}, exits
+    assert exits == set(backstop.EXIT_CAUSES) == {90, 91, 92, 93, 94}, exits
 
 
 @pytest.mark.parametrize("code, want", [
