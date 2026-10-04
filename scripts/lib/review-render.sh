@@ -39,9 +39,48 @@ _REVIEW_JQ_SEVRANK='
   def rank: _sevmap[.] // null;
 '
 
+# --- 评审员档案（Phase 2b，spec「评审员档案」）---
+# 标题、评审标记、历史标记、发布随机串、页脚图例、历次表计数列、元信息第四列、历次表「完成」标签都由档案给，渲染与解析的
+# 结构只有一份。档案由调用方**代码**在 source 本文件之前显式设定（kiro-review.sh 写死 REVIEW_PROFILE=kiro），不从环境继承：
+# 一个碰巧叫 REVIEW_PROFILE 的流水线变量不能把 Kiro 的标记换成别的评审员的——那样下一次评审找不到上一条汇总、多出一条（I4）。
+# 未设或空串 = kiro（只为直接 source 本文件的测试；空串与未设同义，是有意的：两者都只可能来自「没人设过」）。
+# 未知取值 fail closed：`return 1` 让 source 本身失败，调用方的 set -e / `|| exit` 接住。
+# 所有标记都在 kiro- 前缀族里（HTML 注释开头紧跟 kiro-）：调度器的断环守卫只认这个前缀（N5），新评审员不需要改它。
+# 任意两份档案的评审标记 / 历史标记 / 发布随机串两两不相交（M1，tests/test-reviewer-profile.sh 守着）。
+case "${REVIEW_PROFILE:-kiro}" in
+  kiro)
+    REVIEW_TITLE="# Kiro 代码评审"
+    REVIEW_MARKER_NAME="kiro-review"
+    REVIEW_HISTORY_PREFIX="<!-- kiro-history:"
+    REVIEW_POST_NONCE_PREFIX='<!-- kiro-review-post:'
+    REVIEW_LEGEND="P0 必须修复 · P1 应当修复 · P2 可选改进"
+    REVIEW_COUNTS_HEADER="P0/P1/P2"
+    REVIEW_META_NOTE_HEADER="diff"
+    REVIEW_HISTORY_OK_LABEL="" ;;     # 空 = 按契约结论中文化（_review_verdict_cn），Kiro 的既有行为
+  inspector)
+    REVIEW_TITLE="# Inspector 依赖漏洞扫描"
+    REVIEW_MARKER_NAME="kiro-inspector-review"
+    REVIEW_HISTORY_PREFIX="<!-- kiro-inspector-history:"
+    REVIEW_POST_NONCE_PREFIX='<!-- kiro-inspector-post:'
+    REVIEW_LEGEND="计数为本 MR 引入的依赖漏洞：critical+high / medium / low 及其它"
+    REVIEW_COUNTS_HEADER="引入 高/中/低"
+    REVIEW_META_NOTE_HEADER="组件"
+    REVIEW_HISTORY_OK_LABEL="完成" ;;
+  security)
+    REVIEW_TITLE="# Security Agent 安全评审"
+    REVIEW_MARKER_NAME="kiro-security-review"
+    REVIEW_HISTORY_PREFIX="<!-- kiro-security-history:"
+    REVIEW_POST_NONCE_PREFIX='<!-- kiro-security-post:'
+    REVIEW_LEGEND="计数为差分扫描发现：CRITICAL+HIGH / MEDIUM / LOW 及其它"
+    REVIEW_COUNTS_HEADER="高/中/低"
+    REVIEW_META_NOTE_HEADER="差分"
+    REVIEW_HISTORY_OK_LABEL="完成" ;;
+  *)
+    echo "review-render: 未知的评审员档案 REVIEW_PROFILE=${REVIEW_PROFILE}（只认 kiro / inspector / security）" >&2
+    return 1 ;;
+esac
 # 汇总评论的标题（成功 / 降级 / 失败三条同形）。一级标题、不带图标（用户要求，2026-09-04）。
 # kiro-review.sh 的最小失败评论也用 REVIEW_TITLE_FAILED，不要再手写第二份字面量。
-REVIEW_TITLE="# Kiro 代码评审"
 REVIEW_TITLE_DEGRADED="${REVIEW_TITLE} · ⚠️ 结构化解析失败"
 REVIEW_TITLE_FAILED="${REVIEW_TITLE} · ⚠️ 评审未完成"
 
@@ -1171,14 +1210,15 @@ review_render_inline_body() {
 # run 限 1–9 位：汇总评论在 Codeup 上是人可编辑的，`run:99999999999999999999` 这种手改值会让
 # `$((prior_run + 1))` 静默溢出成负数、渲染出一个再也匹配不上的标记。位数上限让这类值直接不算候选
 # （于是新建一条正常的汇总），而不是把 run 号搞坏。
-REVIEW_MARKER_LINE_RE='^<!-- kiro-review:[0-9a-zA-Z._-]+ run:([0-9]{1,9}) -->[[:space:]]*$'
+# 名字只由档案给（[a-z-]，没有 ERE 元字符，所以直接拼进正则）；Kiro 档案下与 2a 的字面量逐字节相同。
+REVIEW_MARKER_LINE_RE="^<!-- ${REVIEW_MARKER_NAME}:[0-9a-zA-Z._-]+ run:([0-9]{1,9}) -->[[:space:]]*\$"
 # --- 本次发布随机串行（CodeX 2026-09-09 P1-3 复审）---
 # 评论头第 4 行：<!-- kiro-review-post:{nonce} -->（REVIEW_POST_NONCE 非空且形态合法时才写；kiro-review.sh 每次运行生成一个）。
 # 汇总新建 POST 的「响应丢失但评论已创建」探针只认带**本次**随机串的评论：sha + run 不是本次独有的——列表查询失败时 REVIEW_RUN
 # 回落到 1，MR 上可能已有同作者、同 sha、run:1 的旧评论（同提交并发重跑亦然），把它当成功会让脚本停止重试并报告成功，而本次
 # 报告根本没发出去。形态只定义在这里，codeup-api.sh 引用、不抄第二份；这一行也是守卫保护的脚本标记行（截断砍掉它 → 拒绝截断）。
-REVIEW_POST_NONCE_PREFIX='<!-- kiro-review-post:'
-REVIEW_POST_NONCE_LINE_RE='^<!-- kiro-review-post:([0-9a-f]{16}) -->[[:space:]]*$'
+# 前缀由档案给（见文件开头）；这一行从它派生，Kiro 档案下与 2a 的字面量逐字节相同。
+REVIEW_POST_NONCE_LINE_RE="^${REVIEW_POST_NONCE_PREFIX}([0-9a-f]{16}) -->[[:space:]]*\$"
 
 # --- 历次评审记录 ---
 # 汇总评论里嵌一行隐藏 JSON 作为机器可读的历次记录，「历次评审」表只是它的人类可读投影：
@@ -1188,7 +1228,7 @@ REVIEW_POST_NONCE_LINE_RE='^<!-- kiro-review-post:([0-9a-f]{16}) -->[[:space:]]*
 # status：""=正常评审；failed=评审未完成；degraded=结构化解析失败（此时计数为 null）。
 # 注入面：这一行会被下一次评审读回来，所以写入时对每个字符串字段做许可清单过滤
 # （review_history_append 的 safe()），保证正文里不可能出现 `-->` 而提前闭合注释。
-REVIEW_HISTORY_PREFIX="<!-- kiro-history:"
+# REVIEW_HISTORY_PREFIX 由档案给（见文件开头）。
 REVIEW_HISTORY_SUFFIX=" -->"
 # 行数上限：历史无限增长会把汇总评论撑到 Codeup 的长度上限
 REVIEW_HISTORY_MAX=20
@@ -1448,7 +1488,7 @@ review_render_history_table() {
   n=$(jq -r 'length' "$hist")
   echo "<details><summary>历次评审（${n}）</summary>"
   echo ""
-  echo "| 次 | 提交 | 结论 | P0/P1/P2 |"
+  echo "| 次 | 提交 | 结论 | ${REVIEW_COUNTS_HEADER} |"
   echo "|---|---|---|---|"
   # 分隔符用 \x1f 而不是制表符：制表符属于 IFS 空白，bash 会把连续分隔符并成一个，
   # status 或 verdict 为空串时字段就整体错位（实测把 verdict 读成了计数）。
@@ -1456,7 +1496,7 @@ review_render_history_table() {
     case "$status" in
       failed)   label="评审未完成" ;;
       degraded) label="结构化解析失败" ;;
-      *)        label=$(_review_verdict_cn "$verdict") ;;
+      *)        if [[ -n "$REVIEW_HISTORY_OK_LABEL" ]]; then label="$REVIEW_HISTORY_OK_LABEL"; else label=$(_review_verdict_cn "$verdict"); fi ;;
     esac
     printf '| %s | `%s` | %s | %s/%s/%s |\n' "$run" "$sha" "$label" "$p0" "$p1" "$p2"
   done < <(jq -r --arg sep "$(printf '\037')" '.[] | [ (.run | tostring), (.sha // ""), (.status // ""), (.verdict // ""),
@@ -1492,7 +1532,7 @@ _review_rerun_hint() {
 # 用法：review_render_footer <run>（公开：kiro-review.sh 的失败评论也要用同一份页脚）
 review_render_footer() {
   echo "---"
-  printf '第 %s 次评审 · P0 必须修复 · P1 应当修复 · P2 可选改进 · %s\n' "$1" "$(_review_rerun_hint)"
+  printf '第 %s 次评审 · %s · %s\n' "$1" "$REVIEW_LEGEND" "$(_review_rerun_hint)"
 }
 
 # --- 标题层级（2026-09-04 真实验收）---
@@ -1511,7 +1551,7 @@ review_render_footer() {
 review_render_comment_head() {
   local title="$1" sha="$2" run="$3" hist="$4"
   echo "$title"
-  echo "<!-- kiro-review:${sha} run:${run} -->"
+  echo "<!-- ${REVIEW_MARKER_NAME}:${sha} run:${run} -->"
   review_render_history_marker "$hist"
   # 第 4 行：本次发布随机串（P1-3）。只在形态合法（16 位十六进制）时写：这一行是脚本标记行（守卫保护、探针逐字比对），
   # 不能让任何别的取值借它进评论头。为空 / 不合法就不写——探针据此不作数、回到既有重试策略（fail-safe），前三行形态不变。
@@ -1537,7 +1577,7 @@ _review_render_header() {
   local title="$1" hist="$2"
   review_render_comment_head "$title" "$_RR_SHA" "$_RR_RUN" "$hist"
   echo ""
-  echo "| Commit | 分支 | 时间 | diff |"
+  echo "| Commit | 分支 | 时间 | ${REVIEW_META_NOTE_HEADER} |"
   echo "|---|---|---|---|"
   echo "| \`${_RR_SHA}\` | \`$(_review_meta_cell "$_RR_SRC")\` → \`$(_review_meta_cell "$_RR_DST")\` | ${_RR_TS} | ${_RR_DIFF_NOTE} |"
   _review_render_kiro_cli

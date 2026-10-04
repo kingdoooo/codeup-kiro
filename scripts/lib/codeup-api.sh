@@ -277,7 +277,7 @@ _codeup_post_probe_marker() {  # <markdown 文件>
   local f="${1-}" line nline
   _CODEUP_POST_PROBE_SHA=""; _CODEUP_POST_PROBE_RUN=""; _CODEUP_POST_PROBE_NONCE=""
   [[ -r "$f" ]] || return 0
-  if [[ -z "${REVIEW_MARKER_LINE_RE:-}" ]]; then
+  if [[ -z "${REVIEW_MARKER_LINE_RE:-}" || -z "${REVIEW_MARKER_NAME:-}" ]]; then
     echo "codeup_post_comment: 取不到评审标记的形态（REVIEW_MARKER_LINE_RE 未定义，scripts/lib/review-render.sh 没加载），无法核对「响应丢失但评论已创建」，只能按既有策略重试" >&2
     return 0
   fi
@@ -287,7 +287,7 @@ _codeup_post_probe_marker() {  # <markdown 文件>
   # 复制一份的话，REVIEW_MARKER_LINE_RE 的字符集哪天放宽（比如 sha 允许 `+`），这里会静静地匹配不上、探针整个跳过。
   [[ "$line" =~ $REVIEW_MARKER_LINE_RE ]] || return 0
   _CODEUP_POST_PROBE_RUN="${BASH_REMATCH[1]}"
-  local rest="${line#*kiro-review:}"
+  local rest="${line#*"${REVIEW_MARKER_NAME}":}"
   _CODEUP_POST_PROBE_SHA="${rest%% run:*}"
   # 兜底：万一标记形态变了（取不到 sha、或 sha 里带空白），按「没有可比对的标记」处理——探针跳过 = 回到既有重试策略（fail-safe）
   [[ -n "$_CODEUP_POST_PROBE_SHA" && "$_CODEUP_POST_PROBE_SHA" != *[[:space:]]* ]] \
@@ -328,7 +328,7 @@ _codeup_post_probe_created() {  # <本次 POST 的 HTTP 状态码，只用于日
   # 判定 = 作者匹配 **且** 正文里有一行与本次标记逐字节相同 **且** 有一行与本次发布随机串行逐字节相同（容忍行尾空白，与
   # review_select_prior_comment 的容忍度一致）。随机串每次运行新生成，旧评论与别人都复制不到「本次」这一形态。
   cid=$(jq -r --arg bot "$_CODEUP_POST_PROBE_AUTHOR" \
-              --arg m "<!-- kiro-review:${_CODEUP_POST_PROBE_SHA} run:${_CODEUP_POST_PROBE_RUN} -->" \
+              --arg m "<!-- ${REVIEW_MARKER_NAME}:${_CODEUP_POST_PROBE_SHA} run:${_CODEUP_POST_PROBE_RUN} -->" \
               --arg pn "${REVIEW_POST_NONCE_PREFIX}${_CODEUP_POST_PROBE_NONCE} -->" '
     def str(v): if (v | type) == "string" then v else "" end;
     def author_name: if (.author | type) == "object" then str(.author.username) else "" end;
@@ -342,10 +342,10 @@ _codeup_post_probe_created() {  # <本次 POST 的 HTTP 状态码，只用于日
     | (.[0] // {}) | str(.comment_biz_id)' "$tmp" 2>/dev/null) || cid=""
   rm -f "$tmp"
   if [[ -n "$cid" ]]; then
-    echo "codeup_post_comment: 响应丢失但评论已创建：${cid}（HTTP ${code} 之后在 MR 上查到同一标记 kiro-review:${_CODEUP_POST_PROBE_SHA} run:${_CODEUP_POST_PROBE_RUN} 且带本次发布随机串 post:${_CODEUP_POST_PROBE_NONCE} 的评论），不再重试" >&2
+    echo "codeup_post_comment: 响应丢失但评论已创建：${cid}（HTTP ${code} 之后在 MR 上查到同一标记 ${REVIEW_MARKER_NAME}:${_CODEUP_POST_PROBE_SHA} run:${_CODEUP_POST_PROBE_RUN} 且带本次发布随机串 post:${_CODEUP_POST_PROBE_NONCE} 的评论），不再重试" >&2
     return 0
   fi
-  echo "codeup_post_comment: HTTP ${code} 之后 MR 上没有本次标记（kiro-review:${_CODEUP_POST_PROBE_SHA} run:${_CODEUP_POST_PROBE_RUN}）与本次发布随机串（post:${_CODEUP_POST_PROBE_NONCE}）同在的评论，按既有策略重试" >&2
+  echo "codeup_post_comment: HTTP ${code} 之后 MR 上没有本次标记（${REVIEW_MARKER_NAME}:${_CODEUP_POST_PROBE_SHA} run:${_CODEUP_POST_PROBE_RUN}）与本次发布随机串（post:${_CODEUP_POST_PROBE_NONCE}）同在的评论，按既有策略重试" >&2
   return 1
 }
 

@@ -1350,7 +1350,26 @@ def test_the_two_paths_keep_their_own_state_rules():
 ENGINE_SCRIPTS = [ROOT.parent / "scripts" / "kiro-review.sh",
                   *sorted((ROOT.parent / "scripts" / "lib").glob("*.sh"))]
 KNOWN_MARKER_PREFIXES = {"<!-- kiro-review:", "<!-- kiro-review-post:",
-                         "<!-- kiro-history:", "<!-- kiro-inline:"}
+                         "<!-- kiro-history:", "<!-- kiro-inline:",
+                         # Phase 2b 评审员档案（scripts/lib/review-render.sh 开头）：扫描员的历史标记与发布随机串是字面量，
+                         # 评审标记由 REVIEW_MARKER_NAME 拼出、文本里抽不到，见 _profile_prefixes
+                         "<!-- kiro-inspector-history:", "<!-- kiro-inspector-post:",
+                         "<!-- kiro-security-history:", "<!-- kiro-security-post:"}
+
+
+def _profile_prefixes():
+    """每份评审员档案 source 之后**真实**写出的四种标记前缀（评审标记 / 历史 / 发布随机串 / 行内）。"""
+    import subprocess
+    out = set()
+    for rid in ("kiro", "inspector", "security"):
+        r = subprocess.run(
+            ["/bin/bash", "--norc", "--noprofile", "-c",
+             'source scripts/lib/review-render.sh; printf "%s\n" "<!-- ${REVIEW_MARKER_NAME}:" '
+             '"$REVIEW_HISTORY_PREFIX" "$REVIEW_POST_NONCE_PREFIX" "$REVIEW_INLINE_MARKER_PREFIX"'],
+            cwd=ROOT.parent, env={"PATH": "/usr/bin:/bin", "REVIEW_PROFILE": rid},
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, check=True)
+        out |= set(r.stdout.splitlines())
+    return out
 
 
 def _marker_prefixes(src):
@@ -1371,7 +1390,12 @@ def test_every_marker_prefix_the_engine_emits_starts_with_the_dispatchers_marker
         found |= _marker_prefixes(path.read_text())
     # 集合与数量都钉住：抽取器什么都没抽到时，「每一个都以 kiro- 开头」是空真。
     assert found == KNOWN_MARKER_PREFIXES, found
-    assert len(found) == 4, found
+    assert len(found) == 8, found
+    # 档案派生出来的真实值：三份档案的评审标记文本里抽不到（由 REVIEW_MARKER_NAME 拼出），在这里补上
+    derived = _profile_prefixes()
+    assert len(derived) == 10, derived   # 3 档案 × (评审 / 历史 / 发布随机串) + 共用的行内标记
+    assert derived - found == {"<!-- kiro-review:", "<!-- kiro-inspector-review:", "<!-- kiro-security-review:"} - found
+    found |= derived
     for prefix in sorted(found):
         assert prefix.startswith(handler_mod.REVIEW_MARKER), \
             f"{prefix} 不以 {handler_mod.REVIEW_MARKER} 开头：这一种评论断不了环（N5）"
@@ -1402,8 +1426,9 @@ def test_the_four_marker_prefixes_are_the_ones_the_engine_really_writes():
                         ("REVIEW_HISTORY_PREFIX", "<!-- kiro-history:")):
         assert (f'{var}="{prefix}"' in render or f"{var}='{prefix}'" in render), var
         assert prefix in KNOWN_MARKER_PREFIXES
-    # 汇总评论那一个没有变量，是直接 echo 出去的
-    assert 'echo "<!-- kiro-review:${sha} run:${run} -->"' in render, "汇总标记那行 echo 变了"
+    # 汇总评论那一个按档案的 REVIEW_MARKER_NAME 直接 echo 出去；Kiro 档案下名字是 kiro-review（与 2a 相同）
+    assert 'echo "<!-- ${REVIEW_MARKER_NAME}:${sha} run:${run} -->"' in render, "汇总标记那行 echo 变了"
+    assert '    REVIEW_MARKER_NAME="kiro-review"' in render, "Kiro 档案的评审标记名变了"
 
 
 # ── 复审 M-3：伪造报文多带一个 `state: merged` 不得把形状告警降级成「正常流量」 ──────────

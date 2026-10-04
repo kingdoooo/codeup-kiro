@@ -76,6 +76,9 @@ source "${SCRIPT_DIR}/lib/codeup-api.sh"
 source "${SCRIPT_DIR}/lib/diff-compress.sh"
 source "${SCRIPT_DIR}/lib/kiro-agent.sh"
 source "${SCRIPT_DIR}/lib/isolation.sh"
+# 评审员档案写死为 kiro（Phase 2b）：review-render.sh 按 REVIEW_PROFILE 选标题与标记族，这里不让环境里的同名变量
+# 决定 Kiro 用哪套标记（见 review-render.sh 文件开头「评审员档案」）。
+REVIEW_PROFILE=kiro
 source "${SCRIPT_DIR}/lib/review-render.sh"
 # git 网络调用遇到 Codeup 限流（HTTP 429）时有界重试（issue 03），只重试 429、别的失败原样返回
 source "${SCRIPT_DIR}/lib/git-retry.sh"
