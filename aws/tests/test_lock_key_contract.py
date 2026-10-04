@@ -65,10 +65,12 @@ import subprocess  # noqa: E402
 import pytest  # noqa: E402
 
 ENTRY = ROOT / "executor" / "entrypoint.sh"
+# Phase 2b：「核对最新提交」（tip_key 那一行）随租约函数抽到了 lib/lease.sh
+LEASE_LIB = ROOT / "executor" / "lib" / "lease.sh"
 
 
 def _entry_assignment(var):
-    lines = [ln for ln in ENTRY.read_text().splitlines()
+    lines = [ln for ln in (ENTRY.read_text() + LEASE_LIB.read_text()).splitlines()
              if re.match(rf"^\s*{var}=", ln)]
     assert len(lines) == 1, (var, lines)
     return lines[0].strip()

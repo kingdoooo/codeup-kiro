@@ -1476,7 +1476,9 @@ def test_an_empty_bot_list_is_accepted_with_a_poc_only_warning(write_cfg, capsys
 
 # ── spec I6 ②：按 MR 的租约——手册与 entrypoint 两头都钉 ─────────────────────────────
 def _entry_code():
-    entry = (pathlib.Path(__file__).resolve().parents[1] / "executor" / "entrypoint.sh").read_text()
+    """entrypoint.sh 与它 source 的租约库（Phase 2b：租约函数抽到了 executor/lib/lease.sh）的非注释行。"""
+    executor = pathlib.Path(__file__).resolve().parents[1] / "executor"
+    entry = (executor / "entrypoint.sh").read_text() + "\n" + (executor / "lib" / "lease.sh").read_text()
     return "\n".join(ln for ln in entry.splitlines() if not ln.lstrip().startswith("#"))
 
 

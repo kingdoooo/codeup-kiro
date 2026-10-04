@@ -118,7 +118,16 @@ assert_contains "$eng" 'source "${SCRIPT_DIR}/lib/git-retry.sh"' "⑦ 引擎加�
 ent=$(code_of ../aws/executor/entrypoint.sh)
 assert_contains "$ent" 'retry_git_429 /usr/bin/git clone --no-tags' "⑦ 入口脚本 clone 经重试"
 assert_contains "$ent" 'retry_git_429 /usr/bin/git -C "$WORKROOT/business" fetch --no-tags origin \' "⑦ 入口脚本补取源分支经重试"
-assert_contains "$ent" 'retry_git_429 /usr/bin/timeout 30 /usr/bin/git -C "$WORKROOT/business" ls-remote origin' "⑦ 入口脚本 ls-remote 经重试"
+# Phase 2b：「核对最新提交」随租约函数抽到了 lib/lease.sh（扫描任务共用；ls-remote 的目录可由扫描任务换成 LEASE_GIT_DIR）
+lease=$(code_of ../aws/executor/lib/lease.sh)
+assert_contains "$lease" 'retry_git_429 /usr/bin/timeout 30 /usr/bin/git -C "${LEASE_GIT_DIR:-$WORKROOT/business}" ls-remote origin' "⑦ 租约库的 ls-remote 经重试"
+# AWS 档位其余的 bash 文件（执行器的库、扫描任务入口、扫描员）同样不得有裸的网络 git 调用；还没建出来的文件跳过
+for f in ../aws/executor/lib/*.sh ../aws/executor/scan-entrypoint.sh ../aws/reviewers/*.sh ../aws/reviewers/lib/*.sh; do
+  [[ -e "$f" ]] || continue
+  assert_eq "$(code_of "$f" | LC_ALL=C grep -E "/usr/bin/$net_re" \
+                | LC_ALL=C grep -vE 'retry_git_429 (/usr/bin/timeout [0-9]+ )?/usr/bin/git ' || true)" "" \
+    "⑦ ${f#../} 里没有漏掉的裸网络 git 调用"
+done
 assert_not_contains "$ent" 'refs/remotes/origin/${MR_TARGET_BRANCH}' "⑦ 入口脚本不再在 clone 之后取目标分支（G4）"
 assert_eq "$(printf '%s\n' "$ent" | LC_ALL=C grep -E "/usr/bin/$net_re" \
               | LC_ALL=C grep -vE 'retry_git_429 (/usr/bin/timeout [0-9]+ )?/usr/bin/git ' || true)" "" \

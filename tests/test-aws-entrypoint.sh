@@ -4,6 +4,8 @@ cd "$(dirname "$0")"
 . ./helpers.sh
 
 ENTRY=../aws/executor/entrypoint.sh
+# Phase 2b：租约与「核对最新提交」的函数从 entrypoint 抽到这个库（扫描任务共用）。下面凡是看函数体的断言都读它。
+LEASE_LIB=../aws/executor/lib/lease.sh
 # 抽出来跑的几段（检出段、clone 那一行、租约段）都要用 retry_git_429（issue 03）：生产里它由 clone 之前那一行
 # `source "$PKG/scripts/lib/git-retry.sh"` 加载，这里垫同一个文件。
 RETRY_SRC="source \"$(cd .. && pwd)/scripts/lib/git-retry.sh\""
@@ -89,13 +91,13 @@ assert_eq "$([ -n "$guard_line" ] && [ -n "$mark_line" ] && [ -n "$close_line" ]
 #   （评论命令的键多一段评论 id，重建出来的是另一条记录）；LOCK_KEY 只给 entrypoint 自己用，不导出
 #   给评审脚本（I9 的裁判比较的是导出集合）。
 assert_contains "$(cat "$ENTRY")" ': "${LOCK_KEY:?' "I1：LOCK_KEY 缺失必须硬失败"
-code_lines=$(LC_ALL=C grep -vE '^[[:space:]]*#' "$ENTRY")
+code_lines=$(cat "$ENTRY" "$LEASE_LIB" | LC_ALL=C grep -vE '^[[:space:]]*#')
 #   租约（㉒）让本文件第一次**合法地**拼了两个键：租约键 `lease#仓库#MR`，与「源分支最新提交」的抢锁键
 #   `仓库#MR#<最新提交>`（查别人的记录，不是自己的）。所以这里不再是「一处都不许拼」，而是：
 #   用自己的 HEAD_SHA 拼的键一个都不许有（那就是重建自己的 LOCK_KEY），拼键的只许是这两行。
 assert_not_contains "$code_lines" '#${HEAD_SHA}' "I1：不得用自己的 HEAD_SHA 拼锁键"
 assert_not_contains "$code_lines" '#$HEAD_SHA' "I1：不得用自己的 HEAD_SHA 拼锁键（无花括号写法）"
-key_builds=$(LC_ALL=C grep -vE '^[[:space:]]*#' "$ENTRY" | LC_ALL=C grep -F '${CODEUP_REPO_ID}#' || true)
+key_builds=$(cat "$ENTRY" "$LEASE_LIB" | LC_ALL=C grep -vE '^[[:space:]]*#' | LC_ALL=C grep -F '${CODEUP_REPO_ID}#' || true)
 assert_eq "$key_builds" \
   "lease_key=\$(/usr/bin/jq -cn --arg k \"lease#\${CODEUP_REPO_ID}#\${MR_LOCAL_ID}\" '{pk: {S: \$k}}')
   tip_key=\"\${CODEUP_REPO_ID}#\${MR_LOCAL_ID}#\${tip}\"" \
@@ -642,7 +644,9 @@ if [[ -x /usr/bin/git && -x /usr/bin/jq ]] && command -v python3 >/dev/null; the
   lease_block=$(awk '/^# ── 按 MR 的租约/{f=1} /^# ── 与 Flow run block/{exit} f{print}' "$ENTRY")
   tail_block=$(awk '/^rc=0$/{f=1} f{print} f&&/^exit "\$rc"$/{exit}' "$ENTRY")
   assert_contains "$lease_block" 'exit 93' "㉒ 抽到了租约那一段"
-  assert_contains "$lease_block" 'head-check result=superseded' "㉒ 抽到的租约段包含核对最新提交那一段"
+  lease_lib=$(cat "$LEASE_LIB")
+  assert_contains "$lease_lib" 'head-check result=superseded' "㉒ 租约库里有核对最新提交那一段"
+  assert_contains "$lease_block" 'if head_check_superseded; then' "㉒ 抽到的租约段调用了核对最新提交"
   assert_contains "$tail_block" 'scripts/kiro-review.sh' "㉒ 抽到了调引擎与收尾那一段"
   printf '#!/bin/sh\nexec python3 "%s" "$@"\n' "$PWD/fake-aws-dynamodb.py" > "$ltmp/aws"
   cat > "$ltmp/date" <<'STUB'
@@ -694,7 +698,7 @@ case "$url" in "$ECS_CONTAINER_METADATA_URI_V4/task") ;; *) exit 22 ;; esac
 printf '%s' "$FAKE_TASK_META"
 STUB
   chmod +x "$ltmp/aws" "$ltmp/date" "$ltmp/sleep" "$ltmp/engine" "$ltmp/curl" "$ltmp/timeout"
-  run_block=$(printf '%s\n%s\n%s\n' "$RETRY_SRC" "$lease_block" "$tail_block" \
+  run_block=$(printf '%s\n%s\n%s\n%s\n' "$RETRY_SRC" "$lease_lib" "$lease_block" "$tail_block" \
     | sed -e "s#/usr/local/bin/aws#$ltmp/aws#g" -e "s#/bin/date#$ltmp/date#g" \
           -e "s#/bin/sleep#$ltmp/sleep#g" -e "s#/usr/bin/curl#$ltmp/curl#g" \
           -e "s#/usr/bin/timeout#$ltmp/timeout#g" \
@@ -802,7 +806,7 @@ STUB
   assert_eq "$(wc -l < "$ltmp/ddb.log")" "$n_before" "㉒ L6：退出之后不再有续期写入（续期循环没有泄漏）"
 
   # 续期调用自带短的 CLI 超时（静态）：CLI 缺省连接/读各 60 秒、共 3 次，一次续期就可能比 120 秒的租期还长
-  renew_fn=$(awk '/^lease_renew_loop\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ENTRY")
+  renew_fn=$(awk '/^lease_renew_loop\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$LEASE_LIB")
   assert_contains "$renew_fn" "update-item --cli-connect-timeout 2 --cli-read-timeout 5" "㉒ 续期调用带短的 CLI 超时"
   # 续期遇到别的错误（限流）：打代号、下一轮接着续，不停。第 1 次写是拿租约，第 2 次是第一次续期
   reset_lease
@@ -1129,11 +1133,25 @@ for pat in 'kiro-review\.sh' 'KIRO_IMAGE_DIGESTS' '^retry_git_429 /usr/bin/git c
            '^export GIT_CONFIG_VALUE_0=' 'checkout -q --detach' \
            '\[\[ -n "\$\{HEAD_SHA:-\}" \]\]' ': "\$\{MR_TARGET_BRANCH:=\}"' \
            '\[\[ "\$head_now" == "\$HEAD_SHA" \]\]' '^while :; do' '^trap lease_exit EXIT' \
-           'ls-remote origin' '^if head_check_superseded; then exit 0; fi'; do
+           '^source "\$PKG/lib/lease\.sh"$' '^if head_check_superseded; then exit 0; fi'; do
   pat_line=$(entry_code_line "$pat")
   assert_eq "$([ -n "$pat_line" ] && echo yes)" "yes" "㉑ 顺序断言的模式必须匹配到代码：${pat}"
   assert_eq "$(LC_ALL=C sed -n "${pat_line}p" "$ENTRY" | LC_ALL=C grep -cE '^[[:space:]]*#')" "0" \
     "㉑ 取到的必须是代码行而不是注释行：${pat}"
+done
+
+# ㉖ 租约库（Phase 2b）：在 clone 之前 source、只有函数定义；ls-remote 的目录可由扫描任务覆盖（LEASE_GIT_DIR），缺省仍是业务库
+src_line=$(entry_code_line '^source "\$PKG/lib/lease\.sh"$')
+clone_line=$(entry_code_line '^retry_git_429 /usr/bin/git clone ')
+assert_eq "$([ -n "$src_line" ] && [ -n "$clone_line" ] && [ "$src_line" -lt "$clone_line" ] && echo yes)" "yes" \
+  "㉖ lease.sh 在 clone 之前 source"
+top_level=$(LC_ALL=C grep -vE '^[[:space:]]*(#|$)' "$LEASE_LIB" | LC_ALL=C grep -vE '^[[:space:]]' \
+            | LC_ALL=C grep -vE '^([a-z_]+\(\) \{|\})$' || true)
+assert_eq "$top_level" "" "㉖ lease.sh 顶层只有函数定义（source 时不执行任何动作）"
+assert_contains "$(cat "$LEASE_LIB")" '-C "${LEASE_GIT_DIR:-$WORKROOT/business}" ls-remote origin' "㉖ ls-remote 的目录缺省仍是业务库"
+for fn in aws_err_code lease_acquire lease_renew_loop lease_release head_check_superseded; do
+  assert_eq "$(LC_ALL=C grep -cE "^${fn}\(\) \{" "$ENTRY")" "0" "㉖ ${fn} 不再在 entrypoint 里定义（只有一份，在 lease.sh）"
+  assert_eq "$(LC_ALL=C grep -cE "^${fn}\(\) \{" "$LEASE_LIB")" "1" "㉖ ${fn} 在 lease.sh 里定义一次"
 done
 
 report
