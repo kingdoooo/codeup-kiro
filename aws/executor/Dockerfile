@@ -35,6 +35,23 @@ RUN echo "${KIRO_PINNED_ARTIFACT_SHA256}  /opt/kiro/kirocli-x86_64-linux-musl.zi
       | sha256sum --strict -c - \
  || { echo "安装包摘要不符，拒绝构建"; exit 1; }
 
+# Amazon Inspector SBOM Generator（Phase 2b，issue 06）：**总是**烤进镜像、只在 inspector: 1 时调用——镜像内容若随开关变，
+# 镜像摘要就随开关变，换开关就得重新登记 kiro_image_digests。许可证（AWS Intellectual Property License）禁止再分发，所以与
+# Kiro 安装包同一处置：每个部署自己构建时从官方**版本化**地址下载（不用 latest/：那会让同一份 Dockerfile 在不同日子构建出
+# 不同的二进制，摘要钉不住）。官方只发布 zip 的 SHA-256（无签名）；zip 里另有一份二进制自身的摘要，两道都核对。
+ARG SBOMGEN_VERSION=1.16.0
+ARG SBOMGEN_ZIP_SHA256=2aff31bd5f7f426020a5cdda7a58aaebde72e7dae9bc78f687978ad19ef487b4
+RUN curl -sSf "https://amazon-inspector-sbomgen.s3.amazonaws.com/${SBOMGEN_VERSION}/linux/amd64/inspector-sbomgen.zip" \
+      -o /tmp/sbomgen.zip \
+ && echo "${SBOMGEN_ZIP_SHA256}  /tmp/sbomgen.zip" | sha256sum --strict -c - \
+ && unzip -q /tmp/sbomgen.zip -d /tmp/sbomgen \
+ && d="/tmp/sbomgen/inspector-sbomgen-${SBOMGEN_VERSION}/linux/amd64" \
+ && want=$(awk 'NR==1 {print $1}' "$d/checksum.txt") \
+ && echo "${want}  ${d}/inspector-sbomgen" | sha256sum --strict -c - \
+ && install -D -m 0755 "$d/inspector-sbomgen" /opt/sbomgen/inspector-sbomgen \
+ && rm -rf /tmp/sbomgen /tmp/sbomgen.zip \
+ && /usr/bin/setpriv --version >/dev/null
+
 # 集成包（scripts/ prompts/ kiro/）进镜像。AWS 档位下镜像摘要因此成为
 # **集成包自身唯一的信任锚**——Flow 档位里这个角色由受保护分支承担。
 COPY scripts /opt/integration/scripts
