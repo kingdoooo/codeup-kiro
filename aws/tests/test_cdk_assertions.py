@@ -1982,6 +1982,14 @@ def test_an_overlapping_phrase_of_a_disabled_reviewer_is_not_checked(write_cfg):
     load_config(write_cfg(_base_cfg(inspector=1, all_command_phrase="")))   # 空串不参与比较
 
 
+def test_the_all_phrase_is_not_checked_while_no_scanner_is_enabled(write_cfg):
+    # 复审 I-2：扫描开关全 0 时「全部」那一句不生效（调度器不读它），2a 合法的 command_phrase 不能因为与它重叠而被拒
+    from config import load_config
+    load_config(write_cfg(_base_cfg(command_phrase="/review please")))
+    with pytest.raises(ValueError, match="子串"):   # 正向对照：开了扫描员，「全部」生效，同一份配置就该被拒
+        load_config(write_cfg(_base_cfg(inspector=1, command_phrase="/review please")))
+
+
 @pytest.mark.parametrize("over", [{"inspector": True}, {"security_agent": "1"}, {"inspector": 2},
                                   {"inspector_bot_username": " aliyun:x"}, {"security_bot_username": "a,b"},
                                   {"inspector_max_scan_calls": 0}, {"inspector_max_scan_calls": 21},

@@ -139,7 +139,10 @@ def load_config(path):
                 + ("一条命令都不受理" if key == "command_phrase" else "这一句命令不受理"))
     # 生效短语两两不得互为子串：调度器按「正文含短语」判定，`/review` 若是 `/kiro review all` 的子串，一条只想重跑 Kiro 的
     # 评论就会把全部评审员都拉起来（也可能反过来）。空串不参与（它表示不受理）。只看生效的：没启用的评审员的短语调度器根本不读。
-    live = {k: cfg[k] for k, t in PHRASE_TOGGLE.items() if cfg[k] and (t is None or cfg[t] == 1)}
+    # 「全部」那一句只在启用了至少一位扫描员时生效（与调度器同一条规则；开关全 0 时与 2a 相同，2a 没有这一句）
+    any_scanner = any(cfg[t] == 1 for t in PHRASE_TOGGLE.values() if t)
+    live = {k: cfg[k] for k, t in PHRASE_TOGGLE.items()
+            if cfg[k] and (cfg[t] == 1 if t else (k != "all_command_phrase" or any_scanner))}
     for a, pa in live.items():
         for b, pb in live.items():
             if a != b and pa in pb:

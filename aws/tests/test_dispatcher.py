@@ -1758,7 +1758,20 @@ def test_a_command_for_a_disabled_reviewer_is_ignored_and_logged(capsys):
     assert _cmd("/inspector review /kiro review", cfg) == ("review", "kiro")
     assert capsys.readouterr().out == ""
     # 「全部」只覆盖启用了的
-    assert _cmd("/review", cfg) == ("review", "kiro")
+    assert _cmd("/review", dict(cfg, enabled=("kiro", "inspector"))) == ("review", "kiro,inspector")
+
+
+def test_the_all_phrase_is_inactive_while_no_scanner_is_enabled(capsys):
+    # 复审 I-2：两个扫描开关都是 0 时部署必须与 2a 逐行相同——2a 没有「全部」这一句，含 `/review` 子串的普通评论
+    # （`docs/review/x.md`、`…/reviews` 链接）不该拉起 Kiro；2a 用 command_phrase: "" 关掉命令的部署升级后也不该被它重新打开。
+    cfg = dict(ALL_ON, enabled=("kiro",))
+    assert _cmd("/review", cfg) == ("ignore", None)
+    assert _cmd("见 docs/review/x.md", cfg) == ("ignore", None)
+    assert capsys.readouterr().out == "", "没点名任何评审员：静默忽略，不是 reviewer-disabled"
+    assert _cmd("/review", dict(cfg, command_phrase="")) == ("ignore", None)
+    # 正向对照：Kiro 自己那句照常；启用了一位扫描员时「全部」生效
+    assert _cmd("/kiro review", cfg) == ("review", "kiro")
+    assert _cmd("/review", dict(cfg, enabled=("kiro", "inspector"))) == ("review", "kiro,inspector")
 
 
 def test_an_ordinary_comment_naming_nobody_is_ignored_silently(capsys):

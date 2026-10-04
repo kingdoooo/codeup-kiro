@@ -441,7 +441,7 @@ Amazon Inspector 是第二位评审员：只看依赖漏洞，每次评审在 MR
    PoC 可以与 Kiro 用同一个账号、同一个令牌；生产建议独立账号——评论作者一眼就能分出是谁写的，令牌也各自轮换。
 3. 机器人账号与命令短语（都可省）：`inspector_bot_username`（缺省 = `bot_username`，即共用一个账号）；
    `inspector_command_phrase`（缺省 `/inspector review`，只重跑 Inspector）与 `all_command_phrase`（缺省 `/review`，重跑全部已启用的评审员；
-   `/kiro review` 仍只重跑 Kiro）。生效的短语**两两不得互为子串**（否则一条命令会同时命中两句），synth 时检查。
+   `/kiro review` 仍只重跑 Kiro）。`/review` 只在启用了至少一位扫描员时生效：两个开关都是 0 的部署与 2a 完全相同。生效的短语**两两不得互为子串**（否则一条命令会同时命中两句），synth 时检查。
 
 **每次评审做什么**：执行器 clone 并检出 MR 的提交之后、Kiro 开始评审之前，从 git 对象（不是工作树）导出 MR 的提交、以及它与目标分支的
 merge-base 两棵树（删掉全部符号链接），以非 root 用户、空环境在两棵树上各跑一次 Amazon Inspector SBOM Generator，两份依赖清单放进

@@ -56,7 +56,7 @@ security_agent: 0
 #                                   # 评论里的词（例如 Kiro 代码评审），见 setup-guide.md 第 4.3 节
 # inspector_command_phrase: "/inspector review"   # 只重跑 Inspector；仅 inspector: 1 时生效
 # security_command_phrase: "/security review"     # 只重跑 Security Agent；仅 security_agent: 1 时生效
-# all_command_phrase: "/review"                   # 重跑全部已启用的评审员；空串 "" = 不提供这一句
+# all_command_phrase: "/review"                   # 重跑全部已启用的评审员；只在启用了至少一位扫描员时生效；空串 "" = 不提供这一句
 #                                   # 四句生效的短语两两不得互为子串（synth 时校验），否则一条评论会同时触发两句。
 # inspector_bot_username: aliyun:kirobot   # Inspector 的机器人账号；缺省 = bot_username（三位共用一个账号）
 # security_bot_username: aliyun:kirobot    # Security Agent 的机器人账号；缺省 = bot_username

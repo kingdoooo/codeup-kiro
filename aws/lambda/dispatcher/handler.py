@@ -341,7 +341,8 @@ def _reviewers_named_in(note, cfg):
     phrases = dict(cfg.get("phrases") or {})
     phrases["kiro"] = cfg.get("command_phrase") or ""
     hits = {rid for rid in reviewers.ORDER if phrases.get(rid) and phrases[rid] in note}
-    if phrases.get("all") and phrases["all"] in note:
+    # 「全部」只在启用了至少一位扫描员时生效：开关全 0 的部署与 2a 逐行相同（2a 没有这一句；复审 I-2）
+    if any(r in reviewers.SCANNERS for r in enabled) and phrases.get("all") and phrases["all"] in note:
         hits |= set(enabled)
     wanted = tuple(r for r in reviewers.ORDER if r in hits and r in enabled)
     return wanted, bool(hits - set(enabled))
