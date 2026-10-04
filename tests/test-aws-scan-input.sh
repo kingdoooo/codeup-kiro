@@ -22,9 +22,12 @@ echo 'requests==2.31.0' > "$B/requirements.txt"; lgit -C "$B" add -A; lgit -C "$
 BASE=$(lgit -C "$B" rev-parse HEAD)
 lgit -C "$B" checkout -qb feat
 printf 'hidden.py export-ignore\nver.txt export-subst\n' > "$B/.gitattributes"
+# 复审 M-2：内容转换类属性同样能改写导出物——working-tree-encoding 把清单转成 UTF-16（sbomgen 读不出依赖）、ident 与 eol 改字节
+printf 'requirements.txt working-tree-encoding=UTF-16\nid.txt ident\ncrlf.txt text eol=crlf\n' >> "$B/.gitattributes"
 echo 'eval(input())' > "$B/hidden.py"; printf '$Format:%%H$\n' > "$B/ver.txt"
 echo steering > "$B/AGENTS.md"; mkdir -p "$B/.kiro"; echo '{}' > "$B/.kiro/x.json"; echo '{}' > "$B/lsp.json"
-echo 'requests==2.19.0' > "$B/requirements.txt"
+printf 'requests==2.19.0\n' | /usr/bin/iconv -f UTF-8 -t UTF-16 > "$B/requirements.txt"   # 工作树按属性是 UTF-16，blob 是 UTF-8
+printf '$Id$\n' > "$B/id.txt"; printf 'a\nb\n' > "$B/crlf.txt"
 ln -s /proc/1/environ "$B/package-lock.json"; ln -s /etc "$B/etc-link"; ln -s missing "$B/dangling"
 lgit -C "$B" add -A; lgit -C "$B" commit -qm mr
 HEAD=$(lgit -C "$B" rev-parse HEAD)
@@ -73,6 +76,10 @@ run_lib "scan_export_tree '$HEAD' '$tmp/out'" >/dev/null 2>"$tmp/err"; rc=$?
 assert_eq "$rc" "0" "① 导出成功"
 assert_eq "$(cat "$tmp/out/hidden.py" 2>/dev/null)" "eval(input())" "① 树内 export-ignore 失效：hidden.py 在导出物里"
 assert_eq "$(cat "$tmp/out/ver.txt" 2>/dev/null)" '$Format:%H$' "① 树内 export-subst 失效：内容与 blob 逐字节相同"
+for f in requirements.txt id.txt crlf.txt; do
+  assert_eq "$(cmp -s "$tmp/out/$f" <(lgit -C "$B" cat-file blob "$HEAD:$f") && echo same)" "same" \
+    "① 树内的内容转换属性失效：${f} 与 blob 逐字节相同（working-tree-encoding / ident / eol；复审 M-2）"
+done
 for f in AGENTS.md .kiro/x.json lsp.json .gitattributes requirements.txt; do
   assert_eq "$([ -f "$tmp/out/$f" ] && echo yes)" "yes" "① N8 的实质：${f} 在导出物里（隔离会删它，导出取自 git 对象所以不受影响）"
 done
@@ -85,6 +92,10 @@ assert_eq "$(run_lib "scan_export_tree HEAD '$tmp/out2'" 2>/dev/null; echo $?)" 
 # 正向对照：不加那一行 info/attributes 时，同一个 git 确实会藏掉 hidden.py（证明上面不是因为这个 git 根本不认 export-ignore）
 mkdir -p "$tmp/ctl"; lgit -C "$B" archive --format=tar "$HEAD" | tar -x -C "$tmp/ctl"
 assert_eq "$([ -e "$tmp/ctl/hidden.py" ] && echo yes || echo no)" "no" "① 正向对照：没有那一行时 export-ignore 真的生效"
+for f in requirements.txt id.txt crlf.txt; do
+  assert_eq "$(cmp -s "$tmp/ctl/$f" <(lgit -C "$B" cat-file blob "$HEAD:$f") && echo same || echo converted)" "converted" \
+    "① 正向对照：没有那一行时 ${f} 真的被转换了"
+done
 
 # ② N8 静态
 code=$(cat "$ENTRY" ../aws/executor/lib/*.sh | LC_ALL=C grep -vE '^[[:space:]]*#')

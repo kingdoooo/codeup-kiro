@@ -5,14 +5,15 @@
 
 # 把一个提交导出成一棵专用副本树（I8：取自 git 对象、不取自工作树——隔离只删工作树，所以 N8 在实质上自动成立）。
 # 树内与执行器配置里的 export-ignore / export-subst 一律失效：MR 作者否则能用 export-ignore 把文件藏出扫描输入、用 export-subst
-# 改写内容。手段：$GIT_DIR/info/attributes 的优先级高于树内任何 .gitattributes 与 core.attributesFile（gitattributes(5)），
-# 导出期间在那里写一行 `* -export-ignore -export-subst`，导出完就删掉（不给之后的 Kiro 评审留任何改动）。
+# 改写内容；内容转换类属性同理（working-tree-encoding=UTF-16 能让 sbomgen 读不出清单里的依赖，ident / text / eol / filter 改字节；
+# 复审 M-2）。导出物必须与 blob 逐字节相同。手段：$GIT_DIR/info/attributes 的优先级高于树内任何 .gitattributes 与
+# core.attributesFile（gitattributes(5)），导出期间在那里写一行把这些属性全部取消，导出完就删掉（不给之后的 Kiro 评审留任何改动）。
 # 导出后删掉全部符号链接并核对为零（S1：sbomgen 与 SA 都不该顺着链接读到树外——AWS 自己的 SA 客户端同样跳过符号链接）。
 scan_export_tree() {  # <40 位提交> <目标目录> → rc 0 / 非 0
   local commit="$1" dest="$2" gd="$WORKROOT/business" rc=0 left
   [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
   /bin/mkdir -p "$gd/.git/info" "$dest" || return 1
-  printf '* -export-ignore -export-subst\n' > "$gd/.git/info/attributes" || return 1
+  printf '* -export-ignore -export-subst -working-tree-encoding -text -eol -ident -filter\n' > "$gd/.git/info/attributes" || return 1
   /usr/bin/git -C "$gd" archive --format=tar "$commit" | /usr/bin/tar -x -C "$dest" --no-same-owner --no-same-permissions || rc=1
   /bin/rm -f "$gd/.git/info/attributes"
   [[ "$rc" == 0 ]] || return 1
