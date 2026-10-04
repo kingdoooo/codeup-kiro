@@ -1,0 +1,5417 @@
+{
+  "sbom": {
+    "specVersion": "1.5",
+    "metadata": {
+      "tools": {
+        "services": [
+          {
+            "name": "Amazon Inspector Scan SBOM API",
+            "version": "1a2b3c4d+06d21186+1d74da34"
+          }
+        ]
+      },
+      "properties": [
+        {
+          "name": "amazon:inspector:sbom_scanner:critical_vulnerabilities",
+          "value": "5"
+        },
+        {
+          "name": "amazon:inspector:sbom_scanner:high_vulnerabilities",
+          "value": "6"
+        },
+        {
+          "name": "amazon:inspector:sbom_scanner:medium_vulnerabilities",
+          "value": "10"
+        },
+        {
+          "name": "amazon:inspector:sbom_scanner:low_vulnerabilities",
+          "value": "0"
+        },
+        {
+          "name": "amazon:inspector:sbom_scanner:other_vulnerabilities",
+          "value": "0"
+        },
+        {
+          "name": "amazon:inspector:sbom_scanner:malicious_packages",
+          "value": "0"
+        }
+      ],
+      "timestamp": "2026-10-04T09:23:04.855Z"
+    },
+    "components": [
+      {
+        "bom-ref": "comp-1",
+        "name": "y",
+        "purl": "pkg:maven/x/y@1",
+        "type": "library",
+        "version": "1",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:path",
+            "value": "mvn/pom.xml"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:info",
+            "value": "Component skipped: no supported rules found."
+          }
+        ]
+      },
+      {
+        "bom-ref": "comp-2",
+        "name": "log4j-core",
+        "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+        "type": "library",
+        "version": "2.14.1",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:path",
+            "value": "mvn/pom.xml"
+          }
+        ]
+      },
+      {
+        "bom-ref": "comp-3",
+        "name": "lodash",
+        "purl": "pkg:npm/lodash@4.17.15",
+        "type": "library",
+        "version": "4.17.15",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:path",
+            "value": "npm/package-lock.json"
+          }
+        ]
+      },
+      {
+        "bom-ref": "comp-4",
+        "name": "pyyaml",
+        "purl": "pkg:pypi/pyyaml@5.3",
+        "type": "library",
+        "version": "5.3",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:path",
+            "value": "py/requirements.txt"
+          }
+        ]
+      },
+      {
+        "bom-ref": "comp-5",
+        "name": "requests",
+        "purl": "pkg:pypi/requests@2.19.0",
+        "type": "library",
+        "version": "2.19.0",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:path",
+            "value": "py/requirements.txt"
+          }
+        ]
+      }
+    ],
+    "serialNumber": "urn:uuid:91127637-4954-4cfd-b808-929a4c791887",
+    "bomFormat": "CycloneDX",
+    "vulnerabilities": [
+      {
+        "advisories": [
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-34477"
+          },
+          {
+            "url": "https://logging.apache.org/security.html#CVE-2026-34477"
+          },
+          {
+            "url": "https://lists.apache.org/thread/lkx8cl46t2bvkcwfcb2pd43ygc097lq4"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2/pull/4075"
+          },
+          {
+            "url": "https://logging.apache.org/cyclonedx/vdr.xml"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/manual/appenders/network.html#SslConfiguration-attr-verifyHostName"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2026-34477"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2026-34477"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2026/CVE-2026-34477.html"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-6hg6-v5c8-fphq"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2026/cve-2026-34477.json"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2026-34477"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2026-34477"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:21773"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2026-34477.html"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2"
+          }
+        ],
+        "bom-ref": "vuln-1",
+        "references": [
+          {
+            "id": "GHSA-6hg6-v5c8-fphq",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-6hg6-v5c8-fphq"
+            }
+          }
+        ],
+        "created": "2026-03-28T11:26:04Z",
+        "description": "The fix for CVE-2025-68161 https://logging.apache.org/security.html#CVE-2025-68161 was incomplete: it addressed hostname verification only when enabled via the log4j2.sslVerifyHostName https://logging.apache.org/log4j/2.x/manual/systemproperties.html#log4j2.sslVerifyHostName system property, but not when configured through the verifyHostName https://logging.apache.org/log4j/2.x/manual/appenders/network.html#SslConfiguration-attr-verifyHostName attribute of the <Ssl> element.\n\nAlthough the verifyHostName configuration attribute was introduced in Log4j Core 2.12.0, it was silently ignored in all versions through 2.25.3, leaving TLS connections vulnerable to interception regardless of the configured value.\n\nA network-based attacker may be able to perform a man-in-the-middle attack when all of the following conditions are met:\n\n * An SMTP, Socket, or Syslog appender is in use. * TLS is configured via a nested <Ssl> element. * The attacker can present a certificate issued by a CA trusted by the appender's configured trust store, or by the default Java trust store if none is configured. This issue does not affect users of the HTTP appender, which uses a separate verifyHostname https://logging.apache.org/log4j/2.x/manual/appenders/network.html#HttpAppender-attr-verifyHostName attribute that was not subject to this bug and verifies host names by default.\n\nUsers are advised to upgrade to Apache Log4j Core 2.25.4, which corrects this issue.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-2"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-34477"
+        },
+        "published": "2026-04-10T16:16:30Z",
+        "cwes": [
+          295,
+          297,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "in_triage"
+        },
+        "ratings": [
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:N/T:P",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2026-34477"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.00502,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2026-34477"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.3,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:L/SA:N",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2026-34477"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.9,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:N",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-34477"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2026-34477"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.3,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:L/SA:N",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-6hg6-v5c8-fphq"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.3,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:L/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-34477"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.4,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:L/I:L/A:N",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          }
+        ],
+        "id": "CVE-2026-34477",
+        "updated": "2026-05-06T16:49:51Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-2",
+            "value": "2.25.4"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/WORRFHPQVAFKKXXWLSSW6XKUYLWM6CSH/"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/K5HEPD7LEVDPCITY5IMDYWXUMX37VFMY/"
+          },
+          {
+            "url": "https://github.com/yaml/pyyaml/pull/386"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/7PPAS6C4SZRDQLR7C22A5U3QOLXY33JX/"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-1747"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujul2022.html"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/ZBJA3SGNJKCAYPSHOHWY3KBCWNM5NYK2/"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/MMQXSZXNJT6ERABJZAAICI3DQSQLCP3D/"
+          },
+          {
+            "url": "https://bugzilla.redhat.com/show_bug.cgi?id=CVE-2020-1747"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=953013"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:4641"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2020/CVE-2020-1747.html"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2020-1747.html"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2020-1747"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2020-1747"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2020-1747"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2020/cve-2020-1747.json"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2020-1747"
+          }
+        ],
+        "bom-ref": "vuln-2",
+        "references": [
+          {
+            "id": "GHSA-6757-jp84-gxfx",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-6757-jp84-gxfx"
+            }
+          }
+        ],
+        "created": "2019-11-27T00:00:00Z",
+        "description": "A vulnerability was discovered in the PyYAML library in versions before 5.3.1, where it is susceptible to arbitrary code execution when it processes untrusted YAML files through the full_load method or with the FullLoader loader. Applications that use the library to process untrusted input may be vulnerable to this flaw. An attacker could use this flaw to execute arbitrary code on the system by abusing the python/object/new constructor.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-4"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-1747"
+        },
+        "published": "2020-03-24T15:15:12Z",
+        "cwes": [
+          20,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2020-1747"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.8,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-1747"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.05442,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2020-1747"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.8,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "critical",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.8,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2020-1747"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.8,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-6757-jp84-gxfx"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.3,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-6757-jp84-gxfx"
+            }
+          }
+        ],
+        "id": "CVE-2020-1747",
+        "updated": "2024-11-21T05:11:17Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-4",
+            "value": "5.3.1"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:ttps",
+            "value": "T1190;T1210"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujan2022.html"
+          },
+          {
+            "url": "https://lists.debian.org/debian-lts-announce/2021/12/msg00036.html"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-784507.pdf"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44832"
+          },
+          {
+            "url": "https://lists.apache.org/thread/s1o5vlo78ypqxnzn6p8zf6t9shtq5143"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/EVV25FXL4FU5X6X5BSL7RLQ7T6F65MRA/"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuapr2022.html"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujul2022.html"
+          },
+          {
+            "url": "https://tools.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/T57MPJUW3MA6QGWZRTMCHHMMPQNVKGFC/"
+          },
+          {
+            "url": "https://issues.apache.org/jira/browse/LOG4J2-3293"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2021-44832.html"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1002813"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2/commit/05db5f9527254632b59aed2a1d78a32c5ab74f16"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0226"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0205"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0227"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0203"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0225"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0467"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0222"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0223"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0485"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:1297"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:1296"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2021-44832"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2021/CVE-2021-44832.html"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2021/cve-2021-44832.json"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/CVE-2021-44832.html"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/cve/json/v1/CVE-2021-44832.json"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-5222-1"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-8489-44mv-ggj8"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2021-44832"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2022-1734.html"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2021-44832"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0138"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0216"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0236"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/EVV25FXL4FU5X6X5BSL7RLQ7T6F65MRA"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0493"
+          },
+          {
+            "url": "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0230"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0181"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2021-44832"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0083"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/T57MPJUW3MA6QGWZRTMCHHMMPQNVKGFC"
+          }
+        ],
+        "bom-ref": "vuln-3",
+        "references": [
+          {
+            "id": "GHSA-8489-44mv-ggj8",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-8489-44mv-ggj8"
+            }
+          }
+        ],
+        "created": "2021-12-11T00:00:00Z",
+        "description": "Apache Log4j2 versions 2.0-beta7 through 2.17.0 (excluding security fix releases 2.3.2 and 2.12.4) are vulnerable to a remote code execution (RCE) attack when a configuration uses a JDBC Appender with a JNDI LDAP data source URI when an attacker has control of the target LDAP server. This issue is fixed by limiting JNDI data source names to the java protocol in Log4j2 versions 2.17.1, 2.12.4, and 2.3.2.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-2"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44832"
+        },
+        "published": "2021-12-28T20:15:08Z",
+        "cwes": [
+          20,
+          74,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 6.6,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-8489-44mv-ggj8"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.6,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2021-44832"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.6,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44832"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:N/T:T",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2021-44832"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.97906,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2021-44832"
+            }
+          }
+        ],
+        "id": "CVE-2021-44832",
+        "updated": "2026-05-29T20:16:21Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "immediate"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "verified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_last_seen_in_public",
+            "value": "2026-03-23T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_first_seen_in_public",
+            "value": "2023-02-14T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:vulncheck_kev_date_added",
+            "value": "2023-02-14T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-2",
+            "value": "2.17.1"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:ttps",
+            "value": "T0866;T1210"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:tools",
+            "value": "AvosLocker;BigBossHorse;RAR1Ransom;Satan"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujan2022.html"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/pull/5065"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-637483.pdf"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/blob/npm/trimEnd.js#L8"
+          },
+          {
+            "url": "https://www.oracle.com//security-alerts/cpujul2021.html"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujul2022.html"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-28500"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuoct2021.html"
+          },
+          {
+            "url": "https://github.com/github/advisory-database/pull/6139"
+          },
+          {
+            "url": "https://github.com/rubysec/ruby-advisory-db/blob/master/gems/lodash-rails/CVE-2020-28500.yml"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-29mw-wpgm-hmr9"
+          },
+          {
+            "url": "https://github.com/lodash/lodash"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:2438"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2020-28500"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=985086"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:6429"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2020-28500"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2020/CVE-2020-28500.html"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2020-28500"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2020/cve-2020-28500.json"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:2179"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-8411-1"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/commit/c4847ebe7d14540bb28a8b932a9ce1b9ecbfee1a"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:3459"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/pull/5065/commits/02906b8191d3c100c193fe6f7b27d1c40f200bb7"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2020-28500"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:2543"
+          }
+        ],
+        "bom-ref": "vuln-4",
+        "references": [
+          {
+            "id": "GHSA-29mw-wpgm-hmr9",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-29mw-wpgm-hmr9"
+            }
+          }
+        ],
+        "created": "2020-11-12T00:00:00Z",
+        "description": "Lodash versions prior to 4.17.21 are vulnerable to Regular Expression Denial of Service (ReDoS) via the toNumber, trim and trimEnd functions.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-3"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-28500"
+        },
+        "published": "2021-02-15T11:15:12Z",
+        "cwes": [
+          400,
+          1035,
+          1333,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-29mw-wpgm-hmr9"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2020-28500"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.07336,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2020-28500"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2020-28500"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-28500"
+            }
+          }
+        ],
+        "id": "CVE-2020-28500",
+        "updated": "2024-11-21T05:22:55Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "moderate"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-3",
+            "value": "4.17.21"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://www.intel.com/content/www/us/en/security-center/advisory/intel-sa-00646.html"
+          },
+          {
+            "url": "https://www.debian.org/security/2021/dsa-5022"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/security.html"
+          },
+          {
+            "url": "https://security.gentoo.org/glsa/202310-16"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-479842.pdf"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/alert-cve-2021-44228.html"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujan2022.html"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-714170.pdf"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/EOKPQGV24RRBBI4TBZUDQMM4MEH7MXCY/"
+          },
+          {
+            "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2021-45046"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2021-44228"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-397453.pdf"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-661247.pdf"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-45046"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/SIG7FZULMNK2XF6FZRU4VWYDQXNMUGAJ/"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuapr2022.html"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujul2022.html"
+          },
+          {
+            "url": "https://tools.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd"
+          },
+          {
+            "url": "https://www.kb.cert.org/vuls/id/930724"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2CORRETTO8-2021-001.html"
+          },
+          {
+            "url": "https://lists.apache.org/thread/83y7dx5xvn3h5290q1twn16tltolv88f"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5094"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0205"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0203"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:1297"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:1296"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2021-45046.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5127"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/SIG7FZULMNK2XF6FZRU4VWYDQXNMUGAJ"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5128"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/EOKPQGV24RRBBI4TBZUDQMM4MEH7MXCY"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5129"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/CVE-2021-45046.html"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-7rjr-3q55-vv33"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2021/cve-2021-45046.json"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5141"
+          },
+          {
+            "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:1747"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0138"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5140"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0216"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2021-45046"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:1746"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2JAVA-OPENJDK11-2021-001.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5137"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-jfh8-c2jp-5v3q"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0222"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0223"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-5197-1"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2021-1731.html"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/cve/json/v1/CVE-2021-45046.json"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2021/CVE-2021-45046.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5106"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/ALAS-2021-1553.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5107"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5108"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2021-45046"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5148"
+          },
+          {
+            "url": "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd"
+          },
+          {
+            "url": "https://wiki.ubuntu.com/SecurityTeam/KnowledgeBase/Log4Shell"
+          },
+          {
+            "url": "https://issues.apache.org/jira/browse/LOG4J2-3221"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0083"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1001729"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2021-1730.html"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2021-45046"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2021-45046"
+          }
+        ],
+        "bom-ref": "vuln-5",
+        "references": [
+          {
+            "id": "GHSA-7rjr-3q55-vv33",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-7rjr-3q55-vv33"
+            }
+          }
+        ],
+        "created": "2021-12-14T00:00:00Z",
+        "description": "It was found that the fix to address CVE-2021-44228 in Apache Log4j 2.15.0 was incomplete in certain non-default configurations. This could allows attackers with control over Thread Context Map (MDC) input data when the logging configuration uses a non-default Pattern Layout with either a Context Lookup (for example, $${ctx:loginId}) or a Thread Context Map pattern (%X, %mdc, or %MDC) to craft malicious input data using a JNDI Lookup pattern resulting in an information leak and remote code execution in some environments and local code execution in all environments. Log4j 2.16.0 (Java 8) and 2.12.2 (Java 7) fix this issue by removing support for message lookup patterns and disabling JNDI functionality by default.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-2"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-45046"
+        },
+        "published": "2021-12-14T19:15:07Z",
+        "cwes": [
+          917,
+          1035,
+          502,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2021-45046"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.99977,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2021-45046"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.0,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-45046"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.0,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "critical",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.0,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-7rjr-3q55-vv33"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:A/A:N/T:T",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2021-45046"
+            }
+          }
+        ],
+        "id": "CVE-2021-45046",
+        "updated": "2025-10-27T17:35:56Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "immediate"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "verified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_last_seen_in_public",
+            "value": "2026-06-22T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_first_seen_in_public",
+            "value": "2021-12-06T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:cisa_kev_date_added",
+            "value": "2023-05-01T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:cisa_kev_date_due",
+            "value": "2023-05-22T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:vulncheck_kev_date_added",
+            "value": "2021-12-06T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:vulncheck_kev_date_due",
+            "value": "2023-05-22T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-2",
+            "value": "2.16.0"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:ttps",
+            "value": "T0866;T1210"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:tools",
+            "value": "Amazon Web Services (AWS);AvosLocker;BITSAdmin;BigBossHorse;BlackCat;Cobalt Strike;Conti;CountLoader;ExMatter;GMER;GhostSOCKS;LockBit;Mimikatz;PC Hunter;PSExec;Process Hacker;RAR1Ransom;Rclone;Satan;Seatbelt;Sharpview;SystemBC;Unattributed"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://github.com/psf/requests/security/advisories/GHSA-gc5v-m9x4-r6x2"
+          },
+          {
+            "url": "https://github.com/psf/requests/releases/tag/v2.33.0"
+          },
+          {
+            "url": "https://github.com/psf/requests/commit/66d21cb07bd6255b1280291c4fafb71803cdb3b7"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-25645"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2026/CVE-2026-25645.html"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2026-25645"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2026-25645"
+          },
+          {
+            "url": "https://github.com/psf/requests"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2026-25645"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-gc5v-m9x4-r6x2"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2026/cve-2026-25645.json"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2026-25645.html"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-8825-1"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1132071"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2026-25645"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:59151"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:56431"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:59144"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:57383"
+          }
+        ],
+        "bom-ref": "vuln-6",
+        "references": [
+          {
+            "id": "GHSA-gc5v-m9x4-r6x2",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-gc5v-m9x4-r6x2"
+            }
+          }
+        ],
+        "created": "2026-02-04T05:15:41Z",
+        "description": "Requests is a HTTP library. Prior to version 2.33.0, the `requests.utils.extract_zipped_paths()` utility function uses a predictable filename when extracting files from zip archives into the system temporary directory. If the target file already exists, it is reused without validation. A local attacker with write access to the temp directory could pre-create a malicious file that would be loaded in place of the legitimate one. Standard usage of the Requests library is not affected by this vulnerability. Only applications that call `extract_zipped_paths()` directly are impacted. Starting in version 2.33.0, the library extracts files to a non-deterministic location. If developers are unable to upgrade, they can set `TMPDIR` in their environment to a directory with restricted write access.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-5"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-25645"
+        },
+        "published": "2026-03-25T17:16:52Z",
+        "cwes": [
+          377,
+          1035,
+          379,
+          937
+        ],
+        "analysis": {
+          "state": "in_triage"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 5.5,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-25645"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:N/T:P",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2026-25645"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 4.4,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:H/A:N",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2026-25645"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 4.4,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:H/A:N",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-gc5v-m9x4-r6x2"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2026-25645"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.00185,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2026-25645"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 4.4,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:H/A:N",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          }
+        ],
+        "id": "CVE-2026-25645",
+        "updated": "2026-03-30T14:23:16Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-5",
+            "value": "2.33.0"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://lists.debian.org/debian-lts-announce/2026/01/msg00015.html"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-68161"
+          },
+          {
+            "url": "https://logging.apache.org/cyclonedx/vdr.xml"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/manual/systemproperties.html#log4j2.sslVerifyHostName"
+          },
+          {
+            "url": "https://lists.apache.org/thread/xr33kyxq3sl67lwb61ggvm1fzc8k7dvx"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2/pull/4002"
+          },
+          {
+            "url": "https://logging.apache.org/security.html#CVE-2025-68161"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/manual/appenders/network.html#SslConfiguration-attr-verifyHostName"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2025-68161"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2025-68161"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/cve/json/v1/CVE-2025-68161.json"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2025/cve-2025-68161.json"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2026-1398.html"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2025-68161"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2025/CVE-2025-68161.html"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/CVE-2025-68161.html"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2/commit/3b93748497e1adbbd027fda8a5e7268ec5d0d578"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1123744"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2025-68161"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2025-68161.html"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-vc5p-v9hr-52mj"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2"
+          }
+        ],
+        "bom-ref": "vuln-7",
+        "references": [
+          {
+            "id": "GHSA-vc5p-v9hr-52mj",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-vc5p-v9hr-52mj"
+            }
+          }
+        ],
+        "created": "2025-12-16T11:30:53Z",
+        "description": "The Socket Appender in Apache Log4j Core versions 2.0-beta9 through 2.25.2 does not perform TLS hostname verification of the peer certificate, even when the verifyHostName https://logging.apache.org/log4j/2.x/manual/appenders/network.html#SslConfiguration-attr-verifyHostName configuration attribute or the log4j2.sslVerifyHostName https://logging.apache.org/log4j/2.x/manual/systemproperties.html#log4j2.sslVerifyHostName system property is set to true.\n\nThis issue may allow a man-in-the-middle attacker to intercept or redirect log traffic under the following conditions:\n\n * The attacker is able to intercept or redirect network traffic between the client and the log receiver. * The attacker can present a server certificate issued by a certification authority trusted by the Socket Appender’s configured trust store (or by the default Java trust store if no custom trust store is configured).\n\nUsers are advised to upgrade to Apache Log4j Core version 2.25.3, which addresses this issue.\n\nAs an alternative mitigation, the Socket Appender may be configured to use a private or restricted trust root to limit the set of trusted certificates.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-2"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-68161"
+        },
+        "published": "2025-12-18T21:15:57Z",
+        "cwes": [
+          295,
+          297,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 4.8,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:N",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-68161"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.3,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:L/SA:N",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-vc5p-v9hr-52mj"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:N/T:P",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2025-68161"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2025-68161"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.4,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:L/I:L/A:N",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.3,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:L/SA:N",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2025-68161"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.00767,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2025-68161"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.3,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:L/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-68161"
+            }
+          }
+        ],
+        "id": "CVE-2025-68161",
+        "updated": "2026-01-20T01:15:55Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "moderate"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-2",
+            "value": "2.25.3"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://bugzilla.redhat.com/show_bug.cgi?id=1860466"
+          },
+          {
+            "url": "https://github.com/SeldonIO/seldon-core/issues/2252"
+          },
+          {
+            "url": "https://github.com/yaml/pyyaml/issues/420"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuapr2022.html"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujul2022.html"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-14343"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2020/CVE-2020-14343.html"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2020-14343"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2020-14343"
+          },
+          {
+            "url": "https://github.com/yaml/pyyaml/wiki/PyYAML-yaml.load(input)-Deprecation"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-4940-1"
+          },
+          {
+            "url": "https://github.com/pypa/advisory-database/tree/main/vulns/pyyaml/PYSEC-2021-142.yaml"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-8q59-q68h-6hv4"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2020-14343.html"
+          },
+          {
+            "url": "https://github.com/yaml/pyyaml/commit/a001f2782501ad2d24986959f0239a354675f9dc"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2020-14343"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2020-14343"
+          },
+          {
+            "url": "https://pypi.org/project/PyYAML"
+          },
+          {
+            "url": "https://github.com/yaml/pyyaml"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:4702"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2020/cve-2020-14343.json"
+          },
+          {
+            "url": "https://github.com/yaml/pyyaml/issues/420#issuecomment-663673966"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:2583"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=966233"
+          }
+        ],
+        "bom-ref": "vuln-8",
+        "references": [
+          {
+            "id": "GHSA-8q59-q68h-6hv4",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-8q59-q68h-6hv4"
+            }
+          }
+        ],
+        "created": "2020-06-17T00:00:00Z",
+        "description": "A vulnerability was discovered in the PyYAML library in versions before 5.4, where it is susceptible to arbitrary code execution when it processes untrusted YAML files through the full_load method or with the FullLoader loader. Applications that use the library to process untrusted input may be vulnerable to this flaw. This flaw allows an attacker to execute arbitrary code on the system by abusing the python/object/new constructor. This flaw is due to an incomplete fix for CVE-2020-1747.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-4"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-14343"
+        },
+        "published": "2021-02-09T21:15:12Z",
+        "cwes": [
+          20,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "none",
+            "score": 0.05984,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2020-14343"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2020-14343"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.8,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-14343"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.8,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "critical",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.3,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-8q59-q68h-6hv4"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.8,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-8q59-q68h-6hv4"
+            }
+          }
+        ],
+        "id": "CVE-2020-14343",
+        "updated": "2024-11-21T05:03:03Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-4",
+            "value": "5.4"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:ttps",
+            "value": "T1190;T1210"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-35195"
+          },
+          {
+            "url": "https://github.com/psf/requests/security/advisories/GHSA-9wx4-h78v-vm56"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/IYLSNK5TL46Q6XPRVMHVWS63MVJQOK4Q/"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/N7WP6EYDSUOCOJYHDK5NX43PYZ4SNHGZ/"
+          },
+          {
+            "url": "https://github.com/psf/requests/commit/a58d7f2ffb4d00b46dca2d70a3932a0b37e22fac"
+          },
+          {
+            "url": "https://github.com/psf/requests/pull/6655"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2024-732.html"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1071593"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:7049"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:1335"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2024-2654.html"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2024-780.html"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-8344-1"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2024/cve-2024-35195.json"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/CVE-2024-35195.html"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/N7WP6EYDSUOCOJYHDK5NX43PYZ4SNHGZ"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2024:9988"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2024/CVE-2024-35195.html"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2024-35195"
+          },
+          {
+            "url": "https://github.com/psf/requests"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:8385"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2025-2846.html"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2025-957.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2024:3781"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2025-2868.html"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2024-781.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:0012"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:2399"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2024-35195.html"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/cve/json/v1/CVE-2024-35195.json"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2024-35195"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/IYLSNK5TL46Q6XPRVMHVWS63MVJQOK4Q"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2PYTHON3.8-2024-017.html"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2024-2715.html"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-9wx4-h78v-vm56"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2024-782.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2024:4522"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2024-35195"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2024-35195"
+          }
+        ],
+        "bom-ref": "vuln-9",
+        "references": [
+          {
+            "id": "GHSA-9wx4-h78v-vm56",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-9wx4-h78v-vm56"
+            }
+          }
+        ],
+        "created": "2024-05-10T14:24:24Z",
+        "description": "Requests is a HTTP library. Prior to 2.32.0, when making requests through a Requests `Session`, if the first request is made with `verify=False` to disable cert verification, all subsequent requests to the same host will continue to ignore cert verification regardless of changes to the value of `verify`. This behavior will continue for the lifecycle of the connection in the connection pool. This vulnerability is fixed in 2.32.0.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-5"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-35195"
+        },
+        "published": "2024-05-20T21:15:09Z",
+        "cwes": [
+          670,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "in_triage"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 5.6,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:H/I:H/A:N",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2024-35195"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:N/T:T",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2024-35195"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.6,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:H/I:H/A:N",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-9wx4-h78v-vm56"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.0034,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2024-35195"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.6,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:H/I:H/A:N",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2024-35195"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.6,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:H/I:H/A:N",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-35195"
+            }
+          }
+        ],
+        "id": "CVE-2024-35195",
+        "updated": "2026-04-15T00:35:42Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-5",
+            "value": "2.32.0"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://seclists.org/fulldisclosure/2025/Jun/2"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-47081"
+          },
+          {
+            "url": "https://github.com/psf/requests/commit/96ba401c1296ab1dda74a2365ef36d88f7d144ef"
+          },
+          {
+            "url": "https://github.com/psf/requests/pull/6965"
+          },
+          {
+            "url": "https://github.com/psf/requests/security/advisories/GHSA-9hjg-9r4m-mvj7"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:14750"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2024/cve-2024-47081.json"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:15622"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2025-1083.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:4215"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:15723"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:14999"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2025-1110.html"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-7568-1"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2025-2928.html"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2025-2906.html"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2024-47081"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:12519"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/CVE-2024-47081.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:13604"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2024/CVE-2024-47081.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:15121"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:15122"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1107368"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2024-47081"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2024-47081"
+          },
+          {
+            "url": "https://github.com/psf/requests"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:15614"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:15615"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:15616"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2024-47081"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:15617"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2025-3089.html"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2024-47081.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:15618"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2025-1303.html"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/cve/json/v1/CVE-2024-47081.json"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-7762-1"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2025-2907.html"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-9hjg-9r4m-mvj7"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2025-3104.html"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2025-1097.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:15691"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:13234"
+          }
+        ],
+        "bom-ref": "vuln-10",
+        "references": [
+          {
+            "id": "GHSA-9hjg-9r4m-mvj7",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-9hjg-9r4m-mvj7"
+            }
+          }
+        ],
+        "created": "2024-09-17T17:42:37Z",
+        "description": "Requests is a HTTP library. Due to a URL parsing issue, Requests releases prior to 2.32.4 may leak .netrc credentials to third parties for specific maliciously-crafted URLs. Users should upgrade to version 2.32.4 to receive a fix. For older versions of Requests, use of the .netrc file can be disabled with `trust_env=False` on one's Requests Session.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-5"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-47081"
+        },
+        "published": "2025-06-09T18:15:24Z",
+        "cwes": [
+          522,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2024-47081"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:N/T:P",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2024-47081"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-47081"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-9hjg-9r4m-mvj7"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2024-47081"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.0098,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2024-47081"
+            }
+          }
+        ],
+        "id": "CVE-2024-47081",
+        "updated": "2026-04-15T00:35:42Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-5",
+            "value": "2.32.4"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujan2022.html"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-501673.pdf"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-45105"
+          },
+          {
+            "url": "https://www.debian.org/security/2021/dsa-5024"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/security.html"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuapr2022.html"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujul2022.html"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-479842.pdf"
+          },
+          {
+            "url": "https://tools.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd"
+          },
+          {
+            "url": "https://www.kb.cert.org/vuls/id/930724"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2021/CVE-2021-45105.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0205"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0026"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0203"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0222"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0223"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0047"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/CVE-2021-45105.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0044"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0042"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:1297"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:1296"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0043"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/cve/json/v1/CVE-2021-45105.json"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/SIG7FZULMNK2XF6FZRU4VWYDQXNMUGAJ"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2021-45105"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2021-45105.html"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/EOKPQGV24RRBBI4TBZUDQMM4MEH7MXCY"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-5222-1"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/security.html#CVE-2021-45105"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-5203-1"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0219"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2021-45105"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2021-1733.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:1469"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0216"
+          },
+          {
+            "url": "https://lists.debian.org/debian-lts-announce/2021/12/msg00017.html"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1001891"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2021/cve-2021-45105.json"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:1463"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2021-45105"
+          },
+          {
+            "url": "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:1462"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2021-45105"
+          },
+          {
+            "url": "https://wiki.ubuntu.com/SecurityTeam/KnowledgeBase/Log4Shell"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0083"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-p6xc-xr62-6r2g"
+          }
+        ],
+        "bom-ref": "vuln-11",
+        "references": [
+          {
+            "id": "GHSA-p6xc-xr62-6r2g",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-p6xc-xr62-6r2g"
+            }
+          }
+        ],
+        "created": "2021-12-16T00:00:00Z",
+        "description": "Apache Log4j2 versions 2.0-alpha1 through 2.16.0 (excluding 2.12.3 and 2.3.1) did not protect from uncontrolled recursion from self-referential lookups. This allows an attacker with control over Thread Context Map data to cause a denial of service when a crafted string is interpreted. This issue was fixed in Log4j 2.17.0, 2.12.3, and 2.3.1.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-2"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-45105"
+        },
+        "published": "2021-12-18T12:15:07Z",
+        "cwes": [
+          20,
+          674,
+          1035,
+          835,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 5.9,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-45105"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 8.6,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-p6xc-xr62-6r2g"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 8.6,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:N/A:H",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2021-45105"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.99999,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2021-45105"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:N/T:P",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2021-45105"
+            }
+          }
+        ],
+        "id": "CVE-2021-45105",
+        "updated": "2026-08-25T16:28:27Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "immediate"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_last_seen_in_public",
+            "value": "2025-09-15T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_first_seen_in_public",
+            "value": "2021-12-22T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:vulncheck_kev_date_added",
+            "value": "2021-12-22T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-2",
+            "value": "2.17.0"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:tools",
+            "value": "AvosLocker;BigBossHorse;RAR1Ransom;Satan"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujan2022.html"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-637483.pdf"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/blob/ddfd9b11a0126db2302cb70ec9973b66baec0975/lodash.js#L14851"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-23337"
+          },
+          {
+            "url": "https://www.oracle.com//security-alerts/cpujul2021.html"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujul2022.html"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuoct2021.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:7329"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2021/CVE-2021-23337.html"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/commit/3469357cff396a26c363f8c1b5a91dde28ba4b1c"
+          },
+          {
+            "url": "https://github.com/lodash/lodash"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:2438"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:6429"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=985086"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:2179"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-8411-1"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2021-23337"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2021-23337"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2021-23337"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2021/cve-2021-23337.json"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2021-23337"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:3459"
+          },
+          {
+            "url": "https://github.com/rubysec/ruby-advisory-db/blob/master/gems/lodash-rails/CVE-2021-23337.yml"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-35jh-r3h4-6jhm"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:2543"
+          }
+        ],
+        "bom-ref": "vuln-12",
+        "references": [
+          {
+            "id": "GHSA-35jh-r3h4-6jhm",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-35jh-r3h4-6jhm"
+            }
+          }
+        ],
+        "created": "2021-01-08T00:00:00Z",
+        "description": "Lodash versions prior to 4.17.21 are vulnerable to Command Injection via the template function.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-3"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-23337"
+        },
+        "published": "2021-02-15T13:15:12Z",
+        "cwes": [
+          94,
+          1035,
+          77,
+          78,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "high",
+            "score": 7.2,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2021-23337"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.21333,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2021-23337"
+            }
+          },
+          {
+            "severity": "high",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 7.2,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-35jh-r3h4-6jhm"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 7.2,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-23337"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 7.2,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2021-23337"
+            }
+          }
+        ],
+        "id": "CVE-2021-23337",
+        "updated": "2024-11-21T05:51:31Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "moderate"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-3",
+            "value": "4.17.21"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:ttps",
+            "value": "T0866"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://www.npmjs.com/advisories/1523"
+          },
+          {
+            "url": "https://github.com/nodejs/security-wg/blob/master/vuln/npm/516.json"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/pull/4759"
+          },
+          {
+            "url": "https://hackerone.com/reports/712065"
+          }
+        ],
+        "bom-ref": "vuln-13",
+        "created": "2019-10-11T00:00:00Z",
+        "description": "Allocation of Resources Without Limits or Throttling - Prototype pollution attack (lodash)",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-3"
+          }
+        ],
+        "source": {
+          "name": "NODE_SECURITY_WG_NPM",
+          "url": "https://github.com/nodejs/security-wg/blob/master/vuln/npm/516.json"
+        },
+        "published": "2019-10-11T00:00:00Z",
+        "analysis": {
+          "state": "in_triage"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.3,
+            "method": "CVSSv3",
+            "vector": "CVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L",
+            "source": {
+              "name": "NODE_SECURITY_WG_NPM",
+              "url": "https://github.com/nodejs/security-wg/blob/master/vuln/npm/516.json"
+            }
+          }
+        ],
+        "id": "NSWG-ECO-516",
+        "updated": "2020-07-13T00:00:00Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-3",
+            "value": "4.17.19"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:11454"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:41944"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:60023"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:11494"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:41941"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:11493"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:13553"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:11495"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:17598"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:59833"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2026-4800"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:42078"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:8483"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:8484"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:19410"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:24331"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:54188"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:17550"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:24977"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:13545"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:34100"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:34342"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:17549"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:17547"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:17789"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:17469"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:40984"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:17468"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:14870"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:14871"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:10713"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:29795"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:13826"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:19008"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:10710"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:19409"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2026/cve-2026-4800.json"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:19167"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:56912"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:48699"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:20946"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:20943"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:40118"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-4800"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:36651"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:11471"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/commit/3469357cff396a26c363f8c1b5a91dde28ba4b1c"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:40795"
+          },
+          {
+            "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2453496"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:11516"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:19712"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHBA-2026:21387"
+          },
+          {
+            "url": "https://cna.openjsf.org/security-advisories.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:56789"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:13571"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:37186"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:11470"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:40945"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:12279"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:17448"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:22619"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:16874"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:10131"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:10175"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:12277"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:36621"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:11469"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:34608"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:20042"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:8493"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:20041"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:9385"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:8490"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:44235"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:24762"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:56854"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:8491"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-35jh-r3h4-6jhm"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:41928"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:8498"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:9742"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:21658"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2026-4800"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2026-4800"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-8411-1"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2026/CVE-2026-4800.html"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2026-4800.html"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/security/advisories/GHSA-r5fr-rjxr-66jc"
+          },
+          {
+            "url": "https://github.com/lodash/lodash"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1132500"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2026-4800"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:68754"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-r5fr-rjxr-66jc"
+          }
+        ],
+        "bom-ref": "vuln-14",
+        "references": [
+          {
+            "id": "GHSA-r5fr-rjxr-66jc",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-r5fr-rjxr-66jc"
+            }
+          }
+        ],
+        "created": "2026-03-25T09:12:38Z",
+        "description": "Impact:\n\nThe fix for CVE-2021-23337 (https://github.com/advisories/GHSA-35jh-r3h4-6jhm) added validation for the variable option in _.template but did not apply the same validation to options.imports key names. Both paths flow into the same Function() constructor sink.\n\nWhen an application passes untrusted input as options.imports key names, an attacker can inject default-parameter expressions that execute arbitrary code at template compilation time.\n\nAdditionally, _.template uses assignInWith to merge imports, which enumerates inherited properties via for..in. If Object.prototype has been polluted by any other vector, the polluted keys are copied into the imports object and passed to Function().\n\nPatches:\n\nUsers should upgrade to version 4.18.0.\n\nWorkarounds:\n\nDo not pass untrusted input as key names in options.imports. Only use developer-controlled, static key names.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-3"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-4800"
+        },
+        "published": "2026-03-31T20:16:29Z",
+        "cwes": [
+          94,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "high",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2026-4800"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.02618,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2026-4800"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 8.1,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 8.1,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-r5fr-rjxr-66jc"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 8.1,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2026-4800"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 9.8,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-4800"
+            }
+          },
+          {
+            "severity": "critical",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:N/T:T",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2026-4800"
+            }
+          }
+        ],
+        "id": "CVE-2026-4800",
+        "updated": "2026-09-10T13:20:23Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-3",
+            "value": "4.18.0"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:ttps",
+            "value": "T0866"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://logging.apache.org/log4j/2.x/manual/layouts.html#XmlLayout"
+          },
+          {
+            "url": "https://logging.apache.org/cyclonedx/vdr.xml"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-34480"
+          },
+          {
+            "url": "https://logging.apache.org/security.html#CVE-2026-34480"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2/pull/4077"
+          },
+          {
+            "url": "https://lists.apache.org/thread/5x0hcnng0chhghp6jgjdp3qmbbhfjzhb"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:66545"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1133847"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2026-34480"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:66488"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2026/CVE-2026-34480.html"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1136032"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2026-34480"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2026-34480.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:22619"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:42644"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-3pxv-7cmr-fjr4"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2026/cve-2026-34480.json"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2026-34480"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:34608"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2026-34480"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:21773"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:54435"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:37390"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2"
+          }
+        ],
+        "bom-ref": "vuln-15",
+        "references": [
+          {
+            "id": "GHSA-3pxv-7cmr-fjr4",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-3pxv-7cmr-fjr4"
+            }
+          }
+        ],
+        "created": "2026-03-28T15:29:27Z",
+        "description": "Apache Log4j Core's XmlLayout https://logging.apache.org/log4j/2.x/manual/layouts.html#XmlLayout , in versions up to and including 2.25.3, fails to sanitize characters forbidden by the XML 1.0 specification https://www.w3.org/TR/xml/#charsets producing invalid XML output whenever a log message or MDC value contains such characters.\n\nThe impact depends on the StAX implementation in use:\n\n * JRE built-in StAX: Forbidden characters are silently written to the output, producing malformed XML. Conforming parsers must reject such documents with a fatal error, which may cause downstream log-processing systems to drop the affected records. * Alternative StAX implementations (e.g., Woodstox https://github.com/FasterXML/woodstox , a transitive dependency of the Jackson XML Dataformat module): An exception is thrown during the logging call, and the log event is never delivered to its intended appender, only to Log4j's internal status logger.\n\nUsers are advised to upgrade to Apache Log4j Core 2.25.4, which corrects this issue by sanitizing forbidden characters before XML output.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-2"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-34480"
+        },
+        "published": "2026-04-10T16:16:31Z",
+        "cwes": [
+          116,
+          1035,
+          937,
+          168
+        ],
+        "analysis": {
+          "state": "in_triage"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.9,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:L/SA:N",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-3pxv-7cmr-fjr4"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.01187,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2026-34480"
+            }
+          },
+          {
+            "severity": "high",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.9,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:L/SA:N",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2026-34480"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:Y/T:P",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2026-34480"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.9,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:L/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-34480"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2026-34480"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 7.5,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-34480"
+            }
+          }
+        ],
+        "id": "CVE-2026-34480",
+        "updated": "2026-04-24T18:21:54Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-2",
+            "value": "2.25.4"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://github.com/psf/requests/security/advisories/GHSA-j8r2-6x86-q33q"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/AW7HNFGYP44RT3DUDQXG2QT3OEV2PJ7Y/"
+          },
+          {
+            "url": "https://github.com/psf/requests/releases/tag/v2.31.0"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/KOYASTZDGQG2BWLSNBPL3TQRL2G7QYNZ/"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-32681"
+          },
+          {
+            "url": "https://github.com/psf/requests/commit/74ea7cf7a6a27a4eeb2ae24e162bcc942a6706d5"
+          },
+          {
+            "url": "https://lists.debian.org/debian-lts-announce/2023/06/msg00018.html"
+          },
+          {
+            "url": "https://security.gentoo.org/glsa/202309-08"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2023-32681"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-7568-1"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/AW7HNFGYP44RT3DUDQXG2QT3OEV2PJ7Y"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2023:6818"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2023/CVE-2023-32681.html"
+          },
+          {
+            "url": "https://github.com/pypa/advisory-database/tree/main/vulns/requests/PYSEC-2023-74.yaml"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2023-32681"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2023:7050"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1036693"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-j8r2-6x86-q33q"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2024:0299"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2023-32681"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2023:7034"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2023/ALAS2023-2023-236.html"
+          },
+          {
+            "url": "https://github.com/psf/requests"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2023:4520"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/KOYASTZDGQG2BWLSNBPL3TQRL2G7QYNZ"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/cve/json/v1/CVE-2023-32681.json"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-7762-1"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2023-2111.html"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-6155-1"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-6155-2"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2023-32681.html"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2023/cve-2023-32681.json"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2023:4693"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2023-2110.html"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/CVE-2023-32681.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2023:6793"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2023:4350"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2023:7042"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2023-32681"
+          }
+        ],
+        "bom-ref": "vuln-16",
+        "references": [
+          {
+            "id": "GHSA-j8r2-6x86-q33q",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-j8r2-6x86-q33q"
+            }
+          }
+        ],
+        "created": "2023-05-11T16:33:45Z",
+        "description": "Requests is a HTTP library. Since Requests 2.3.0, Requests has been leaking Proxy-Authorization headers to destination servers when redirected to an HTTPS endpoint. This is a product of how we use `rebuild_proxies` to reattach the `Proxy-Authorization` header to requests. For HTTP connections sent through the tunnel, the proxy will identify the header in the request itself and remove it prior to forwarding to the destination server. However when sent over HTTPS, the `Proxy-Authorization` header must be sent in the CONNECT request as the proxy has no visibility into the tunneled request. This results in Requests forwarding proxy credentials to the destination server unintentionally, allowing a malicious actor to potentially exfiltrate sensitive information. This issue has been patched in version 2.31.0.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-5"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-32681"
+        },
+        "published": "2023-05-26T18:15:14Z",
+        "cwes": [
+          200,
+          1035,
+          402,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 6.1,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-j8r2-6x86-q33q"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.02974,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2023-32681"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2023-32681"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.1,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:N/T:P",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2023-32681"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.1,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2023-32681"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.1,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:N/A:N",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2023-32681"
+            }
+          }
+        ],
+        "id": "CVE-2023-32681",
+        "updated": "2025-02-13T17:16:32Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-5",
+            "value": "2.31.0"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://bugs.debian.org/910766"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2019:2035"
+          },
+          {
+            "url": "https://github.com/requests/requests/pull/4718"
+          },
+          {
+            "url": "https://github.com/requests/requests/issues/4716"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2018-18074"
+          },
+          {
+            "url": "https://usn.ubuntu.com/3790-2/"
+          },
+          {
+            "url": "https://usn.ubuntu.com/3790-1/"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujul2022.html"
+          },
+          {
+            "url": "https://github.com/requests/requests/commit/c45d7c49ea75133e52ab22a8e9e13173938e36ff"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2018-18074"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:0850"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2018-18074.html"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/cve/json/v1/CVE-2018-18074.json"
+          },
+          {
+            "url": "https://usn.ubuntu.com/3790-2"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2019-1334.html"
+          },
+          {
+            "url": "https://usn.ubuntu.com/3790-1"
+          },
+          {
+            "url": "https://github.com/requests/requests"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:1605"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:0851"
+          },
+          {
+            "url": "https://github.com/pypa/advisory-database/tree/main/vulns/requests/PYSEC-2018-28.yaml"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-x84v-xcm2-53pg"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2018-18074"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2018-18074"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2018-18074"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:2081"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:2068"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=910766"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2018/cve-2018-18074.json"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-3790-2"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-3790-1"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2020-1413.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:1916"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/CVE-2018-18074.html"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2018/CVE-2018-18074.html"
+          }
+        ],
+        "bom-ref": "vuln-17",
+        "references": [
+          {
+            "id": "GHSA-x84v-xcm2-53pg",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-x84v-xcm2-53pg"
+            }
+          }
+        ],
+        "created": "2018-10-09T00:00:00Z",
+        "description": "The Requests package before 2.20.0 for Python sends an HTTP Authorization header to an http URI upon receiving a same-hostname https-to-http redirect, which makes it easier for remote attackers to discover credentials by sniffing the network.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-5"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2018-18074"
+        },
+        "published": "2018-10-09T17:29:01Z",
+        "cwes": [
+          522,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "high",
+            "score": 7.5,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.07443,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2018-18074"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 7.5,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-x84v-xcm2-53pg"
+            }
+          },
+          {
+            "severity": "high",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 7.5,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2018-18074"
+            }
+          },
+          {
+            "severity": "low",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2018-18074"
+            }
+          }
+        ],
+        "id": "CVE-2018-18074",
+        "updated": "2024-11-21T03:55:26Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "moderate"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-5",
+            "value": "2.20.0"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:41944"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:41941"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:1845"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/html/ssa-253495.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3825"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3869"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:9848"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2818"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2817"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2816"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:11414"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:41064"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2819"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:15091"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:24331"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-13465"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2465"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2145"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2661"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:18480"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2462"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3870"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:34100"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:36882"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:57487"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:17469"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:40984"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:13542"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:14870"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:5636"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:14871"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:13829"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2926"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:13548"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2025-13465"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:4630"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3422"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:33371"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2651"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2452"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2694"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2025/cve-2025-13465.json"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3782"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:6497"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:40118"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:36651"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2675"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3962"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2119"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2438"
+          },
+          {
+            "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2431740"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:19712"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:18868"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:25089"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:4466"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:8229"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:4423"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:4467"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:5633"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:6567"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:40945"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2484"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:4782"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:6288"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:33154"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2469"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2149"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2148"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2984"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3710"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2147"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3874"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3958"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:14774"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2900"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/security/advisories/GHSA-xxjr-mmjv-4gpg"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:34608"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:20042"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:20088"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:6192"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3087"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:8218"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:41928"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3884"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:3960"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2078"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2672"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:21658"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:2990"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2025-13465"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2025-13465.html"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-8411-1"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2025/CVE-2025-13465.html"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2025-13465"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1126265"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-xxjr-mmjv-4gpg"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/commit/edadd452146f7e4bad4ea684e955708931d84d81"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2025-13465"
+          }
+        ],
+        "bom-ref": "vuln-18",
+        "references": [
+          {
+            "id": "GHSA-xxjr-mmjv-4gpg",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-xxjr-mmjv-4gpg"
+            }
+          }
+        ],
+        "created": "2025-11-20T02:16:12Z",
+        "description": "Lodash versions 4.0.0 through 4.17.22 are vulnerable to prototype pollution in the _.unset and _.omit functions. An attacker can pass crafted paths which cause Lodash to delete methods from global prototypes.\n\nThe issue permits deletion of properties but does not allow overwriting their original behavior.\n\nThis issue is patched on 4.17.23",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-3"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-13465"
+        },
+        "published": "2026-01-21T20:16:05Z",
+        "cwes": [
+          1321,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "in_triage"
+        },
+        "ratings": [
+          {
+            "severity": "high",
+            "score": 7.9,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:L/SC:H/SI:H/SA:H",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-xxjr-mmjv-4gpg"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.9,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:L/SC:H/SI:H/SA:H/E:P",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2025-13465"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.9,
+            "method": "CVSSv4",
+            "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:L/VA:L/SC:H/SI:H/SA:H/E:P/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-13465"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-13465"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2025-13465"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:Y/T:P",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2025-13465"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.5,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-xxjr-mmjv-4gpg"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.5,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.0185,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2025-13465"
+            }
+          }
+        ],
+        "id": "CVE-2025-13465",
+        "updated": "2026-09-10T13:16:56Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-3",
+            "value": "4.17.23"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://www.intel.com/content/www/us/en/security-center/advisory/intel-sa-00646.html"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44228"
+          },
+          {
+            "url": "https://support.apple.com/kb/HT213189"
+          },
+          {
+            "url": "https://msrc-blog.microsoft.com/2021/12/11/microsofts-response-to-cve-2021-44228-apache-log4j2/"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/security.html"
+          },
+          {
+            "url": "https://www.debian.org/security/2021/dsa-5020"
+          },
+          {
+            "url": "https://github.com/cisagov/log4j-affected-db/blob/develop/SOFTWARE-LIST.md"
+          },
+          {
+            "url": "https://github.com/nu11secur1ty/CVE-mitre/tree/main/CVE-2021-44228"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-479842.pdf"
+          },
+          {
+            "url": "https://github.com/cisagov/log4j-affected-db"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/alert-cve-2021-44228.html"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujan2022.html"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-714170.pdf"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/M5CSVUNV4HWZZXGOKNSK6L7RPM7BOKIB/"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-397453.pdf"
+          },
+          {
+            "url": "https://cert-portal.siemens.com/productcert/pdf/ssa-661247.pdf"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/VU57UJDCFIASIO35GC55JMKSRXJMCDFM/"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuapr2022.html"
+          },
+          {
+            "url": "https://tools.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd"
+          },
+          {
+            "url": "https://twitter.com/kurtseifried/status/1469345530182455296"
+          },
+          {
+            "url": "https://lists.debian.org/debian-lts-announce/2021/12/msg00007.html"
+          },
+          {
+            "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2021-44228"
+          },
+          {
+            "url": "https://www.kb.cert.org/vuls/id/930724"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2CORRETTO8-2021-001.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5130"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-5192-2"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2021-44228"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5132"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5133"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5093"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5094"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-5192-1"
+          },
+          {
+            "url": "https://seclists.org/fulldisclosure/2022/Jul/11"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0203"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/CVE-2021-44228.html"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2/pull/608"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/manual/migration.html"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://www.suse.com/security/cve/CVE-2021-44228.html"
+          },
+          {
+            "url": "https://seclists.org/fulldisclosure/2022/Mar/23"
+          },
+          {
+            "url": "https://issues.apache.org/jira/browse/LOG4J2-3214"
+          },
+          {
+            "url": "https://seclists.org/fulldisclosure/2022/Dec/2"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5127"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5128"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5129"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-7rjr-3q55-vv33"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5126"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/manual/lookups.html#JndiLookup"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5141"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1001478"
+          },
+          {
+            "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:1747"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5140"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2025:1746"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0296"
+          },
+          {
+            "url": "https://issues.apache.org/jira/browse/LOG4J2-3201"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5138"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2/commit/c77b3cb39312b83b053d23a2158b99ac7de44dd3"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5134"
+          },
+          {
+            "url": "https://msrc-blog.microsoft.com/2021/12/11/microsofts-response-to-cve-2021-44228-apache-log4j2"
+          },
+          {
+            "url": "https://github.com/apache/logging-log4j2"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2JAVA-OPENJDK11-2021-001.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5137"
+          },
+          {
+            "url": "https://github.com/github/advisory-database/pull/5501"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-jfh8-c2jp-5v3q"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/VU57UJDCFIASIO35GC55JMKSRXJMCDFM"
+          },
+          {
+            "url": "https://logging.apache.org/log4j/2.x/changes-report.html#a2.15.0"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2021/CVE-2021-44228.html"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2021/cve-2021-44228.json"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-5197-1"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2021-1731.html"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2021-44228"
+          },
+          {
+            "url": "https://issues.apache.org/jira/browse/LOG4J2-3198"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2021-44228"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5106"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/ALAS-2021-1553.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5107"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5108"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:5148"
+          },
+          {
+            "url": "https://github.com/tangxiaofeng7/apache-log4j-poc"
+          },
+          {
+            "url": "https://explore.alas.aws.amazon.com/cve/json/v1/CVE-2021-44228.json"
+          },
+          {
+            "url": "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/M5CSVUNV4HWZZXGOKNSK6L7RPM7BOKIB"
+          },
+          {
+            "url": "https://sec.cloudapps.cisco.com/security/center/content/CiscoSecurityAdvisory/cisco-sa-apache-log4j-qRuKNEbd"
+          },
+          {
+            "url": "https://wiki.ubuntu.com/SecurityTeam/KnowledgeBase/Log4Shell"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2022:0082"
+          },
+          {
+            "url": "https://issues.apache.org/jira/browse/LOG4J2-3221"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2021-44228"
+          },
+          {
+            "url": "https://alas.aws.amazon.com/AL2/ALAS2-2021-1730.html"
+          }
+        ],
+        "bom-ref": "vuln-19",
+        "references": [
+          {
+            "id": "GHSA-jfh8-c2jp-5v3q",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-jfh8-c2jp-5v3q"
+            }
+          }
+        ],
+        "created": "2021-11-26T00:00:00Z",
+        "description": "Apache Log4j2 2.0-beta9 through 2.15.0 (excluding security releases 2.12.2, 2.12.3, and 2.3.1) JNDI features used in configuration, log messages, and parameters do not protect against attacker controlled LDAP and other JNDI related endpoints. An attacker who can control log messages or log message parameters can execute arbitrary code loaded from LDAP servers when message lookup substitution is enabled. From log4j 2.15.0, this behavior has been disabled by default. From version 2.16.0 (along with 2.12.2, 2.12.3, and 2.3.1), this functionality has been completely removed. Note that this vulnerability is specific to log4j-core and does not affect log4net, log4cxx, or other Apache Logging Services projects.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-2"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44228"
+        },
+        "published": "2021-12-10T10:15:09Z",
+        "cwes": [
+          400,
+          502,
+          20,
+          917,
+          1035,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "critical",
+            "score": 10.0,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44228"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.99999,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2021-44228"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 10.0,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "critical",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:A/A:Y/T:T",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2021-44228"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 10.0,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-jfh8-c2jp-5v3q"
+            }
+          },
+          {
+            "severity": "critical",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2021-44228"
+            }
+          }
+        ],
+        "id": "CVE-2021-44228",
+        "updated": "2026-08-11T19:33:44Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "immediate"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "verified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_last_seen_in_public",
+            "value": "2026-10-03T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_first_seen_in_public",
+            "value": "2021-12-06T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:cisa_kev_date_added",
+            "value": "2021-12-10T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:cisa_kev_date_due",
+            "value": "2021-12-24T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:vulncheck_kev_date_added",
+            "value": "2021-12-06T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:vulncheck_kev_date_due",
+            "value": "2021-12-24T00:00:00Z"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-2",
+            "value": "2.15.0"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:ttps",
+            "value": "T0819;T0866;T1190;T1210;T1211"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:tools",
+            "value": "Advanced IP Scanner;Amazon Web Services (AWS);Anubis;AnyDesk;AvosLocker;BITSAdmin;BRUTED;Backstab;Black Basta;BlackCat;Censys;Cheerscrypt;Chisel;Clop;Cobalt Strike;Conti;CountLoader;DoppelPaymer;DragonForce;EDRKillShifter;ExMatter;FOFA;FileZilla;GMER;GhostSOCKS;IcedID;Impacket;IntelX Search Engine;Khonsari;Level;LocaltoNet;LockBit;Masque;Microsoft Quick Assist;Microsoft Teams;Mimikatz;MystiqueLoader;NetSupport Manager;Netcat;Night Sky;PC Hunter;PSExec;Pikabot;PingCastle;PowerShell;ProcDump;Process Hacker;PsExec;PyOBFUSCATE;Pyramid;Qakbot;RClone;RDP;Rclone;Remote Desktop Protocol (RDP);Restic;RocketReach;SOCKS5;Screen Connect;Seatbelt;Sharpview;Shodan;SimpleHelp;Skype;SoftPerfect;Splashtop;SystemBC;TDSSKiller;TeamViewer;TellYouThePass;Tox;Unattributed;VIPERTUNNEL;WinSCP;XenAllPasswordPro;ZoomInfo;mimikatz;pCloud"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:alias",
+            "value": "Log4Shell"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-2950"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/security/advisories/GHSA-xxjr-mmjv-4gpg"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-8411-1"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2026/CVE-2026-2950.html"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2026/cve-2026-2950.json"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2026-2950"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2026-2950"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-f23m-r3pf-42rh"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2026-2950"
+          },
+          {
+            "url": "https://github.com/lodash/lodash"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:24841"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2026-2950"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:7655"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:7378"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2026:9455"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/security/advisories/GHSA-f23m-r3pf-42rh"
+          }
+        ],
+        "bom-ref": "vuln-20",
+        "references": [
+          {
+            "id": "GHSA-f23m-r3pf-42rh",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-f23m-r3pf-42rh"
+            }
+          }
+        ],
+        "created": "2026-02-21T20:04:35Z",
+        "description": "Impact:\n\nLodash versions 4.17.23 and earlier are vulnerable to prototype pollution in the _.unset and _.omit functions. The fix for (CVE-2025-13465: https://github.com/lodash/lodash/security/advisories/GHSA-xxjr-mmjv-4gpg) only guards against string key members, so an attacker can bypass the check by passing array-wrapped path segments. This allows deletion of properties from built-in prototypes such as Object.prototype, Number.prototype, and String.prototype.\n\nThe issue permits deletion of prototype properties but does not allow overwriting their original behavior.\n\nPatches:\n\nThis issue is patched in 4.18.0.\n\nWorkarounds:\n\nNone. Upgrade to the patched version.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-3"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-2950"
+        },
+        "published": "2026-03-31T20:16:26Z",
+        "cwes": [
+          1321,
+          1035,
+          915,
+          937
+        ],
+        "analysis": {
+          "state": "in_triage"
+        },
+        "ratings": [
+          {
+            "severity": "medium",
+            "score": 6.5,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "none",
+            "method": "SSVC",
+            "vector": "CISAv2.0.3/E:N/A:Y/T:P",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2026-2950"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2026-2950"
+            }
+          },
+          {
+            "severity": "medium",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.5,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-f23m-r3pf-42rh"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 6.5,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+            "source": {
+              "name": "MITRE",
+              "url": "https://cve.org/CVERecord?id=CVE-2026-2950"
+            }
+          },
+          {
+            "severity": "none",
+            "score": 0.00377,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2026-2950"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 5.3,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-2950"
+            }
+          }
+        ],
+        "id": "CVE-2026-2950",
+        "updated": "2026-07-24T20:10:00Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "standard"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-3",
+            "value": "4.18.0"
+          }
+        ]
+      },
+      {
+        "advisories": [
+          {
+            "url": "https://www.oracle.com/security-alerts/cpujan2022.html"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/issues/4874"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuApr2021.html"
+          },
+          {
+            "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-8203"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuapr2022.html"
+          },
+          {
+            "url": "https://www.oracle.com//security-alerts/cpujul2021.html"
+          },
+          {
+            "url": "https://hackerone.com/reports/712065"
+          },
+          {
+            "url": "https://www.oracle.com/security-alerts/cpuoct2021.html"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:3369"
+          },
+          {
+            "url": "https://access.redhat.com/security/cve/CVE-2020-8203"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:4298"
+          },
+          {
+            "url": "https://hackerone.com/reports/864701"
+          },
+          {
+            "url": "https://web.archive.org/web/20210914001339/https://github.com/lodash/lodash/issues/4744"
+          },
+          {
+            "url": "https://www.cve.org/CVERecord?id=CVE-2020-8203"
+          },
+          {
+            "url": "https://github.com/lodash/lodash"
+          },
+          {
+            "url": "https://gitlab.com/gitlab-org/advisories-community"
+          },
+          {
+            "url": "https://cve.org/CVERecord?id=CVE-2020-8203"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:3807"
+          },
+          {
+            "url": "https://people.canonical.com/~ubuntu-security/cve/2020/CVE-2020-8203.html"
+          },
+          {
+            "url": "https://security.access.redhat.com/data/csaf/v2/vex/2020/cve-2020-8203.json"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:3370"
+          },
+          {
+            "url": "https://github.com/rubysec/ruby-advisory-db/blob/master/gems/lodash-rails/CVE-2020-8203.yml"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/wiki/Changelog#v41719"
+          },
+          {
+            "url": "https://ubuntu.com/security/notices/USN-8411-1"
+          },
+          {
+            "url": "https://security-tracker.debian.org/tracker/CVE-2020-8203"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:5611"
+          },
+          {
+            "url": "https://github.com/github/advisory-database/pull/2884"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2020:5179"
+          },
+          {
+            "url": "https://github.com/advisories/GHSA-p6mc-m468-83gw"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/issues/4744"
+          },
+          {
+            "url": "https://access.redhat.com/errata/RHSA-2021:3917"
+          },
+          {
+            "url": "https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=965283"
+          },
+          {
+            "url": "https://github.com/lodash/lodash/commit/c84fe82760fb2d3e03a63379b297a1cc1a2fce12"
+          }
+        ],
+        "bom-ref": "vuln-21",
+        "references": [
+          {
+            "id": "GHSA-p6mc-m468-83gw",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-p6mc-m468-83gw"
+            }
+          }
+        ],
+        "created": "2020-01-28T00:00:00Z",
+        "description": "Prototype pollution attack when using _.zipObjectDeep in lodash before 4.17.20.",
+        "recommendation": "Update affected packages to fixed version (or newer).",
+        "affects": [
+          {
+            "ref": "comp-3"
+          }
+        ],
+        "source": {
+          "name": "NVD",
+          "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-8203"
+        },
+        "published": "2020-07-15T17:15:11Z",
+        "cwes": [
+          1321,
+          770,
+          1035,
+          20,
+          937
+        ],
+        "analysis": {
+          "state": "exploitable"
+        },
+        "ratings": [
+          {
+            "severity": "none",
+            "score": 0.05213,
+            "method": "other",
+            "vector": "model:v2026.06.15,date:2026-10-02T12:00:20Z",
+            "source": {
+              "name": "EPSS",
+              "url": "https://api.first.org/data/v1/epss?cve=CVE-2020-8203"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 7.4,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:H",
+            "source": {
+              "name": "NVD",
+              "url": "https://nvd.nist.gov/vuln/detail/CVE-2020-8203"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 7.4,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:H",
+            "source": {
+              "name": "GITHUB",
+              "url": "https://github.com/advisories/GHSA-p6mc-m468-83gw"
+            }
+          },
+          {
+            "severity": "high",
+            "method": "other",
+            "source": {
+              "name": "AMAZON_INSPECTOR",
+              "url": "https://aws.amazon.com/inspector/"
+            }
+          },
+          {
+            "severity": "high",
+            "score": 7.4,
+            "method": "CVSSv31",
+            "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:H",
+            "source": {
+              "name": "GITLAB",
+              "url": "https://gitlab.com/gitlab-org/advisories-community"
+            }
+          },
+          {
+            "severity": "medium",
+            "score": 0.0,
+            "method": "other",
+            "source": {
+              "name": "REDHAT_CVE_SEVERITY",
+              "url": "https://access.redhat.com/security/cve/CVE-2020-8203"
+            }
+          }
+        ],
+        "id": "CVE-2020-8203",
+        "updated": "2024-11-21T05:38:29Z",
+        "properties": [
+          {
+            "name": "amazon:inspector:sbom_scanner:priority",
+            "value": "moderate"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:priority_intelligence",
+            "value": "unverified"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:exploit_available",
+            "value": "true"
+          },
+          {
+            "name": "amazon:inspector:sbom_scanner:fixed_version:comp-3",
+            "value": "4.17.19"
+          }
+        ]
+      }
+    ]
+  }
+}

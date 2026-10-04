@@ -1,0 +1,103 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:f36fe962-5a4a-4974-a691-3795bd8c29d4",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-10-04T09:21:26Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "author": "Amazon Web Services, Inc. (AWS)",
+          "name": "inspector-sbomgen",
+          "version": "1.16.0",
+          "hashes": [
+            {
+              "alg": "SHA-256",
+              "content": "6a41e14dd4c0f0b91dd59500168088c7e32c3f165ada9ee580e311a0d637acca"
+            }
+          ],
+          "properties": [
+            {
+              "name": "amazon:inspector:sbom_generator:resource_type",
+              "value": "directory"
+            }
+          ]
+        }
+      ]
+    },
+    "component": {
+      "bom-ref": "comp-1",
+      "type": "file",
+      "name": "."
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "comp-2",
+      "type": "library",
+      "name": "x:y",
+      "version": "1",
+      "purl": "pkg:maven/x/y@1",
+      "properties": [
+        {
+          "name": "amazon:inspector:sbom_generator:source_path",
+          "value": "mvn/pom.xml"
+        }
+      ]
+    },
+    {
+      "bom-ref": "comp-3",
+      "type": "library",
+      "name": "org.apache.logging.log4j:log4j-core",
+      "version": "2.14.1",
+      "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+      "properties": [
+        {
+          "name": "amazon:inspector:sbom_generator:source_path",
+          "value": "mvn/pom.xml"
+        }
+      ]
+    },
+    {
+      "bom-ref": "comp-4",
+      "type": "library",
+      "name": "lodash",
+      "version": "4.17.15",
+      "purl": "pkg:npm/lodash@4.17.15",
+      "properties": [
+        {
+          "name": "amazon:inspector:sbom_generator:source_path",
+          "value": "npm/package-lock.json"
+        }
+      ]
+    },
+    {
+      "bom-ref": "comp-5",
+      "type": "library",
+      "name": "PyYAML",
+      "version": "5.3",
+      "purl": "pkg:pypi/pyyaml@5.3",
+      "properties": [
+        {
+          "name": "amazon:inspector:sbom_generator:source_path",
+          "value": "py/requirements.txt"
+        }
+      ]
+    },
+    {
+      "bom-ref": "comp-6",
+      "type": "library",
+      "name": "requests",
+      "version": "2.19.0",
+      "purl": "pkg:pypi/requests@2.19.0",
+      "properties": [
+        {
+          "name": "amazon:inspector:sbom_generator:source_path",
+          "value": "py/requirements.txt"
+        }
+      ]
+    }
+  ]
+}
