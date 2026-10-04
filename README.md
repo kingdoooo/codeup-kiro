@@ -93,8 +93,9 @@
   是目标架构（见 [docs/adr/0001](docs/adr/0001-aws-profile-as-target-architecture.md)），业务库会
   被完整 clone 到客户 AWS 账号里的临时容器（数据治理条款见该指南第 1.3 节）。
 
-**安全扫描（Security Agent）属于 AWS 档位，且是后续里程碑（2b）才引入的能力**——本仓库现在两个档位
-都只做 Kiro 代码评审，不要在当前版本里找安全扫描相关的配置或输出。
+**AWS 档位可选 Inspector 依赖漏洞评审员**（`inspector: 1`，见 [aws/setup-guide.md](aws/setup-guide.md) 第 6.5 节）：
+每次评审另发一条自己的汇总评论，只详列本 MR 引入的依赖上的漏洞；它的任何失败都不影响 Kiro。
+**安全扫描（Security Agent）同样属于 AWS 档位，还没有开通**——不要在当前版本里找它的配置或输出。Flow 档位只做 Kiro 代码评审。
 
 ## 快速开始
 

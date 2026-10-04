@@ -85,19 +85,23 @@ spec 对这个功能的验收就是「一条评论触发重审，而它产生的
 
 ### 1.3 数据流与治理披露（部署前必须书面确认）
 
-三条数据流分别对应不同的持久性与引入时机，客户的合规评审人最容易把它们混为一谈——尤其是第二行：
+下表几条数据流分别对应不同的持久性与引入时机，客户的合规评审人最容易把它们混为一谈——尤其是第二行：
 它是 Flow 档位早就有的行为，**不是**本次新增的出境面。
 
 | 数据流 | 去向 | 持久性 | 何时引入 |
 |---|---|---|---|
 | 业务库完整副本 | Fargate 任务（所选区域） | 临时存储，随任务销毁，**不持久化** | **本档位（2a）新增** |
 | diff 与 Kiro 读到的文件内容 | Kiro 自己的服务（美国） | Kiro 侧 | Flow 档位**已存在**，非本档位新增 |
+| 依赖清单（SBOM：包名、版本、清单文件在仓库里的相对路径） | S3 输入桶的 `inspector/` 前缀 + Amazon Inspector `ScanSbom`（都在所选区域） | S3 1 天后过期；Inspector 侧按其服务条款 | **2b 新增**，只在 `inspector: 1` 时（第 6.5 节） |
 | 业务库完整归档 | S3（持久化）+ Security Agent 的模型推理 | 持久（7 天生命周期） | 后续里程碑（**2b**），见 [ADR-0003](../docs/adr/0003-security-agent-via-s3-differential-scan.md) |
+
+Inspector 那一行只有依赖清单离开执行器，没有源码，也不经过任何模型推理。但不要把它说成「源码不出境、只有 SBOM 出境」：
+在本档位里，业务库完整副本在 sbomgen 运行之前就已经在 AWS 的执行器里了（第一行）。
 
 **客户书面确认「仓库出境」是部署前的硬前置**（[ADR-0001](../docs/adr/0001-aws-profile-as-target-architecture.md)）：
 执行器 clone 的是**业务库完整副本**，不再是 Flow 档位那样只有 diff 与评审员按需读取的文件——
 这条数据治理条款必须重新取得书面确认，参考 `pipeline/setup-guide.md` 第 1.2 节的确认清单形态，
-按上表把三条数据流分别列出、分别取得确认（不要笼统写「代码出境」，客户会误以为整个流程只有一条数据流）。
+按上表把每一条数据流分别列出、分别取得确认（不要笼统写「代码出境」，客户会误以为整个流程只有一条数据流）。
 
 ### 1.4 机器人账号与令牌权限
 
@@ -123,14 +127,15 @@ Flow 档位靠「受保护分支」当集成包的信任锚；本档位没有这
 
 ## 3. 密钥（Secrets Manager）
 
-三个密钥必配，第四个为 2b 预留（本档位不创建）：
+三个密钥必配；扫描评审员各有一个，启用了才创建：
 
 | 密钥名 | 用途 | 2a 是否必配 |
 |---|---|---|
 | `codeup-kiro/yunxiao-token-kiro` | Kiro 评审员使用的云效令牌（代码只读 + 合并请求读写） | 是 |
 | `codeup-kiro/kiro-api-key` | Kiro API Key | 是 |
 | `codeup-kiro/webhook-secret` | Lambda 调度器校验 Codeup webhook 共享密钥用（调度器在每次调用时按注入的 `WEBHOOK_SECRET_ID`——即这里的密钥名——向 Secrets Manager 取值，见 `aws/lambda/dispatcher/secret_fetch.py`）。**信任边界**：一个部署只有这一个共享密钥，填进每一个接入仓库的 webhook。持有它的人能伪造或重放投递，触发组织里云效令牌读得到的任何仓库的 MR 评审；但评审的内容总是来自 MR 所在的那个仓库：执行器按仓库 id 向 Codeup 取 clone 地址，报文里的地址只拿来比对（不一致时日志里有一行 `clone-url-mismatch`，见第 8 节「clone-url-mismatch」那一行）。所以只把它交给被信任拥有云效令牌读权限的人，其中有人离开时轮换它 | 是 |
-| `codeup-kiro/yunxiao-token-security` | Security Agent 机器人账号的云效令牌 | **否，2b 才用**，先不要创建 |
+| `codeup-kiro/yunxiao-token-inspector` | Inspector 评审员使用的云效令牌（代码只读 + 合并请求读写） | **否**，只在 `inspector: 1` 时创建（第 6.5 节） |
+| `codeup-kiro/yunxiao-token-security` | Security Agent 机器人账号的云效令牌 | **否**，Security Agent 开通之前不要创建 |
 
 创建命令（值本身在命令行历史与终端 scrollback 里可见，生产环境建议改用 `--cli-input-json`
 从文件读取，或直接在控制台里创建）：
@@ -424,6 +429,35 @@ aws cloudformation describe-stacks --region <区域> --stack-name CodeupKiroDisp
 - 触发事件：勾选**合并请求事件**（`mergeRequestsEvents`）与**评论事件**（`noteEvents`）；
 - SSL 校验：开启（`enableSslVerification: true`）。
 
+### 6.5 可选：扫描评审员（Inspector）
+
+Amazon Inspector 是第二位评审员：只看依赖漏洞，每次评审在 MR 上维护**一条自己的汇总评论**（标题「Inspector 依赖漏洞扫描」），
+与 Kiro 的汇总互不接管——两位用同一个机器人账号也一样（评审标记按评审员区分）。没有行内评论：Inspector 的结果只到包与清单文件，没有行号。
+
+**开通**（三步，然后重新部署：先 `CodeupKiroExecutor`，后 `CodeupKiroDispatcher`）：
+
+1. `config.yaml` 写 `inspector: 1`（严格 0/1，`true` 之类会被 synth 拒绝）。
+2. 建密钥 `codeup-kiro/yunxiao-token-inspector`（创建方式同第 3 节）：Inspector 机器人账号的云效令牌，权限与 Kiro 的相同（代码只读 + 合并请求读写）。
+   PoC 可以与 Kiro 用同一个账号、同一个令牌；生产建议独立账号——评论作者一眼就能分出是谁写的，令牌也各自轮换。
+3. 机器人账号与命令短语（都可省）：`inspector_bot_username`（缺省 = `bot_username`，即共用一个账号）；
+   `inspector_command_phrase`（缺省 `/inspector review`，只重跑 Inspector）与 `all_command_phrase`（缺省 `/review`，重跑全部已启用的评审员；
+   `/kiro review` 仍只重跑 Kiro）。生效的短语**两两不得互为子串**（否则一条命令会同时命中两句），synth 时检查。
+
+**每次评审做什么**：执行器 clone 并检出 MR 的提交之后、Kiro 开始评审之前，从 git 对象（不是工作树）导出 MR 的提交、以及它与目标分支的
+merge-base 两棵树（删掉全部符号链接），以非 root 用户、空环境在两棵树上各跑一次 Amazon Inspector SBOM Generator，两份依赖清单放进
+输入桶，再拉起一个小规格的扫描任务（同一镜像，0.5 vCPU / 1 GB，`scan_cpu` / `scan_memory_mib` 可调）。扫描任务调 `inspector-scan:ScanSbom`，
+评论只详列**本 MR 引入**的依赖（MR 提交里有、merge-base 里没有的包与版本）上的漏洞，存量漏洞折叠计数。严重级别取 Inspector 返回的
+全部 CVSS 评级里最高的那个（与 Inspector 自己的计数一致）。扫描员的任何失败都**不影响 Kiro**：Kiro 照常评审，Inspector 在自己那条
+评论里写一行固定的失败原因与代号（见第 8 节「scan-prep reviewer=inspector status=failed」那一行，以及「Inspector ScanSbom 调用失败」那一行）。
+
+**成本**：每次 `ScanSbom` 约 $0.03（us-east-1 价；每个账号一次性 25 次免费）。一次 ScanSbom 最多送 1,900 个组件（服务上限是 5,000，
+但单次响应上限 10 MB，留了余量），每次评审最多 `inspector_max_scan_calls`（缺省 3，可配 1–20）次——引入的组件总是排在最前面先送，
+存量超出时折叠区写明只扫了一部分。另有扫描任务的 Fargate 时长与 S3 输入桶（`inspector/` 前缀 1 天后过期）。
+
+**镜像**：sbomgen **总是**烤在镜像里（版本与两道 SHA-256 钉在 `aws/executor/Dockerfile` 的 `SBOMGEN_VERSION` / `SBOMGEN_ZIP_SHA256`），
+所以换开关不会改镜像摘要、不用重新登记 `kiro_image_digests`。升级 sbomgen = 改那两个 ARG、重建镜像、按第 5.2 节登记新摘要。
+它的许可证不允许再分发，所以和 Kiro 安装包一样，每个部署在自己的构建里下载。
+
 ## 7. 本地测试
 
 `aws/` 下的 CDK/Lambda 测试用 pytest，依赖装进项目内的虚拟环境 `aws/.venv`（已加入
@@ -471,6 +505,9 @@ aws/.venv/bin/pip install -r aws/requirements.txt
 | Codeup 重投同一次投递：投递记录里同一次投递重试了，调度 Lambda 在约 1 秒内被调用 2~3 次（Lambda 日志里的 `REPORT` 行；我们部署的代码不记录 `X-Codeup-Delivery`，日志里按它是查不到的） | **预期行为，不是错误**。实测的是 **503**（Task 1，只测了这一个状态码）：回 503 时 Codeup 立即重试，同一个 delivery id 在约 1 秒内最多到 3 次，之后不再重投（观察 10 分钟以上）。**其他非 2xx（404 / 502 / 504）是否同样重投没有测过**，所以不要把「最多 3 次」当成所有状态码的上界。幂等抢锁（`ReviewLock` 表，键是「仓库#MR#提交」）把这几次吸收掉，只有过了验签与取密钥、抢到锁的那一次能拉起 Fargate 任务（回 503 的那几次根本没走到抢锁）；`X-Codeup-Delivery` 本身也可以当投递级去重的辅助键 |
 | Codeup 的 webhook 投递记录显示 404 或连接超时，调度 Lambda 没有任何日志 | 请求没有到达 Lambda：方法不是 `POST`（监听器默认动作固定返回 404，只有 `POST` 转发给调度器），或 URL 填成了 ALB 域名（内网 ALB 从公网连不上，只能经 CloudFront 访问）——URL 必须是 `WebhookUrl` |
 | Codeup 的 webhook 投递记录显示 502/504 | 502：调度 Lambda 抛了异常或返回了不完整的响应（查 Lambda 日志）；504：Lambda 超过 CloudFront 回源读超时（30 秒）仍未返回。两种情况下请求可能已被处理，Codeup 却记为失败。**Codeup 对 502/504 会不会重投没有实测过**（实测过的只有 503，见本表「Codeup 重投同一次投递」那一行），所以这里只能说：如果它不重投，这次事件就丢了；如果它重投，而 502 之前抢锁那一步已经写进去了（比如写入的应答丢了、重试又被限流），重投会被幂等锁当成重复挡住——**这次事件同样丢了**，那条抢锁记录 24 小时后才过期。两种情况都不会自己恢复，得主动重新触发（重新推送，或发一条评论命令） |
+| 日志里有 `scan-prep reviewer=inspector status=failed:<代号>`，Inspector 的汇总评论写着「执行器没能准备 Inspector 的扫描输入（代号 …）」 | **Kiro 不受影响、照常评审**，只是 Inspector 这一次没有输入。代号：`no-target-branch`（调度器没给目标分支）、`merge-base`（目标分支在 clone 里找不到，或与 MR 提交没有共同祖先）、`export`（从 git 对象导出树失败，或导出后仍有符号链接）、`sbomgen`（sbomgen 报错退出，日志里紧跟几行以 `  sbomgen: ` 开头的报错尾巴）、`sbomgen-timeout`（超过 300 秒，多为仓库特别大）、`sbom-too-large`（输出超过 50 MB）、`sbom-not-cyclonedx`（输出不是 CycloneDX）、`upload`（写输入桶失败：执行器角色缺 `s3:PutObject` 或桶不存在，多见于开了开关却没重新部署 `CodeupKiroExecutor`）。`failed:not-implemented` 只会出现在点名了本部署还没实现的扫描员时 |
+| 日志里有 `scan-dispatch result=failed`，MR 上有 Inspector 的兜底评论「执行器没能拉起扫描任务」 | 执行器调 `ecs:RunTask` 拉起扫描任务失败（两次尝试、同一个 clientToken）。原因在同一个日志流里的 `scan-dispatch attempt=N result=failed code=<代号>`（每次尝试一行）：`AccessDeniedException` 多为执行器角色缺 `ecs:RunTask` / `iam:PassRole`（开了开关却没重新部署 `CodeupKiroExecutor`），`RESOURCE:` 开头的是 Fargate 容量或配额，`overrides-too-long` 是环境覆盖超过 8,192 字符（只在分支名极长时）。**Kiro 不受影响**。修好之后重新推送或发 `/inspector review` |
+| Inspector 的汇总评论写着「Inspector ScanSbom 调用失败（代号 …）」 | `AccessDeniedException`：扫描任务角色缺 `inspector-scan:ScanSbom`（重新部署 `CodeupKiroExecutor`）；`ValidationException`：送检的 SBOM 不合法或组件过多（一块最多 1,900 个，正常不会触发；持续出现时报给集成包维护方）；`ThrottlingException` 等限流已按 AWS CLI 的 standard 重试模式重试过。评论里只有代号，不回显服务端的错误正文 |
 
 「抢锁冲突」「评审未启动」「兜底回写」三行对应的代码都已实现且已接到 webhook 入口上
 （`aws/lambda/dispatcher/handler.py`、`aws/lambda/backstop/handler.py`），真实部署上这三类现象都能复现。
