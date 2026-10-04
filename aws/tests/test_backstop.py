@@ -318,3 +318,159 @@ def test_the_handler_posts_the_comment_for_the_exit_code_of_the_matched_containe
     _stub_boto3(monkeypatch, {"SecretString": "pt-t0ken"})
     assert backstop.handler(ev, None) == {"ok": True, "posted": True}
     assert posted[0][4] == backstop.backstop_comment(93)
+
+
+# ── Phase 2b F1：按评审员的兜底（spec「F1」「兜底 Lambda」，issue 03）──────────────────────────
+def _ev2(exit_code=1, reviewers_env=None, kind=None, name=None):
+    """带 REVIEWERS / TASK_KIND 的事件。reviewers_env=None 表示不带 REVIEWERS（旧调度器拉起的任务）。"""
+    ev = _ev(exit_code=exit_code)
+    env = ev["detail"]["overrides"]["containerOverrides"][0]["environment"]
+    if reviewers_env is not None:
+        env.append({"name": "REVIEWERS", "value": reviewers_env})
+    if kind is not None:
+        env.append({"name": "TASK_KIND", "value": kind})
+    if name is not None:
+        ev["detail"]["overrides"]["containerOverrides"][0]["name"] = name
+    return ev
+
+
+def _decide_with(item, **kw):
+    table = mock.Mock(); table.get_item.return_value = {"Item": item}
+    return backstop._decide(_ev2(**kw), table)
+
+
+def test_task_a_scanner_without_dispatched_mark_gets_a_comment_even_on_clean_exit():
+    # 扫描员派发失败时执行器仍以 0 退出（F2：扫描员的失败不改变执行器的退出码），兜底必须照样发
+    assert _decide_with({"pk": "k", "posted": True}, exit_code=0, reviewers_env="kiro,inspector") == (False, ["inspector"])
+
+
+def test_task_a_scanner_with_dispatched_mark_is_left_to_the_scan_task():
+    assert _decide_with({"pk": "k", "posted": True, "dispatched_inspector": True},
+                        exit_code=0, reviewers_env="kiro,inspector") == (False, [])
+
+
+def test_task_a_superseded_silences_every_reviewer():
+    # 被新推送取代：新提交的那一轮会评，这一轮所有评审员都不该发（那是正常流量）
+    assert _decide_with({"pk": "k", "superseded": True},
+                        exit_code=137, reviewers_env="kiro,inspector,security") == (True, [])
+    # Kiro 的判据不看 superseded（与 2a 相同：被取代时执行器以 0 退出，Kiro 本来就不发）
+    assert _decide_with({"pk": "k", "superseded": True},
+                        exit_code=0, reviewers_env="kiro,inspector") == (False, [])
+
+
+def test_kiro_is_not_posted_for_a_scanner_only_command():
+    # 评论 `/inspector review`：REVIEWERS 不含 kiro，执行器不跑 Kiro，也就没有 posted——绝不能替 Kiro 发「评审未完成」
+    assert _decide_with({"pk": "k", "dispatched_inspector": True},
+                        exit_code=0, reviewers_env="inspector") == (False, [])
+    assert _decide_with({"pk": "k"}, exit_code=137, reviewers_env="inspector") == (False, ["inspector"])
+
+
+def test_missing_reviewers_means_kiro_only_as_in_2a():
+    assert _decide_with({"pk": "k"}, exit_code=137) == (True, [])
+    assert _decide_with({"pk": "k", "posted": True}, exit_code=137) == (False, [])
+
+
+def test_invalid_reviewers_on_the_executor_falls_back_to_kiro_and_logs(capsys):
+    assert _decide_with({"pk": "k"}, exit_code=94, reviewers_env="kiro,inspectr") == (True, [])
+    assert "backstop reviewers=invalid" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("bad", [None, "", "kiro,inspector", "inspectr"])
+def test_invalid_reviewers_on_the_scan_task_raises_instead_of_guessing(bad):
+    table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "k"}}
+    with pytest.raises(ValueError):
+        backstop._decide(_ev2(exit_code=137, reviewers_env=bad, kind="scan", name="scan"), table)
+
+
+def test_scan_task_posts_for_each_scanner_without_a_terminal_state():
+    item = {"pk": "k", "posted_inspector": True, "dispatched_inspector": True, "dispatched_security": True}
+    assert _decide_with(item, exit_code=96, reviewers_env="inspector,security", kind="scan") == (False, ["security"])
+    # 扫描员级的 superseded 是终态
+    item["superseded_security"] = True
+    assert _decide_with(item, exit_code=96, reviewers_env="inspector,security", kind="scan") == (False, [])
+    # 退出码 0 也照样看标记：扫描入口只有在所有子进程都到终态时才以 0 退出，但这里不信退出码、只信标记
+    assert _decide_with({"pk": "k"}, exit_code=0, reviewers_env="inspector", kind="scan") == (False, ["inspector"])
+
+
+def _stub_tokens(monkeypatch, tokens):
+    """按密钥名给不同的令牌；记录每次 GetSecretValue 的 SecretId。走真实 secret_fetch，只换掉它内部的 boto3。"""
+    table = mock.Mock(); table.get_item.return_value = {"Item": {"pk": "r1#7#abc"}}
+    client = mock.Mock()
+    client.get_secret_value.side_effect = lambda SecretId: {"SecretString": tokens[SecretId]}
+    boto3 = mock.Mock()
+    boto3.resource.return_value.Table.return_value = table
+    boto3.client.return_value = client
+    monkeypatch.setitem(sys.modules, "boto3", boto3)
+    monkeypatch.setenv("LOCK_TABLE", "lock")
+    monkeypatch.setenv("YUNXIAO_ORG_ID", "o1")
+    monkeypatch.setenv("YUNXIAO_TOKEN_ID", "codeup-kiro/yunxiao-token-kiro")
+    monkeypatch.setenv("YUNXIAO_TOKEN_INSPECTOR_ID", "codeup-kiro/yunxiao-token-inspector")
+    monkeypatch.setenv("YUNXIAO_TOKEN_SECURITY_ID", "codeup-kiro/yunxiao-token-security")
+    monkeypatch.setattr(backstop.secret_fetch, "_CACHE", {})
+    return client
+
+
+TOKENS = {"codeup-kiro/yunxiao-token-kiro": "pt-kiro", "codeup-kiro/yunxiao-token-inspector": "pt-insp",
+          "codeup-kiro/yunxiao-token-security": "pt-sec"}
+
+
+def test_each_reviewer_is_posted_with_its_own_token_and_marker(monkeypatch):
+    _stub_tokens(monkeypatch, TOKENS)
+    posted = []
+    monkeypatch.setattr(backstop.codeup_min, "post_comment", lambda *a, **k: posted.append(a) or True)
+    assert backstop.handler(_ev2(exit_code=137, reviewers_env="kiro,inspector,security"), None) \
+        == {"ok": True, "posted": True}
+    assert [(p[3], p[4].splitlines()[1]) for p in posted] == [
+        ("pt-kiro", "<!-- kiro-backstop -->"),
+        ("pt-insp", "<!-- kiro-backstop-inspector -->"),
+        ("pt-sec", "<!-- kiro-backstop-security -->")]
+    assert posted[1][4].startswith("## 🤖 Inspector 依赖漏洞扫描\n"), posted[1][4]
+    assert "执行器在交给扫描任务之前异常结束（退出码 137" in posted[1][4]
+
+
+def test_one_reviewers_failure_does_not_swallow_the_next_and_the_first_error_is_reraised(monkeypatch):
+    _stub_tokens(monkeypatch, TOKENS)
+    posted = []
+    def fake_post(org, repo, mr, token, body):
+        posted.append(token)
+        return token != "pt-kiro"          # Kiro 那条被 Codeup 拒收
+    monkeypatch.setattr(backstop.codeup_min, "post_comment", fake_post)
+    with pytest.raises(backstop.PostFailed):
+        backstop.handler(_ev2(exit_code=137, reviewers_env="kiro,inspector"), None)
+    assert posted == ["pt-kiro", "pt-insp"], "Kiro 失败之后 Inspector 那条仍要发"
+
+
+def test_a_scanner_token_failure_is_reraised_as_secret_unavailable_after_trying_the_rest(monkeypatch):
+    client = _stub_tokens(monkeypatch, {"codeup-kiro/yunxiao-token-security": "pt-sec"})  # 只有 SA 的令牌取得到
+    posted = []
+    monkeypatch.setattr(backstop.codeup_min, "post_comment", lambda *a, **k: posted.append(a[3]) or True)
+    # 桩对缺的 SecretId 抛 KeyError，真实 secret_fetch 把它包成 SecretUnavailable（原始异常挂在 __cause__）——断言真实路径的类型
+    with pytest.raises(backstop.secret_fetch.SecretUnavailable) as ei:
+        backstop.handler(_ev2(exit_code=96, reviewers_env="inspector,security", kind="scan", name="scan"), None)
+    assert str(ei.value) == "YUNXIAO_TOKEN_INSPECTOR_ID", "异常消息只有变量名（不带 AWS 错误正文）"
+    assert posted == ["pt-sec"]
+    assert [c.kwargs["SecretId"] for c in client.get_secret_value.call_args_list] == [
+        "codeup-kiro/yunxiao-token-inspector", "codeup-kiro/yunxiao-token-security"]
+
+
+def test_kiro_only_event_keeps_the_2a_step_log_exactly(monkeypatch, capsys):
+    _stub_tokens(monkeypatch, TOKENS)
+    monkeypatch.setattr(backstop.codeup_min, "post_comment", lambda *a, **k: True)
+    backstop.handler(_ev2(exit_code=137, reviewers_env="kiro"), None)
+    assert capsys.readouterr().out == (
+        "backstop step=read-mark\nbackstop step=fetch-token\nbackstop step=post-comment\n")
+
+
+@pytest.mark.parametrize("code, want", [
+    (90, "扫描任务的镜像摘要门拒绝了运行（镜像摘要不在已探测名单内，或读不到本容器的镜像摘要）（退出码 90）"),
+    (96, "扫描子进程没有正常结束"),
+    (137, "扫描任务异常结束（退出码 137"),
+    (None, "没有退出码"),
+])
+def test_scan_task_causes(code, want):
+    assert want in backstop.scanner_comment("inspector", code, True, "scan")
+
+
+def test_a_scanner_the_executor_recorded_as_disabled_is_not_posted():
+    assert _decide_with({"pk": "k", "posted": True, "disabled_inspector": True},
+                        exit_code=0, reviewers_env="kiro,inspector") == (False, [])
