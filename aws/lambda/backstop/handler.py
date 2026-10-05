@@ -83,7 +83,7 @@ def _scan_cause(exit_code, identified, task_kind):
 
 
 def scanner_comment(rid, exit_code, identified=True, task_kind="scan"):
-    """扫描员的兜底评论：该评审员自己的标题与 `<!-- kiro-backstop:<rid> -->` 断环标记（N5）+ 固定文案与枚举代号（F3）。"""
+    """扫描员的兜底评论：该评审员自己的标题与 `<!-- kiro-backstop-<rid> -->` 断环标记（N5）+ 固定文案与枚举代号（F3）。"""
     prof = reviewers.PROFILES[rid]
     return (prof["lambda_heading"] + "\n" + prof["backstop_marker"] +
             f"\n\n**评审未完成**：{_scan_cause(exit_code, identified, task_kind)}。重新推送可再次触发。")

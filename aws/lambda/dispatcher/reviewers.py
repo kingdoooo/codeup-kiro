@@ -5,7 +5,8 @@ aws/tests/test_reviewer_profiles.py 做：它读 bash 那边 source 之后的**�
 
 调度器与兜底 Lambda 都 import 本文件（兜底经 CodeupMinLayer 的 /opt/dispatcher，与 codeup_min 同一手法）。
 Kiro 的两个 Lambda 侧标记保持 2a 的无后缀形态（`<!-- kiro-backstop -->`、`<!-- kiro-dispatch-failed -->`）：
-它们已经出现在真实 MR 上，换名没有收益。扫描员的带 `:<rid>` 后缀，仍在 `<!-- kiro-` 族里（调度器断环 N5 只认这个前缀）。
+它们已经出现在真实 MR 上，换名没有收益。扫描员的带 `-<rid>` 后缀（`<!-- kiro-backstop-<rid> -->`、
+`<!-- kiro-dispatch-failed-<rid> -->`，不带冒号载荷），仍在 `<!-- kiro-` 族里（调度器断环 N5 只认这个前缀）。
 """
 
 # 固定顺序：REVIEWERS 环境变量按这个顺序拼，日志与测试都依赖它稳定
