@@ -50,7 +50,17 @@ $code" ) </dev/null
 # 替身：setpriv 只是把后面的命令原样执行（④ 用真的）；timeout 缺省换成 /usr/bin/env（吃掉「秒数」参数不行——见下），
 # 所以 timeout 替身单独写：丢掉秒数再执行
 printf '#!/bin/sh\nexec "$@"\n' > "$tmp/setpriv"
-printf '#!/bin/sh\nshift\n[ -n "${FAKE_TIMEOUT:-}" ] && exit 124\nexec "$@"\n' > "$tmp/timeout"
+# 它包着两种命令：导出管道（/bin/bash -c '… git archive | tar …'，复审 M-4）与 sbomgen（setpriv …）——各用各的开关，
+# 免得「sbomgen 超时」的用例先在导出那一步就红了。FAKE_TIMEOUT_RC：137 = timeout 的 -k KILL，或别人（OOM）的 KILL。
+cat > "$tmp/timeout" <<'STUB'
+#!/bin/sh
+shift
+case "$1" in
+  /bin/bash) [ -n "${FAKE_EXPORT_RC:-}" ] && exit "$FAKE_EXPORT_RC" ;;
+  *) [ -n "${FAKE_TIMEOUT:-}" ] && exit "${FAKE_TIMEOUT_RC:-124}" ;;
+esac
+exec "$@"
+STUB
 # 输出路径写死进替身（env -i 之后它拿不到任何环境变量——这本身就是 S1 要的效果；STUB_MODE 同理经文件传）
 cat > "$tmp/sbomgen" <<STUB
 #!/bin/sh
@@ -136,6 +146,14 @@ assert_eq "$(prep STUB_MODE=fail)" "failed:sbomgen" "③ sbomgen 失败 → fail
 assert_contains "$(cat "$tmp/err")" "  sbomgen: boom" "③ sbomgen 的报错尾巴进日志（固定前缀）"
 assert_eq "$(ls -A "$tmp/work/scan/inspector" 2>/dev/null | LC_ALL=C grep -vE '\.cdx\.json$' || true)" "" "③ 失败路径上导出的树同样删掉"
 assert_eq "$(prep FAKE_TIMEOUT=1)" "failed:sbomgen-timeout" "③ sbomgen 超时 → failed:sbomgen-timeout"
+# 复审 M-6：137 有两种来源——timeout 到点后 -k 的 KILL（真超时）与时限之前别人（OOM killer）的 KILL；按已用时间区分
+assert_eq "$(prep FAKE_TIMEOUT=1 FAKE_TIMEOUT_RC=137)" "failed:sbomgen-killed" "③ M-6 sbomgen 在时限之前被 KILL（多为内存不足）→ failed:sbomgen-killed"
+assert_eq "$(prep FAKE_TIMEOUT=1 FAKE_TIMEOUT_RC=137 SBOMGEN_TIMEOUT=0)" "failed:sbomgen-timeout" "③ M-6 已到时限的 137（-k 的 KILL）仍是 failed:sbomgen-timeout"
+# 复审 M-4：导出管道有时限（git archive | tar 包在 timeout 里），超时与其它导出失败分开报
+assert_eq "$(prep FAKE_EXPORT_RC=124)" "failed:export-timeout" "③ M-4 导出超时 → failed:export-timeout"
+assert_eq "$(prep FAKE_EXPORT_RC=137)" "failed:export-timeout" "③ M-4 导出超时后被 -k 的 KILL → failed:export-timeout"
+assert_eq "$(prep FAKE_EXPORT_RC=1)" "failed:export" "③ M-4 其它导出失败仍是 failed:export"
+assert_eq "$(ls -A "$tmp/work/scan/inspector" 2>/dev/null | tr '\n' ' ')" "" "③ M-4 导出失败时导出到一半的树也删掉（复审 I-3 的失败路径）"
 assert_eq "$(prep STUB_MODE=notcdx)" "failed:sbom-not-cyclonedx" "③ 输出不是 CycloneDX → failed:sbom-not-cyclonedx"
 assert_eq "$(prep SBOM_MAX_BYTES=10)" "failed:sbom-too-large" "③ 输出超过上限 → failed:sbom-too-large"
 assert_eq "$(prep FAKE_S3_FAIL=1)" "failed:upload" "③ 上传失败 → failed:upload"

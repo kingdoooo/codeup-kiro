@@ -9,14 +9,19 @@
 # 复审 M-2）。导出物必须与 blob 逐字节相同。手段：$GIT_DIR/info/attributes 的优先级高于树内任何 .gitattributes 与
 # core.attributesFile（gitattributes(5)），导出期间在那里写一行把这些属性全部取消，导出完就删掉（不给之后的 Kiro 评审留任何改动）。
 # 导出后删掉全部符号链接并核对为零（S1：sbomgen 与 SA 都不该顺着链接读到树外——AWS 自己的 SA 客户端同样跳过符号链接）。
-scan_export_tree() {  # <40 位提交> <目标目录> → rc 0 / 非 0
+# 导出有时限（SCAN_EXPORT_TIMEOUT，缺省 300 秒；复审 M-4）：clone 是完整 clone，导出只读本地对象、不会因网络挂住，但特别大的
+# 仓库会拖慢它，而它在 Kiro 开始之前。管道整个包在 timeout 里（GNU timeout 不带 --foreground 时连同 git 与 tar 一起杀），
+# 三个值经环境传给内层 bash（只是路径与提交号）。rc：0 = 成功；124/137 = 超时；1 = 其它失败。
+scan_export_tree() {  # <40 位提交> <目标目录> → rc 0 / 124|137 / 1
   local commit="$1" dest="$2" gd="$WORKROOT/business" rc=0 left
   [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
   /bin/mkdir -p "$gd/.git/info" "$dest" || return 1
   printf '* -export-ignore -export-subst -working-tree-encoding -text -eol -ident -filter\n' > "$gd/.git/info/attributes" || return 1
-  /usr/bin/git -C "$gd" archive --format=tar "$commit" | /usr/bin/tar -x -C "$dest" --no-same-owner --no-same-permissions || rc=1
+  gd="$gd" commit="$commit" dest="$dest" /usr/bin/timeout -k 10 "${SCAN_EXPORT_TIMEOUT:-300}" /bin/bash -c \
+    'set -o pipefail; /usr/bin/git -C "$gd" archive --format=tar "$commit" | /usr/bin/tar -x -C "$dest" --no-same-owner --no-same-permissions' \
+    || rc=$?
   /bin/rm -f "$gd/.git/info/attributes"
-  [[ "$rc" == 0 ]] || return 1
+  case "$rc" in 0) ;; 124|137) return "$rc" ;; *) return 1 ;; esac
   /usr/bin/find "$dest" -type l -exec /bin/rm -f {} + || return 1
   left=$(/usr/bin/find "$dest" -type l | /usr/bin/head -1)
   [[ -z "$left" ]] || return 1
@@ -27,17 +32,21 @@ scan_export_tree() {  # <40 位提交> <目标目录> → rc 0 / 非 0
 # HOME 是每次新建、只属于 65534 的 0700 私有目录：sbomgen 要在 $HOME/.inspector-sbomgen 建工作目录（issue 01 实测：不可写的
 # HOME 让它必然以 WorkDirInitFailed 失败）。--skip-cloud-metadata：不探测实例元数据（行为不随所在环境变）。
 # 成功后把组件路径改写成相对树根、根组件名改成 .：执行器内部路径不进 S3、Inspector 与 MR 评论。
-# rc：0 = 写好了 <输出文件>；124 = 超时；3 = 输出超过 SBOM_MAX_BYTES；4 = 输出不是 CycloneDX；其它 = sbomgen 失败。
+# rc：0 = 写好了 <输出文件>；124/137 = 超时；5 = 时限之前被 KILL（多为内存不足）；3 = 输出超过 SBOM_MAX_BYTES；
+# 4 = 输出不是 CycloneDX；其它 = sbomgen 失败。137 有两种来源（复审 M-6）：timeout 到点后 -k 的 KILL，与时限之前别人
+# （OOM killer）的 KILL——按已用时间区分，免得内存不足被报成「超过 300 秒」。
 scan_sbomgen() {  # <树> <输出文件>
-  local tree="$1" out="$2" od cwd home rc=0 size
+  local tree="$1" out="$2" od cwd home rc=0 size t0 limit="${SBOMGEN_TIMEOUT:-300}"
   od=$(/usr/bin/mktemp -d) && cwd=$(/usr/bin/mktemp -d) && home=$(/usr/bin/mktemp -d) || return 1
   /bin/chmod 0777 "$od" && /bin/chmod 0755 "$cwd" && /bin/chmod 0700 "$home" && /bin/chmod -R a+rX "$tree" || return 1
   if [[ "$(/usr/bin/id -u)" == 0 ]]; then /bin/chown 65534:65534 "$home" || return 1; fi
-  ( cd "$cwd" && /usr/bin/timeout -k 10 "${SBOMGEN_TIMEOUT:-300}" \
+  t0=$(/bin/date +%s)
+  ( cd "$cwd" && /usr/bin/timeout -k 10 "$limit" \
       /usr/bin/setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs \
       /usr/bin/env -i PATH=/usr/bin:/bin HOME="$home" \
       /opt/sbomgen/inspector-sbomgen directory --path "$tree" -o "$od/sbom.json" --skip-cloud-metadata ) \
     >/dev/null 2>"$od/err" || rc=$?
+  if [[ "$rc" == 137 && "$limit" =~ ^[0-9]+$ ]] && (( $(/bin/date +%s) - t0 < 10#$limit )); then rc=5; fi
   if [[ "$rc" != 0 ]]; then
     # 报错尾巴只进容器日志（不进 MR 评论）：逐行去控制字符、截到 200 字节、加固定前缀（与 git 报错尾巴同一处理）
     /usr/bin/tail -n 3 "$od/err" | LC_ALL=C /usr/bin/tr -d '\000-\010\013-\037\177' \
@@ -74,19 +83,25 @@ scan_prep_inspector() {
 }
 
 _scan_prep_inspector_run() {
-  local base dir="$WORKROOT/scan/inspector" side rc
+  local base dir="$WORKROOT/scan/inspector" side rc commit
   [[ -n "${MR_TARGET_BRANCH:-}" ]] || { printf 'failed:no-target-branch'; return 0; }
   # 目标分支用完整的 refs/remotes/ 名字：短名字会被同名的本地分支或标签遮蔽（entrypoint 检出段那两个坑的同一类）
   base=$(/usr/bin/git -C "$WORKROOT/business" merge-base "refs/remotes/origin/${MR_TARGET_BRANCH}" "$HEAD_SHA" 2>/dev/null) || base=""
   [[ "$base" =~ ^[0-9a-f]{40}$ ]] || { printf 'failed:merge-base'; return 0; }
   for side in head base; do
-    if [[ "$side" == head ]]; then scan_export_tree "$HEAD_SHA" "$dir/$side" || { printf 'failed:export'; return 0; }
-    else scan_export_tree "$base" "$dir/$side" || { printf 'failed:export'; return 0; }; fi
+    if [[ "$side" == head ]]; then commit="$HEAD_SHA"; else commit="$base"; fi
+    rc=0; scan_export_tree "$commit" "$dir/$side" || rc=$?
+    case "$rc" in
+      0) ;;
+      124|137) printf 'failed:export-timeout'; return 0 ;;
+      *) printf 'failed:export'; return 0 ;;
+    esac
     rc=0; scan_sbomgen "$dir/$side" "$dir/$side.cdx.json" || rc=$?
     /bin/rm -rf "${dir:?}/$side"
     case "$rc" in
       0) ;;
       124|137) printf 'failed:sbomgen-timeout'; return 0 ;;
+      5) printf 'failed:sbomgen-killed'; return 0 ;;
       3) printf 'failed:sbom-too-large'; return 0 ;;
       4) printf 'failed:sbom-not-cyclonedx'; return 0 ;;
       *) printf 'failed:sbomgen'; return 0 ;;
