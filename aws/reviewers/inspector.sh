@@ -13,7 +13,6 @@ source "$PKG/reviewers/lib/inspector-render.sh"
 # ScanSbom 的有效组件上限：模型文档写 2,000、SBOM Generator 文档写 5,000（issue 01 实测后定）；按小的那个留余量
 INSPECTOR_COMPONENTS_PER_CALL=1900
 REVIEWER_LEASE_WAIT="${REVIEWER_LEASE_WAIT:-900}"
-REVIEW_META_NOTE="组件"
 # AWS CLI 自己的有界重试（standard 模式会按 ThrottlingException / 5xx 退避）：ScanSbom 是幂等的（模型标注 idempotent）
 export AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=4
 

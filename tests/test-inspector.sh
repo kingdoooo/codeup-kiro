@@ -194,6 +194,12 @@ assert_eq "$(drive FAKE_SCAN_FAIL=1)" "0" "⑥ ScanSbom 失败 → 失败评论"
 fc=$(posted_comment "$(cat "$tmp/out")")
 assert_contains "$fc" "Inspector ScanSbom 调用失败（代号 ValidationException）" "⑥ 失败评论只带 AWS 错误码"
 assert_not_contains "$fc" "too many" "⑥ F3：不回显服务端的错误正文"
+# 复审 M-8（Task 13 真跑发现）：失败评论元信息表的第四格是值，不是表头——曾经显示字面「组件」（与表头重复）。
+# 取表格的数据行（以 | ` 开头的第一行；awk 读完再挑，不提前停读——helpers.sh 的规矩），比它的最后一格
+meta_row=$(printf '%s\n' "$fc" | awk '/^\| `/ && !n { n = 1; r = $0 } END { print r }')
+assert_contains "$meta_row" "| \`aaaaaaa\` | \`feat\` → \`main\` |" "⑥ M-8（正向对照）取到的是元信息表的数据行"
+meta_cell="${meta_row% |}"; meta_cell="${meta_cell##*| }"
+assert_eq "$meta_cell" "—" "⑥ M-8 失败评论元信息第四格是占位「—」，不是表头字样「组件」"
 assert_eq "$(drive FAKE_S3_FAIL=1)" "0" "⑥ 读输入失败 → 失败评论"
 assert_contains "$(posted_comment "$(cat "$tmp/out")")" "读取 Inspector 的扫描输入失败（代号 AccessDenied）" "⑥ 读输入失败带错误码"
 assert_eq "$(drive INSPECTOR_MAX_SCAN_CALLS=0)" "0" "⑥ 调用上限不合法 → 失败评论"
