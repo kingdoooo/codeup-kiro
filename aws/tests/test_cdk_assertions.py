@@ -2204,7 +2204,9 @@ def test_the_security_agent_service_role_can_only_read_the_security_prefix_and_w
     (get,) = [s for s in st if s["Action"] == "s3:GetObject"]
     assert "security/*" in json.dumps(get["Resource"]) and "inspector/" not in json.dumps(get["Resource"]), get
     (lst,) = [s for s in st if s["Action"] == "s3:ListBucket"]
-    assert lst["Condition"]["StringLike"] == {"s3:prefix": "security/*"}, lst
+    # 列桶不能限前缀（sandbox，2026-10-08 Task 9）：带 s3:prefix=security/* 条件时 CreateCodeReview 报「Access denied to source code
+    # S3 object」；IAM 模拟器里不带前缀的 ListBucket 是 implicitDeny。探测时跑通的服务角色就是不带前缀条件的列桶。读对象仍只限 security/*
+    assert lst["Condition"] == {"StringEquals": {"aws:ResourceAccount": {"Ref": "AWS::AccountId"}}}, lst
     for s in st:
         if s["Action"] != "iam:GetRole" and not (isinstance(s["Action"], list) and "iam:GetRole" in s["Action"]):
             assert "aws:ResourceAccount" in json.dumps(s.get("Condition", {})), s

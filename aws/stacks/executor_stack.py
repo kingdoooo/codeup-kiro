@@ -363,12 +363,13 @@ class ExecutorStack(cdk.Stack):
         role.add_to_policy(iam.PolicyStatement(
             actions=["logs:CreateLogStream", "logs:PutLogEvents"], resources=[f"{logs_arn}:log-stream:*"],
             conditions=own_account))
-        # S3：只读 security/（spec S3：Inspector 的 SBOM 不在它可读范围内）；列桶也只许列 security/
+        # S3：读对象只限 security/（spec S3：Inspector 的 SBOM 不在它可读范围内）。列桶不限前缀：sandbox 实测（2026-10-08 Task 9）
+        # 带 s3:prefix=security/* 条件时 CreateCodeReview 报「Access denied to source code S3 object」，IAM 模拟器里不带前缀的
+        # ListBucket 是 implicitDeny；探测时跑通的服务角色就是这样列桶的。代价：SA 能列出 inspector/ 下的键名（看不到内容）
         role.add_to_policy(iam.PolicyStatement(
             actions=["s3:GetObject"], resources=[self.scan_bucket.arn_for_objects("security/*")], conditions=own_account))
         role.add_to_policy(iam.PolicyStatement(
-            actions=["s3:ListBucket"], resources=[self.scan_bucket.bucket_arn],
-            conditions={**own_account, "StringLike": {"s3:prefix": "security/*"}}))
+            actions=["s3:ListBucket"], resources=[self.scan_bucket.bucket_arn], conditions=own_account))
 
         self.agent_space = securityagent.CfnAgentSpace(
             self, "AgentSpace",
