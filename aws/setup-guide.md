@@ -480,7 +480,7 @@ API 发起的差分扫描用不到它。想在 Security Agent 控制台里看发
 
 **每次评审做什么**：执行器在 Kiro 开始之前，用钉死的参数生成 merge-base 到 MR 提交的 diff（树内 `.gitattributes` 的 `-diff` 失效，
 改动藏不成「二进制」；`-M` 识别改名），再从 git 对象导出 MR 提交的整棵树（删掉符号链接）打成 zip（不带归档注释：Security Agent 拒收带注释的
-zip），连同文件清单放进输入桶的 `security/` 前缀。扫描任务里的 Security Agent 子进程：每个仓库一个 code review（标题 `codeup-kiro:<仓库 id>`，
+zip），连同文件清单放进输入桶的 `security/` 前缀。扫描任务里的 Security Agent 子进程：每个仓库一个 code review（标题 `codeup-kiro-<仓库 id>`，
 映射表 `CodeReviewMapping` 记着它）；把它重指向本次的归档 → 启动差分作业 → 核对作业记下的源确实是本次的（不是就停掉、发失败评论）→ 每 30 秒
 查一次作业状态 → 取发现 → 汇总。同一仓库的两个 MR 只在「重指向 + 启动」那几秒里串行（作业在启动时记下源，之后再重指向不影响它）。
 一次差分作业实测约 10 分钟。源分支在作业运行中又有了新提交时，旧作业被停掉，交给新提交那次。

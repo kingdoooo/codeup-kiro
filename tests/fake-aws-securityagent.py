@@ -25,6 +25,7 @@
 import fcntl
 import json
 import os
+import re
 import sys
 
 OPS = {
@@ -83,6 +84,10 @@ def handle(op, req, st):
         raise ApiError(forced, "injected")
     if op == "create-code-review":
         need(req, "agentSpaceId", "title", "assets")
+        # sandbox 实测（2026-10-08，SA 半段 Task 9 的第一次真跑）：标题里有冒号就被拒，原文如下
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", req["title"]):
+            raise ApiError("ValidationException", "Title can only contain letters, numbers, hyphens, and underscores. "
+                                                  "Maximum 100 characters allowed.")
         if req.get("codeRemediationStrategy") != "DISABLED" or req.get("validationMode") != "DISABLED":
             raise ApiError("ValidationException", "this fake only accepts DISABLED remediation and validation")
         if not req["assets"].get("sourceCode"):

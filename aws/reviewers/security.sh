@@ -94,7 +94,8 @@ jq -e '(.files | type) == "number" and (.diff_files | type) == "number" and (.sy
   || reviewer_fail "Security Agent 的扫描输入格式不对（代号 meta）"
 
 # ── Q1：本仓库的 code review（spec Q1：每仓库一个、映射表永不过期；CreateCodeReview 没有幂等令牌——按标题收编让重试收敛）──
-SA_TITLE="codeup-kiro:${CODEUP_REPO_ID}"
+# 标题只许字母、数字、连字符、下划线，最多 100 个字符（sandbox 实测，2026-10-08：带冒号的 `codeup-kiro:<id>` 被 CreateCodeReview 拒收）
+SA_TITLE="codeup-kiro-${CODEUP_REPO_ID}"
 SA_MAP_KEY=$(jq -cn --arg r "$CODEUP_REPO_ID" '{repo_id: {S: $r}}')
 sa_map_get() {  # → stdout 映射记录（Item 或 {}）
   /usr/local/bin/aws dynamodb get-item --region "$AWS_REGION" --table-name "$SA_MAPPING_TABLE" --consistent-read \

@@ -247,7 +247,7 @@ assert_eq "$(ops)" "list-code-reviews create-code-review update-code-review star
   "④ 调用顺序：收编（无）→ 建 → 重指向 → Start → 核对作业的源 → 轮询 → 取发现"
 creq=$(req_of create-code-review)
 assert_eq "$(jq -c '[.title, .codeRemediationStrategy, .validationMode, .assets.sourceCode[0].s3Location, .serviceRole]' <<< "$creq")" \
-  "[\"codeup-kiro:7\",\"DISABLED\",\"DISABLED\",\"$SRC\",\"arn:aws:iam::123456789012:role/sa-role\"]" "④ Q1 / I2：建 code review 的请求（标题、两个 DISABLED、本次源、服务角色）"
+  "[\"codeup-kiro-7\",\"DISABLED\",\"DISABLED\",\"$SRC\",\"arn:aws:iam::123456789012:role/sa-role\"]" "④ Q1 / I2：建 code review 的请求（标题、两个 DISABLED、本次源、服务角色）"
 assert_eq "$(jq -c '[.assets.sourceCode[0].s3Location, .serviceRole]' <<< "$(req_of update-code-review)")" \
   "[\"$SRC\",\"arn:aws:iam::123456789012:role/sa-role\"]" "④ 重指向带本次的源与服务角色（实测：带 sourceCode 时必须带 serviceRole）"
 assert_eq "$(jq -c '.diffSource' <<< "$(req_of start-code-review-job)")" "{\"s3Uri\":\"$PATCH\"}" "④ D1：Start 带 diffSource，指向本次的 .patch"
@@ -271,7 +271,7 @@ fresh
 python3 - "$tmp/sa.json" "$SPACE" <<'PY'
 import json, sys
 json.dump({"n": 5, "codeReviews": {"cr-0000000a-0000-4000-8000-000000000000": {
-  "codeReviewId": "cr-0000000a-0000-4000-8000-000000000000", "title": "codeup-kiro:7", "assets": {"sourceCode": [{"s3Location": "s3://bkt/old.zip"}]},
+  "codeReviewId": "cr-0000000a-0000-4000-8000-000000000000", "title": "codeup-kiro-7", "assets": {"sourceCode": [{"s3Location": "s3://bkt/old.zip"}]},
   "serviceRole": "r", "agentSpaceId": sys.argv[2], "createdAt": "2026-10-01T00:00:00.000000+00:00"}}}, open(sys.argv[1], "w"))
 PY
 assert_eq "$(drive)" "0" "④ 收编 → 0"
@@ -302,7 +302,7 @@ fresh
 python3 - "$tmp/sa.json" "$tmp/ddb.json" "$SPACE" <<'PY'
 import json, sys
 cr = "cr-0000000b-0000-4000-8000-000000000000"
-json.dump({"n": 5, "codeReviews": {cr: {"codeReviewId": cr, "title": "codeup-kiro:7", "assets": {"sourceCode": [{"s3Location": "s3://bkt/old.zip"}]},
+json.dump({"n": 5, "codeReviews": {cr: {"codeReviewId": cr, "title": "codeup-kiro-7", "assets": {"sourceCode": [{"s3Location": "s3://bkt/old.zip"}]},
   "serviceRole": "r", "agentSpaceId": sys.argv[3], "createdAt": "2026-10-01T00:00:00.000000+00:00"}}}, open(sys.argv[1], "w"))
 json.dump({"repo_id=7": {"repo_id": {"S": "7"}, "status": {"S": "ready"}, "code_review_id": {"S": cr},
   "agent_space_id": {"S": sys.argv[3]}, "holder": {"S": "other"}, "until": {"N": "1"}}}, open(sys.argv[2], "w"))
