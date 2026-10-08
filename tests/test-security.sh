@@ -99,7 +99,9 @@ assert_eq "$(printf '%s\n' "$descs" | wc -l | tr -d ' ')" "7" "③（准备）�
 assert_eq "$(printf '%s\n' "$descs" | LC_ALL=C grep -cv '…$' || true)" "0" "③ 7 条长说明（2.5–3 KB）都被截断（以「…」结尾）"
 maxdesc=$(printf '%s\n' "$descs" | sed 's/^   //' | jq -R 'length' | sort -n | tail -1)
 assert_eq "$([ "$maxdesc" -le 830 ] && echo ok)" "ok" "③ 说明行的长度 ≈ 800 码点（清洗加的转义只多几个字符；最长 ${maxdesc}）"
-maxlabel=$(printf '%s\n' "$lout" | LC_ALL=C grep -E '^   - `' | sed 's/^[^—]* — //' | jq -R 'length' | sort -n | tail -1)
+# 标签 = 「 — 」之后的部分。不用 sed 的 [^—]：C locale 下（Debian 容器测）它按字节匹配，碰到 `1–9` 里 en dash 的首字节就停，量到的是整行
+maxlabel=$(printf '%s\n' "$lout" | LC_ALL=C grep -E '^   - `' \
+  | jq -R 'if test(" — ") then (split(" — ") | .[1:] | join(" — ") | length) else 0 end' | sort -n | tail -1)
 assert_eq "$([ "$maxlabel" -le 90 ] && echo ok)" "ok" "③ 位置标签截到约 80 个码点（最长 ${maxlabel}）"
 assert_eq "$(printf '%s' "$lout" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' 2>/dev/null && echo valid)" "valid" "③ 截断后整条评论仍是合法 UTF-8"
 assert_contains "$lout" "有 $(jq '.unmatched' "$tmp/long.json") 个位置不在本次归档里（标「路径未能对应」）。" "③ 未能对应的位置在结论里计数"
