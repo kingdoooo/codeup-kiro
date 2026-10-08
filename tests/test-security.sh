@@ -333,6 +333,11 @@ assert_eq "$(ops | tr ' ' '\n' | grep -c '^start-code-review-job$')" "1" "④ Q3
 assert_eq "$(jq '.jobs | length' "$tmp/sa.json")" "1" "④ Q3：服务里只有一个作业"
 assert_contains "$(cat "$tmp/out")" "收编了本次的作业" "④ Q3：日志写明收编"
 assert_contains "$(posted_comment "$(cat "$tmp/out")")" "差分扫描发现 2 个安全问题" "④ Q3：收编的作业照常出汇总"
+# 终审 I-11：收编只按「sourceCode = 本次键」（键里有本次的 run_id），不按状态筛——作业列表里报的若不是 IN_PROGRESS（初始状态没实测过）也照样收编
+fresh
+assert_eq "$(drive FAKE_SA_START_AMBIGUOUS=1 FAKE_SA_LIST_STATUS=PENDING)" "0" "④ I-11 列表里的作业状态不是 IN_PROGRESS → 0"
+assert_eq "$(ops | tr ' ' '\n' | grep -c '^start-code-review-job$')" "1" "④ I-11 照样收编，只 Start 了一次"
+assert_eq "$(jq '.jobs | length' "$tmp/sa.json")" "1" "④ I-11 服务里只有一个作业"
 # Q2：作业记下的源不是本次的 → Stop + 失败评论
 fresh
 assert_eq "$(drive FAKE_SA_JOB_SOURCE_OVERRIDE=s3://bkt/security/7/other/source.zip)" "0" "④ Q2：源不符 → 失败评论（终态 0）"

@@ -190,7 +190,8 @@ sa_adopt_job() {
   local out ids j
   out=$(sa_call list-code-review-jobs-for-code-review "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" --arg c "$SA_CR_ID" \
           '{agentSpaceId: $s, codeReviewId: $c}')") || return 1
-  ids=$(jq -c '[.codeReviewJobSummaries[]? | select(.status == "IN_PROGRESS")] | sort_by(.createdAt) | reverse | .[0:20] | map(.codeReviewJobId)' <<< "$out")
+  # 不按状态筛（终审 I-11）：本次的键里有 128 位的 run_id，sourceCode 对得上的就是本次的作业，不管它报什么状态（已结束的交给轮询判）
+  ids=$(jq -c '[.codeReviewJobSummaries[]?] | sort_by(.createdAt) | reverse | .[0:20] | map(.codeReviewJobId)' <<< "$out")
   [[ "$ids" != "[]" ]] || return 1
   out=$(sa_call batch-get-code-review-jobs "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" --argjson j "$ids" '{agentSpaceId: $s, codeReviewJobIds: $j}')") || return 1
   j=$(jq -r --arg src "$SA_SRC_URI" '[.codeReviewJobs[]? | select(.sourceCode[0].s3Location == $src)][0].codeReviewJobId // empty' <<< "$out")

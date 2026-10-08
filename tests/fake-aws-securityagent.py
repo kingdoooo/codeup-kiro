@@ -20,6 +20,7 @@
   FAKE_SA_JOB_TEMPLATE=<文件>    BatchGetCodeReviewJobs 输出的模板（取其 codeReviewJobs[0] 的 overview）
   FAKE_SA_FINDINGS=<文件>        ListFindings / BatchGetFindings 的数据来源（一个 BatchGetFindings 输出）
   FAKE_SA_FAIL_<操作>=<Code>     该操作一律报这个错误码（操作名大写、去掉连字符，例如 FAKE_SA_FAIL_CREATECODEREVIEW）
+  FAKE_SA_LIST_STATUS=<status>   ListCodeReviewJobsForCodeReview 里每个作业都报这个状态（作业刚建好时报的初始状态没实测过，终审 I-11）
 """
 import fcntl
 import json
@@ -167,8 +168,9 @@ def handle(op, req, st):
         return {"codeReviewJobs": out, "notFound": missing}
     if op == "list-code-review-jobs-for-code-review":
         need(req, "agentSpaceId", "codeReviewId")
+        listed = os.environ.get("FAKE_SA_LIST_STATUS")
         return {"codeReviewJobSummaries": [
-            {k: j[k] for k in ("codeReviewJobId", "codeReviewId", "status", "createdAt")}
+            {**{k: j[k] for k in ("codeReviewJobId", "codeReviewId", "status", "createdAt")}, **({"status": listed} if listed else {})}
             for j in st["jobs"].values() if j["codeReviewId"] == req["codeReviewId"]]}
     if op in ("list-findings", "batch-get-findings"):
         need(req, "agentSpaceId")
