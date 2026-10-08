@@ -93,7 +93,7 @@ spec 对这个功能的验收就是「一条评论触发重审，而它产生的
 | 业务库完整副本 | Fargate 任务（所选区域） | 临时存储，随任务销毁，**不持久化** | **本档位（2a）新增** |
 | diff 与 Kiro 读到的文件内容 | Kiro 自己的服务（美国） | Kiro 侧 | Flow 档位**已存在**，非本档位新增 |
 | 依赖清单（SBOM：包名、版本、清单文件在仓库里的相对路径） | S3 输入桶的 `inspector/` 前缀 + Amazon Inspector `ScanSbom`（都在所选区域） | S3 1 天后过期；Inspector 侧按其服务条款 | **2b 新增**，只在 `inspector: 1` 时（第 6.5 节） |
-| 业务库完整归档 | S3（持久化）+ Security Agent 的模型推理 | 持久（7 天生命周期） | 后续里程碑（**2b**），见 [ADR-0003](../docs/adr/0003-security-agent-via-s3-differential-scan.md) |
+| 业务库完整归档（MR 提交的整棵树）+ 本 MR 的 diff | S3 输入桶的 `security/` 前缀 + AWS Security Agent（都在所选区域；SA 的模型推理按第 1.2 节的跨区规则） | S3 7 天后过期；SA 在作业开始时取一份副本，删除后 30 天内从 SA 的系统里清除 | **2b 新增**，只在 `security_agent: 1` 时（第 6.6 节、[ADR-0003](../docs/adr/0003-security-agent-via-s3-differential-scan.md)） |
 
 Inspector 那一行只有依赖清单离开执行器，没有源码，也不经过任何模型推理。但不要把它说成「源码不出境、只有 SBOM 出境」：
 在本档位里，业务库完整副本在 sbomgen 运行之前就已经在 AWS 的执行器里了（第一行）。
@@ -135,7 +135,7 @@ Flow 档位靠「受保护分支」当集成包的信任锚；本档位没有这
 | `codeup-kiro/kiro-api-key` | Kiro API Key | 是 |
 | `codeup-kiro/webhook-secret` | Lambda 调度器校验 Codeup webhook 共享密钥用（调度器在每次调用时按注入的 `WEBHOOK_SECRET_ID`——即这里的密钥名——向 Secrets Manager 取值，见 `aws/lambda/dispatcher/secret_fetch.py`）。**信任边界**：一个部署只有这一个共享密钥，填进每一个接入仓库的 webhook。持有它的人能伪造或重放投递，触发组织里云效令牌读得到的任何仓库的 MR 评审；但评审的内容总是来自 MR 所在的那个仓库：执行器按仓库 id 向 Codeup 取 clone 地址，报文里的地址只拿来比对（不一致时日志里有一行 `clone-url-mismatch`，见第 8 节「clone-url-mismatch」那一行）。所以只把它交给被信任拥有云效令牌读权限的人，其中有人离开时轮换它 | 是 |
 | `codeup-kiro/yunxiao-token-inspector` | Inspector 评审员使用的云效令牌（代码只读 + 合并请求读写） | **否**，只在 `inspector: 1` 时创建（第 6.5 节） |
-| `codeup-kiro/yunxiao-token-security` | Security Agent 机器人账号的云效令牌 | **否**，Security Agent 开通之前不要创建 |
+| `codeup-kiro/yunxiao-token-security` | Security Agent 评审员使用的云效令牌（代码只读 + 合并请求读写） | **否**，只在 `security_agent: 1` 时创建（第 6.6 节） |
 
 创建命令（值本身在命令行历史与终端 scrollback 里可见，生产环境建议改用 `--cli-input-json`
 从文件读取，或直接在控制台里创建）：
@@ -458,6 +458,51 @@ merge-base 两棵树（删掉全部符号链接），以非 root 用户、空环
 所以换开关不会改镜像摘要、不用重新登记 `kiro_image_digests`。升级 sbomgen = 改那两个 ARG、重建镜像、按第 5.2 节登记新摘要。
 它的许可证不允许再分发，所以和 Kiro 安装包一样，每个部署在自己的构建里下载。
 
+### 6.6 可选：扫描评审员（Security Agent）
+
+AWS Security Agent 是第三位评审员：做架构与数据流层面的安全分析（注入、越权、敏感数据外泄之类），**不报依赖漏洞**（那是 Inspector 的事）。
+每次评审在 MR 上维护**一条自己的汇总评论**（标题「Security Agent 安全评审」），与 Kiro、Inspector 互不接管。只做**差分扫描**：分析本 MR
+改动的代码，整个仓库只作上下文。只发汇总、不发行内评论：每条发现在汇总里带 `文件:行`。
+
+**开通**（然后重新部署：先 `CodeupKiroExecutor`，后 `CodeupKiroDispatcher`）：
+
+1. `config.yaml` 写 `security_agent: 1`（严格 0/1）。
+2. 建密钥 `codeup-kiro/yunxiao-token-security`（创建方式同第 3 节）：Security Agent 机器人账号的云效令牌，权限与 Kiro 的相同。PoC 可以与 Kiro
+   共用一个账号、一个令牌；生产建议独立账号。
+3. 机器人账号与命令短语（都可省）：`security_bot_username`（缺省 = `bot_username`）；`security_command_phrase`（缺省 `/security review`，
+   只重跑 Security Agent）；`all_command_phrase` 同第 6.5 节。
+4. 可选：`security_agent_timeout`（缺省 3600 秒，可配 600–7200）——从第一次启动作业到作业结束的总预算，含并发满时的排队。超时就停掉作业、
+   发失败评论。
+
+**不需要在 Security Agent 控制台做任何开通**：CDK 建 Agent Space（名字 `codeup-kiro-security`）与它的服务角色（只能读输入桶的 `security/`
+前缀、写自己的作业日志）。**不建 Application**：Application 是 Security Agent Web 控制台的区域级配置（Identity Center、Web 应用角色），
+API 发起的差分扫描用不到它。想在 Security Agent 控制台里看发现，按 Security Agent 文档在本区域建一次 Application（一个区域一个，已有就不必再建）。
+
+**每次评审做什么**：执行器在 Kiro 开始之前，用钉死的参数生成 merge-base 到 MR 提交的 diff（树内 `.gitattributes` 的 `-diff` 失效，
+改动藏不成「二进制」；`-M` 识别改名），再从 git 对象导出 MR 提交的整棵树（删掉符号链接）打成 zip（不带归档注释：Security Agent 拒收带注释的
+zip），连同文件清单放进输入桶的 `security/` 前缀。扫描任务里的 Security Agent 子进程：每个仓库一个 code review（标题 `codeup-kiro:<仓库 id>`，
+映射表 `CodeReviewMapping` 记着它）；把它重指向本次的归档 → 启动差分作业 → 核对作业记下的源确实是本次的（不是就停掉、发失败评论）→ 每 30 秒
+查一次作业状态 → 取发现 → 汇总。同一仓库的两个 MR 只在「重指向 + 启动」那几秒里串行（作业在启动时记下源，之后再重指向不影响它）。
+一次差分作业实测约 10 分钟。源分支在作业运行中又有了新提交时，旧作业被停掉，交给新提交那次。
+
+**不起作业的情况**：空 diff、改动超过 3,000 个文件或 5 MB、归档超过 2 GB——汇总里写一句「本次没有执行差分扫描：…」。
+
+**汇总里有什么**：按严重级别分组（CRITICAL / HIGH / MEDIUM / LOW / 其它）的发现：名字、类型、置信度、全部位置（`文件:起–止行` 加 Security
+Agent 给的标签）、截短的说明；Security Agent 对本次作业的总结在折叠区；它判为误报的只计数。**结论非确定**：同一提交重跑，条数与位置可能不同
+（评论里有一行固定说明）。每次差分扫描最多 30 条（服务上限），恰好 30 条时评论写明。不渲染 Security Agent 生成的攻击脚本与验证脚本。
+
+**配额与成本**：代码评审目前处于预览期、不收费（以 AWS 公布为准）。并发作业数默认每账号每区域 5 个（Service Quotas 里的
+`Concurrently Running Code Review Jobs`，可申请调高）：满了时启动被拒，扫描员每 60 秒重试、最多 15 分钟，仍满就发失败评论
+（代号 `sa-concurrency-full`）。配额页另有「每月 1,000 次 PR code reviews」：API 发起的作业是否计入，在 Service Quotas 与 `AWS/Usage`
+里都看不到（2026-10 实测），按「可能计入」规划。另有扫描任务的 Fargate 时长（一次作业约 10 分钟，0.5 vCPU / 1 GB）与输入桶
+（`security/` 前缀 7 天后过期）。
+
+**数据与推理**：见第 1.3 节表格的最后一行与第 1.2 节（跨区推理）。`codeRemediationStrategy` 钉成 `DISABLED`（Security Agent 不会开修复 PR），
+`validationMode` 钉成 `DISABLED`（不做模拟验证——那会在 Security Agent 的环境里运行你的代码）。
+
+**排错**：第 8 节「scan-prep reviewer=security」与「Security Agent 的汇总评论」那两行；Security Agent 自己的作业日志在 CloudWatch 日志组
+`/aws/securityagent/codeup-kiro-security/<code review id>`。
+
 ## 7. 本地测试
 
 `aws/` 下的 CDK/Lambda 测试用 pytest，依赖装进项目内的虚拟环境 `aws/.venv`（已加入
@@ -489,7 +534,7 @@ aws/.venv/bin/pip install -r aws/requirements.txt
 | 扫描员（Inspector / Security Agent）的兜底评论说「扫描任务的镜像摘要门拒绝了运行」（扫描退出码 90） | 与执行器的退出码 90 同一件事：扫描任务与执行器是同一个镜像、核对同一份 `kiro_image_digests`。按「退出码 90」那一行处置（登记新镜像摘要后重新部署）。 |
 | 扫描员的兜底评论说「扫描任务收到的输入不合法」（扫描退出码 95） | 扫描任务的环境覆盖由执行器拼（评审员清单只会是 inspector / security、提交号与 run_id 是固定形状、仓库地址已按仓库 id 核对过），出现这一行说明有人手工拉起了扫描任务，或执行器与扫描任务不是同一次部署出来的。重新部署 `CodeupKiroExecutor`。 |
 | 扫描员的兜底评论说「扫描子进程没有正常结束」（扫描退出码 96） | 某位扫描员的子进程既没发出汇总、也没发出它自己的失败评论（进程被杀、OOM，或连失败评论都发不出去——多为云效令牌失效或跨境网络断）。看执行器日志组里流前缀 `scan/` 的那个流：`scan-reviewer reviewer=<评审员> result=failed rc=<码>` 一行点名是哪一位，它上面的 `[<评审员>]` 日志是那位的经过。 |
-| 评审被终止，日志里有「评审引擎超过总时长上限 N 秒仍未结束，已终止」（entrypoint 退出码 124；引擎 30 秒内不理 TERM 时是 137） | 评审引擎跑满了总时长上限 `KIRO_TIMEOUT` + 1800 秒（开头「同一 MR 串行」一段）。Kiro 对话本身已受 `KIRO_TIMEOUT` 限制，所以多半是引擎自己的 `git fetch` 或 Codeup API 长时间没有应答（跨境网络、Codeup 限流）。上限同时给持有租约的时长与这个任务的 Fargate 费用设了上界。兜底 Lambda 会在 MR 上回写「评审任务异常结束（退出码 124）」；重新推送或发评论命令即可，频繁出现时查执行器到 codeup.aliyun.com 的网络。137 而**没有**这行消息的，是内存不足（OOM）或任务被 StopTask 停掉，不是上限：容器的 PID 1 是 bash、不处理 SIGTERM，StopTask 要等 30 秒后的 SIGKILL 才生效，任务同样以 137 结束、租约来不及主动释放，最多 120 秒后自动失效（开头「同一 MR 串行」一段）。两者看 `aws ecs describe-tasks` 的 `stopCode` 区分：StopTask 是 `UserInitiated` |
+| 评审被终止，日志里有「评审引擎超过总时长上限 N 秒仍未结束，已终止」（entrypoint 退出码 124；引擎 30 秒内不理 TERM 时是 137） | 评审引擎跑满了总时长上限 `KIRO_TIMEOUT` + 1800 秒（开头「同一 MR 串行」一段）。Kiro 对话本身已受 `KIRO_TIMEOUT` 限制，所以多半是引擎自己的 `git fetch` 或 Codeup API 长时间没有应答（跨境网络、Codeup 限流）。上限同时给持有租约的时长与这个任务的 Fargate 费用设了上界。兜底 Lambda 会在 MR 上回写「评审任务异常结束（退出码 124）」；重新推送或发评论命令即可，频繁出现时查执行器到 codeup.aliyun.com 的网络。137 而**没有**这行消息的，是内存不足（OOM），不是上限。任务被 StopTask 停掉时退出码是 143：任务定义开了 init（`initProcessEnabled`，issue 15），SIGTERM 立刻让执行器退出、EXIT 陷阱当场释放租约（评审引擎子进程收不到 init 转发的 TERM，要等 30 秒后的 SIGKILL）；扫描任务同样 143，入口先把 TERM 转给每位扫描员、等它们释放各自的租约（Security Agent 的作业也随之停掉）。旧部署（没开 init）里 StopTask 要等 30 秒后的 SIGKILL、以 137 结束，租约最多 120 秒后自动失效。看 `aws ecs describe-tasks` 的 `stopCode` 区分：StopTask 是 `UserInitiated` |
 | 某次推送没有对应的评审，日志里有 `head-check result=superseded` | **预期行为，不是错误**：这个任务等租约期间源分支又被推过，调度器也已为最新提交拉起了任务，所以它退出 0、不评审也不发评论，由新任务评最新提交（汇总评论里的 `Commit:` 是最新的那个）。这一行其余几种取值：`result=current`（最新提交就是本任务的，照常评审）、`result=moved-unclaimed`（源分支前进了，但新提交没有抢锁记录——那次投递丢了——照常评审本任务的提交）、`result=unknown`（`git ls-remote` 失败或源分支已不存在，照常评审）、`result=claim-unknown`（读新提交的抢锁记录失败，照常评审）。后三种是退化路径：与加租约之前的行为相同 |
 | 装机、摘要、自检、版本门全过，评审在生成 diff 那一步失败：`[kiro-review] 错误：无法 fetch 目标分支：<分支>`，日志里还有 `fatal: could not read Username for 'https://codeup.aliyun.com'` | **执行器的 git 凭证没有传给评审引擎。** 引擎（`scripts/kiro-review.sh` 第 4 步）会自己在业务库里 `git fetch` 目标分支、必要时再 `git fetch --unshallow`——Flow 档位由平台检出业务库并留下可用凭证，AWS 档位得由执行器提供。真实 Fargate 运行实测过这个坑（Task 14 验收）：当时 helper 只作为 `git -c` 传给执行器自己那两次调用，引擎那次 fetch 因此是无凭证的。**修法**：凭证必须经 `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` 导出（第 3 节最后一条），环境变量才会被引擎这个子进程继承。核对办法：`bash tests/test-aws-entrypoint.sh` 的 ⑯ 用真 git 的 `credential fill` 判这件事。若这三个变量确实在位而现象依旧，再查令牌本身（与本表「clone 业务库失败」那一行同一批成因） |
 | 同一个 MR 短时间内被评审两次，或看到「抢锁」相关的提示（幂等锁 `ReviewLock` 表） | **预期行为，不是错误**：每次推送、每条评论命令各是一次评审，两次推送离得很近时就会看到两次。它们**依次**进行、不会同时跑——执行器先拿按 MR 的租约（开头「同一 MR 串行」一段），后到的任务等前一个结束；拿到租约时源分支已经又前进了的话，旧任务直接退出、只评最新的提交（见本表「某次推送没有对应的评审」那一行）。同一次投递被重放（Codeup 对 503 的立即重投、有人重放报文）则由幂等锁按「仓库#MR#提交」去重，挡在真正拉起 Fargate 任务之前 |
@@ -508,6 +553,8 @@ aws/.venv/bin/pip install -r aws/requirements.txt
 | 日志里有 `scan-prep reviewer=inspector status=failed:<代号>`，Inspector 的汇总评论写着「执行器没能准备 Inspector 的扫描输入（代号 …）」 | **Kiro 不受影响、照常评审**，只是 Inspector 这一次没有输入。代号：`no-target-branch`（调度器没给目标分支）、`merge-base`（目标分支在 clone 里找不到，或与 MR 提交没有共同祖先）、`export`（从 git 对象导出树失败，或导出后仍有符号链接）、`export-timeout`（导出一棵树超过 300 秒，多为仓库特别大）、`sbomgen`（sbomgen 报错退出，日志里紧跟几行以 `  sbomgen: ` 开头的报错尾巴）、`sbomgen-timeout`（超过 300 秒，多为仓库特别大）、`sbomgen-killed`（不到 300 秒就被强杀，多为内存不足：调大执行器的 `memory_mib`）、`sbom-too-large`（输出超过 50 MB）、`sbom-not-cyclonedx`（输出不是 CycloneDX）、`upload`（写输入桶失败：执行器角色缺 `s3:PutObject` 或桶不存在，多见于开了开关却没重新部署 `CodeupKiroExecutor`）。`failed:not-implemented` 只会出现在点名了本部署还没实现的扫描员时 |
 | 日志里有 `scan-dispatch result=failed`，MR 上有 Inspector 的兜底评论「执行器没能拉起扫描任务」 | 执行器调 `ecs:RunTask` 拉起扫描任务失败（两次尝试、同一个 clientToken）。原因在同一个日志流里的 `scan-dispatch attempt=N result=failed code=<代号>`（每次尝试一行）：`AccessDeniedException` 多为执行器角色缺 `ecs:RunTask` / `iam:PassRole`（开了开关却没重新部署 `CodeupKiroExecutor`），`RESOURCE:` 开头的是 Fargate 容量或配额，`overrides-too-long` 是环境覆盖超过 8,192 字符（只在分支名极长时）。**Kiro 不受影响**。修好之后重新推送或发 `/inspector review` |
 | Inspector 的汇总评论写着「Inspector ScanSbom 调用失败（代号 …）」 | `AccessDeniedException`：扫描任务角色缺 `inspector-scan:ScanSbom`（重新部署 `CodeupKiroExecutor`）；`ValidationException`：送检的 SBOM 不合法或组件过多（一块最多 1,900 个，正常不会触发；持续出现时报给集成包维护方）；`ThrottlingException` 等限流已按 AWS CLI 的 standard 重试模式重试过。评论里只有代号，不回显服务端的错误正文 |
+| 日志里有 `scan-prep reviewer=security status=failed:<代号>`，Security Agent 的汇总评论写着「执行器没能准备 Security Agent 的扫描输入（代号 …）」 | **Kiro 不受影响、照常评审**。代号：`no-target-branch`、`merge-base`、`export`、`export-timeout`、`upload` 与 Inspector 那一行同义；`diff`（生成 diff 失败）、`zip`（打包失败，多为临时盘满：调大 `ephemeral_storage_gib`）、`zip-timeout`（打包超过 600 秒，仓库特别大）、`zip-comment`（打出来的 zip 带归档注释——只会在有人改过打包方式之后出现，Security Agent 拒收这种 zip）、`meta`（写计数失败）、`prep`（建工作目录失败）。`status=skipped:<代号>` 不是错误：`empty-diff`、`diff-too-large`、`archive-too-large` 时不起作业、汇总里写一句说明 |
+| Security Agent 的汇总评论写着「…（代号 sa-…）」或带 Security Agent 的错误码 | 评论里只有代号，不回显服务端的错误正文（里面有桶名与对象键）。`sa-config`：扫描任务缺 `SA_AGENT_SPACE_ID` / `SA_SERVICE_ROLE_ARN` / `SA_MAPPING_TABLE` / `SECURITY_AGENT_TIMEOUT`（开了开关却没重新部署 `CodeupKiroExecutor`）。`sa-concurrency-full`：并发作业满了 15 分钟仍没空出来（第 6.6 节「配额」；同一账号别的地方也在跑代码评审时更容易碰到）。`sa-timeout`：作业超过 `security_agent_timeout` 仍未结束，已停止。`sa-source-mismatch`：作业记下的源不是本次的归档（理应不会发生：同一仓库的「重指向 + 启动」是串行的；出现就报给集成包维护方），作业已停止。`sa-repo-lease` / `sa-mapping-wait`：同一仓库的另一次评审占着「重指向 + 启动」或「建 code review」那一步超过 300 秒（多为那个任务被强杀，120 秒内租约失效；重新推送即可）。`sa-mapping`：读写映射表 `CodeReviewMapping` 失败（扫描任务角色缺 `dynamodb:GetItem` / `UpdateItem`）。作业失败时代号是 Security Agent 自己的 `CLIENT_ERROR` / `INTERNAL_ERROR`，被别人停掉时是 `STOPPED_BY_USER`：看日志组 `/aws/securityagent/codeup-kiro-security/<code review id>` 里那个作业的日志。启动、重指向、取发现那几步失败时代号是 AWS 错误码：`AccessDeniedException` 多为扫描任务角色缺对应的 `securityagent:` 动作（重新部署 `CodeupKiroExecutor`），`ValidationException` 多为输入桶没登记进 Agent Space、或对象已过期（7 天） |
 
 「抢锁冲突」「评审未启动」「兜底回写」三行对应的代码都已实现且已接到 webhook 入口上
 （`aws/lambda/dispatcher/handler.py`、`aws/lambda/backstop/handler.py`），真实部署上这三类现象都能复现。

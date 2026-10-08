@@ -16,7 +16,7 @@ _Avoid_: 目标仓库、被评审仓库、源仓库
 _Avoid_: 脚本仓库、工具库
 
 **评审员**:
-一个自动化的评审身份，对一次评审产出一份评审报告。目前有三位：Kiro 评审员、Inspector 评审员、Security Agent 评审员（后者待开通）。
+一个自动化的评审身份，对一次评审产出一份评审报告。目前有三位：Kiro 评审员、Inspector 评审员、Security Agent 评审员。
 后两位是扫描评审员。
 _Avoid_: 机器人、bot、agent（后者在本项目里另有所指：Kiro 的 custom agent 配置）
 
@@ -47,7 +47,7 @@ _Avoid_: 评审结果、输出
 _Avoid_: 缺陷、issue、finding（仅在直接引用 Security Agent API 字段时使用）、评论项
 
 **严重级别**:
-问题的分级。Kiro 评审员用 P0（必须修复：安全漏洞、数据丢失、逻辑错误）、P1（应当修复：性能、并发、错误处理）、P2（可选改进：规范、可读性）；扫描评审员沿用扫描服务的原生取值（Inspector：critical / high / medium / low），不翻译成 P0/P1/P2。
+问题的分级。Kiro 评审员用 P0（必须修复：安全漏洞、数据丢失、逻辑错误）、P1（应当修复：性能、并发、错误处理）、P2（可选改进：规范、可读性）；扫描评审员沿用扫描服务的原生取值（Inspector：critical / high / medium / low；Security Agent：CRITICAL / HIGH / MEDIUM / LOW / INFORMATIONAL），不翻译成 P0/P1/P2。
 _Avoid_: 严重/警告/建议、红黄蓝灯、优先级、Critical/Major/Minor、riskLevel（仅在直接引用 Security Agent API 字段时使用）
 
 **总体结论**:
@@ -140,7 +140,7 @@ _Avoid_: 新增漏洞、增量漏洞
 _Avoid_: 历史漏洞、旧漏洞
 
 **严重级别序**:
-只用于排序与预算（折叠区上限、截断优先级）的严重级别先后：Inspector 为 critical、high、medium、low、其它（none / unknown）。
+只用于排序与预算（折叠区上限、截断优先级）的严重级别先后：Inspector 为 critical、high、medium、low、其它（none / unknown）；Security Agent 为 CRITICAL、HIGH、MEDIUM、LOW、INFORMATIONAL、UNKNOWN。
 _Avoid_: 风险分、优先级
 
 **差分扫描**:
