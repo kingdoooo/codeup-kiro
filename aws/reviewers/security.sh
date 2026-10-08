@@ -244,8 +244,15 @@ sa_start_job() {  # → 全局 SA_JOB_ID
     [[ "$SA_JOB_ID" =~ ^cj-[0-9a-f-]{8,64}$ ]] || { sa_repo_lease release; reviewer_fail "作业 id 的形状不对（代号 sa-start）"; }
     SA_JOB_ACTIVE=1
     # 核对作业记下的源 = 本次键（R12 / Q2 的守卫：作业在 Start 时记下 code review 当时的 sourceCode，issue 09 J3b）
-    src=$(sa_job_source "$SA_JOB_ID" || true)
+    # 读不到 ≠ 源不符（终审 I-6）：只读、幂等，再读两次；仍读不到就停掉作业、用单独的代号，不把一次读失败说成「作业读了别人的源」
+    src=""
+    for _ in 1 2 3; do
+      src=$(sa_job_source "$SA_JOB_ID" || true)
+      [[ -n "$src" ]] && break
+      /bin/sleep 2
+    done
     sa_repo_lease release
+    [[ -n "$src" ]] || reviewer_fail "读不到 Security Agent 作业记下的源，已停止（代号 sa-source-unknown）"
     if [[ "$src" != "$SA_SRC_URI" ]]; then
       reviewer_fail "Security Agent 作业记下的源与本次不符，已停止（代号 sa-source-mismatch）"
     fi

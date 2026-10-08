@@ -159,6 +159,11 @@ case "\$1 \$2" in
   # 每次查作业时记下按仓库租约的租期（R12：只有核对作业源那一次持有它，轮询时已释放）
   "securityagent batch-get-code-review-jobs")
     jq -r '.["lease#7#security-repo"].lease_until.N // "none"' "$tmp/ddb.json" >> "$tmp/lease-at-poll" 2>/dev/null
+    # \$tmp/bgj-fail 里的数 > 0：这一次按 5xx 失败、数减一（终审 I-6 的「读一次失败」）
+    if [ -s "$tmp/bgj-fail" ] && [ "\$(cat "$tmp/bgj-fail")" -gt 0 ]; then
+      echo \$(( \$(cat "$tmp/bgj-fail") - 1 )) > "$tmp/bgj-fail"
+      echo "An error occurred (InternalServerException) when calling the BatchGetCodeReviewJobs operation: injected" >&2; exit 254
+    fi
     exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
   securityagent*) exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
   # \$tmp/stale-get：映射表的下一次 get-item 读到这份旧记录（一次）——模拟「读到 creating 之后、认领之前，别人已经置了 ready」（终审 I-3）
@@ -192,7 +197,7 @@ cp "$FIX/files-head-clean.txt" "$tmp/s3/files.txt"; cp "$tmp/meta.json" "$tmp/s3
 SPACE=as-11111111-1111-4111-8111-111111111111
 SHA=$(printf 'a%.0s' {1..40}); RUNID=$(printf 'b%.0s' {1..32})
 SRC="s3://bkt/security/7/$SHA/$RUNID/source.zip"; PATCH="s3://bkt/security/7/$SHA/$RUNID/changes.patch"
-fresh() { rm -f "$tmp"/sa.json* "$tmp/sa.log" "$tmp/s3.argv" "$tmp/date.n" "$tmp/superseded" "$tmp/hc.seen" "$tmp/lease-at-poll" "$tmp/stale-get"; echo '{}' > "$tmp/ddb.json"; rm -f "$tmp/ddb.json.lock"; }
+fresh() { rm -f "$tmp"/sa.json* "$tmp/sa.log" "$tmp/s3.argv" "$tmp/date.n" "$tmp/superseded" "$tmp/hc.seen" "$tmp/lease-at-poll" "$tmp/stale-get" "$tmp/bgj-fail"; echo '{}' > "$tmp/ddb.json"; rm -f "$tmp/ddb.json.lock"; }
 drive() {  # [KEY=VAL …] → rc；输出在 $tmp/out
   rm -rf "$tmp/w"; mkdir -p "$tmp/w"
   local rc=0
@@ -316,6 +321,15 @@ assert_eq "$(drive FAKE_SA_JOB_SOURCE_OVERRIDE=s3://bkt/security/7/other/source.
 assert_contains "$(posted_comment "$(cat "$tmp/out")")" "Security Agent 作业记下的源与本次不符，已停止（代号 sa-source-mismatch）" "④ Q2：失败评论带 sa-source-mismatch"
 assert_eq "$(ops | tr ' ' '\n' | grep -c '^stop-code-review-job$')" "1" "④ Q2：作业被停止"
 assert_eq "$(ops | tr ' ' '\n' | grep -c '^list-findings$')" "0" "④ Q2：不取（别人的）发现"
+# 终审 I-6：核对时读作业记录失败 ≠ 源不符。一次失败 → 再读、照常评审；一直读不到 → sa-source-unknown + 停作业（不说成 sa-source-mismatch）
+fresh; echo 1 > "$tmp/bgj-fail"
+assert_eq "$(drive)" "0" "④ I-6 核对时读作业记录失败一次 → 0"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "差分扫描发现 2 个安全问题" "④ I-6 再读一次就对上了，照常出汇总"
+assert_eq "$(ops | tr ' ' '\n' | grep -c '^stop-code-review-job$')" "0" "④ I-6 没有停掉一个正常的作业"
+fresh
+assert_eq "$(drive FAKE_SA_FAIL_BATCHGETCODEREVIEWJOBS=InternalServerException)" "0" "④ I-6 一直读不到作业记录 → 失败评论"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "读不到 Security Agent 作业记下的源，已停止（代号 sa-source-unknown）" "④ I-6 失败代号是 sa-source-unknown"
+assert_eq "$(ops | tr ' ' '\n' | grep -c '^stop-code-review-job$')" "1" "④ I-6 核对不了的作业被停止"
 # 作业 FAILED / 被别人停止：失败评论只带枚举代号，不回显 errorInformation.message（F3）
 fresh
 assert_eq "$(drive FAKE_SA_JOB_STATUSES=IN_PROGRESS,IN_PROGRESS,FAILED FAKE_SA_JOB_ERROR=CLIENT_ERROR)" "0" "④ 作业 FAILED → 失败评论"
