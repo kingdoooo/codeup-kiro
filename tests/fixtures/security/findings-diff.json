@@ -1,0 +1,61 @@
+{
+  "findings": [
+    {
+      "findingId": "f-2a573a5f-8025-4540-8a1b-48f97625114a",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-1f981f2a-0e5b-4910-b8a5-a16f0e64a25c",
+      "taskId": "tk-75a4e7ac-8368-4c02-b382-013b43cb9c3f",
+      "name": "Unauthenticated OS command injection in new /ping endpoint (shell=True)",
+      "description": "Any unauthenticated caller can run arbitrary OS commands as the app user and read the output in the HTTP response — e.g. `GET /ping?host=127.0.0.1;cat%20/etc/passwd`. The new endpoint concatenates the `host` query parameter straight into a shell string passed to `subprocess.check_output(..., shell=True)` with no validation, allowlist or quoting, and the route is registered on the shared Flask app which has no auth middleware.",
+      "status": "ACTIVE",
+      "riskType": "COMMAND_INJECTION",
+      "riskLevel": "CRITICAL",
+      "confidence": "HIGH",
+      "attackScript": "host = request.args.get(\"host\", \"\") (ping.py:10) → subprocess.check_output(\"ping -c 1 \" + host, shell=True) (ping.py:11); output returned to caller.",
+      "lastUpdatedBy": "tk-75a4e7ac-8368-4c02-b382-013b43cb9c3f",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-5fb90930-1be5-48db-be66-8fb1872605a6/src/工具/ping.py",
+          "lineStart": 8,
+          "lineEnd": 11,
+          "label": "sink: shell=True with user input"
+        }
+      ],
+      "createdAt": "2026-10-08T01:07:11.155252+00:00",
+      "updatedAt": "2026-10-08T01:07:11.194215+00:00"
+    },
+    {
+      "findingId": "f-0d323b7f-968f-4846-818b-9e69ac57b77e",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-1f981f2a-0e5b-4910-b8a5-a16f0e64a25c",
+      "taskId": "tk-75a4e7ac-8368-4c02-b382-013b43cb9c3f",
+      "name": "SQL injection in new /search route: raw `q` param concatenated into LIKE clause",
+      "description": "An unauthenticated request to `/search` can read any table in the SQLite database — e.g. `/search?q=%25' UNION SELECT sql FROM sqlite_master--` returns the injected rows verbatim in the JSON response. The `q` query parameter is concatenated into a single-quoted LIKE literal with no sanitization, so a quote in `q` terminates the literal and appends arbitrary SQL. The sibling `/user` route uses a bound parameter, so this is a local deviation, not a codebase-wide pattern. `limit` is separately clamped by `page_size()` and is not the issue.",
+      "status": "ACTIVE",
+      "riskType": "SQL_INJECTION",
+      "riskLevel": "HIGH",
+      "confidence": "HIGH",
+      "attackScript": "q = request.args.get(\"q\", \"\") (line 34) → cur.execute(\"SELECT name FROM users WHERE name LIKE '%\" + q + \"%' LIMIT \" + str(limit)) (line 37) → return {\"rows\": cur.fetchall()} (line 38)",
+      "lastUpdatedBy": "tk-75a4e7ac-8368-4c02-b382-013b43cb9c3f",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-5fb90930-1be5-48db-be66-8fb1872605a6/src/app/routes.py",
+          "lineStart": 37,
+          "lineEnd": 37,
+          "label": "sink: concatenated SQL"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-5fb90930-1be5-48db-be66-8fb1872605a6/src/app/routes.py",
+          "lineStart": 34,
+          "lineEnd": 34,
+          "label": "source: request.args q"
+        }
+      ],
+      "createdAt": "2026-10-08T01:07:10.963462+00:00",
+      "updatedAt": "2026-10-08T01:07:11.005482+00:00"
+    }
+  ],
+  "notFound": []
+}

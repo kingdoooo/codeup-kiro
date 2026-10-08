@@ -1,0 +1,86 @@
+{
+  "findings": [
+    {
+      "findingId": "f-95b57ad0-68c1-4cdd-958a-d5810c8956c5",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "codeReviewJobId": "cj-33d74873-2027-45c0-a4f8-611fd1678e18",
+      "taskId": "tk-ed6c92c6-edf4-4cba-adf6-1bbe8892b8b7",
+      "name": "Unsafe path join in read_avatar() permits path traversal when wired to user input",
+      "description": "If `read_avatar()` is ever called with request data, an attacker can read any file the process can access — `os.path.join(\"/srv/avatars\", user)` is opened with no normalization or containment check, so an absolute path or \"../\" sequence escapes the avatar directory. No caller exists in the repo today, so the sink is latent: fixing it is cheap hardening rather than a merge blocker.",
+      "status": "ACTIVE",
+      "riskType": "PATH_TRAVERSAL",
+      "riskLevel": "LOW",
+      "confidence": "MEDIUM",
+      "attackScript": "grep -rn read_avatar → only the definition at src/app/helpers.py:8; no callers.",
+      "lastUpdatedBy": "tk-ed6c92c6-edf4-4cba-adf6-1bbe8892b8b7",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-a15dd893-3443-445d-8970-1072710e6a78/src/app/helpers.py",
+          "lineStart": 8,
+          "lineEnd": 9,
+          "label": "sink: unchecked path join + open"
+        }
+      ],
+      "createdAt": "2026-10-08T01:07:08.182922+00:00",
+      "updatedAt": "2026-10-08T01:07:08.218453+00:00"
+    },
+    {
+      "findingId": "f-f7f5f16a-838e-4c02-9602-97e5a924f96e",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "codeReviewJobId": "cj-33d74873-2027-45c0-a4f8-611fd1678e18",
+      "taskId": "tk-ed6c92c6-edf4-4cba-adf6-1bbe8892b8b7",
+      "name": "SQL injection in /search via string-concatenated LIKE pattern",
+      "description": "Any unauthenticated caller of GET /search can read arbitrary data from app.db (e.g. password column) by breaking out of the quoted LIKE literal with a UNION/subselect. The raw `q` query parameter is concatenated directly into the SQL string at line 37 with no sanitization; `limit` is clamped by page_size() and is not tainted.",
+      "status": "ACTIVE",
+      "riskType": "SQL_INJECTION",
+      "riskLevel": "HIGH",
+      "confidence": "HIGH",
+      "attackScript": "q = request.args.get(\"q\",\"\") (routes.py:34) → cur.execute(\"SELECT name FROM users WHERE name LIKE '%\" + q + \"%' LIMIT \" + str(limit)) (routes.py:37); e.g. q=' UNION SELECT password FROM users--",
+      "lastUpdatedBy": "tk-ed6c92c6-edf4-4cba-adf6-1bbe8892b8b7",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-a15dd893-3443-445d-8970-1072710e6a78/src/app/routes.py",
+          "lineStart": 37,
+          "lineEnd": 37,
+          "label": "sink: concatenated SQL"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-a15dd893-3443-445d-8970-1072710e6a78/src/app/routes.py",
+          "lineStart": 34,
+          "lineEnd": 34,
+          "label": "source: request.args q"
+        }
+      ],
+      "createdAt": "2026-10-08T01:07:07.974238+00:00",
+      "updatedAt": "2026-10-08T01:07:08.013060+00:00"
+    },
+    {
+      "findingId": "f-b0bb6acd-3cb3-4db2-8afb-80c591de90ff",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "codeReviewJobId": "cj-33d74873-2027-45c0-a4f8-611fd1678e18",
+      "taskId": "tk-ed6c92c6-edf4-4cba-adf6-1bbe8892b8b7",
+      "name": "Unauthenticated OS command injection in /ping (shell=True with query param)",
+      "description": "Any unauthenticated caller can run arbitrary shell commands as the web process: `GET /ping?host=127.0.0.1;id`. The `host` query parameter is concatenated straight into a shell string passed to `subprocess.check_output(..., shell=True)`, with no validation, allowlist, or auth decorator between the request and the sink. Deployment exposure of the endpoint was not verified.",
+      "status": "ACTIVE",
+      "riskType": "COMMAND_INJECTION",
+      "riskLevel": "CRITICAL",
+      "confidence": "HIGH",
+      "attackScript": "GET /ping (line 8) → `host = request.args.get(\"host\",\"\")` (line 10) → `subprocess.check_output(\"ping -c 1 \" + host, shell=True)` (line 11).",
+      "lastUpdatedBy": "tk-ed6c92c6-edf4-4cba-adf6-1bbe8892b8b7",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-a15dd893-3443-445d-8970-1072710e6a78/src/工具/ping.py",
+          "lineStart": 8,
+          "lineEnd": 11,
+          "label": "sink: shell=True with tainted host"
+        }
+      ],
+      "createdAt": "2026-10-08T01:07:07.783111+00:00",
+      "updatedAt": "2026-10-08T01:07:07.825082+00:00"
+    }
+  ],
+  "notFound": []
+}

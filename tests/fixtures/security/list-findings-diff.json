@@ -1,0 +1,30 @@
+{
+  "findingsSummaries": [
+    {
+      "findingId": "f-2a573a5f-8025-4540-8a1b-48f97625114a",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-1f981f2a-0e5b-4910-b8a5-a16f0e64a25c",
+      "name": "Unauthenticated OS command injection in new /ping endpoint (shell=True)",
+      "status": "ACTIVE",
+      "riskType": "COMMAND_INJECTION",
+      "riskLevel": "CRITICAL",
+      "confidence": "HIGH",
+      "createdAt": "2026-10-08T01:07:11.155252+00:00",
+      "updatedAt": "2026-10-08T01:07:11.194215+00:00"
+    },
+    {
+      "findingId": "f-0d323b7f-968f-4846-818b-9e69ac57b77e",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-1f981f2a-0e5b-4910-b8a5-a16f0e64a25c",
+      "name": "SQL injection in new /search route: raw `q` param concatenated into LIKE clause",
+      "status": "ACTIVE",
+      "riskType": "SQL_INJECTION",
+      "riskLevel": "HIGH",
+      "confidence": "HIGH",
+      "createdAt": "2026-10-08T01:07:10.963462+00:00",
+      "updatedAt": "2026-10-08T01:07:11.005482+00:00"
+    }
+  ]
+}

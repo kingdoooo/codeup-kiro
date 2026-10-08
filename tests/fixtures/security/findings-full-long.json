@@ -1,0 +1,312 @@
+{
+  "findings": [
+    {
+      "findingId": "f-551754fa-74fa-4e55-bcaf-d52ab428cae1",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-a0bd9fef-cd6f-4afd-b1e5-5def06150332",
+      "taskId": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "name": "[Requirement: secure-by-default-best-practices] Unpinned, unhashed transitive dependencies with no lockfile — non-reproducible, unverifiable builds",
+      "description": "`requirements.txt:1` is the entire dependency manifest and pins only `flask==3.0.0`. Every transitive package that actually implements the HTTP/WSGI layer this service depends on — Werkzeug, Jinja2, click, itsdangerous, MarkupSafe — floats unpinned, with no lockfile, no `pyproject.toml`/`setup.py`, no `constraints.txt`, and no `--hash` entries. I verified the repository contains exactly `app.py` and `requirements.txt` and nothing else.\n\nWhy that matters here specifically: the installed Werkzeug owns request parsing for the query-string reads at app.py:14 and app.py:23, URL routing, `safe_join` for the implicit `/static/<path:filename>` route that `Flask(__name__)` registers at app.py:5, and the interactive debugger. A load-bearing security component is therefore chosen by whatever the resolver or a cached/mirrored index serves at build time, rather than by anything in this repository, and with no hash to verify the artifact against.\n\nWho could exploit it and what they gain: an actor able to influence the build-time package source — an internal mirror, a poisoned cache, or dependency confusion on a private index — chooses which Werkzeug lands, with no hash pinning to detect substitution. Separately, because Flask 3.0.0's floor is `Werkzeug>=3.0.0`, a stale index or cached wheel can legitimately resolve to Werkzeug 3.0.0, which carries advisories against components this app does exercise (CVE-2023-46136, resource exhaustion in multipart request parsing; CVE-2024-34069, debugger-PIN bypass, conditional on the debugger being enabled — an operator flag here, since `app.run()` is never called).\n\nVerified: I read the whole manifest (one line) and confirmed by `find` that no lockfile, constraints file, build config, CI config, or container definition exists to pin or hash anything. Nothing in-repo constrains the transitive set.\n\nWhat I could not check, which is why this is LOW and MEDIUM confidence rather than higher: no build artifact exists in this repository, so the actually-installed versions cannot be read here and no specific vulnerable version is demonstrated to be deployed. The named CVEs establish that the unconstrained floor *admits* affected versions, not that one is in use; the deployment may well install current releases. The exposure is a supply-chain integrity and reproducibility gap rather than a demonstrated vulnerable dependency.\n\nSecurity Requirement(s): ASA Base Pack/secure-by-default-best-practices",
+      "status": "ACTIVE",
+      "riskType": "SECURITY_MISCONFIGURATION",
+      "riskLevel": "LOW",
+      "confidence": "MEDIUM",
+      "attackScript": "requirements.txt — entire file, one line:\n```\n 1  flask==3.0.0\n```\n\nNo other dependency or build artifact exists — verified with `find /tmp/opt/source_code -type f`, which returns only:\n  /tmp/opt/source_code/.../app.py\n  /tmp/opt/source_code/.../requirements.txt\ni.e. no `requirements*.lock`, `Pipfile.lock`, `poetry.lock`, `pyproject.toml`, `setup.py`, `constraints.txt`, Dockerfile, or CI config, and therefore no `--require-hashes` install path.\n\nWerkzeug is nonetheless load-bearing in the running service:\n  app.py:5   `app = Flask(__name__)`              — registers the Werkzeug-served /static/<path:filename> route and owns routing\n  app.py:14  `uid = request.args.get(\"id\", \"\")`   — query-string parsing via Werkzeug\n  app.py:23  `q = request.args.get(\"q\", \"\")`      — query-string parsing via Werkzeug\n\nChain: build-time index/cache → unconstrained `Werkzeug>=3.0.0` resolution (no lockfile, no hashes, requirements.txt:1) → installed Werkzeug becomes the request parser and static-file handler for app.py:5/14/23 at runtime. The storage hop here is the package index/wheel cache: the chosen artifact is persisted into the environment image and then executed on every request.\n\nCounter-evidence: no installed-version manifest exists in-repo, so no specific vulnerable Werkzeug build is shown to be deployed; CVE-2024-34069 additionally requires the operator to enable the debugger, which no in-repo code does.",
+      "lastUpdatedBy": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/requirements.txt",
+          "lineStart": 1,
+          "lineEnd": 1,
+          "label": "primary fix location: sole dependency manifest; transitives unpinned and unhashed, no lockfile"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 5,
+          "lineEnd": 5,
+          "label": "code impact: Flask(__name__) relies on the floating Werkzeug for request parsing, routing, static safe_join and the debugger"
+        }
+      ],
+      "createdAt": "2026-10-07T17:00:46.389657+00:00",
+      "updatedAt": "2026-10-07T17:00:46.444014+00:00"
+    },
+    {
+      "findingId": "f-d24fb16a-6a06-4a0e-95f6-49f93ec04e8c",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-a0bd9fef-cd6f-4afd-b1e5-5def06150332",
+      "taskId": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "name": "[Requirement: privileged-access-best-practices] SQLite handle opened read-write over the entire database file for a strictly read-only workload, and its use is unmonitored",
+      "description": "`get_db()` at app.py:8-9 returns `sqlite3.connect(\"app.db\")`, which opens the database file read-write with authority over every table in it. The application's entire legitimate need is two read-only `SELECT name FROM users` statements (app.py:16, app.py:25): there is no `INSERT`, `UPDATE`, `DELETE`, `commit()`, or `executescript` anywhere in the repository, and both routes omit `methods=` so they serve GET/HEAD/OPTIONS only.\n\nSQLite authorizes by connection mode and filesystem permission, so this one line is the whole data-tier privilege boundary, and it is set to maximum rather than to need. The read-only URI form the standard library already offers — `sqlite3.connect(\"file:app.db?mode=ro\", uri=True)` — is not used, and `mode=ro` appears nowhere in the repo. Use of this privileged handle is additionally unmonitored: no logging call exists anywhere in the file.\n\nWhat this gets an attacker today: nothing directly, and I want to be precise rather than overstate it. I traced no reachable write primitive. The injection point at app.py:25 sits in the `WHERE` clause of a `SELECT`, and I confirmed experimentally that `sqlite3.Cursor.execute` rejects stacked statements (`ProgrammingError: You can only execute one statement at a time`), so an attacker cannot presently convert the excess write authority into a modification. I also note the candidate's framing that read-only mode would narrow the injection's reach is wrong: `mode=ro` still permits `UNION SELECT` against other tables, so it caps integrity exposure, not confidentiality.\n\nThe defect is therefore the missing least-privilege guardrail itself: a read-only workload holds write authority over the entire production database file, so any future write statement, ORM change, operator mistake, or newly introduced multi-statement path converts directly into data modification, with no logging to detect it. Reported at LOW severity precisely because no path to a write exists in the current code — this is a requirement violation and a blast-radius gap, not a demonstrated integrity break.\n\nWhat I could not check: the deployed filesystem permissions on `app.db` are the other half of this boundary and are set outside this repository (no Dockerfile, IaC, or deployment artifact exists), so the service account could already be constrained to read-only at the OS level — nothing in-repo establishes that either way.\n\nSecurity Requirement(s): ASA Base Pack/privileged-access-best-practices",
+      "status": "ACTIVE",
+      "riskType": "PRIVILEGE_ESCALATION",
+      "riskLevel": "LOW",
+      "confidence": "HIGH",
+      "attackScript": "app.py:8-9:\n```\n 8  def get_db():\n 9      return sqlite3.connect(\"app.db\")    # read-WRITE, authority over EVERY table in the file\n```\nBoth handlers obtain this handle per anonymous request: app.py:15 (`/user`) and app.py:24 (`/search`).\n\nReachability of the over-privileged handle itself:\nGET /search (app.py:21, no auth decorator)\n→ app.py:24 `cur = get_db().cursor()`\n→ app.py:9 `sqlite3.connect(\"app.db\")` — default read-write mode, authority over every table in the file\n→ app.py:25 `cur.execute(...)` — statement executes under write-capable authority although only a SELECT is issued\n\nNeed is read-only across the whole repository:\n  $ grep -rniE \"insert|update |delete|commit|executescript\" .   -> zero matches (exit 1)\nRead-only mode is never requested:\n  $ grep -rn \"mode=ro\" .   -> zero matches\nUse of the privilege is unmonitored:\n  $ grep -rniE \"logging|logger|audit\" .   -> zero matches\n\nWhy no write is reachable today (tested, not assumed): executing `SELECT name FROM users WHERE name LIKE '%'; DROP TABLE users--%'` through `sqlite3.Cursor.execute` raises `ProgrammingError: You can only execute one statement at a time`. Combined with the absence of any write statement or `executescript` in the source, the excess authority is latent rather than exercisable.\n\nWhere the guardrail could have stood: app.py:9 is the single place the connection mode is chosen and it takes the default read-write mode; there is no wrapper, no `PRAGMA query_only`, and no `set_authorizer` callback anywhere in the repo.",
+      "lastUpdatedBy": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 8,
+          "lineEnd": 9,
+          "label": "primary fix location: connection opened read-write over the whole DB file for a read-only workload"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 15,
+          "lineEnd": 16,
+          "label": "read-only need served by the over-privileged handle: GET /user"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 24,
+          "lineEnd": 25,
+          "label": "read-only need served by the over-privileged handle, and the injection sink it sits beside: GET /search"
+        }
+      ],
+      "createdAt": "2026-10-07T17:00:46.220916+00:00",
+      "updatedAt": "2026-10-07T17:00:46.258509+00:00"
+    },
+    {
+      "findingId": "f-9e06f3cb-4370-4dab-a29e-3adb074fa7c5",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-a0bd9fef-cd6f-4afd-b1e5-5def06150332",
+      "taskId": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "name": "[Requirement: audit-logging-best-practices] No audit logging anywhere: PII reads, id enumeration, and SQL errors are all unrecorded",
+      "description": "The application emits no application-level log record for any event. There is no `import logging`, no `app.logger` call, no audit helper, and no `@app.errorhandler` anywhere in the repository — a case-insensitive grep for `logging|logger|audit|errorhandler` over both files returns zero matches, and requirements.txt:1 declares only `flask==3.0.0`, so no logging or observability dependency is installed.\n\nThe requirement's domain clearly applies: both endpoints disclose records from a `users` table, and app.py:25 is an anonymously reachable injection sink, so access attempts against this service are security-relevant by construction.\n\nConcretely unrecorded events:\n- `/user` lookups (app.py:12-18): nothing records which `id` was requested or whether it resolved, so a full id-enumeration sweep leaves no application-level trace.\n- `/search` requests (app.py:21-26): neither the `q` value nor the returned row count is recorded, so a bulk export of the entire directory via an empty `q` is indistinguishable after the fact from a single-name lookup.\n- SQL errors from the concatenated statement at app.py:25 propagate as an unhandled 500 with no `try/except` and no error handler, so injection probing — the highest-signal event this service could possibly record — is never captured with the offending input or the exception.\n\nWho is affected: an incident responder cannot answer which records were read, by whom, or in what volume, which directly undermines investigation of the injection and enumeration defects in the same file. `request.remote_addr` is never read anywhere, so even the caller is not captured by the application.\n\nVerified / falsification attempted: I looked for every place logging could have been configured in a Flask app of this shape — module imports (app.py:1-3), application bootstrap (app.py:5), per-handler calls, an `after_request` hook, an `errorhandler`, and the dependency manifest — and found each empty. No `dictConfig`, no `app.logger` reference, no structured-logging library.\n\nCounter-evidence I weighed: the WSGI server's default access log would still emit a request line (method, path, status), so coverage is not literally zero at the infrastructure layer. But nothing in this repository configures it (there is no WSGI entrypoint, gunicorn config, Dockerfile, or logging config — the repo is exactly `app.py` and `requirements.txt`), it carries no outcome detail such as rows returned, and no document describes what events are logged or what fields each entry captures.\n\nSecurity Requirement(s): ASA Base Pack/audit-logging-best-practices",
+      "status": "ACTIVE",
+      "riskType": "SECURITY_MISCONFIGURATION",
+      "riskLevel": "MEDIUM",
+      "confidence": "HIGH",
+      "attackScript": "Absence verified over the entire repository (two files, 26 lines of code):\n  $ grep -rniE \"logging|logger|audit|errorhandler\" .   -> zero matches (exit status 1)\n  $ cat requirements.txt                               -> flask==3.0.0   (no logging/observability dependency)\n  $ find /tmp/opt/source_code -type f                  -> app.py, requirements.txt only (no logging config, no WSGI entrypoint)\n\nWhere logging could have lived, and what is there instead:\n- app.py:1-3 — `import sqlite3` / `from flask import Flask, request`; no `import logging`\n- app.py:5 — `app = Flask(__name__)`; no `dictConfig`, no `app.logger` configuration, no handler attachment\n- app.py:18 — `return {\"name\": row[0] if row else None}`; the requested `id` and the hit/miss outcome are discarded, so enumeration via the oracle leaves no trace\n- app.py:26 — `return {\"rows\": cur.fetchall()}`; the row count is never recorded, so a full-directory export looks identical to a single lookup\n- app.py:25 — `cur.execute(\"SELECT name FROM users WHERE name LIKE '%\" + q + \"%'\")` sits in no `try/except`, and there is no `@app.errorhandler`, so a failed injection probe becomes an unlogged 500 with the payload unrecorded\n- No `before_request`/`after_request` hook exists to capture caller or outcome; `request.remote_addr` is never read anywhere in the file",
+      "lastUpdatedBy": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 3,
+          "lineEnd": 5,
+          "label": "primary fix location: no logging import or configuration at application bootstrap"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 12,
+          "lineEnd": 18,
+          "label": "unlogged PII read and enumeration oracle: GET /user handler"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 21,
+          "lineEnd": 26,
+          "label": "unlogged bulk export and unlogged SQL errors: GET /search handler, no errorhandler"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/requirements.txt",
+          "lineStart": 1,
+          "lineEnd": 1,
+          "label": "no logging/observability dependency declared"
+        }
+      ],
+      "createdAt": "2026-10-07T17:00:46.050346+00:00",
+      "updatedAt": "2026-10-07T17:00:46.083448+00:00"
+    },
+    {
+      "findingId": "f-3eda03be-003b-4178-b2e4-9da9f4594b5a",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-a0bd9fef-cd6f-4afd-b1e5-5def06150332",
+      "taskId": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "name": "[Requirement: information-protection-best-practices] String-concatenated SQL in GET /search permits anonymous arbitrary read of the whole SQLite database",
+      "description": "`GET /search` builds its SQL by string concatenation: at app.py:25 the untrusted query-string value read at app.py:23 is spliced into a single-quoted SQL literal (`\"SELECT name FROM users WHERE name LIKE '%\" + q + \"%'\"`). A single quote in `q` closes the literal and the remainder of the parameter is parsed as SQL grammar. The entire result set is returned verbatim to the caller as JSON at app.py:26, so this is a direct (non-blind) exfiltration channel.\n\nWhat an attacker gains: `?q=' OR 1=1--` returns every row of `users`; `?q=' UNION SELECT sql FROM sqlite_master--` returns the `CREATE TABLE` DDL for every object in `app.db`; a follow-up `?q=' UNION SELECT <col> FROM <table>--` reads any table in the file. The connection at app.py:9 is opened against the whole `app.db` file, so the reachable read scope is the entire datastore, not just the `users` table — including columns and tables no line of app.py references (the schema is not defined in this repository, so I cannot bound what else is stored there).\n\nWho must be compromised first: nobody. The attacker needs only network reach to the listening port.\n\nVerified / falsification attempted: I looked for the controls that would defeat this and found none. There is no authentication decorator on app.py:21, no `before_request` hook, no WSGI middleware, and `app = Flask(__name__)` at app.py:5 is bare defaults — a repo-wide grep for `login|session|secret|token|auth|cookie|before_request` over both files returned zero matches. There is no input validation, escaping, or allowlist between app.py:23 and app.py:25, and `requirements.txt` declares only `flask==3.0.0` (no ORM, no sanitiser). I also confirmed the safe API was available and used four lines earlier: app.py:16 binds its parameter with qmark substitution, so this is an oversight rather than a deliberate pattern.\n\nBounding counter-evidence I did confirm: `sqlite3.Cursor.execute()` accepts only one statement — I executed a stacked payload against a local SQLite database and it raised `ProgrammingError: You can only execute one statement at a time`. The repository contains no `executescript`, `executemany`, `create_function`, or any INSERT/UPDATE/DELETE/commit (grep returned zero matches). So no write or RCE primitive is reachable from this sink; impact is confidentiality (arbitrary read), which is why this is HIGH and not CRITICAL.\n\nOutside the codebase: the repository contains only `app.py` and `requirements.txt` — no Dockerfile, WSGI entrypoint, or proxy config — so I cannot rule out a WAF or authenticating reverse proxy in front of the service in some deployment. Nothing in-repo establishes one.\n\nSecurity Requirement(s): ASA Base Pack/information-protection-best-practices",
+      "status": "ACTIVE",
+      "riskType": "SQL_INJECTION",
+      "riskLevel": "HIGH",
+      "confidence": "HIGH",
+      "attackScript": "Entry point: `GET /search?q=...` — route registered at app.py:21 with no auth decorator, no `methods=` restriction\n→ `q = request.args.get(\"q\", \"\")` at app.py:23 — source, no validation, no escaping, no length or charset check\n→ `cur = get_db().cursor()` at app.py:24 → `sqlite3.connect(\"app.db\")` at app.py:9 — handle authorized over the whole DB file (sets read scope)\n→ `cur.execute(\"SELECT name FROM users WHERE name LIKE '%\" + q + \"%'\")` at app.py:25 — SINK: attacker controls SQL structure, not just data\n→ `return {\"rows\": cur.fetchall()}` at app.py:26 — full result set reflected to the caller as JSON\n\nMitigations checked at each hop: app.py:21 — no decorator; repo-wide grep `login|session|secret|token|auth|cookie|before_request|limit` over app.py + requirements.txt returned zero matches (grep exit status 1). app.py:23→25 — no sanitisation of any kind. app.py:16 in the sibling handler uses `cur.execute(\"SELECT name FROM users WHERE id = ?\", (uid,))`, proving parameter binding was available.\n\nExecuted against a local SQLite DB with the identical concatenation to confirm the parse, not just infer it:\n  q = \"' OR 1=1--\"                          -> returns all rows\n  q = \"' UNION SELECT sql FROM sqlite_master--\" -> returns \"CREATE TABLE users(id integer, name text)\" plus data rows, confirming out-of-table and schema reads\n  stacked \"'; DROP TABLE users--\"           -> ProgrammingError: You can only execute one statement at a time (no write primitive)\n\nResulting statement for the first payload: `SELECT name FROM users WHERE name LIKE '%' OR 1=1--%'`.",
+      "lastUpdatedBy": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 25,
+          "lineEnd": 25,
+          "label": "sink (primary fix location): SQL assembled by string concatenation in cur.execute()"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 23,
+          "lineEnd": 23,
+          "label": "source: untrusted request.args.get('q'), no validation or escaping"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 26,
+          "lineEnd": 26,
+          "label": "exfiltration channel: fetchall() result set reflected to caller as JSON"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 21,
+          "lineEnd": 22,
+          "label": "entry point: anonymous GET /search route, no auth decorator"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 8,
+          "lineEnd": 9,
+          "label": "authority: sqlite3 connection scoped to the entire app.db file, sets read blast radius"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 16,
+          "lineEnd": 16,
+          "label": "contrast: correct parameterized execute in sibling route (fix template)"
+        }
+      ],
+      "createdAt": "2026-10-07T17:00:45.209721+00:00",
+      "updatedAt": "2026-10-07T17:00:45.250666+00:00"
+    },
+    {
+      "findingId": "f-6dad5e32-474e-4ed0-a745-97835a654768",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-a0bd9fef-cd6f-4afd-b1e5-5def06150332",
+      "taskId": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "name": "[Requirement: authentication-best-practices] Both HTTP endpoints serving user records are fully unauthenticated",
+      "description": "The application exposes two HTTP endpoints that serve records out of a `users` table — `GET /user` (app.py:12-18) and `GET /search` (app.py:21-26) — and implements no authentication mechanism of any kind. `app = Flask(__name__)` at app.py:5 is constructed with bare defaults: `app.secret_key` is never set, `flask.session` is never imported, no `Authorization` header or cookie is ever read, no API key is checked, there is no `before_request` hook and no WSGI middleware wrapping the app. `requirements.txt:1` declares only `flask==3.0.0`, so no authentication library is even installed.\n\nWhat this gets an attacker: any network-reachable caller reads user records with zero credentials. This absence is also what makes the other defects in this file anonymously reachable rather than requiring a compromised principal — the injection sink at app.py:25 and the unscoped record lookup at app.py:16-18 are both served to callers who present nothing.\n\nWhat the attacker must already hold: nothing beyond network reach to the listening port.\n\nVerified / falsification attempted: I searched for every place an authentication control could plausibly live in a Flask app of this shape and found it empty at each — no decorator above `@app.route` on app.py:12 or app.py:21, no `before_request`/`after_request` hook, no `app.config` or `secret_key` assignment, no middleware assignment to `app.wsgi_app`, and no auth dependency in the manifest. A repo-wide case-insensitive grep for `login|session|secret|token|auth|cookie|before_request` over both files returned zero matches (grep exit status 1). The repository contains exactly `app.py` and `requirements.txt`.\n\nWhat I could not check: the deployment model lives entirely outside this repository — there is no Dockerfile, WSGI entrypoint, IaC, or reverse-proxy configuration — so an operator could in principle front this service with an authenticating gateway, and no in-repo artifact confirms or contradicts that. `flask run` binds loopback by default, which limits exposure in a local run, but that is an environmental property rather than a control in the code. The requirement violation holds at code level regardless of how the service is ultimately fronted.\n\nSecurity Requirement(s): ASA Base Pack/authentication-best-practices",
+      "status": "ACTIVE",
+      "riskType": "AUTHENTICATION_BYPASS",
+      "riskLevel": "MEDIUM",
+      "confidence": "HIGH",
+      "attackScript": "Entry point: `GET /user?id=1` — route registered at app.py:12, no decorator on the line above\n→ `uid = request.args.get(\"id\", \"\")` at app.py:14 — the handler reads request data without ever consulting a caller identity\n→ `cur.execute(\"SELECT name FROM users WHERE id = ?\", (uid,))` at app.py:16 → `return {\"name\": ...}` at app.py:18 — record returned to an unidentified caller\n\nSame with no credential on the second route: app.py:21 `@app.route(\"/search\")` → app.py:23 → app.py:26 returns rows.\n\nWhere enforcement could have lived, and what I found at each place:\n- Route decorators, app.py:12 and app.py:21 — only `@app.route(...)`, no `@login_required`-style wrapper\n- Application factory, app.py:5 `app = Flask(__name__)` — no `secret_key`, no `app.config` block, no `app.wsgi_app` wrapping\n- Request lifecycle hooks — no `before_request`/`after_request` anywhere in the 26-line file\n- Dependency manifest, requirements.txt:1 — `flask==3.0.0` only; no Flask-Login, Flask-HTTPAuth, PyJWT, or equivalent\n- Repo-wide: `grep -rniE \"login|session|secret|token|auth|cookie|before_request\" .` over app.py + requirements.txt → zero matches\n\nThe repository contains no deployment artifact (verified: `find` returns only app.py and requirements.txt), so no authenticating front end can be read from the code.",
+      "lastUpdatedBy": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 5,
+          "lineEnd": 5,
+          "label": "primary fix location: Flask app constructed with no authentication layer, no before_request hook, no secret_key"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 12,
+          "lineEnd": 14,
+          "label": "unauthenticated endpoint serving user records: GET /user"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 21,
+          "lineEnd": 23,
+          "label": "unauthenticated endpoint serving user records: GET /search"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/requirements.txt",
+          "lineStart": 1,
+          "lineEnd": 1,
+          "label": "dependency set contains no authentication library"
+        }
+      ],
+      "createdAt": "2026-10-07T17:00:45.392563+00:00",
+      "updatedAt": "2026-10-07T17:00:45.428954+00:00"
+    },
+    {
+      "findingId": "f-f5451969-a97f-4ece-ac98-b799babe5bc9",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-a0bd9fef-cd6f-4afd-b1e5-5def06150332",
+      "taskId": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "name": "[Requirement: secure-by-default-best-practices] Empty default search term dumps the entire users directory to an anonymous caller — no row cap, no pagination, no egress column contract",
+      "description": "`GET /search` behaves as an unbounded bulk-export primitive over the `users` table, by default and with no parameters supplied:\n\n1. `q` defaults to the empty string at app.py:23 (`request.args.get(\"q\", \"\")`), so a bare `GET /search` produces `LIKE '%%'`, which matches every row. The permissive behaviour is the no-argument default, not an opt-in.\n2. The statement at app.py:25 has no `LIMIT`/`OFFSET` and the `LIKE` pattern is unanchored, so it is a full table scan with no row cap.\n3. `cur.fetchall()` at app.py:26 materialises the whole result set and serialises it into one JSON response. There is no pagination, page size, slice, or output column allowlist at the egress point.\n\nWhat an attacker gains: one parameterless anonymous request returns the complete user directory (`users.name` for every row) — bulk disclosure, categorically different from the per-record lookup `/user` offers.\n\nWhat the attacker must already hold: nothing. No authentication, authorization, or rate limiting exists anywhere (requirements.txt:1 is `flask==3.0.0` only — no flask-limiter; no `before_request` hook in the file).\n\nWhy this is distinct from the SQL injection at the same line: that defect is caller control over SQL *structure*; this one is the absence of any bound on an operation behaving exactly as written. Parameterising the `LIKE` argument does not remove it — `q=\"\"` still matches all rows and still returns them uncapped — so it needs its own change (reject empty/short `q`, add `LIMIT` with pagination, allowlist egress columns).\n\nVerified / falsification attempted: I confirmed the match-all semantics by executing `SELECT name FROM users WHERE name LIKE '%%'` against a local SQLite database — it returns every row, so the empty-default path really is a full export rather than a no-op. I searched for a bound at each layer and found none: no `LIMIT`/`OFFSET` in the statement, no slice on the `fetchall()` result, no non-empty or minimum-length check on `q` at app.py:23, no `MAX_CONTENT_LENGTH` or `app.config` block, no `after_request` filter, and no rate-limiting dependency. By contrast `/user` is structurally bounded to one row by `fetchone()` at app.py:17 — `/search` has no equivalent bound.\n\nWhat I could not check: the magnitude of the disclosure scales with the real row count and column sensitivity of `users`, and the schema and data-population path live outside this repository, so whether this directory is intentionally public is unresolved from the code.\n\nSecurity Requirement(s): ASA Base Pack/information-protection-best-practices, ASA Base Pack/authorization-best-practices, ASA Base Pack/secure-by-default-best-practices",
+      "status": "ACTIVE",
+      "riskType": "INFORMATION_DISCLOSURE",
+      "riskLevel": "MEDIUM",
+      "confidence": "HIGH",
+      "attackScript": "Entry point: `curl 'http://host/search'` — no query parameter, no credential; route at app.py:21 has no auth decorator and no rate limit\n→ `q = request.args.get(\"q\", \"\")` at app.py:23 — default `\"\"`, no non-empty or length check\n→ `cur.execute(\"SELECT name FROM users WHERE name LIKE '%\" + q + \"%'\")` at app.py:25 — becomes `LIKE '%%'`; unanchored, no LIMIT/OFFSET\n→ `return {\"rows\": cur.fetchall()}` at app.py:26 — entire result set materialised and serialised in one response\n\nConfirmed the semantics rather than assuming them: executed `SELECT name FROM users WHERE name LIKE '%%'` against a local SQLite table — returns all rows.\n\nWhere a bound could have lived, and what I found:\n- app.py:23 — no non-empty/minimum-length validation on `q`\n- app.py:25 — no `LIMIT`, no `OFFSET`, no anchored pattern\n- app.py:26 — `fetchall()` with no slice, no pagination, no column allowlist\n- app.py:5 — bare `Flask(__name__)`: no `app.config`, no `MAX_CONTENT_LENGTH`, no `before_request`/`after_request`\n- requirements.txt:1 — `flask==3.0.0` only; no flask-limiter or equivalent\n- Repo-wide `grep -rniE \"limit|auth|before_request\" .` → zero matches (exit 1)\n\nContrast within the same file: `/user` uses `fetchone()` (app.py:17) and is therefore bounded to a single row; `/search` has no such bound.",
+      "lastUpdatedBy": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 25,
+          "lineEnd": 26,
+          "label": "sink (primary fix location): unanchored LIKE with no LIMIT, full result set returned via fetchall()"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 23,
+          "lineEnd": 23,
+          "label": "insecure default: q defaults to empty string, making match-everything the no-argument behaviour"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 21,
+          "lineEnd": 22,
+          "label": "missing control: route public by default, no auth decorator, no rate limit"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 17,
+          "lineEnd": 18,
+          "label": "contrast: /user is bounded to one row by fetchone(), /search has no equivalent bound"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/requirements.txt",
+          "lineStart": 1,
+          "lineEnd": 1,
+          "label": "dependency set contains no rate limiter"
+        }
+      ],
+      "createdAt": "2026-10-07T17:00:45.879101+00:00",
+      "updatedAt": "2026-10-07T17:00:45.923300+00:00"
+    },
+    {
+      "findingId": "f-09016324-3eff-465c-9229-8f8ac7db5d55",
+      "agentSpaceId": "as-11111111-1111-4111-8111-111111111111",
+      "codeReviewId": "cr-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "codeReviewJobId": "cj-a0bd9fef-cd6f-4afd-b1e5-5def06150332",
+      "taskId": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "name": "[Requirement: authorization-best-practices] No access control on user-record reads: unscoped object reference and enumeration oracle on GET /user",
+      "description": "Both user-record read operations select rows using only caller-supplied input, with no ownership, tenancy, or role predicate and no post-query authorization check.\n\nAt app.py:14 `uid = request.args.get(\"id\", \"\")` is bound into `SELECT name FROM users WHERE id = ?` at app.py:16 and the row is returned at app.py:18. The SQL here is correctly parameterized — this is purely a missing-access-control defect, not injection. The `WHERE` clause constrains the row solely by the identifier the attacker chose, so the handler answers \"give me record N\" for any N. `GET /search` (app.py:21-26) reads the same table with no authorization predicate either.\n\nWhat an attacker gains: walking `id=1,2,3,...` harvests every user's `name` through a per-record primitive. app.py:18 additionally yields a reliable existence oracle — `{\"name\": \"<value>\"}` for an allocated id versus `{\"name\": null}` for an unallocated one — which lets an attacker map the valid id keyspace before harvesting. `uid` is never cast to `int`, but SQLite column affinity still matches the string `'5'` against an INTEGER `id`, so no casting is needed to exploit this.\n\nWhat the attacker must already hold: nothing. There is no authentication at all (app.py:5 is bare `Flask(__name__)`), so there is no principal to compare an identifier against even if one wanted to.\n\nVerified / falsification attempted: I checked the places an authorization check could stand on this path and found each empty — no decorator on app.py:12, no `before_request` hook, no post-fetch comparison between `uid` and any caller identity between app.py:16 and the return at app.py:18, and no row-level predicate in the statement. A repo-wide grep for `auth|session|role|permission|before_request|login|cookie|token` over both files returned zero matches.\n\nThe honest limit on this finding: the application defines no principal, role, tenant, or ownership concept anywhere, so \"this caller should not read this record\" is inferred from the presence of a per-user lookup rather than from a rule stated in the code. If `users` is an intentionally public directory, the authorization framing weakens and what remains is the enumeration oracle. The schema and the data-population path are not in this repository, so I cannot confirm what `users.name` actually contains. Impact is also bounded by projection — only the `name` column is returned on this path. That is why this is MEDIUM rather than higher.\n\nSecurity Requirement(s): ASA Base Pack/authorization-best-practices, ASA Base Pack/authentication-best-practices",
+      "status": "ACTIVE",
+      "riskType": "INSECURE_DIRECT_OBJECT_REFERENCE",
+      "riskLevel": "MEDIUM",
+      "confidence": "HIGH",
+      "attackScript": "Entry point: `GET /user?id=1` — route at app.py:12, no authorization decorator\n→ `uid = request.args.get(\"id\", \"\")` at app.py:14 — attacker-chosen direct object reference, no validation, no int cast\n→ `cur.execute(\"SELECT name FROM users WHERE id = ?\", (uid,))` at app.py:16 — SINK: the row is constrained only by attacker input; no `AND owner_id = :caller`, no tenant column, no role predicate\n→ `row = cur.fetchone()` at app.py:17 → `return {\"name\": row[0] if row else None}` at app.py:18 — record disclosed, and the value-vs-null differential is an existence oracle\nSecond affected operation, same table, same absence: app.py:21-26 (`SELECT name FROM users WHERE name LIKE ...` → `fetchall()`).\n\nWhich check should have stood on this path, and where I looked for it:\n- A decorator above app.py:12 — absent (only `@app.route(\"/user\")`)\n- A `before_request` hook — absent from the whole 26-line file\n- A principal-scoped predicate inside the statement at app.py:16 — absent; the only predicate is `id = ?` from the request\n- A post-query ownership comparison between app.py:17 and app.py:18 — absent; the row is returned unconditionally when found\n- Repo-wide: `grep -rniE \"auth|session|role|permission|before_request|login|cookie|token\" .` → zero matches (exit 1)\n\nNo comparable path in this codebase enforces such a check — there are only two handlers and neither does — so the contrast is with the absent control rather than with a sibling route.\n\nCounter-evidence confirmed in source: the statement at app.py:16 IS correctly parameterized, so this is not an injection path; and only the `name` column is projected, bounding the disclosure per record.",
+      "lastUpdatedBy": "tk-fa5dc12b-35b3-4be4-8f29-27fcd7f9bd28",
+      "codeLocations": [
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 16,
+          "lineEnd": 18,
+          "label": "sink (primary fix location): /user record lookup with no ownership/role predicate, result returned unconditionally"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 14,
+          "lineEnd": 14,
+          "label": "source: request.args.get('id') used as a direct object reference, no validation or int cast"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 12,
+          "lineEnd": 13,
+          "label": "entry point / missing control: route registered with no authorization decorator"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 21,
+          "lineEnd": 26,
+          "label": "second affected operation: /search reads the same users table with no authorization predicate"
+        },
+        {
+          "filePath": "/tmp/opt/source_code/code_sc-11d79d71-c41f-41da-a4c0-2a544f53d4d7/app.py",
+          "lineStart": 5,
+          "lineEnd": 5,
+          "label": "config: Flask app built with defaults only; no before_request hook, no authz middleware anywhere"
+        }
+      ],
+      "createdAt": "2026-10-07T17:00:45.582875+00:00",
+      "updatedAt": "2026-10-07T17:00:45.619848+00:00"
+    }
+  ],
+  "notFound": []
+}
