@@ -349,6 +349,11 @@ for bad in SA_AGENT_SPACE_ID=bad SA_SERVICE_ROLE_ARN=x SECURITY_AGENT_TIMEOUT=59
   assert_contains "$(posted_comment "$(cat "$tmp/out")")" "（代号 sa-config）" "④ ${bad} → sa-config"
 done
 assert_eq "$([ -e "$tmp/sa.log" ] && echo yes || echo no)" "no" "④ 配置不对时一次 SA 调用都没有"
+# 终审 I-1：SECURITY_AGENT_TIMEOUT 不能在形状核对之前进 $(( ))（REVIEWER_LEASE_WAIT 的缺省值）——bash 算术会执行 `NAME[$(cmd)]` 里的 cmd
+rm -f "$tmp/pwned.sat"
+assert_eq "$(drive "SECURITY_AGENT_TIMEOUT=SA_POLL_INTERVAL[\$(touch $tmp/pwned.sat)]")" "0" "④ I-1 SECURITY_AGENT_TIMEOUT 带命令 → 失败评论"
+assert_eq "$([ -e "$tmp/pwned.sat" ] && echo ran || echo no)" "no" "④ I-1 SECURITY_AGENT_TIMEOUT 里的命令没有被执行"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "（代号 sa-config）" "④ I-1 → sa-config"
 
 # ⑤ 静态守卫（D1 / I2）：只做差分、只读
 code=$(LC_ALL=C grep -rvhE '^[[:space:]]*#' "$ROOT/aws/reviewers" "$ROOT/aws/executor")

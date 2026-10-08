@@ -130,6 +130,17 @@ assert_contains $'\n'"$(cat "$tmp/env.inspector")"$'\n' $'\n'"REVIEWER_WORKDIR=$
 assert_eq "$(LC_ALL=C grep -c 'kiro_env_exec' <(LC_ALL=C grep -vE '^[[:space:]]*#' "$SCAN"))" "0" \
   "③b 垫片直接内联（函数放后台时 \$! 是包着它的子 shell，issue 15 要的是评审员进程本身）"
 
+# ③c 白名单里的数值在交给扫描员之前查形状（终审 I-1）：bash 算术会对 `NAME[$(cmd)]` 的下标求值、执行 cmd——这样的取值一旦进了
+#    扫描员的 $(( )) / [[ -gt ]]，被攻破的 Task A 就能在持有扫描员令牌的进程里跑命令。形状不对 → 95，一个扫描员都不起
+for v in MAX_COMMENT_BYTES SECURITY_AGENT_TIMEOUT INSPECTOR_MAX_SCAN_CALLS; do
+  rm -f "$tmp/env.inspector" "$tmp/env.security"
+  assert_eq "$(scan_run REVIEWERS=inspector,security "$v=PATH[\$(touch $tmp/pwned)]")" "95" "③c ${v} 不是十进制整数 → 入口 95"
+  assert_eq "$([ -e "$tmp/env.inspector" ] || [ -e "$tmp/env.security" ] && echo started || echo none)" "none" \
+    "③c ${v} 形状不对时一个扫描员都不起"
+done
+assert_eq "$(scan_run REVIEWERS=inspector,security MAX_COMMENT_BYTES=60000 SECURITY_AGENT_TIMEOUT=3600 INSPECTOR_MAX_SCAN_CALLS=3)" "0" \
+  "③c（正向对照）合法的数值照常跑完"
+
 # ④ F1：退出码 → 终态
 assert_eq "$(attr_true posted_inspector)/$(attr_true posted_security)" "true/true" "④ 两位都回写了 → 各自 posted"
 echo 10 > "$tmp/rc.inspector"; echo 3 > "$tmp/rc.security"

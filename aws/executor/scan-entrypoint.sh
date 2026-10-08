@@ -20,6 +20,11 @@ done
 [[ "$SCAN_RUN_ID" =~ ^[0-9a-f]{32}$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$CODEUP_REPO_ID" =~ ^[0-9]+$ \
    && "$MR_LOCAL_ID" =~ ^[0-9]+$ ]] || { echo "SCAN_RUN_ID / HEAD_SHA / CODEUP_REPO_ID / MR_LOCAL_ID 形状不对，拒绝运行" >&2; exit 95; }
 [[ "${YUNXIAO_ORG_ID:-}" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "YUNXIAO_ORG_ID 没配或形状不对，拒绝运行" >&2; exit 95; }
+# 白名单放行的数值设置（终审 I-1）：扫描员把它们放进 bash 算术（$(( ))、[[ -gt ]]），而 bash 算术会对 `NAME[$(cmd)]` 的下标求值、
+# 执行 cmd——被攻破的 Task A 经 RunTask 环境覆盖就能在持有扫描员令牌的进程里跑命令。不是十进制整数就拒绝（空 = 未设置，扫描员用缺省）。
+for v in MAX_COMMENT_BYTES SECURITY_AGENT_TIMEOUT INSPECTOR_MAX_SCAN_CALLS; do
+  [[ -z "${!v:-}" || "${!v}" =~ ^[0-9]{1,9}$ ]] || { echo "${v} 不是十进制整数，拒绝运行（取值不回显）" >&2; exit 95; }
+done
 # 仓库地址：执行器按仓库 id 查到、过了检查的那一个（只拿来 ls-remote 核对最新提交）。规则与 entrypoint 的同一道一致。
 [[ "$SCAN_REPO_URL" == "https://codeup.aliyun.com/${YUNXIAO_ORG_ID}/"*.git \
    && "$SCAN_REPO_URL" != *[[:space:][:cntrl:]@?#%]* && "$SCAN_REPO_URL" != *..* ]] \

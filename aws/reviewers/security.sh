@@ -19,8 +19,11 @@ SA_START_RETRY_MAX="${SA_START_RETRY_MAX:-900}"       # 并发满时最多排多
 SA_SUPERSEDE_EVERY="${SA_SUPERSEDE_EVERY:-5}"         # 每几次轮询核对一次最新提交（被取代就停掉作业，免得新提交的那次等满一个作业）
 SA_LOCK_WAIT="${SA_LOCK_WAIT:-300}"                   # 等按仓库租约 / 映射表认领的上限（两者都是秒级临界区）
 SA_FINDINGS_BATCH=50                                  # BatchGetFindings 每批的 id 数
-# L7 的等待上限：同一 MR 的上一次 SA 评审可能持有按 MR 的租约一整个作业（含排队），缺省的 900 秒不够
-REVIEWER_LEASE_WAIT="${REVIEWER_LEASE_WAIT:-$(( ${SECURITY_AGENT_TIMEOUT:-3600} + 600 ))}"
+# L7 的等待上限：同一 MR 的上一次 SA 评审可能持有按 MR 的租约一整个作业（含排队），缺省的 900 秒不够。
+# SECURITY_AGENT_TIMEOUT 这时还没查形状（下面 sa-config 那一道）：先过正则再进算术——bash 算术会执行 `NAME[$(cmd)]` 里的 cmd
+# （终审 I-1）。形状不对的按缺省算，随后照样被 sa-config 拒绝。
+_sa_timeout="${SECURITY_AGENT_TIMEOUT:-3600}"; [[ "$_sa_timeout" =~ ^[0-9]{3,4}$ ]] || _sa_timeout=3600
+REVIEWER_LEASE_WAIT="${REVIEWER_LEASE_WAIT:-$(( 10#$_sa_timeout + 600 ))}"
 # 只读与幂等的调用交给 AWS CLI 的 standard 重试；CreateCodeReview 与 StartCodeReviewJob 没有幂等令牌，这两处单独设 AWS_MAX_ATTEMPTS=1（Q3）
 export AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=4
 
