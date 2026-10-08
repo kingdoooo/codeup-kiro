@@ -65,11 +65,13 @@ scan_sbomgen() {  # <树> <输出文件>
   /bin/mv "$od/rel.json" "$out" && /bin/rm -rf "$od" "$cwd"
 }
 
-# 上传到输入桶（S3：不可变键 <评审员>/<仓库>/<提交>/<run_id>/<名字>，每次调用都带 ExpectedBucketOwner）
+# 上传到输入桶（S3：不可变键 <评审员>/<仓库>/<提交>/<run_id>/<名字>，每次调用都带 ExpectedBucketOwner）。
+# 有时限（终审 I-2）：SA 的 source.zip 可达 2 GB，单次 PUT 只受套接字读超时约束、总时长没有上界，而这一步在 Kiro 之前（spec F2
+# 「输入准备每一步有界」）。rc 124 / 137 = 超时（调用方按需区分）。
 scan_put() {  # <评审员> <名字> <本地文件>
   local key="$1/${CODEUP_REPO_ID}/${HEAD_SHA}/${SCAN_RUN_ID}/$2"
-  /usr/local/bin/aws s3api put-object --region "$AWS_REGION" --bucket "$SCAN_BUCKET" --key "$key" \
-    --body "$3" --expected-bucket-owner "$SCAN_BUCKET_OWNER" >/dev/null 2>&1
+  /usr/bin/timeout -k 10 "${SCAN_UPLOAD_TIMEOUT:-300}" /usr/local/bin/aws s3api put-object --region "$AWS_REGION" \
+    --bucket "$SCAN_BUCKET" --key "$key" --body "$3" --expected-bucket-owner "$SCAN_BUCKET_OWNER" >/dev/null 2>&1
 }
 
 # Inspector 的输入：head 与 merge-base 两棵树各一份 CycloneDX。输出一行输入状态（scan_prep 的约定）。
@@ -201,8 +203,13 @@ _scan_prep_security_run() {
     --argjson diff_files "$nfiles" --argjson diff_bytes "$dbytes" --arg base "$base" \
     '{files: $files, unlisted: $unlisted, symlinks: $symlinks, diff_files: $diff_files, diff_bytes: $diff_bytes, base: $base}' \
     > "$dir/meta.json" || { printf 'failed:meta'; return 0; }
+  rc=0
   scan_put security changes.patch "$dir/changes.patch" && scan_put security meta.json "$dir/meta.json" \
-    && scan_put security files.txt "$dir/files.txt" && scan_put security source.zip "$dir/source.zip" \
-    || { printf 'failed:upload'; return 0; }
+    && scan_put security files.txt "$dir/files.txt" && scan_put security source.zip "$dir/source.zip" || rc=$?
+  case "$rc" in
+    0) ;;
+    124|137) printf 'failed:upload-timeout'; return 0 ;;
+    *) printf 'failed:upload'; return 0 ;;
+  esac
   printf 'ok'
 }

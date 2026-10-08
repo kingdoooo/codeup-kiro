@@ -248,6 +248,9 @@ assert_eq "$(saprep FAKE_ZIP_RC=1)" "failed:zip" "⑤ 打包失败 → failed:zi
 assert_eq "$(saprep FAKE_ZIP_COMMENT=0123abc)" "failed:zip-comment" "⑤ Z1：打出来的 zip 带了归档注释 → failed:zip-comment（SA 会拒收，不上传）"
 assert_eq "$([ -e "$tmp/aws.argv" ] && echo yes || echo no)" "no" "⑤ Z1：带注释的 zip 什么都不上传"
 assert_eq "$(saprep FAKE_S3_FAIL=1)" "failed:upload" "⑤ 上传失败 → failed:upload"
+# 终审 I-2：上传有时限（source.zip 可达 2 GB；这一步在 Kiro 之前，spec F2「输入准备每一步有界」）。FAKE_TIMEOUT 让 timeout 替身对 aws 报 124
+assert_eq "$(saprep FAKE_TIMEOUT=1)" "failed:upload-timeout" "⑤ I-2 上传超过 SCAN_UPLOAD_TIMEOUT → failed:upload-timeout"
+assert_eq "$([ -e "$tmp/sawork/scan/security" ] && echo yes || echo no)" "no" "⑤ I-2 上传超时时工作目录同样删掉"
 assert_eq "$([ -e "$tmp/sawork/scan/security" ] && echo yes || echo no)" "no" "⑤ 失败路径上工作目录同样删掉"
 assert_eq "$([ -e "$S/.git/info/attributes" ] && echo yes || echo no)" "no" "⑤ 失败路径上 info/attributes 同样删掉"
 
