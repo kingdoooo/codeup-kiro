@@ -56,21 +56,37 @@ done
 # N1 那一段与 entrypoint.sh 逐字节相同（tests/test-aws-scan.sh 比对）：同一个镜像、同一份已探测摘要名单。
 source "$PKG/lib/lease.sh"          # aws_err_code（mark_lock 要用）
 source "$PKG/lib/scan-dispatch.sh"  # mark_lock
+source "$PKG/scripts/lib/kiro-agent.sh"   # KIRO_ENV_EXEC_SHIM（「恰好一份清单」的环境，取值不进 argv）
 /bin/rm -rf "$WORKROOT"; /bin/mkdir -p "$WORKROOT"
+# 扫描子进程的环境是白名单（issue 14，复审 M-3）：不继承 Task B 的环境。Task A 能以任意 containerOverrides.environment 调 RunTask
+# （IAM 对 override 的内容没有条件键）；被攻破的 Task A 一旦能把 GIT_CONFIG_PARAMETERS（credential helper、http.proxy +
+# sslVerify=false）、GIT_SSH_COMMAND、*_PROXY、LD_PRELOAD 之类塞进子进程，就能在 L7 的 ls-remote 时截获扫描员的云效令牌。
+# 名单只放扫描员与它调用的库实际读到的变量（aws/reviewers/、scripts/lib/{review-render,codeup-api}.sh、lib/lease.sh），加上
+# Fargate 给 AWS CLI 找任务角色凭证用的两个（AWS_CONTAINER_CREDENTIALS_RELATIVE_URI、AWS_EXECUTION_ENV）。未设置的名字跳过。
+SCAN_CHILD_COMMON=(PATH HOME LANG LC_ALL TZ AWS_REGION AWS_DEFAULT_REGION AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_EXECUTION_ENV
+                   ECS_CONTAINER_METADATA_URI_V4 CODEUP_REPO_ID MR_LOCAL_ID HEAD_SHA CI_COMMIT_REF_NAME MR_TARGET_BRANCH LOCK_KEY
+                   LOCK_TABLE SCAN_RUN_ID SCAN_REPO_URL YUNXIAO_ORG_ID SCAN_BUCKET SCAN_BUCKET_OWNER MAX_COMMENT_BYTES)
 pids=""
 for rid in ${REVIEWERS//,/ }; do
   case "$rid" in
-    inspector) tok=YUNXIAO_TOKEN_INSPECTOR; bot=INSPECTOR_BOT_USERNAME; hint=INSPECTOR_RERUN_HINT ;;
-    security)  tok=YUNXIAO_TOKEN_SECURITY;  bot=SECURITY_BOT_USERNAME;  hint=SECURITY_RERUN_HINT ;;
+    inspector) tok=YUNXIAO_TOKEN_INSPECTOR; bot=INSPECTOR_BOT_USERNAME; hint=INSPECTOR_RERUN_HINT
+               own=(INSPECTOR_INPUT INSPECTOR_MAX_SCAN_CALLS) ;;
+    security)  tok=YUNXIAO_TOKEN_SECURITY;  bot=SECURITY_BOT_USERNAME;  hint=SECURITY_RERUN_HINT
+               own=(SECURITY_INPUT SA_AGENT_SPACE_ID SA_SERVICE_ROLE_ARN SA_MAPPING_TABLE SECURITY_AGENT_TIMEOUT) ;;
   esac
-  # S2：子进程只看得见自己的令牌。值经 export 进子 shell 的环境（不进任何 argv：`env NAME=值 …` 会把它放进 env 的 argv，
-  # issue 10 的教训），其它评审员的令牌在 exec 之前 unset。
-  (
-    export YUNXIAO_TOKEN="${!tok:-}" CODEUP_BOT_USERNAME="${!bot:-}" REVIEW_RERUN_HINT="${!hint:-}" REVIEWER_WORKDIR="$WORKROOT/$rid"
-    unset YUNXIAO_TOKEN_INSPECTOR YUNXIAO_TOKEN_SECURITY
-    /bin/mkdir -p "$REVIEWER_WORKDIR"
-    exec /bin/bash -p "$PKG/reviewers/${rid}.sh"
-  ) &
+  child_env=()
+  for n in "${SCAN_CHILD_COMMON[@]}" "${own[@]}"; do
+    [[ -n "${!n+x}" ]] && child_env+=("${n}=${!n}")
+  done
+  # S2：子进程只拿到自己的令牌（改名成 YUNXIAO_TOKEN），别的评审员的令牌与 Kiro 的密钥根本不在名单里
+  child_env+=("YUNXIAO_TOKEN=${!tok:-}" "CODEUP_BOT_USERNAME=${!bot:-}" "REVIEW_RERUN_HINT=${!hint:-}"
+              "REVIEWER_WORKDIR=$WORKROOT/$rid")
+  /bin/mkdir -p "$WORKROOT/$rid"
+  # 与 kiro_env_exec 同一个垫片：清单按 NUL 分隔从 fd 3 读进空环境（printf 是内建，令牌不进任何进程的 argv——issue 10 的教训），
+  # 名字非法的环境项（`a-b=`、`BASH_FUNC_x%%`）与 bash 自己补的 SHLVL 都不会漏进去。**直接写在这里、不经 kiro_env_exec 函数**：
+  # 函数放后台时 `$!` 是包着它的子 shell，这样写则 env → bash → env → 评审员一路 exec，`$!` 就是评审员进程本身（issue 15 要往它转发 TERM）。
+  /usr/bin/env -i /bin/bash --norc --noprofile -c "$KIRO_ENV_EXEC_SHIM" kiro-env /bin/bash -p "$PKG/reviewers/${rid}.sh" \
+    3< <(printf '%s\0' "${child_env[@]}") &
   pids="${pids}${rid}:$! "
 done
 all_terminal=1

@@ -31,12 +31,13 @@ for f in "$ROOT"/aws/executor/lib/*.sh; do
 done
 # 守卫：测试包根里任何一个文件都不得再指向真的 aws（否则这份测试会用本机凭证打真实账号）
 assert_eq "$(LC_ALL=C grep -rl '/usr/local/bin/aws' "$tmp/pkg/lib" 2>/dev/null || true)" "" "（准备）测试包根里的库都换成了 aws 替身"
-# 替身扫描员：把自己的环境（名字=值）写进文件，按 STUB_RC_<评审员> 退出
+# 替身扫描员：把自己的环境（名字=值）写进文件，按 $tmp/rc.<评审员> 里的数退出（没有这个文件 = 0）。
+# 退出码经文件给、不经环境变量：子进程的环境是白名单（issue 14），测试自己的变量也到不了它
 for rid in inspector security; do
   cat > "$tmp/pkg/reviewers/${rid}.sh" <<STUB
 #!/bin/bash
 env > "$tmp/env.${rid}"
-exit "\${STUB_RC_${rid}:-0}"
+exit "\$(cat "$tmp/rc.${rid}" 2>/dev/null || echo 0)"
 STUB
 done
 scan_prog=$(sed -e "s#^PKG=/opt/integration\$#PKG=$tmp/pkg#" -e "s#^WORKROOT=/tmp/scan\$#WORKROOT=$tmp/work#" \
@@ -54,7 +55,8 @@ scan_run() {  # [KEY=VAL …] → rc；stderr 在 $tmp/err
            FAKE_DDB_STATE="$tmp/state.json" FAKE_DDB_LOG="$tmp/ddb.log" \
            YUNXIAO_TOKEN_INSPECTOR=pt-insp YUNXIAO_TOKEN_SECURITY=pt-sec KIRO_API_KEY=should-not-be-here \
            INSPECTOR_BOT_USERNAME=aliyun:insp SECURITY_BOT_USERNAME=aliyun:sec INSPECTOR_RERUN_HINT=hint-i "$@"
-    /bin/bash --norc --noprofile -c "$scan_prog" ) 2> "$tmp/err" </dev/null || rc=$?
+    # SCAN_ENV_EXTRA：export 造不出来的环境项（名字非法的 `a-b=`、`BASH_FUNC_x%%`）经 env 塞进入口的环境（③b）
+    /usr/bin/env ${SCAN_ENV_EXTRA[@]+"${SCAN_ENV_EXTRA[@]}"} /bin/bash --norc --noprofile -c "$scan_prog" ) 2> "$tmp/err" </dev/null || rc=$?
   echo "$rc"
 }
 attr_true() { /usr/bin/jq -r --arg k "r1#7#$SHA40" --arg a "$1" '.[$k][$a].BOOL // false' "$tmp/state.json"; }
@@ -91,9 +93,39 @@ assert_not_contains "$(LC_ALL=C grep -vE '^[[:space:]]*#' "$SCAN")" 'env YUNXIAO
 # 任务定义层面（Kiro 的密钥不该进扫描任务）由 CDK 断言守；这里只钉入口不主动转交
 assert_not_contains "$(LC_ALL=C grep -vE '^[[:space:]]*#' "$SCAN")" 'KIRO_API_KEY' "③ 扫描入口不碰 KIRO_API_KEY"
 
+# ③b 子进程环境是白名单（issue 14，复审 M-3）：被攻破的 Task A 经 RunTask 环境覆盖塞进来的变量一个都到不了扫描员
+names_of() { sed 's/=.*//' "$1" | LC_ALL=C grep -vE '^(PWD|SHLVL|_|OLDPWD)$' | sort | tr '\n' ' '; }
+SCAN_ENV_EXTRA=('BASH_FUNC_evil%%=() { echo pwned; }' 'a-b=1')
+assert_eq "$(scan_run REVIEWERS=inspector,security GIT_CONFIG_PARAMETERS="'credential.helper=!evil'" GIT_SSH_COMMAND=evil \
+             HTTPS_PROXY=http://evil:1 LD_PRELOAD= SOME_UNKNOWN_VAR=x SECURITY_INPUT=ok SA_AGENT_SPACE_ID=as-1)" "0" \
+  "③b（准备）注入了几个危险变量后照常跑完"
+SCAN_ENV_EXTRA=()
+for rid in inspector security; do
+  for bad in GIT_CONFIG_PARAMETERS GIT_SSH_COMMAND HTTPS_PROXY LD_PRELOAD SOME_UNKNOWN_VAR BASH_FUNC_evil a-b KIRO_API_KEY \
+             KIRO_IMAGE_DIGESTS REVIEWERS FAKE_DDB_STATE INSPECTOR_BOT_USERNAME; do
+    assert_eq "$(sed 's/=.*//' "$tmp/env.$rid" | LC_ALL=C grep -c "^${bad}" || true)" "0" "③b ${rid} 子进程的环境里没有 ${bad}"
+  done
+done
+assert_eq "$(LC_ALL=C grep -c 'pwned' "$tmp/env.inspector" || true)" "0" "③b 导出的 bash 函数（BASH_FUNC_x%%）没有漏进子进程"
+common="AWS_REGION CI_COMMIT_REF_NAME CODEUP_BOT_USERNAME CODEUP_REPO_ID ECS_CONTAINER_METADATA_URI_V4 HEAD_SHA LOCK_KEY LOCK_TABLE MR_LOCAL_ID MR_TARGET_BRANCH PATH REVIEWER_WORKDIR REVIEW_RERUN_HINT SCAN_REPO_URL SCAN_RUN_ID YUNXIAO_ORG_ID YUNXIAO_TOKEN"
+# 名单里另几项 scan_run 不设、取决于跑测试的机器（LANG、HOME 之类）：本机设了就应当在
+for n in HOME LANG LC_ALL TZ AWS_DEFAULT_REGION AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_EXECUTION_ENV SCAN_BUCKET \
+         SCAN_BUCKET_OWNER MAX_COMMENT_BYTES; do
+  [[ -n "${!n+x}" ]] && common+=" $n"
+done
+want_names() { printf '%s\n' $common "$@" | sort | tr '\n' ' '; }
+assert_eq "$(names_of "$tmp/env.inspector")" "$(want_names)" "③b Inspector 子进程的环境恰好是白名单里已设置的那些（正向对照：一个都不少）"
+assert_eq "$(names_of "$tmp/env.security")" "$(want_names SA_AGENT_SPACE_ID SECURITY_INPUT)" \
+  "③b Security Agent 子进程额外只多它自己的两项（SECURITY_INPUT、SA_AGENT_SPACE_ID）；Inspector 的不给它"
+assert_contains $'\n'"$(cat "$tmp/env.inspector")"$'\n' $'\n'"REVIEWER_WORKDIR=$tmp/work/inspector"$'\n' "③b 工作目录按评审员给"
+assert_eq "$(LC_ALL=C grep -c 'kiro_env_exec' <(LC_ALL=C grep -vE '^[[:space:]]*#' "$SCAN"))" "0" \
+  "③b 垫片直接内联（函数放后台时 \$! 是包着它的子 shell，issue 15 要的是评审员进程本身）"
+
 # ④ F1：退出码 → 终态
 assert_eq "$(attr_true posted_inspector)/$(attr_true posted_security)" "true/true" "④ 两位都回写了 → 各自 posted"
-assert_eq "$(scan_run REVIEWERS=inspector,security STUB_RC_inspector=10 STUB_RC_security=3)" "96" "④ 有一位没有终态 → 入口 96"
+echo 10 > "$tmp/rc.inspector"; echo 3 > "$tmp/rc.security"
+assert_eq "$(scan_run REVIEWERS=inspector,security)" "96" "④ 有一位没有终态 → 入口 96"
+rm -f "$tmp/rc.inspector" "$tmp/rc.security"
 assert_eq "$(attr_true superseded_inspector)/$(attr_true posted_security)/$(attr_true superseded_security)" "true/false/false" \
   "④ 10 → superseded；3 → 不置任何终态（交给兜底）"
 assert_contains "$(cat "$tmp/err")" "scan-reviewer reviewer=security result=failed rc=3" "④ 日志里点名没有终态的那位"
