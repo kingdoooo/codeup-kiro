@@ -257,7 +257,8 @@ fi
 # 陷阱跑不到也无妨。（StopTask：任务定义开了 initProcessEnabled（issue 15），PID 1 是 init、本文件不是 PID 1，SIGTERM
 # 让它立刻以 143 退出、EXIT 陷阱照常释放租约。没开 init 时本文件是 PID 1，内核对 PID 1 上没有处理函数的 SIGTERM 一律忽略，
 # 只能等 30 秒后的 SIGKILL，陷阱不跑、租约靠到期失效——Task 13 验收 5a 实测。init 只把 TERM 转给本文件，kiro-review.sh
-# 收不到、要等那次 SIGKILL：它的租约已在这里释放，最多与下一次评审重叠 30 秒。）
+# 收不到，随任务一起结束：本文件退出后 init 随之退出，内核结束 PID 命名空间里剩下的进程（pid_namespaces(7)，推断；最迟是 30 秒后
+# 那次 SIGKILL）。它的租约已在这里释放，与下一次评审的重叠很短、最多 30 秒。）
 # 引擎包在总时长上限 engine_cap = KIRO_TIMEOUT + 1800 秒里：它给续期（也就是持有时长）设了上界，也给挂住的任务的
 # Fargate 费用设了上界。KIRO_TIMEOUT 不是纯数字时按引擎的缺省 900 算：引擎自己会拒绝这个取值并在 MR 上说明
 # （die_review），这里不抢它的活。等待上限 = engine_cap + 600：持有者合法持有的最长时间（引擎 + KILL 余量 30 秒 +
@@ -331,7 +332,8 @@ export KIRO_PINNED_ARTIFACT=/opt/kiro/kirocli-x86_64-linux-musl.zip
 rc=0
 # 总时长上限（见租约那一段开头）：超时 124 原样透出——兜底 Lambda 的通用文案写着「任务超时」；
 # 30 秒内不理 TERM 就 KILL（137）。137 与 OOM 同码，所以只在确实跑满了上限时才打那行消息，运维靠它区分两者。
-# 引擎内层 timeout 下的 kiro-cli 自成进程组、不被这里杀掉，但本文件是 PID 1，它一退出整个任务就结束。
+# 引擎内层 timeout 下的 kiro-cli 自成进程组、不被这里杀掉，但本文件一退出整个任务就结束（本文件是 PID 1；开了 init 时
+# init 随本文件退出，内核结束命名空间里剩下的进程）。
 engine_t0=$(/bin/date +%s)
 /usr/bin/timeout -k 30 "$engine_cap" /bin/bash -p "$PKG/scripts/kiro-review.sh" || rc=$?
 if [[ "$rc" -eq 124 ]] || { [[ "$rc" -eq 137 ]] && (( $(/bin/date +%s) - engine_t0 >= engine_cap )); }; then
