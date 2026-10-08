@@ -161,6 +161,10 @@ case "\$1 \$2" in
     jq -r '.["lease#7#security-repo"].lease_until.N // "none"' "$tmp/ddb.json" >> "$tmp/lease-at-poll" 2>/dev/null
     exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
   securityagent*) exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
+  # \$tmp/stale-get：映射表的下一次 get-item 读到这份旧记录（一次）——模拟「读到 creating 之后、认领之前，别人已经置了 ready」（终审 I-3）
+  "dynamodb get-item")
+    case "\$*" in *repo_id*) if [ -e "$tmp/stale-get" ]; then cat "$tmp/stale-get"; rm -f "$tmp/stale-get"; exit 0; fi ;; esac
+    exec python3 "$ROOT/tests/fake-aws-dynamodb.py" "\$@" ;;
   *) exec python3 "$ROOT/tests/fake-aws-dynamodb.py" "\$@" ;;
 esac
 STUB
@@ -188,7 +192,7 @@ cp "$FIX/files-head-clean.txt" "$tmp/s3/files.txt"; cp "$tmp/meta.json" "$tmp/s3
 SPACE=as-11111111-1111-4111-8111-111111111111
 SHA=$(printf 'a%.0s' {1..40}); RUNID=$(printf 'b%.0s' {1..32})
 SRC="s3://bkt/security/7/$SHA/$RUNID/source.zip"; PATCH="s3://bkt/security/7/$SHA/$RUNID/changes.patch"
-fresh() { rm -f "$tmp"/sa.json* "$tmp/sa.log" "$tmp/s3.argv" "$tmp/date.n" "$tmp/superseded" "$tmp/hc.seen" "$tmp/lease-at-poll"; echo '{}' > "$tmp/ddb.json"; rm -f "$tmp/ddb.json.lock"; }
+fresh() { rm -f "$tmp"/sa.json* "$tmp/sa.log" "$tmp/s3.argv" "$tmp/date.n" "$tmp/superseded" "$tmp/hc.seen" "$tmp/lease-at-poll" "$tmp/stale-get"; echo '{}' > "$tmp/ddb.json"; rm -f "$tmp/ddb.json.lock"; }
 drive() {  # [KEY=VAL …] → rc；输出在 $tmp/out
   rm -rf "$tmp/w"; mkdir -p "$tmp/w"
   local rc=0
@@ -267,6 +271,21 @@ assert_eq "$(cat "$tmp/rc.a")/$(cat "$tmp/rc.b")" "0/0" "④ Q1 并发：两个�
 assert_eq "$(ops | tr ' ' '\n' | grep -c '^create-code-review$')" "1" "④ Q1 并发：只调了一次 CreateCodeReview"
 assert_eq "$(jq '.codeReviews | length' "$tmp/sa.json")" "1" "④ Q1 并发：服务里只有一个 code review"
 assert_eq "$(jq -r '[.jobs[].codeReviewId] | unique | length' "$tmp/sa.json")" "1" "④ Q1 并发：两个作业落在同一个 code review 上"
+# 终审 I-3：读到别人「正在建」之后、认领之前，那边已经置了 ready → 认领不能覆盖这条 ready（否则要再收编一次，ListCodeReviews 若还没
+# 列出它就会建第二个）。认领失败 → 再读一次 → 用表里 ready 的那个
+fresh
+python3 - "$tmp/sa.json" "$tmp/ddb.json" "$SPACE" <<'PY'
+import json, sys
+cr = "cr-0000000b-0000-4000-8000-000000000000"
+json.dump({"n": 5, "codeReviews": {cr: {"codeReviewId": cr, "title": "codeup-kiro:7", "assets": {"sourceCode": [{"s3Location": "s3://bkt/old.zip"}]},
+  "serviceRole": "r", "agentSpaceId": sys.argv[3], "createdAt": "2026-10-01T00:00:00.000000+00:00"}}}, open(sys.argv[1], "w"))
+json.dump({"repo_id=7": {"repo_id": {"S": "7"}, "status": {"S": "ready"}, "code_review_id": {"S": cr},
+  "agent_space_id": {"S": sys.argv[3]}, "holder": {"S": "other"}, "until": {"N": "1"}}}, open(sys.argv[2], "w"))
+PY
+printf '{"Item": {"repo_id": {"S": "7"}, "status": {"S": "creating"}, "holder": {"S": "other"}, "until": {"N": "9999999999"}}}' > "$tmp/stale-get"
+assert_eq "$(drive)" "0" "④ I-3 读到旧的 creating → 0"
+assert_eq "$(ops | cut -d' ' -f1-2)" "update-code-review start-code-review-job" "④ I-3 认领没有覆盖已 ready 的映射：不再列、不再建，直接用表里那个"
+assert_eq "$(mapping | jq -r .cr)" "cr-0000000b-0000-4000-8000-000000000000" "④ I-3 映射表仍是原来那个 code review"
 # R9：并发满（明确拒绝、不建作业）→ 放开仓库租约、退避重试
 fresh
 assert_eq "$(drive FAKE_SA_START_THROTTLE=2)" "0" "④ R9：前两次 Start 被限流 → 重试后成功"

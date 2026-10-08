@@ -111,19 +111,22 @@ sa_adopt_by_title() {
   jq -r --arg t "$SA_TITLE" '[.codeReviewSummaries[]? | select(.title == $t)] | sort_by(.createdAt) | .[0].codeReviewId // empty' <<< "$out"
 }
 sa_ensure_code_review() {  # → 全局 SA_CR_ID
-  local item status cr space now deadline claimed=0 rc out
+  local item status cr space now deadline rc out
   deadline=$(( $(/bin/date +%s) + SA_LOCK_WAIT ))
   while :; do
     item=$(sa_map_get) || item='{}'
     status=$(jq -r '.status.S // ""' <<< "$item"); cr=$(jq -r '.code_review_id.S // ""' <<< "$item")
     space=$(jq -r '.agent_space_id.S // ""' <<< "$item")
     if [[ "$status" == ready && "$space" == "$SA_AGENT_SPACE_ID" && "$cr" =~ ^cr-[0-9a-f-]{8,64}$ ]]; then SA_CR_ID="$cr"; return 0; fi
-    # 认领：没有记录、不是「正在建」（例如 Agent Space 换过之后留下的旧记录）、认领已过期，或本来就是我
+    # 认领：没有记录、不是「正在建」（例如 Agent Space 换过之后留下的旧记录、stale）、认领已过期，或本来就是我——但**不覆盖**本 Space
+    # 已 ready 的记录（终审 I-3：上面读到的可能是别人置 ready 之前的样子；条件不满足就回去再读一次，用表里那个）
     now=$(/bin/date +%s); rc=0
-    sa_map_update 'attribute_not_exists(repo_id) OR #s <> :creating OR #u < :now OR #h = :me' 'SET #s = :creating, #u = :until, #h = :me' \
-      "$(jq -cn --arg me "$lease_me" --arg now "$now" --arg until "$((now + 120))" \
-         '{":creating": {S: "creating"}, ":now": {N: $now}, ":until": {N: $until}, ":me": {S: $me}}')" || rc=$?
-    [[ "$rc" == 0 ]] && { claimed=1; break; }
+    sa_map_update 'attribute_not_exists(repo_id) OR ((#s <> :ready OR #a <> :space) AND (#s <> :creating OR #u < :now OR #h = :me))' \
+      'SET #s = :creating, #u = :until, #h = :me' \
+      "$(jq -cn --arg me "$lease_me" --arg now "$now" --arg until "$((now + 120))" --arg sp "$SA_AGENT_SPACE_ID" \
+         '{":creating": {S: "creating"}, ":ready": {S: "ready"}, ":space": {S: $sp}, ":now": {N: $now}, ":until": {N: $until}, ":me": {S: $me}}')" \
+      || rc=$?
+    [[ "$rc" == 0 ]] && break
     [[ "$rc" == 1 ]] || reviewer_fail "读写 code review 映射表失败（代号 sa-mapping）"
     (( $(/bin/date +%s) < deadline )) || reviewer_fail "等别的任务建本仓库的 code review 超过 ${SA_LOCK_WAIT} 秒（代号 sa-mapping-wait）"
     /bin/sleep 5
