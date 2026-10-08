@@ -28,6 +28,10 @@ REVIEWER_LEASE_WAIT="${REVIEWER_LEASE_WAIT:-$(( 10#$_sa_timeout + 600 ))}"
 export AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=4
 
 reviewer_lease_and_check
+# 两把租约的键与持有者各存一份（终审 I-9）：EXIT 陷阱在被打断的那个函数的作用域里跑，sa_repo_lease 的局部 lease_key / lease_me
+# 会遮住全局的那一对——陷阱按这里的名字各放各的，不读当时可见的 lease_key
+SA_L7_KEY="$lease_key"; SA_L7_ME="$lease_me"
+SA_REPO_KEY=$(jq -cn --arg k "lease#${CODEUP_REPO_ID}#security-repo" '{pk: {S: $k}}'); SA_REPO_ME="${lease_me}|repo"; SA_REPO_HELD=0
 summary_locate_prior
 
 case "${SECURITY_INPUT:-}" in
@@ -72,6 +76,10 @@ _sa_exit() {
       >/dev/null 2>&1 || true
     log "退出时作业 ${SA_JOB_ID} 仍在运行，已请求停止"
   fi
+  if [[ "${SA_REPO_HELD:-0}" == 1 ]]; then
+    local lease_key="$SA_REPO_KEY" lease_me="$SA_REPO_ME"; lease_release
+  fi
+  local lease_key="$SA_L7_KEY" lease_me="$SA_L7_ME"
   _reviewer_lease_exit
 }
 trap '_sa_exit' EXIT
@@ -158,15 +166,14 @@ sa_ensure_code_review() {  # → 全局 SA_CR_ID
 
 # ── Q2 + Q3：按仓库租约下的「重指向 → Start → 核对作业记下的源」（R12：秒级临界区，核对完立刻释放）──
 # 租约复用 lib/lease.sh 的函数，但键、持有者、租期都是局部的（bash 动态作用域：被调函数读到的是这里的 local），
-# 不碰 reviewer.sh 那把按 MR 的租约（它的 EXIT 陷阱读的是全局变量）。
+# 不碰 reviewer.sh 那把按 MR 的租约。SA_REPO_HELD 记下是否持有：退出时（_sa_exit）按另存的键各放各的（终审 I-9）。
 sa_repo_lease() {  # <acquire|release>
-  local lease_key lease_me="${lease_me}|repo" LEASE_TTL=60 lrc deadline
-  lease_key=$(jq -cn --arg k "lease#${CODEUP_REPO_ID}#security-repo" '{pk: {S: $k}}')
-  if [[ "$1" == release ]]; then lease_release; return 0; fi
+  local lease_key="$SA_REPO_KEY" lease_me="$SA_REPO_ME" LEASE_TTL=60 lrc deadline
+  if [[ "$1" == release ]]; then lease_release; SA_REPO_HELD=0; return 0; fi
   deadline=$(( $(/bin/date +%s) + SA_LOCK_WAIT ))
   while :; do
     lrc=0; lease_acquire || lrc=$?
-    [[ "$lrc" == 0 ]] && return 0
+    [[ "$lrc" == 0 ]] && { SA_REPO_HELD=1; return 0; }
     [[ "$lrc" == 1 ]] || return 2
     (( $(/bin/date +%s) < deadline )) || return 1
     /bin/sleep 2

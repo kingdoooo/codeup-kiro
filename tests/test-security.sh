@@ -223,7 +223,9 @@ drive() {  # [KEY=VAL …] → rc；输出在 $tmp/out
            FAKE_SA_FINDINGS="$FIX/findings-diff.json" FAKE_SA_JOB_TEMPLATE="$FIX/job-diff-completed.json" \
            SECURITY_INPUT=ok SA_AGENT_SPACE_ID="$SPACE" SA_SERVICE_ROLE_ARN=arn:aws:iam::123456789012:role/sa-role \
            SA_MAPPING_TABLE=map SECURITY_AGENT_TIMEOUT=600 SA_POLL_INTERVAL=0 SA_START_RETRY_EVERY=0 SA_LOCK_WAIT=30 "$@"
-    /bin/bash --norc --noprofile "$tmp/security.sh" ) > "$tmp/out" 2>&1 </dev/null || rc=$?
+    # DRIVE_PIDFILE：驱动进程的 PID 写进这个文件（exec 保持同一个 PID；I-9 要往驱动本身发 TERM）
+    /bin/bash --norc --noprofile -c 'echo $$ > "$1"; exec /bin/bash --norc --noprofile "$2"' _ "${DRIVE_PIDFILE:-/dev/null}" "$tmp/security.sh" \
+    ) > "$tmp/out" 2>&1 </dev/null || rc=$?
   echo "$rc"
 }
 ops() { awk '{print $1}' "$tmp/sa.log" | tr '\n' ' '; }
@@ -369,6 +371,18 @@ assert_eq "$(drive FAKE_SA_JOB_STATUSES=IN_PROGRESS SA_SUPERSEDE_EVERY=2)" "10" 
 rm -f "$tmp/superseded"
 assert_eq "$(ops | tr ' ' '\n' | grep -c '^stop-code-review-job$')" "1" "④ 被取代时作业被停止"
 assert_eq "$(req_count "$(cat "$tmp/out")" POST 'comments$')" "0" "④ 被取代时不发评论"
+# 终审 I-9：TERM 落在「等按仓库租约」的循环里（同一仓库别的评审占着它）时，EXIT 陷阱放的必须是按 MR 的 L7 租约——trap 在被打断的
+# 函数作用域里跑，sa_repo_lease 的局部 lease_key / lease_me 会遮住全局的；放错了，下一次同 MR 的评审要等 L7 的 120 秒到期
+fresh
+printf '{"lease#7#security-repo": {"pk": {"S": "lease#7#security-repo"}, "holder": {"S": "other"}, "lease_until": {"N": "9999999999"}}}' > "$tmp/ddb.json"
+rm -f "$tmp/drv.pid"
+( DRIVE_PIDFILE="$tmp/drv.pid" drive > "$tmp/rc.i9" ) & bg9=$!
+for _ in $(seq 1 100); do [[ "$(mapping | jq -r .status)" == ready && -s "$tmp/drv.pid" ]] && break; sleep 0.2; done
+sleep 1   # 已经进了等仓库租约的循环（每 2 秒试一次，SA_LOCK_WAIT=30）
+kill -TERM "$(cat "$tmp/drv.pid")"; wait "$bg9"
+assert_eq "$(jq -r '.["lease#7#7#security"] | [(.lease_until.N // "none"), has("holder")] | join("/")' "$tmp/ddb.json")" "0/false" \
+  "④ I-9 收到 TERM 时放的是按 MR 的 L7 租约（下一次同 MR 的评审不必等它到期）"
+assert_eq "$(jq -r '.["lease#7#security-repo"].holder.S' "$tmp/ddb.json")" "other" "④ I-9 别人持有的仓库租约没被动过"
 # code review 在别处被删了（映射表还指着它）→ 标成过期、重新建一个、照常评审
 fresh
 printf '{"repo_id=7": {"repo_id": {"S": "7"}, "status": {"S": "ready"}, "code_review_id": {"S": "cr-dead0000-0000-4000-8000-000000000000"}, "agent_space_id": {"S": "%s"}}}' "$SPACE" > "$tmp/ddb.json"
