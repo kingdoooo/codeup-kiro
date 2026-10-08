@@ -109,6 +109,20 @@ jq '{findings: [range(0; 30) as $i | .findings[$i % 7] | .findingId = "f-\($i)"]
 lib "sa_findings_report /dev/null '$tmp/f30.json'" > "$tmp/r30.json"
 bytes30=$(render "$tmp/r30.json" "$tmp/overview.md" | wc -c | tr -d ' ')
 assert_eq "$([ "$bytes30" -lt 60000 ] && echo under)" "under" "③ 30 条长发现 + 总结的汇总评论 ${bytes30} 字节 < 60,000（说明 800 / 标签 80 / 总结 3,000 码点的上限够用）"
+# 终审 I-7：最坏形状——30 条、每条 7 个位置、800 码点的中文说明与标签、3,000 码点的中文总结。码点上限换成字节可以翻三倍：发现按字节预算
+# 渲染，放不下的（排在最后、最不严重的）折成一行计数；历次表与页脚（重新评审的提示）一定还在，不靠尾部截断
+jq --arg d "$(printf '漏%.0s' {1..900})" '{findings: [range(0; 30) as $i | .findings[$i % 7] | .findingId = "w-\($i)" | .description = $d
+    | .codeLocations = [range(0; 7) as $k | {filePath: "src/很长的目录/文件\($k).py", lineStart: ($k + 1), lineEnd: ($k + 9), label: ("标签" * 60)}]]}' \
+  "$FIX/findings-full-long.json" > "$tmp/worst.json"
+lib "sa_findings_report /dev/null '$tmp/worst.json'" > "$tmp/rworst.json"
+printf '总%.0s' {1..3100} > "$tmp/ov-cjk.md"
+wout=$(render "$tmp/rworst.json" "$tmp/ov-cjk.md")
+wbytes=$(printf '%s\n' "$wout" | wc -c | tr -d ' ')
+assert_eq "$([ "$wbytes" -le 60000 ] && echo under)" "under" "③ I-7 最坏形状的汇总 ${wbytes} 字节 ≤ 60,000（不靠尾部截断）"
+assert_contains "$wout" "条发现因评论长度上限" "③ I-7 放不下的发现折成一行计数"
+assert_contains "$wout" "<!-- kiro-security-history:" "③ I-7 历次记录还在"
+assert_contains "$wout" "第 3 次评审 · " "③ I-7 页脚（重新评审的提示）还在"
+assert_not_contains "$out" "条发现因评论长度上限" "③ I-7 放得下时不折叠"
 # 服务上限 30 条、误报计数、没有发现
 jq '.returned = 30' "$tmp/rep.json" > "$tmp/cap.json"
 assert_contains "$(render "$tmp/cap.json")" "本次返回 30 条，达到服务上限（每次差分扫描最多 30 条），可能还有未报出的问题。" "③ 恰好 30 条 → 注明服务上限"
@@ -223,6 +237,8 @@ out=$(cat "$tmp/out"); body=$(posted_comment "$out")
 assert_eq "$(req_count "$out" POST 'comments$')" "1" "④ 新建一条汇总"
 assert_contains "$body" "差分扫描发现 2 个安全问题" "④ 汇总里是作业的发现"
 assert_contains "$body" '`src/工具/ping.py:8–11`' "④ 位置已规范化"
+assert_contains "$out" "的 report：[{\"name\":" "④ I-7 完整的发现列表记进扫描任务日志（评论按字节预算折叠时，折叠行指向它）"
+assert_not_contains "$(LC_ALL=C grep '的 report：' <<< "$out")" "attackScript" "④ I-7 日志里的 report 同样不带 attackScript"
 assert_eq "$(ops)" "list-code-reviews create-code-review update-code-review start-code-review-job batch-get-code-review-jobs batch-get-code-review-jobs list-findings batch-get-findings " \
   "④ 调用顺序：收编（无）→ 建 → 重指向 → Start → 核对作业的源 → 轮询 → 取发现"
 creq=$(req_of create-code-review)

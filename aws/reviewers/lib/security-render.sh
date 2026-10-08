@@ -48,11 +48,14 @@ _sa_render_meta() {  # <第四格>
 
 # 汇总评论：<报告 JSON> <meta.json> <作业 id> <overview 文件（可为空串）> → stdout
 security_render_summary() {
-  local report="$1" meta="$2" job="$3" ovf="$4" hist total lvl n f i counts note
+  local report="$1" meta="$2" job="$3" ovf="$4" hist total lvl n f i counts note head_f head_bytes tail_f max budget used shown cur \
+        chunk bytes
   hist=$(mktemp)
   read -r -a counts < <(sa_history_counts "$report")
   review_history_append "${PRIOR_HISTORY_FILE:--}" "$REVIEW_RUN" "$SHORT_SHA" "" "" "${counts[0]}" "${counts[1]}" "${counts[2]}" \
     > "$hist" || return 2
+  head_f=$(mktemp)
+  {  # 评论头部到结论（先写进文件：发现的字节预算要扣掉它的长度）
   review_render_comment_head "$REVIEW_TITLE" "$SHORT_SHA" "$REVIEW_RUN" "$hist"
   echo ""
   note="$(jq -r '.diff_files' "$meta") 个文件 · 归档 $(jq -r '.files' "$meta") 个文件"
@@ -83,33 +86,54 @@ security_render_summary() {
     echo ""
     printf '有 %s 个位置不在本次归档里（标「路径未能对应」）。\n' "$(jq '.unmatched' "$report")"
   fi
+  } > "$head_f"
+  head_bytes=$(wc -c < "$head_f" | tr -d ' ')
+  cat "$head_f"; rm -f "$head_f"
+  # 评论尾部（总结折叠区、历次表、页脚）先渲染好：发现要按它剩下的字节预算来排
+  tail_f=$(mktemp)
+  {
+    if [[ -n "$ovf" && -s "$ovf" ]]; then
+      echo ""
+      echo "<details><summary>Security Agent 的总结</summary>"
+      echo ""
+      jq -Rrs --argjson m "$SA_OVERVIEW_MAX" 'if length > $m then .[0:$m] + "…" else . end' "$ovf" | review_sanitize_md
+      echo ""
+      echo "</details>"
+    fi
+    echo ""
+    review_render_history_table "$hist"
+    echo ""
+    review_render_footer "$REVIEW_RUN"
+  } > "$tail_f"
+  rm -f "$hist"
   if [[ "$total" != 0 ]]; then
     echo ""
     echo "## 发现"
-    for lvl in $SA_RISK_LEVELS; do
-      n=$(jq --arg l "$lvl" '[.findings[] | select(.riskLevel == $l)] | length' "$report")
-      [[ "$n" == 0 ]] && continue
+    # 发现按字节预算渲染（终审 I-7）：截断上限按码点算，中文说明换成字节翻三倍，30 条长发现能远超 MAX_COMMENT_BYTES；那时尾部截断会
+    # 砍掉历次表与页脚。预算 = 上限 − 已输出的头部 − 尾部 − 余量（「## 发现」、折叠行、发布时加的标记）。放不下的（排在最后、最不严重的）
+    # 折成一行计数；完整列表在扫描任务日志里（security.sh 记下 report）。
+    max="${MAX_COMMENT_BYTES:-60000}"; [[ "$max" =~ ^[0-9]{1,9}$ ]] || max=60000
+    budget=$(( max - head_bytes - $(wc -c < "$tail_f") - 600 ))
+    used=0; shown=0; cur=""; i=0
+    while IFS= read -r f; do
+      lvl=$(jq -r '.riskLevel' <<< "$f"); chunk=""
+      if [[ "$lvl" != "$cur" ]]; then
+        n=$(jq --arg l "$lvl" '[.findings[] | select(.riskLevel == $l)] | length' "$report")
+        chunk=$'\n'"**${lvl}（${n}）**"$'\n\n'; i=0
+      fi
+      chunk+="$(_sa_render_finding "$((i + 1))" "$f")"$'\n'
+      bytes=$(printf '%s' "$chunk" | wc -c | tr -d ' ')
+      (( used + bytes <= budget )) || break
+      printf '%s' "$chunk"; used=$((used + bytes)); shown=$((shown + 1)); cur="$lvl"; i=$((i + 1))
+    done < <(jq -c '.findings[]' "$report")
+    if (( shown < total )); then
       echo ""
-      printf '**%s（%s）**\n\n' "$lvl" "$n"
-      i=0
-      while IFS= read -r f; do
-        i=$((i + 1)); _sa_render_finding "$i" "$f"
-      done < <(jq -c --arg l "$lvl" '.findings[] | select(.riskLevel == $l)' "$report")
-    done
+      printf '另有 %s 条发现因评论长度上限（%s 字节）未展开（按严重级别排在最后的先省略），完整列表见扫描任务日志里本次作业的 report 一行。\n' \
+        "$((total - shown))" "$max"
+    fi
   fi
-  if [[ -n "$ovf" && -s "$ovf" ]]; then
-    echo ""
-    echo "<details><summary>Security Agent 的总结</summary>"
-    echo ""
-    jq -Rrs --argjson m "$SA_OVERVIEW_MAX" 'if length > $m then .[0:$m] + "…" else . end' "$ovf" | review_sanitize_md
-    echo ""
-    echo "</details>"
-  fi
-  echo ""
-  review_render_history_table "$hist"
-  rm -f "$hist"
-  echo ""
-  review_render_footer "$REVIEW_RUN"
+  cat "$tail_f"
+  rm -f "$tail_f"
 }
 
 # 输入状态 skipped:<代号> → 说明汇总（不起作业；spec「Task A」SA 一项：Task B 照常发一条说明）

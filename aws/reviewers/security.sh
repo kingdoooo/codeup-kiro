@@ -313,6 +313,8 @@ done < <(jq -Rnc --argjson n "$SA_FINDINGS_BATCH" '[inputs] | . as $a | range(0;
 if (( ${#batches[@]} == 0 )); then echo '{"findings": []}' > "$WORK/findings-0.json"; batches=("$WORK/findings-0.json"); fi
 sa_findings_report "$WORK/files.txt" "${batches[@]}" > "$WORK/report.json" || reviewer_fail "归一 Security Agent 的发现失败（代号 report）"
 log "作业 ${SA_JOB_ID} 完成：$(jq -r '"\(.findings | length) 条（服务返回 \(.returned) 条，误报 \(.false_positives) 条，未能对应的位置 \(.unmatched) 个）"' "$WORK/report.json")"
+# 完整的发现列表进扫描任务日志：评论按字节预算折叠时（终审 I-7）折叠行指向这一行。归一后的报告本来就不带 attackScript 之类（F3）
+log "作业 ${SA_JOB_ID} 的 report：$(jq -c '.findings' "$WORK/report.json")"
 security_render_summary "$WORK/report.json" "$WORK/meta.json" "$SA_JOB_ID" "$WORK/overview.md" > "$WORK/comment.md" \
   || reviewer_fail "Security Agent 汇总评论渲染失败"
 reviewer_publish "$WORK/comment.md"
