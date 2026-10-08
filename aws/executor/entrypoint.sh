@@ -254,8 +254,10 @@ fi
 # 租期短、持有期间续期（issue 04）：租期 120 秒，拿到之后后台每 30 秒续一次。不按引擎最坏耗时定一个长租期——
 # 那个最坏值约 1–1.5 小时（每次 Codeup API 最坏约 195 秒、一次评审十几次调用，引擎自己的 git fetch 还没有上限），
 # 被强杀的任务（OOM、StopTask 之后迟迟不退被 SIGKILL）会把 MR 挡上那么久；短租期下最多 120 秒就能被接管（L2），
-# 所以也不需要 init 进程来保证陷阱一定跑到。（StopTask 的 SIGTERM 本身陷阱是接得住的：挂了 EXIT 陷阱的 bash 作为
-# PID 1 会跑陷阱、释放租约、以 143 退出——issue 04 复审在 debian:stable-slim 的 bash 5.2 里实验过。）
+# 陷阱跑不到也无妨。（StopTask：任务定义开了 initProcessEnabled（issue 15），PID 1 是 init、本文件不是 PID 1，SIGTERM
+# 让它立刻以 143 退出、EXIT 陷阱照常释放租约。没开 init 时本文件是 PID 1，内核对 PID 1 上没有处理函数的 SIGTERM 一律忽略，
+# 只能等 30 秒后的 SIGKILL，陷阱不跑、租约靠到期失效——Task 13 验收 5a 实测。init 只把 TERM 转给本文件，kiro-review.sh
+# 收不到、要等那次 SIGKILL：它的租约已在这里释放，最多与下一次评审重叠 30 秒。）
 # 引擎包在总时长上限 engine_cap = KIRO_TIMEOUT + 1800 秒里：它给续期（也就是持有时长）设了上界，也给挂住的任务的
 # Fargate 费用设了上界。KIRO_TIMEOUT 不是纯数字时按引擎的缺省 900 算：引擎自己会拒绝这个取值并在 MR 上说明
 # （die_review），这里不抢它的活。等待上限 = engine_cap + 600：持有者合法持有的最长时间（引擎 + KILL 余量 30 秒 +

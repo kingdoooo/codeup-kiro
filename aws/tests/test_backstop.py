@@ -471,6 +471,19 @@ def test_scan_task_causes(code, want):
     assert want in backstop.scanner_comment("inspector", code, True, "scan")
 
 
+@pytest.mark.parametrize("text", [
+    lambda: backstop.backstop_comment(143),
+    lambda: backstop.scanner_comment("security", 143, True, "scan"),
+    lambda: backstop.scanner_comment("security", 143, True, "review"),
+], ids=["kiro", "scan", "review"])
+def test_a_stopped_task_gets_its_own_cause_not_the_out_of_memory_guess(text):
+    """issue 15 开了 init 之后 StopTask 的 SIGTERM 到得了入口，任务以 143 结束（以前是 30 秒后 SIGKILL 的 137）。"""
+    body = text()
+    assert "被停止（收到 SIGTERM" in body, body
+    assert "退出码 143" in body, body
+    assert "内存不足" not in body, body
+
+
 def test_a_scanner_the_executor_recorded_as_disabled_is_not_posted():
     assert _decide_with({"pk": "k", "posted": True, "disabled_inspector": True},
                         exit_code=0, reviewers_env="kiro,inspector") == (False, [])

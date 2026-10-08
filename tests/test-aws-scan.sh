@@ -33,13 +33,22 @@ done
 assert_eq "$(LC_ALL=C grep -rl '/usr/local/bin/aws' "$tmp/pkg/lib" 2>/dev/null || true)" "" "（准备）测试包根里的库都换成了 aws 替身"
 # 替身扫描员：把自己的环境（名字=值）写进文件，按 $tmp/rc.<评审员> 里的数退出（没有这个文件 = 0）。
 # 退出码经文件给、不经环境变量：子进程的环境是白名单（issue 14），测试自己的变量也到不了它
-for rid in inspector security; do
+# \$tmp/hang 存在时替身先登记自己（pid 与父进程 pid）、挂一个 EXIT 陷阱再睡——⑧ 用它验证 StopTask 时及时停下（issue 15）。
+mkstub() {  # <评审员>
+  local rid="$1"
   cat > "$tmp/pkg/reviewers/${rid}.sh" <<STUB
 #!/bin/bash
 env > "$tmp/env.${rid}"
+if [ -e "$tmp/hang" ]; then
+  /bin/sleep 30 & sp=\$!
+  trap 'kill \$sp 2>/dev/null; echo ran > "$tmp/exit.${rid}"' EXIT
+  echo "\$\$ \$PPID" > "$tmp/pid.${rid}"
+  wait \$sp
+fi
 exit "\$(cat "$tmp/rc.${rid}" 2>/dev/null || echo 0)"
 STUB
-done
+}
+mkstub inspector; mkstub security
 scan_prog=$(sed -e "s#^PKG=/opt/integration\$#PKG=$tmp/pkg#" -e "s#^WORKROOT=/tmp/scan\$#WORKROOT=$tmp/work#" \
                 -e "s#/usr/bin/curl#$tmp/curl#g" -e "s#/usr/local/bin/aws#$tmp/aws#g" "$SCAN")
 assert_contains "$scan_prog" "PKG=$tmp/pkg" "（准备）集成包根换成了测试布局"
@@ -230,5 +239,23 @@ assert_contains "$(cat "$tmp/l7.err")" "等待同一 MR 的上一次评审超过
 assert_eq "$(jq -r --arg k "$LKEY" '.[$k].holder.S' "$tmp/l7.json")" "other" "⑦ 没拿到租约时不碰别人的租约"
 printf '{"%s": {"pk": {"S": "%s"}, "holder": {"S": "other"}, "lease_until": {"N": "9999999999"}, "expires_at": {"N": "9999999999"}}}' "$LKEY" "$LKEY" > "$tmp/l7.json"
 assert_eq "$(lease_run REVIEWER_LEASE_WAIT=0 FAKE_SUPERSEDED=0)" "10 " "⑦ 等满上限但已被取代 → 10（不发失败评论）"
+
+# ⑧ StopTask 时及时停下（issue 15）：任务开了 init，入口不是 PID 1，收得到 TERM——它要把 TERM 转给每位扫描员、等它们的 EXIT
+# 陷阱跑完（租约在那里释放）、以 143 退出；不能等扫描员自己跑完。替身扫描员睡 30 秒，从发 TERM 到入口退出必须远小于这个数。
+mkstub security   # ④ 删掉过它
+touch "$tmp/hang"; rm -f "$tmp"/pid.* "$tmp"/exit.*
+( scan_run REVIEWERS=inspector,security > "$tmp/rc8" ) &
+bg=$!
+for _ in $(seq 1 100); do [[ -s "$tmp/pid.inspector" && -s "$tmp/pid.security" ]] && break; sleep 0.1; done
+read -r _ entry_pid < "$tmp/pid.inspector"
+assert_eq "$(read -r _ p < "$tmp/pid.security"; echo "$p")" "$entry_pid" "⑧（准备）两位替身的父进程是同一个入口进程（\$! 就是评审员本身，垫片一路 exec）"
+t0=$(date +%s); kill -TERM "$entry_pid"; wait "$bg"; t1=$(date +%s)
+rm -f "$tmp/hang"
+assert_eq "$(cat "$tmp/rc8")" "143" "⑧ 入口收到 TERM → 退出 143"
+assert_eq "$([ $((t1 - t0)) -le 5 ] && echo fast)" "fast" "⑧ 不等扫描员睡完 30 秒（用了 $((t1 - t0)) 秒）"
+assert_eq "$(cat "$tmp/exit.inspector" 2>/dev/null)/$(cat "$tmp/exit.security" 2>/dev/null)" "ran/ran" \
+  "⑧ TERM 转给了每位扫描员，它们的 EXIT 陷阱都跑了（租约在那里释放）"
+assert_contains "$(cat "$tmp/err")" "scan-entrypoint 收到 TERM" "⑧ 日志里写明是收到 TERM 停下的"
+assert_eq "$(attr_true posted_inspector)/$(attr_true posted_security)" "false/false" "⑧ 被停下的扫描员不置 posted（交给兜底，F1）"
 
 report

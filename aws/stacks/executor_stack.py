@@ -176,6 +176,9 @@ class ExecutorStack(cdk.Stack):
             container_name=self.container_name,
             image=ecs.ContainerImage.from_docker_image_asset(image_asset),
             logging=ecs.LogDrivers.aws_logs(stream_prefix="executor", log_group=log_group),
+            # PID 1 = init（tini，issue 15）：没有它时入口 bash 是 PID 1，内核对 PID 1 上没有处理函数的 SIGTERM 一律忽略，
+            # StopTask 只能等 30 秒后的 SIGKILL（EXIT 陷阱不跑、租约靠到期失效；Task 13 验收 5a 实测）
+            linux_parameters=ecs.LinuxParameters(self, "ExecutorLinuxParameters", init_process_enabled=True),
             # KIRO_IMAGE_DIGESTS/KIRO_PINNED_ARTIFACT_SHA256/KIRO_CLI_SHA256 刻意不从
             # image_asset 的内容哈希派生——ADR-0006 明确这三个值必须由「使用方环境」声明，
             # 集成包/CDK 自己填等于自己出题自己判。真正的镜像摘要要在构建、推送之后由操作者
@@ -271,6 +274,8 @@ class ExecutorStack(cdk.Stack):
             image=ecs.ContainerImage.from_docker_image_asset(image_asset),
             entry_point=["/bin/bash", "-p", "/opt/integration/scan-entrypoint.sh"],
             logging=ecs.LogDrivers.aws_logs(stream_prefix="scan", log_group=log_group),
+            # 同上（issue 15）；扫描入口收到 TERM 后再转给各扫描员子进程（init 只转给它的直接子进程）
+            linux_parameters=ecs.LinuxParameters(self, "ScanLinuxParameters", init_process_enabled=True),
             environment={
                 "KIRO_IMAGE_DIGESTS": cfg["kiro_image_digests"],
                 "YUNXIAO_ORG_ID": cfg["org_id"],

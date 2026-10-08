@@ -2084,6 +2084,17 @@ def test_inspector_on_adds_a_scan_task_on_the_same_image_with_its_own_entrypoint
             "SCAN_SECURITY_GROUPS", "SCAN_BUCKET", "SCAN_BUCKET_OWNER", "INSPECTOR", "SECURITY_AGENT"} <= renv
 
 
+def test_both_task_definitions_run_an_init_process_so_stoptask_sigterm_reaches_the_entrypoint():
+    # issue 15：没有 init 时入口 bash 是 PID 1，内核对 PID 1 上没有处理函数的 SIGTERM 一律忽略——StopTask 只能等 30 秒后的
+    # SIGKILL，EXIT 陷阱不跑、租约靠到期失效（Task 13 验收 5a 实测）。开关为 0 时执行器同样要开（执行器自己也持租约）。
+    for over in ({}, {"inspector": 1}):
+        _, t = _scan_templates(**over)
+        names = ["review"] + (["scan"] if over else [])
+        for name in names:
+            c = _td_by_container(t, name)["ContainerDefinitions"][0]
+            assert c.get("LinuxParameters", {}).get("InitProcessEnabled") is True, (over, name, c.get("LinuxParameters"))
+
+
 def test_the_scan_bucket_is_private_tls_only_owner_enforced_and_expires_by_prefix():
     _, t = _scan_templates(inspector=1)
     (b,) = t.find_resources("AWS::S3::Bucket").values()

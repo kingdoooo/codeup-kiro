@@ -39,6 +39,10 @@ SCAN_EXIT_CAUSES = {
     96: "扫描子进程没有正常结束（进程被杀、超时，或连失败评论都没能发出）",
 }
 
+# issue 15 之后两个任务都开了 init：StopTask 的 SIGTERM 到得了入口、以 143 退出（以前是 30 秒后 SIGKILL 的 137）。
+# 它不是 fail-closed 码，也不是内存不足——给它一句专门的成因，不落到「可能是内存不足或任务超时」的笼统猜测里。
+STOPPED_EXIT_CODE = 143
+
 
 def backstop_comment(exit_code, identified=True):
     """兜底评论的正文。退出码只在确实是整数时写进去（它来自 ECS 事件，不是自由文本；bool 不算）。
@@ -53,6 +57,8 @@ def backstop_comment(exit_code, identified=True):
     elif code in EXIT_CAUSES:
         cause = (f"{EXIT_CAUSES[code]}（退出码 {code}），评审脚本没有启动。"
                  f"按部署手册 aws/setup-guide.md 第 8 节里标着「退出码 {code}」的行排查")
+    elif code == STOPPED_EXIT_CODE:
+        cause = "评审任务被停止（收到 SIGTERM：有人调了 StopTask，或 Fargate 回收了任务；退出码 143），评审脚本没来得及回写"
     elif code is not None:
         cause = (f"评审任务异常结束（退出码 {code}；可能是内存不足或任务超时），"
                  "脚本没有机会回写失败原因")
@@ -68,6 +74,8 @@ def _scan_cause(exit_code, identified, task_kind):
     if task_kind == "review":
         if code == 0:
             return "执行器没能拉起扫描任务（ecs:RunTask 失败，执行器日志里有一行 scan-dispatch result=failed）"
+        if code == STOPPED_EXIT_CODE:
+            return "执行器在交给扫描任务之前被停止（收到 SIGTERM；退出码 143）"
         if code in EXIT_CAUSES:
             return f"执行器在交给扫描任务之前结束：{EXIT_CAUSES[code]}（退出码 {code}）"
         if code is not None:
@@ -75,6 +83,9 @@ def _scan_cause(exit_code, identified, task_kind):
         return "执行器在交给扫描任务之前结束（没有退出码：容器多半没能启动，例如拉取镜像失败）"
     if not identified:
         return "扫描任务结束了，但 ECS 事件里有多个容器、没有一个名字对得上扫描容器，无从判断退出码"
+    if code == STOPPED_EXIT_CODE:
+        return ("扫描任务被停止（收到 SIGTERM：有人调了 StopTask，或 Fargate 回收了任务；退出码 143），"
+                "扫描员没来得及回写")
     if code in SCAN_EXIT_CAUSES:
         return f"{SCAN_EXIT_CAUSES[code]}（退出码 {code}）。按部署手册 aws/setup-guide.md 第 8 节里标着「扫描退出码 {code}」的行排查"
     if code is not None:

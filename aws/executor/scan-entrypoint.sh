@@ -67,6 +67,18 @@ SCAN_CHILD_COMMON=(PATH HOME LANG LC_ALL TZ AWS_REGION AWS_DEFAULT_REGION AWS_CO
                    ECS_CONTAINER_METADATA_URI_V4 CODEUP_REPO_ID MR_LOCAL_ID HEAD_SHA CI_COMMIT_REF_NAME MR_TARGET_BRANCH LOCK_KEY
                    LOCK_TABLE SCAN_RUN_ID SCAN_REPO_URL YUNXIAO_ORG_ID SCAN_BUCKET SCAN_BUCKET_OWNER MAX_COMMENT_BYTES)
 pids=""
+# StopTask 时及时停下（issue 15）：任务定义开了 initProcessEnabled，PID 1 是 init（tini），本入口不再是 PID 1，SIGTERM 能到达；
+# 但 init 只把信号转给它的直接子进程（就是本入口），扫描员子进程收不到——它们的租约要在各自的 EXIT 陷阱里释放。所以本入口
+# 收到 TERM 就转给每位扫描员、等它们退出、以 143 退出（没有终态的评审员由兜底 Lambda 回写，F1 不变）。
+# 扫描员（bash，没有 TERM 陷阱）收到 TERM 立刻退出 143，EXIT 陷阱照常执行（integration-local + integration-remote 实测，issue 15）。
+_scan_on_term() {
+  local pr
+  echo "scan-entrypoint 收到 TERM：转给各扫描员子进程并等它们退出" >&2
+  for pr in $pids; do kill -TERM "${pr#*:}" 2>/dev/null || true; done
+  for pr in $pids; do wait "${pr#*:}" 2>/dev/null || true; done
+  exit 143
+}
+trap _scan_on_term TERM
 for rid in ${REVIEWERS//,/ }; do
   case "$rid" in
     inspector) tok=YUNXIAO_TOKEN_INSPECTOR; bot=INSPECTOR_BOT_USERNAME; hint=INSPECTOR_RERUN_HINT
