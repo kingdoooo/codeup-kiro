@@ -296,6 +296,13 @@ fresh
 assert_eq "$(drive FAKE_SA_START_THROTTLE=99 SA_START_RETRY_MAX=0)" "0" "④ R9：排队超过上限 → 失败评论（终态 0）"
 assert_contains "$(posted_comment "$(cat "$tmp/out")")" "Security Agent 并发已满，排队超过上限仍未启动（代号 sa-concurrency-full）" "④ R9：失败评论带 sa-concurrency-full"
 assert_eq "$(jq -r '.["lease#7#security-repo"].lease_until.N' "$tmp/ddb.json")" "0" "④ R9：放弃时仓库租约已释放"
+# 终审 I-5：并发满排队期间同一 MR 有了新提交 → 不再为旧提交起作业（它还会占一个本就紧缺的名额）、安静退出（10）
+fresh; touch "$tmp/superseded"
+assert_eq "$(drive FAKE_SA_START_THROTTLE=99 SA_START_RETRY_MAX=3)" "10" "④ I-5 排队时被取代 → 10（安静）"
+rm -f "$tmp/superseded"
+assert_eq "$(jq '.jobs // {} | length' "$tmp/sa.json")" "0" "④ I-5 被取代的那次一个作业都没起"
+assert_eq "$(req_count "$(cat "$tmp/out")" POST 'comments$')" "0" "④ I-5 被取代时不发评论"
+assert_eq "$(jq -r '.["lease#7#security-repo"].lease_until.N' "$tmp/ddb.json")" "0" "④ I-5 退出时仓库租约已释放"
 # Q3：Start 建了作业、应答却是 5xx → 收编，不再 Start 第二次
 fresh
 assert_eq "$(drive FAKE_SA_START_AMBIGUOUS=1)" "0" "④ Q3：含糊失败 → 收编本次的作业 → 0"

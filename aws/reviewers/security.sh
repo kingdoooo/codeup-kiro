@@ -220,6 +220,10 @@ sa_start_job() {  # → 全局 SA_JOB_ID
         ThrottlingException|ServiceQuotaExceededException|ConflictException)
           # 明确拒绝、没有建作业（issue 09：第 11 个并发 Start 同步收到 ThrottlingException）：放开仓库租约、排队重试
           sa_repo_lease release
+          # 排队期间同一 MR 有了新提交（终审 I-5）：不再为旧提交起作业（它会占一个本就紧缺的名额），安静退出，交给新的那次
+          if head_check_superseded; then
+            log "源分支已有更新的提交，不再排队启动作业，交给新的那次评审"; exit 10
+          fi
           if (( $(/bin/date +%s) + SA_START_RETRY_EVERY > start_deadline )); then
             reviewer_fail "Security Agent 并发已满，排队超过上限仍未启动（代号 sa-concurrency-full）"
           fi
