@@ -76,11 +76,27 @@ pids=""
 # 但 init 只把信号转给它的直接子进程（就是本入口），扫描员子进程收不到——它们的租约要在各自的 EXIT 陷阱里释放。所以本入口
 # 收到 TERM 就转给每位扫描员、等它们退出、以 143 退出（没有终态的评审员由兜底 Lambda 回写，F1 不变）。
 # 扫描员（bash，没有 TERM 陷阱）收到 TERM 立刻退出 143，EXIT 陷阱照常执行（integration-local + integration-remote 实测，issue 15）。
+# 退出码 → 终态（主循环与 TERM 陷阱共用）：0 = 已回写、10 = 被取代；别的交给兜底。marked 记下已经判过的，TERM 时不重判。
+all_terminal=1; marked=" "
+_scan_mark() {  # <评审员> <退出码>
+  marked="${marked}$1 "
+  case "$2" in
+    0)  echo "scan-reviewer reviewer=$1 result=posted" >&2; mark_lock "posted_$1" ;;
+    10) echo "scan-reviewer reviewer=$1 result=superseded" >&2; mark_lock "superseded_$1" ;;
+    *)  echo "scan-reviewer reviewer=$1 result=failed rc=$2（兜底 Lambda 会以这位评审员的机器人回写）" >&2; all_terminal=0 ;;
+  esac
+}
+# TERM 时还没判过的扫描员：先全部转 TERM，再逐个等、按退出码判——TERM 到来之前已经正常结束的那位照样置 posted / superseded
+# （终审 I-4：否则兜底给一位已经发了汇总的评审员再发一条「未完成」）
 _scan_on_term() {
-  local pr
+  local pr rc
   echo "scan-entrypoint 收到 TERM：转给各扫描员子进程并等它们退出" >&2
-  for pr in $pids; do kill -TERM "${pr#*:}" 2>/dev/null || true; done
-  for pr in $pids; do wait "${pr#*:}" 2>/dev/null || true; done
+  for pr in $pids; do [[ "$marked" == *" ${pr%%:*} "* ]] || kill -TERM "${pr#*:}" 2>/dev/null || true; done
+  for pr in $pids; do
+    [[ "$marked" == *" ${pr%%:*} "* ]] && continue
+    rc=0; wait "${pr#*:}" 2>/dev/null || rc=$?
+    _scan_mark "${pr%%:*}" "$rc"
+  done
   exit 143
 }
 trap _scan_on_term TERM
@@ -106,15 +122,10 @@ for rid in ${REVIEWERS//,/ }; do
     3< <(printf '%s\0' "${child_env[@]}") &
   pids="${pids}${rid}:$! "
 done
-all_terminal=1
 for pr in $pids; do
-  rid="${pr%%:*}"; pid="${pr#*:}"; rc=0
-  wait "$pid" || rc=$?
-  case "$rc" in
-    0)  echo "scan-reviewer reviewer=${rid} result=posted" >&2; mark_lock "posted_${rid}" ;;
-    10) echo "scan-reviewer reviewer=${rid} result=superseded" >&2; mark_lock "superseded_${rid}" ;;
-    *)  echo "scan-reviewer reviewer=${rid} result=failed rc=${rc}（兜底 Lambda 会以这位评审员的机器人回写）" >&2; all_terminal=0 ;;
-  esac
+  rc=0
+  wait "${pr#*:}" || rc=$?
+  _scan_mark "${pr%%:*}" "$rc"
 done
 [[ "$all_terminal" == 1 ]] || exit 96
 exit 0

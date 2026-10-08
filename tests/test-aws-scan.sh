@@ -39,7 +39,7 @@ mkstub() {  # <评审员>
   cat > "$tmp/pkg/reviewers/${rid}.sh" <<STUB
 #!/bin/bash
 env > "$tmp/env.${rid}"
-if [ -e "$tmp/hang" ]; then
+if [ -e "$tmp/hang" ] || [ -e "$tmp/hang.${rid}" ]; then
   /bin/sleep 30 & sp=\$!
   trap 'kill \$sp 2>/dev/null; echo ran > "$tmp/exit.${rid}"' EXIT
   echo "\$\$ \$PPID" > "$tmp/pid.${rid}"
@@ -268,5 +268,20 @@ assert_eq "$(cat "$tmp/exit.inspector" 2>/dev/null)/$(cat "$tmp/exit.security" 2
   "⑧ TERM 转给了每位扫描员，它们的 EXIT 陷阱都跑了（租约在那里释放）"
 assert_contains "$(cat "$tmp/err")" "scan-entrypoint 收到 TERM" "⑧ 日志里写明是收到 TERM 停下的"
 assert_eq "$(attr_true posted_inspector)/$(attr_true posted_security)" "false/false" "⑧ 被停下的扫描员不置 posted（交给兜底，F1）"
+
+# ⑧b TERM 到来时已经正常结束的扫描员照样置终态（终审 I-4：否则兜底给一位已经发了汇总的评审员再发一条「未完成」）。
+#    security 写完环境就退出 0、inspector 挂着——入口还在 wait inspector 时收到 TERM
+mkstub inspector; mkstub security
+touch "$tmp/hang.inspector"; rm -f "$tmp"/pid.* "$tmp"/exit.* "$tmp"/env.*
+( scan_run REVIEWERS=inspector,security > "$tmp/rc8b" ) &
+bg=$!
+for _ in $(seq 1 100); do [[ -s "$tmp/pid.inspector" && -e "$tmp/env.security" ]] && break; sleep 0.1; done
+sleep 0.5
+read -r _ entry_pid < "$tmp/pid.inspector"
+kill -TERM "$entry_pid"; wait "$bg"
+rm -f "$tmp/hang.inspector"
+assert_eq "$(cat "$tmp/rc8b")" "143" "⑧b 入口收到 TERM → 143"
+assert_eq "$(attr_true posted_inspector)/$(attr_true posted_security)" "false/true" \
+  "⑧b 已经正常结束的 security 照样置 posted（兜底不再给它发「未完成」）；被停下的 inspector 交给兜底"
 
 report
