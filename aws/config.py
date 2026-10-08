@@ -194,10 +194,10 @@ def load_config(path):
             "源码的模型推理可能被路由到 any commercial AWS Region；"
             "其余六个区域为地理跨区推理，留在本地理边界内。", flush=True)
 
-    # 开关、档案与 security/ 前缀是为 Security Agent 预留的接口，评审员本身还没有实现（没有 reviewers/security.sh）：
-    # 开了它每个 MR 都只得到一条兜底，SA 的令牌密钥（按手册不该创建）缺失时扫描任务起不来、Inspector 也跟着只剩兜底。
-    if cfg["security_agent"] == 1:
-        raise ValueError(
-            "security_agent: 1 被拒绝：Security Agent 评审员尚未实现（开关是为后续里程碑预留的接口）。请保持 0 或不写")
+    # Security Agent 作业的总预算（秒，spec R8）：从第一次 StartCodeReviewJob 到作业终态，含并发满时的排队重试（R9）。
+    # 实测差分作业 9.2–10 分钟（issue 09）；下限 600 是「排队 + 一次作业」都装得下的最小值，上限 7200 给特别大的仓库。
+    timeout = cfg.setdefault("security_agent_timeout", 3600)
+    if type(timeout) is not int or not 600 <= timeout <= 7200:
+        raise ValueError(f"security_agent_timeout 取值 {timeout!r} 非法：600–7200 的整数（秒）")
 
     return cfg

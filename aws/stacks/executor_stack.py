@@ -9,6 +9,7 @@ from aws_cdk import (
     aws_logs as logs,
     aws_s3 as s3,
     aws_secretsmanager as secretsmanager,
+    aws_securityagent as securityagent,
 )
 from constructs import Construct
 
@@ -293,6 +294,9 @@ class ExecutorStack(cdk.Stack):
             },
             secrets=scan_secrets,
         )
+        self.agent_space = None
+        if "security" in scanners:
+            self._add_security_agent(cfg, state)
         state.lock_table.grant(self.scan_task_role, "dynamodb:UpdateItem", "dynamodb:GetItem")
         log_group.grant_write(self.scan_task_role)
         self.scan_task_role.add_to_policy(iam.PolicyStatement(
@@ -327,3 +331,70 @@ class ExecutorStack(cdk.Stack):
                 ("SCAN_BUCKET", self.scan_bucket.bucket_name),
                 ("SCAN_BUCKET_OWNER", account)):
             self.container.add_environment(name, value)
+
+    # Security Agent 的 Agent Space、服务角色、扫描任务这一侧的权限（spec「Security Agent 评审员 · CDK」，issue 10）。
+    # Agent Space 名字不带 codeup-kiro/ 前缀的密钥能匹配上的形状：控制台给服务角色生成的 base policy 允许读 secret:<Space 名>*，
+    # Space 若叫 codeup-kiro，这个形状就会覆盖 codeup-kiro/kiro-api-key 与各个云效令牌——本部署干脆不给服务角色任何 secretsmanager 权限
+    # （SA 的代码评审不读密钥；那条只为渗透测试与集成）。不建 Application（R13：它只是 SA Web 控制台的配置，API 差分扫描用不到）。
+    SA_SPACE_NAME = "codeup-kiro-security"
+    # 扫描任务（Task B）调 SA 的动作白名单（I2：只读评审员——没有 StartCodeRemediation、UpdateFinding、BatchDeleteCodeReviews）
+    SA_TASK_ACTIONS = ("securityagent:CreateCodeReview", "securityagent:UpdateCodeReview", "securityagent:ListCodeReviews",
+                       "securityagent:StartCodeReviewJob", "securityagent:StopCodeReviewJob",
+                       "securityagent:BatchGetCodeReviewJobs", "securityagent:ListCodeReviewJobsForCodeReview",
+                       "securityagent:ListFindings", "securityagent:BatchGetFindings")
+
+    def _add_security_agent(self, cfg, state):
+        account, region, partition = cdk.Aws.ACCOUNT_ID, cdk.Aws.REGION, cdk.Aws.PARTITION
+        # 服务角色：SA 扮演它读输入桶里的归档与 .patch、写自己的作业日志。信任按文档（create-iam-role.html）加混淆代理两道条件。
+        self.sa_service_role = iam.Role(
+            self, "SecurityAgentServiceRole",
+            description="codeup-kiro Security Agent service role: read the security/ prefix of the scan bucket, write job logs",
+            assumed_by=iam.ServicePrincipal("securityagent.amazonaws.com", conditions={
+                "StringEquals": {"aws:SourceAccount": account},
+                "ArnLike": {"aws:SourceArn": f"arn:{partition}:securityagent:{region}:{account}:agent-space/*"}}))
+        role = self.sa_service_role
+        # 控制台 base policy 里的两项自检（10-04 探测的 CloudTrail：没有它们时 SA 的 iam:GetRole / SimulatePrincipalPolicy 被拒）
+        role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:GetRole", "iam:SimulatePrincipalPolicy"], resources=[role.role_arn]))
+        logs_arn = f"arn:{partition}:logs:{region}:{account}:log-group:/aws/securityagent/{self.SA_SPACE_NAME}*"
+        own_account = {"StringEquals": {"aws:ResourceAccount": account}}
+        role.add_to_policy(iam.PolicyStatement(
+            actions=["logs:CreateLogGroup"], resources=[logs_arn], conditions=own_account))
+        role.add_to_policy(iam.PolicyStatement(
+            actions=["logs:CreateLogStream", "logs:PutLogEvents"], resources=[f"{logs_arn}:log-stream:*"],
+            conditions=own_account))
+        # S3：只读 security/（spec S3：Inspector 的 SBOM 不在它可读范围内）；列桶也只许列 security/
+        role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:GetObject"], resources=[self.scan_bucket.arn_for_objects("security/*")], conditions=own_account))
+        role.add_to_policy(iam.PolicyStatement(
+            actions=["s3:ListBucket"], resources=[self.scan_bucket.bucket_arn],
+            conditions={**own_account, "StringLike": {"s3:prefix": "security/*"}}))
+
+        self.agent_space = securityagent.CfnAgentSpace(
+            self, "AgentSpace",
+            name=self.SA_SPACE_NAME,
+            description="codeup-kiro: Security Agent differential code review of Codeup merge requests (managed by CDK)",
+            aws_resources=securityagent.CfnAgentSpace.AWSResourcesProperty(
+                iam_roles=[role.role_arn], s3_buckets=[self.scan_bucket.bucket_arn]),
+            # 只开通用扫描（spec「CDK」）；不设 KMS（设了以后不可更新，换 KMS 要替换 Space）
+            code_review_settings=securityagent.CfnAgentSpace.CodeReviewSettingsProperty(
+                controls_scanning=False, general_purpose_scanning=True))
+        # 角色与它的策略先建好再登记进 Space（Space 可能当场校验角色）
+        self.agent_space.node.add_dependency(role)
+
+        space_arn = f"arn:{partition}:securityagent:{region}:{account}:agent-space/{self.agent_space.attr_agent_space_id}"
+        self.scan_task_role.add_to_policy(iam.PolicyStatement(actions=list(self.SA_TASK_ACTIONS), resources=[space_arn]))
+        # 文档说 CreateCodeReview / UpdateCodeReview 只授权它们自己的动作、不要 iam:PassRole（api-facts A9）；10-04 的探测是管理员
+        # 身份、证明不了这一点。为一次「部署后才发现被拒」的往返，这里先给（只能把这一个角色交给 securityagent）。
+        self.scan_task_role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:PassRole"], resources=[role.role_arn],
+            conditions={"StringEquals": {"iam:PassedToService": "securityagent.amazonaws.com"}}))
+        # 映射表 repo_id → code review（spec Q1；2a 建的、永不开 TTL）：认领与登记都是条件 UpdateItem，读是 GetItem
+        state.mapping_table.grant(self.scan_task_role, "dynamodb:GetItem", "dynamodb:UpdateItem")
+        scan_container = self.scan_task_definition.find_container(self.scan_container_name)
+        for name, value in (
+                ("SA_AGENT_SPACE_ID", self.agent_space.attr_agent_space_id),
+                ("SA_SERVICE_ROLE_ARN", role.role_arn),
+                ("SA_MAPPING_TABLE", state.mapping_table.table_name),
+                ("SECURITY_AGENT_TIMEOUT", str(cfg.get("security_agent_timeout", 3600)))):
+            scan_container.add_environment(name, value)

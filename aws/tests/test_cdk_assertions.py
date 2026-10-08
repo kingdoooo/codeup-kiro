@@ -2000,14 +2000,19 @@ def test_scanner_settings_are_strictly_validated(write_cfg, over):
         load_config(write_cfg(_base_cfg(**over)))
 
 
-def test_security_agent_cannot_be_enabled_until_its_reviewer_exists(write_cfg):
-    # 复审 I-4：Security Agent 评审员还没有实现（没有 reviewers/security.sh、没有 scan_prep_security）。开了它，每个 MR 上
-    # 都是一条 SA 兜底；SA 的令牌密钥按手册不该创建，缺了它扫描任务起不来，连 Inspector 也只剩兜底——一个扫描员拖垮另一个。
-    # 开关与档案保留（2b 后半的接口），synth 先拒绝。
+def test_security_agent_can_be_enabled_and_its_timeout_defaults_to_3600(write_cfg):
+    # SA 半段落地后 security_agent: 1 合法（复审 I-4 那道「尚未实现」的拒绝随之撤掉）；超时缺省 3600 秒（spec R8）
     from config import load_config
-    with pytest.raises(ValueError, match="Security Agent 评审员尚未实现"):
-        load_config(write_cfg(_base_cfg(security_agent=1)))
-    load_config(write_cfg(_base_cfg(security_agent=0, inspector=1)))   # 正向对照
+    cfg = load_config(write_cfg(_base_cfg(security_agent=1)))
+    assert cfg["security_agent"] == 1 and cfg["security_agent_timeout"] == 3600
+    assert load_config(write_cfg(_base_cfg(security_agent=1, security_agent_timeout=600)))["security_agent_timeout"] == 600
+
+
+@pytest.mark.parametrize("bad", [599, 7201, 0, "3600", True, 3600.0, None])
+def test_security_agent_timeout_is_a_strict_integer_between_600_and_7200(write_cfg, bad):
+    from config import load_config
+    with pytest.raises(ValueError, match="security_agent_timeout"):
+        load_config(write_cfg(_base_cfg(security_agent=1, security_agent_timeout=bad)))
 
 
 def test_default_bot_usernames_cover_every_enabled_reviewer_once():
@@ -2141,3 +2146,95 @@ def test_security_agent_on_adds_only_its_own_token_and_prefix():
     st = _policy_statements(t, "ScanTaskRole")
     assert not any("inspector-scan" in json.dumps(s["Action"]) for s in st), "Inspector 没启用就不给 ScanSbom"
     assert "security/*" in json.dumps([s["Resource"] for s in st if s["Action"] == "s3:GetObject"])
+
+
+# ── Phase 2b SA：Agent Space、服务角色、扫描任务这一侧的权限（issue 10，spec「Security Agent 评审员 · CDK」「I2」「I7」「S3」）──
+SA_ACTIONS = {"securityagent:CreateCodeReview", "securityagent:UpdateCodeReview", "securityagent:ListCodeReviews",
+              "securityagent:StartCodeReviewJob", "securityagent:StopCodeReviewJob", "securityagent:BatchGetCodeReviewJobs",
+              "securityagent:ListCodeReviewJobsForCodeReview", "securityagent:ListFindings", "securityagent:BatchGetFindings"}
+
+
+def _actions(st):
+    return {a for s in st for a in ([s["Action"]] if isinstance(s["Action"], str) else s["Action"])}
+
+
+@pytest.mark.parametrize("over", [{}, {"inspector": 1}])
+def test_without_security_agent_there_is_no_security_agent_resource_anywhere(over):
+    # I7：开关为 0 时零个 SA 资源（执行器栈也算，不只是调度器栈）、扫描任务没有 SA 的权限与变量
+    _, t = _scan_templates(**over)
+    types = {r["Type"] for r in t.to_json()["Resources"].values()}
+    assert not {ty for ty in types if ty.startswith("AWS::SecurityAgent::")}, types
+    assert "securityagent" not in json.dumps(t.to_json()), "开关为 0 时模板里不该出现任何 securityagent 字样"
+    if over:
+        env = {e["Name"] for e in _td_by_container(t, "scan")["ContainerDefinitions"][0]["Environment"]}
+        assert not {n for n in env if n.startswith("SA_") or n == "SECURITY_AGENT_TIMEOUT"}, env
+
+
+def test_security_agent_on_creates_one_agent_space_with_general_purpose_scanning_only():
+    executor, t = _scan_templates(security_agent=1)
+    (space,) = t.find_resources("AWS::SecurityAgent::AgentSpace").values()
+    p = space["Properties"]
+    assert p["Name"] == "codeup-kiro-security"
+    assert p["CodeReviewSettings"] == {"ControlsScanning": False, "GeneralPurposeScanning": True}
+    assert "KmsKeyId" not in p, "设了 KMS 以后不可更新、换要替换 Space"
+    assert "—" not in p["Description"] and "–" not in p["Description"], "资源描述不用破折号（CLAUDE.md）"
+    res = json.dumps(p["AwsResources"])
+    assert executor.resolve(executor.scan_bucket.bucket_arn) in p["AwsResources"]["S3Buckets"], res
+    assert executor.resolve(executor.sa_service_role.role_arn) in p["AwsResources"]["IamRoles"], res
+    assert not t.find_resources("AWS::SecurityAgent::Application"), "R13：不建 Application"
+
+
+def test_the_security_agent_service_role_trusts_only_securityagent_from_this_account_and_its_agent_spaces():
+    executor, t = _scan_templates(security_agent=1)
+    roles = t.find_resources("AWS::IAM::Role")
+    (role,) = [v for k, v in roles.items() if k.startswith("SecurityAgentServiceRole")]
+    (stmt,) = role["Properties"]["AssumeRolePolicyDocument"]["Statement"]
+    assert stmt["Principal"] == {"Service": "securityagent.amazonaws.com"} and stmt["Action"] == "sts:AssumeRole"
+    cond = json.dumps(stmt["Condition"])
+    assert '"aws:SourceAccount"' in cond and ":agent-space/*" in cond and '"ArnLike"' in cond, cond
+
+
+def test_the_security_agent_service_role_can_only_read_the_security_prefix_and_write_its_logs():
+    _, t = _scan_templates(security_agent=1, inspector=1)
+    st = _policy_statements(t, "SecurityAgentServiceRole")
+    assert _actions(st) == {"iam:GetRole", "iam:SimulatePrincipalPolicy", "logs:CreateLogGroup", "logs:CreateLogStream",
+                            "logs:PutLogEvents", "s3:GetObject", "s3:ListBucket"}, _actions(st)
+    assert not any("secretsmanager" in json.dumps(s) for s in st), \
+        "不给 secretsmanager：控制台 base policy 的 secret:<Space 名>* 会覆盖 codeup-kiro/ 下的令牌"
+    (get,) = [s for s in st if s["Action"] == "s3:GetObject"]
+    assert "security/*" in json.dumps(get["Resource"]) and "inspector/" not in json.dumps(get["Resource"]), get
+    (lst,) = [s for s in st if s["Action"] == "s3:ListBucket"]
+    assert lst["Condition"]["StringLike"] == {"s3:prefix": "security/*"}, lst
+    for s in st:
+        if s["Action"] != "iam:GetRole" and not (isinstance(s["Action"], list) and "iam:GetRole" in s["Action"]):
+            assert "aws:ResourceAccount" in json.dumps(s.get("Condition", {})), s
+    logs = json.dumps([s["Resource"] for s in st if "logs:" in json.dumps(s["Action"])])
+    assert "/aws/securityagent/codeup-kiro-security" in logs, logs
+
+
+def test_the_scan_task_may_call_exactly_the_whitelisted_security_agent_actions_on_its_own_agent_space():
+    executor, t = _scan_templates(security_agent=1)
+    st = _policy_statements(t, "ScanTaskRole")
+    sa = [s for s in st if "securityagent:" in json.dumps(s["Action"])]
+    assert _actions(sa) == SA_ACTIONS, _actions(sa)
+    for forbidden in ("StartCodeRemediation", "UpdateFinding", "BatchDeleteCodeReviews", "securityagent:*"):
+        assert forbidden not in json.dumps(st), forbidden
+    assert all(":agent-space/" in json.dumps(s["Resource"]) for s in sa), sa
+    assert "AgentSpace" in json.dumps([s["Resource"] for s in sa]), "资源是本部署的 Agent Space（GetAtt），不是通配"
+    (pr,) = [s for s in st if s["Action"] == "iam:PassRole"]
+    assert pr["Condition"] == {"StringEquals": {"iam:PassedToService": "securityagent.amazonaws.com"}}
+    assert "SecurityAgentServiceRole" in json.dumps(pr["Resource"])
+    ddb = [s for s in st if "dynamodb:" in json.dumps(s["Action"]) and "CodeReviewMapping" in json.dumps(s["Resource"])]
+    assert _actions(ddb) == {"dynamodb:GetItem", "dynamodb:UpdateItem"}, ddb
+
+
+def test_the_scan_task_gets_the_agent_space_service_role_mapping_table_and_timeout():
+    _, t = _scan_templates(security_agent=1, security_agent_timeout=900)
+    env = {e["Name"]: e["Value"] for e in _td_by_container(t, "scan")["ContainerDefinitions"][0]["Environment"]}
+    assert "AgentSpace" in json.dumps(env["SA_AGENT_SPACE_ID"]) and "AgentSpaceId" in json.dumps(env["SA_AGENT_SPACE_ID"])
+    assert "SecurityAgentServiceRole" in json.dumps(env["SA_SERVICE_ROLE_ARN"])
+    assert "CodeReviewMapping" in json.dumps(env["SA_MAPPING_TABLE"])
+    assert env["SECURITY_AGENT_TIMEOUT"] == "900"
+    _, t2 = _scan_templates(security_agent=1)
+    env2 = {e["Name"]: e["Value"] for e in _td_by_container(t2, "scan")["ContainerDefinitions"][0]["Environment"]}
+    assert env2["SECURITY_AGENT_TIMEOUT"] == "3600"
