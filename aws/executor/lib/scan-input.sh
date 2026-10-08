@@ -111,3 +111,98 @@ _scan_prep_inspector_run() {
     || { printf 'failed:upload'; return 0; }
   printf 'ok'
 }
+
+# ── Security Agent 的输入（spec「Task A」SA 一项、「I8」「Z1」「D1」，issue 11）────────────────────────────────
+# 四个对象，键 security/<仓库>/<提交>/<run_id>/…（不可变）：
+#   changes.patch  merge-base..HEAD_SHA 的 unified diff（钉死参数 = _git_diff_pinned 的参数集 + 显式 -M；`.patch` 结尾是服务硬要求）
+#   source.zip     head 树（issue 09 实测：head 归档给出精确的 head 行号）的钉死属性导出 + zip -X（Z1：不写归档注释——带注释的源被 SA 拒绝）
+#   files.txt      zip 里的文件清单（一行一个路径，含换行的名字不列、只计数）：Task B 据此标「路径未能对应」的发现
+#   meta.json      计数（归档文件数、剔除的符号链接数、diff 文件数与字节数、merge-base）
+# 服务上限（run-diff-scan-s3.html / code-review-ide-integration.html）：diff 3,000 个文件或 5 MB、归档 2 GB；超了 → skipped:*，不起作业。
+# 空 diff → skipped:empty-diff（issue 09 实测：空 .patch 会被受理，报出与改动无关的发现）。取值可经环境覆盖只为测试。
+SCAN_SA_DIFF_MAX_FILES="${SCAN_SA_DIFF_MAX_FILES:-3000}"
+SCAN_SA_DIFF_MAX_BYTES="${SCAN_SA_DIFF_MAX_BYTES:-5242880}"
+SCAN_SA_ZIP_MAX_BYTES="${SCAN_SA_ZIP_MAX_BYTES:-2147483648}"
+
+# 钉死参数的 diff（_git_diff_pinned，与 Kiro 喂给模型的 diff 同一套参数）+ 显式 -M（不依赖执行器的 diff.renames）。
+# 树内 .gitattributes 的 `-diff` / `diff=<驱动>` 是 MR 作者可控的：`*.py -diff` 能让改动只剩一句「Binary files … differ」，
+# SA 就在没看到代码的情况下给出「未发现问题」。$GIT_DIR/info/attributes 的优先级高于树内任何 .gitattributes（gitattributes(5)），
+# 生成期间在那里写一行 `* !diff`（diff 属性回到「未指定」= 按内容判断是不是二进制），用完即删。真正的二进制文件仍按二进制处理。
+# 输出被 head 截在上限 + 1 字节：特别大的 diff 不撑满临时盘；此时 SIGPIPE（141）只在输出确实超过上限时算正常（交给调用方报超限）。
+# rc：0 = 成功（names 里是 NUL 分隔的改动路径，patch 是 diff）；1 = 失败。
+_scan_sa_diff() {  # <merge-base> <patch 输出> <names 输出>
+  local base="$1" patch="$2" names="$3" gd="$WORKROOT/business" rc=0 drc=0
+  /bin/mkdir -p "$gd/.git/info" || return 1
+  printf '* !diff\n' > "$gd/.git/info/attributes" || return 1
+  ( source "$PKG/scripts/lib/diff-compress.sh" && cd "$gd" \
+      && _git_diff_pinned -M -z --name-only "$base" "$HEAD_SHA" > "$names" ) || rc=1
+  if [[ "$rc" == 0 ]]; then
+    ( set -o pipefail; source "$PKG/scripts/lib/diff-compress.sh" && cd "$gd" \
+        && _git_diff_pinned -M "$base" "$HEAD_SHA" | /usr/bin/head -c "$((SCAN_SA_DIFF_MAX_BYTES + 1))" > "$patch" ) || drc=$?
+    if [[ "$drc" == 141 ]] && (( $(/usr/bin/wc -c < "$patch") > SCAN_SA_DIFF_MAX_BYTES )); then drc=0; fi
+    [[ "$drc" == 0 ]] || rc=1
+  fi
+  /bin/rm -f "$gd/.git/info/attributes"
+  return "$rc"
+}
+
+# 输出一行输入状态（scan_prep 的约定）。工作目录在任何返回路径上都删掉（F2：不在 Kiro 评审期间占着一份仓库大小的磁盘）。
+scan_prep_security() {
+  local st
+  st=$(_scan_prep_security_run)
+  /bin/rm -rf "$WORKROOT/scan/security"
+  printf '%s' "$st"
+}
+
+_scan_prep_security_run() {
+  local base dir="$WORKROOT/scan/security" rc nfiles dbytes zbytes nlinks=0 nlisted=0 nunlisted=0 rec p
+  [[ -n "${MR_TARGET_BRANCH:-}" ]] || { printf 'failed:no-target-branch'; return 0; }
+  base=$(/usr/bin/git -C "$WORKROOT/business" merge-base "refs/remotes/origin/${MR_TARGET_BRANCH}" "$HEAD_SHA" 2>/dev/null) || base=""
+  [[ "$base" =~ ^[0-9a-f]{40}$ ]] || { printf 'failed:merge-base'; return 0; }
+  /bin/mkdir -p "$dir" || { printf 'failed:prep'; return 0; }
+  # 1) diff 先做（便宜）：空或超限就不必导出整棵树
+  _scan_sa_diff "$base" "$dir/changes.patch" "$dir/names" || { printf 'failed:diff'; return 0; }
+  nfiles=$(LC_ALL=C /usr/bin/tr -cd '\000' < "$dir/names" | /usr/bin/wc -c | /usr/bin/tr -d ' ')
+  dbytes=$(/usr/bin/wc -c < "$dir/changes.patch" | /usr/bin/tr -d ' ')
+  [[ "$nfiles" =~ ^[0-9]+$ && "$dbytes" =~ ^[0-9]+$ ]] || { printf 'failed:diff'; return 0; }
+  (( nfiles > 0 )) || { printf 'skipped:empty-diff'; return 0; }
+  (( nfiles <= SCAN_SA_DIFF_MAX_FILES && dbytes <= SCAN_SA_DIFF_MAX_BYTES )) || { printf 'skipped:diff-too-large'; return 0; }
+  # 2) head 树：钉死属性的导出（与 Inspector 同一个辅助函数，N8 / I8），符号链接已删
+  rc=0; scan_export_tree "$HEAD_SHA" "$dir/tree" || rc=$?
+  case "$rc" in
+    0) ;;
+    124|137) printf 'failed:export-timeout'; return 0 ;;
+    *) printf 'failed:export'; return 0 ;;
+  esac
+  # 被剔除的符号链接数（汇总里写明：「导出物 = 提交树」唯一允许的偏差）
+  while IFS= read -r -d '' rec; do
+    [[ "${rec%% *}" == 120000 ]] && nlinks=$((nlinks + 1))
+  done < <(/usr/bin/git -C "$WORKROOT/business" ls-tree -r -z "$HEAD_SHA" 2>/dev/null)
+  # 3) 文件清单（一行一个路径；名字里有换行的不列，只计数）
+  : > "$dir/files.txt"
+  while IFS= read -r -d '' p; do
+    p="${p#./}"
+    if [[ "$p" == *$'\n'* ]]; then nunlisted=$((nunlisted + 1)); continue; fi
+    printf '%s\n' "$p" >> "$dir/files.txt"; nlisted=$((nlisted + 1))
+  done < <(cd "$dir/tree" && /usr/bin/find . -type f -print0)
+  # 4) 打包：zip -X（不存额外属性）、不写注释（Z1），有时限。打完核对注释确实为空——这是 SA 能不能跑的前提，不靠「zip 不会写」的推断
+  rc=0
+  ( cd "$dir/tree" && /usr/bin/timeout -k 10 "${SCAN_ZIP_TIMEOUT:-600}" /usr/bin/zip -q -X -r "$dir/source.zip" . ) >/dev/null 2>&1 || rc=$?
+  /bin/rm -rf "${dir:?}/tree"
+  case "$rc" in
+    0) ;;
+    124|137) printf 'failed:zip-timeout'; return 0 ;;
+    *) printf 'failed:zip'; return 0 ;;
+  esac
+  [[ -z "$(/usr/bin/unzip -zq "$dir/source.zip" 2>/dev/null)" ]] || { printf 'failed:zip-comment'; return 0; }
+  zbytes=$(/usr/bin/wc -c < "$dir/source.zip" | /usr/bin/tr -d ' ')
+  (( zbytes <= SCAN_SA_ZIP_MAX_BYTES )) || { printf 'skipped:archive-too-large'; return 0; }
+  /usr/bin/jq -n --argjson files "$nlisted" --argjson unlisted "$nunlisted" --argjson symlinks "$nlinks" \
+    --argjson diff_files "$nfiles" --argjson diff_bytes "$dbytes" --arg base "$base" \
+    '{files: $files, unlisted: $unlisted, symlinks: $symlinks, diff_files: $diff_files, diff_bytes: $diff_bytes, base: $base}' \
+    > "$dir/meta.json" || { printf 'failed:meta'; return 0; }
+  scan_put security changes.patch "$dir/changes.patch" && scan_put security meta.json "$dir/meta.json" \
+    && scan_put security files.txt "$dir/files.txt" && scan_put security source.zip "$dir/source.zip" \
+    || { printf 'failed:upload'; return 0; }
+  printf 'ok'
+}

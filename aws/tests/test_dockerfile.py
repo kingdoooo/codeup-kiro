@@ -54,6 +54,15 @@ def test_installs_the_hard_dependencies_kiro_review_checks():
         assert pkg in src
 
 
+def test_installs_zip_for_the_security_agent_source_archive():
+    # issue 11：scan-input.sh 的 SA 输入用 /usr/bin/zip 打包（Debian slim 默认没有）。按 apt 包名那一行的整词找——
+    # 「zip」是「unzip」的子串，只写 `"zip" in src` 的话这条永远绿
+    src = DOCKERFILE.read_text()
+    m = re.search(r"apt-get install[^\n]*\\\n\s*([^\n]*)", src)
+    assert m, "找不到 apt-get install 的包名那一行"
+    assert "zip" in m.group(1).replace("\\", " ").split(), m.group(1)
+
+
 # ── Phase 2b：扫描任务的文件进镜像（issue 05）──────────────────────────────────────────────
 
 def test_the_scan_task_files_are_in_the_image():

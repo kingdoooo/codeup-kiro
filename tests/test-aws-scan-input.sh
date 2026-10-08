@@ -57,6 +57,9 @@ cat > "$tmp/timeout" <<'STUB'
 shift
 case "$1" in
   /bin/bash) [ -n "${FAKE_EXPORT_RC:-}" ] && exit "$FAKE_EXPORT_RC" ;;
+  /usr/bin/zip) [ -n "${FAKE_ZIP_RC:-}" ] && exit "$FAKE_ZIP_RC"
+    # FAKE_ZIP_COMMENT：照常打包，再写一条归档注释（= 改用 `git archive --format=zip <提交>` 时 git 写进去的提交号）
+    if [ -n "${FAKE_ZIP_COMMENT:-}" ]; then "$@" || exit; printf '%s\n' "$FAKE_ZIP_COMMENT" | /usr/bin/zip -q -z "$5"; exit; fi ;;
   *) [ -n "${FAKE_TIMEOUT:-}" ] && exit "${FAKE_TIMEOUT_RC:-124}" ;;
 esac
 exec "$@"
@@ -77,7 +80,16 @@ case "${STUB_MODE:-ok}" in
   notcdx) echo '{"hello":1}' > "$5" ;;
 esac
 STUB
-printf '#!/bin/sh\nprintf "%%s\\n" "$@" >> "%s/aws.argv"\n[ -n "${FAKE_S3_FAIL:-}" ] && exit 254\nexit 0\n' "$tmp" > "$tmp/aws"
+# aws 替身：记 argv；put-object 的 --body 按键名的最后一段拷进 $tmp/up/（⑤ 要检查上传的内容）
+cat > "$tmp/aws" <<STUB
+#!/bin/sh
+printf '%s\n' "\$@" >> "$tmp/aws.argv"
+[ -n "\${FAKE_S3_FAIL:-}" ] && exit 254
+key=""; body=""; prev=""
+for a in "\$@"; do [ "\$prev" = --key ] && key="\$a"; [ "\$prev" = --body ] && body="\$a"; prev="\$a"; done
+if [ -n "\$body" ]; then mkdir -p "$tmp/up"; cp "\$body" "$tmp/up/\$(basename "\$key")"; fi
+exit 0
+STUB
 chmod +x "$tmp/setpriv" "$tmp/timeout" "$tmp/sbomgen" "$tmp/aws"
 export TIMEOUT_BIN="$tmp/timeout"
 
@@ -157,6 +169,87 @@ assert_eq "$(ls -A "$tmp/work/scan/inspector" 2>/dev/null | tr '\n' ' ')" "" "�
 assert_eq "$(prep STUB_MODE=notcdx)" "failed:sbom-not-cyclonedx" "③ 输出不是 CycloneDX → failed:sbom-not-cyclonedx"
 assert_eq "$(prep SBOM_MAX_BYTES=10)" "failed:sbom-too-large" "③ 输出超过上限 → failed:sbom-too-large"
 assert_eq "$(prep FAKE_S3_FAIL=1)" "failed:upload" "③ 上传失败 → failed:upload"
+
+# ⑤ scan_prep_security（issue 11；spec「Task A」SA 一项、「I8」「Z1」）。单独一个业务库：MR 作者在树里放了 `*.py -diff`（想把改动
+#    藏成「Binary files differ」）、export-ignore、改名、二进制、带空格与中文的路径、一个符号链接
+S="$tmp/sawork/business"; mkdir -p "$S"; lgit init -q -b main "$S"
+printf 'import sqlite3\n\ndef get(uid):\n    return uid\n' > "$S/app.py"
+for i in $(seq 1 12); do echo "def helper_$i(x): return x + $i"; done > "$S/util.py"
+echo '# demo' > "$S/README.md"
+lgit -C "$S" add -A; lgit -C "$S" commit -qm base
+SBASE=$(lgit -C "$S" rev-parse HEAD)
+lgit -C "$S" checkout -qb feat
+printf '*.py -diff\nhidden.txt export-ignore\n' > "$S/.gitattributes"
+printf 'import sqlite3\n\ndef get(uid):\n    return uid\n\ndef search(q):\n    return "SELECT * FROM t WHERE n = \x27" + q + "\x27"\n' > "$S/app.py"
+echo secret-but-reviewed > "$S/hidden.txt"
+lgit -C "$S" mv util.py helpers.py; echo 'def helper_13(x): return x + 13' >> "$S/helpers.py"
+printf '\000\001\002binary\000' > "$S/bin.dat"
+mkdir -p "$S/dir with space"; echo 'print(1)' > "$S/dir with space/中文.py"
+ln -s /etc/passwd "$S/link"
+lgit -C "$S" add -A; lgit -C "$S" commit -qm mr
+SHEAD=$(lgit -C "$S" rev-parse HEAD)
+lgit -C "$S" update-ref refs/remotes/origin/main "$SBASE"
+RUN32C=$(printf 'c%.0s' {1..32})
+saprep() {  # [KEY=VAL …] → 输入状态
+  rm -f "$tmp/aws.argv"; rm -rf "$tmp/up" "$tmp/sawork/scan"
+  run_lib 'scan_prep_security' WORKROOT="$tmp/sawork" HEAD_SHA="$SHEAD" PKG="$ROOT" "$@" 2>"$tmp/err"
+}
+assert_eq "$(saprep)" "ok" "⑤ 正常 → ok"
+keys=$(awk 'p{print; p=0} $0=="--key"{p=1}' "$tmp/aws.argv")
+assert_eq "$keys" "security/7/$SHEAD/$RUN32C/changes.patch
+security/7/$SHEAD/$RUN32C/meta.json
+security/7/$SHEAD/$RUN32C/files.txt
+security/7/$SHEAD/$RUN32C/source.zip" "⑤ 四个不可变键：security/<仓库>/<提交>/<run_id>/…，diff 以 .patch 结尾（服务硬要求）"
+assert_eq "$(grep -c -- '--expected-bucket-owner' "$tmp/aws.argv")" "4" "⑤ 每次上传都带 ExpectedBucketOwner（S3）"
+zinfo() { python3 - "$tmp/up/source.zip" <<'PY'
+import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+print("comment=" + repr(z.comment))
+# Info-ZIP 的 -X 不写 UTF-8 标志（bit 11）时，Python 按 cp437 解名字；原始字节是 UTF-8（SA 两种都认，issue 09 J1/J8）
+names = [i.filename if i.flag_bits & 0x800 else i.filename.encode("cp437").decode("utf-8")
+         for i in z.infolist() if not i.is_dir()]
+for n in sorted(names):
+    print(n)
+PY
+}
+zi=$(zinfo)
+assert_eq "$(printf '%s\n' "$zi" | head -1)" "comment=b''" "⑤ Z1：source.zip 没有归档注释（带注释的 zip 会被 SA 拒绝，issue 09）"
+got=$(printf '%s\n' "$zi" | tail -n +2 | LC_ALL=C sort)
+assert_eq "$got" "$(lgit -C "$S" -c core.quotePath=false ls-tree -r --name-only "$SHEAD" | LC_ALL=C sort | LC_ALL=C grep -vx link)" \
+  "⑤ I8：zip 里的文件 = head 提交树的非链接文件（export-ignore 的 hidden.txt 在、.gitattributes 在、符号链接不在）"
+assert_contains "$got" "dir with space/中文.py" "⑤ 带空格与中文的路径原样进 zip"
+assert_eq "$(LC_ALL=C sort "$tmp/up/files.txt")" "$got" "⑤ files.txt = zip 里的文件清单"
+p=$(cat "$tmp/up/changes.patch")
+assert_contains "$p" "+    return \"SELECT * FROM t WHERE n = '\" + q + \"'\"" "⑤ 树内的 *.py -diff 失效：app.py 的改动以文本 hunk 进了 .patch"
+assert_not_contains "$p" "Binary files a/app.py" "⑤ app.py 没有被当成二进制藏起来"
+assert_contains "$p" "Binary files /dev/null and b/bin.dat differ" "⑤ 真正的二进制文件仍按二进制处理（不把原始字节灌进 diff）"
+assert_contains "$p" "rename from util.py" "⑤ 显式 -M：改名以 rename 头出现（issue 09 实测 SA 按新路径报改名文件里的问题）"
+assert_contains "$p" "diff --git a/dir with space/中文.py b/dir with space/中文.py" "⑤ 非 ASCII 路径不转义（core.quotePath=false，_git_diff_pinned 的参数集）"
+assert_eq "$(/usr/bin/jq -c '{symlinks, diff_files, unlisted, base}' "$tmp/up/meta.json")" \
+  "{\"symlinks\":1,\"diff_files\":7,\"unlisted\":0,\"base\":\"$SBASE\"}" "⑤ meta.json：剔除 1 个符号链接、diff 7 个文件（符号链接本身也是一处改动）、merge-base"
+assert_eq "$(/usr/bin/jq '.files' "$tmp/up/meta.json")" "$(printf '%s\n' "$got" | wc -l | tr -d ' ')" "⑤ meta.json 的文件数 = zip 里的文件数"
+assert_eq "$([ -e "$S/.git/info/attributes" ] && echo yes || echo no)" "no" "⑤ 生成完删掉了临时的 info/attributes（不给 Kiro 留改动）"
+assert_eq "$([ -e "$tmp/sawork/scan/security" ] && echo yes || echo no)" "no" "⑤ 工作目录用完即删（F2）"
+# 正向对照：不写那一行 `* !diff` 时，同一个 git 确实把 app.py 的改动藏成二进制
+assert_contains "$(lgit -C "$S" diff "$SBASE" "$SHEAD" -- app.py)" "Binary files a/app.py and b/app.py differ" \
+  "⑤ 正向对照：没有那一行时 *.py -diff 真的会藏掉改动"
+# 跳过与失败
+assert_eq "$(saprep HEAD_SHA="$SBASE")" "skipped:empty-diff" "⑤ 空 diff → skipped:empty-diff（不起作业）"
+assert_eq "$([ -e "$tmp/aws.argv" ] && echo yes || echo no)" "no" "⑤ 空 diff 时什么都不上传"
+assert_eq "$(saprep SCAN_SA_DIFF_MAX_FILES=5)" "skipped:diff-too-large" "⑤ 改动文件超过上限 → skipped:diff-too-large"
+assert_eq "$(saprep SCAN_SA_DIFF_MAX_BYTES=100)" "skipped:diff-too-large" "⑤ diff 字节数超过上限 → skipped:diff-too-large"
+assert_eq "$(saprep SCAN_SA_ZIP_MAX_BYTES=100)" "skipped:archive-too-large" "⑤ 归档超过上限 → skipped:archive-too-large"
+assert_eq "$(saprep MR_TARGET_BRANCH=)" "failed:no-target-branch" "⑤ 没有目标分支 → failed:no-target-branch"
+assert_eq "$(saprep MR_TARGET_BRANCH=nope)" "failed:merge-base" "⑤ 目标分支在 clone 里没有 → failed:merge-base"
+assert_eq "$(saprep FAKE_EXPORT_RC=124)" "failed:export-timeout" "⑤ 导出超时 → failed:export-timeout"
+assert_eq "$(saprep FAKE_EXPORT_RC=1)" "failed:export" "⑤ 导出失败 → failed:export"
+assert_eq "$(saprep FAKE_ZIP_RC=124)" "failed:zip-timeout" "⑤ 打包超时 → failed:zip-timeout"
+assert_eq "$(saprep FAKE_ZIP_RC=1)" "failed:zip" "⑤ 打包失败 → failed:zip"
+assert_eq "$(saprep FAKE_ZIP_COMMENT=0123abc)" "failed:zip-comment" "⑤ Z1：打出来的 zip 带了归档注释 → failed:zip-comment（SA 会拒收，不上传）"
+assert_eq "$([ -e "$tmp/aws.argv" ] && echo yes || echo no)" "no" "⑤ Z1：带注释的 zip 什么都不上传"
+assert_eq "$(saprep FAKE_S3_FAIL=1)" "failed:upload" "⑤ 上传失败 → failed:upload"
+assert_eq "$([ -e "$tmp/sawork/scan/security" ] && echo yes || echo no)" "no" "⑤ 失败路径上工作目录同样删掉"
+assert_eq "$([ -e "$S/.git/info/attributes" ] && echo yes || echo no)" "no" "⑤ 失败路径上 info/attributes 同样删掉"
 
 # ④ S1 真跑：Linux、root、有 setpriv
 if [[ "$(uname -s)" == Linux && "$(id -u)" == 0 && -x /usr/bin/setpriv ]]; then

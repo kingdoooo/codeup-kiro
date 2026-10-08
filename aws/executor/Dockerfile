@@ -4,10 +4,11 @@
 FROM public.ecr.aws/docker/library/debian:stable-slim
 
 # kiro-review.sh 把 timeout（GNU coreutils）当强制依赖，缺了直接拒绝运行；
-# jq >= 1.6 有硬前置检查；git 用于 clone 与 diff；unzip 用于解开钉版安装包。
+# jq >= 1.6 有硬前置检查；git 用于 clone 与 diff；unzip 用于解开钉版安装包；
+# zip 用于打 Security Agent 的源归档（Phase 2b issue 11：`zip -X`，不写归档注释——SA 拒收带注释的 zip）。
 RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends \
-      git jq unzip coreutils ca-certificates curl \
+      git jq unzip zip coreutils ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
 # aws-cli v2：entrypoint 收尾时要写一次 DynamoDB「已回写」标记（Task 10）。
