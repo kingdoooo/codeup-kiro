@@ -187,9 +187,12 @@ def main():
         if not o.get(need):
             die(f"{op} without {need}")
     key = json.loads(o["--key"])
-    if list(key) != ["pk"] or list(key["pk"]) != ["S"]:
-        die(f"key must be exactly {{pk: {{S: …}}}}: {key}")
-    pk = key["pk"]["S"]
+    # 锁表的键是 pk；Phase 2b 的映射表（repo_id → code review）的键是 repo_id。其余键名一律拒绝。
+    # 状态文件里锁表记录仍以 pk 的值为键（既有测试读它）；映射表记录以 `repo_id=<值>` 为键，两类不会撞
+    if len(key) != 1 or list(key)[0] not in ("pk", "repo_id") or list(key[list(key)[0]]) != ["S"]:
+        die(f"key must be exactly {{pk|repo_id: {{S: …}}}}: {key}")
+    key_attr = list(key)[0]
+    pk = key[key_attr]["S"] if key_attr == "pk" else f"repo_id={key[key_attr]['S']}"
     state_path = os.environ["FAKE_DDB_STATE"]
     log_path = os.environ.get("FAKE_DDB_LOG")
     with open(state_path + ".lock", "a+") as lk:
@@ -232,10 +235,15 @@ def main():
                 die("update-item without --update-expression")
             item = dict(table.get(pk) or {})
             cond = o.get("--condition-expression")
+            # 与真实 DynamoDB 一致：没在任何表达式里用到的名字 / 取值占位符 → ValidationException（Phase 2b 映射表差点踩到）
+            used = (cond or "") + " " + o["--update-expression"]
+            unused = [k for k in list(names) + list(values) if not re.search(re.escape(k) + r"(?![A-Za-z0-9_])", used)]
+            if unused:
+                service_error(op, "ValidationException", f"Value provided in ExpressionAttribute* unused in expressions: {unused}")
             if cond is not None and not Cond(tokens(cond), names, values, item).parse():
                 result = "condition-failed"
             else:
-                item["pk"] = {"S": pk}
+                item[key_attr] = key[key_attr]
                 apply_update(o["--update-expression"], names, values, item)
                 table[pk] = item
                 with open(state_path + ".tmp", "w") as fh:
