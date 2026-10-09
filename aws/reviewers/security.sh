@@ -52,6 +52,7 @@ SA_SRC_URI="s3://${SCAN_BUCKET}/${SA_PREFIX}/source.zip"
 SA_PATCH_URI="s3://${SCAN_BUCKET}/${SA_PREFIX}/changes.patch"
 SA_DEADLINE=$(( $(/bin/date +%s) + 10#$SECURITY_AGENT_TIMEOUT ))
 SA_JOB_ID=""; SA_JOB_ACTIVE=0
+SA_CLAIM=""   # Q1 映射表认领：held = 认领了、还没调 CreateCodeReview；create = 调过（可能已经建了）；空 = 没有（issue 17）
 
 # 一次 securityagent 调用：<操作> <请求 JSON> → stdout 应答；失败时错误代号（AWS 错误码；没有代号 = unknown）写进 $WORK/sa.code，
 # 用 sa_err 读——不放全局变量：调用方几乎都是 `out=$(sa_call …)`，那是子 shell，全局赋值回不到调用方。
@@ -76,6 +77,8 @@ _sa_exit() {
       >/dev/null 2>&1 || true
     log "退出时作业 ${SA_JOB_ID} 仍在运行，已请求停止"
   fi
+  # 认领了、还没调 CreateCodeReview 就退出（被 TERM）：放掉认领，同仓库别的评审不必等它到期（issue 17）
+  if [[ "${SA_CLAIM:-}" == held ]]; then sa_claim_release; fi
   if [[ "${SA_REPO_HELD:-0}" == 1 ]]; then
     local lease_key="$SA_REPO_KEY" lease_me="$SA_REPO_ME"; lease_release
   fi
@@ -119,6 +122,14 @@ sa_adopt_by_title() {
   out=$(sa_call list-code-reviews "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" '{agentSpaceId: $s}')") || return 1
   jq -r --arg t "$SA_TITLE" '[.codeReviewSummaries[]? | select(.title == $t)] | sort_by(.createdAt) | .[0].codeReviewId // empty' <<< "$out"
 }
+# 放掉本进程的 creating 认领（issue 17）：只在确知本进程没有建出 code review 时调——收编失败、CreateCodeReview 被明确拒绝，
+# 或调它之前就退出。条件带 #s = :creating：已置 ready 的记录上 holder 还是建它的进程，不能碰；别人接管了（holder 不是我）也不碰。
+# 复位成 until = 0、不删 status（I-3 的认领条件要读 status）。持有者显式用 SA_L7_ME：EXIT 陷阱里 lease_me 可能被局部变量遮住
+sa_claim_release() {
+  sa_map_update '#h = :me AND #s = :creating' 'SET #u = :zero' \
+    "$(jq -cn --arg me "$SA_L7_ME" '{":me": {S: $me}, ":creating": {S: "creating"}, ":zero": {N: "0"}}')" || true
+  SA_CLAIM=""
+}
 sa_ensure_code_review() {  # → 全局 SA_CR_ID
   local item status cr space now deadline rc out
   deadline=$(( $(/bin/date +%s) + SA_LOCK_WAIT ))
@@ -135,20 +146,26 @@ sa_ensure_code_review() {  # → 全局 SA_CR_ID
       "$(jq -cn --arg me "$lease_me" --arg now "$now" --arg until "$((now + 120))" --arg sp "$SA_AGENT_SPACE_ID" \
          '{":creating": {S: "creating"}, ":ready": {S: "ready"}, ":space": {S: $sp}, ":now": {N: $now}, ":until": {N: $until}, ":me": {S: $me}}')" \
       || rc=$?
-    [[ "$rc" == 0 ]] && break
+    [[ "$rc" == 0 ]] && { SA_CLAIM=held; break; }
     [[ "$rc" == 1 ]] || reviewer_fail "读写 code review 映射表失败（代号 sa-mapping）"
     (( $(/bin/date +%s) < deadline )) || reviewer_fail "等别的任务建本仓库的 code review 超过 ${SA_LOCK_WAIT} 秒（代号 sa-mapping-wait）"
     /bin/sleep 5
   done
-  SA_CR_ID=$(sa_adopt_by_title) || reviewer_fail "列出 code review 失败（代号 $(sa_err)）"
+  SA_CR_ID=$(sa_adopt_by_title) || { local code; code=$(sa_err); sa_claim_release; reviewer_fail "列出 code review 失败（代号 ${code}）"; }
   if [[ -z "$SA_CR_ID" ]]; then
+    SA_CLAIM=create
     out=$(sa_call_once create-code-review "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" --arg t "$SA_TITLE" --arg src "$SA_SRC_URI" \
             --arg role "$SA_SERVICE_ROLE_ARN" \
             '{agentSpaceId: $s, title: $t, assets: {sourceCode: [{s3Location: $src}]}, serviceRole: $role,
               codeRemediationStrategy: "DISABLED", validationMode: "DISABLED"}')") \
       && SA_CR_ID=$(jq -r '.codeReviewId // empty' <<< "$out") \
       || { local code; code=$(sa_err); SA_CR_ID=$(sa_adopt_by_title || true)
-           [[ -n "$SA_CR_ID" ]] || reviewer_fail "建本仓库的 code review 失败（代号 ${code}）"; }
+           if [[ -z "$SA_CR_ID" ]]; then
+             # 明确拒绝（带错误码、不是 5xx / 超时）= 没建出来：放掉认领（issue 17）。含糊失败可能已经建了（没有幂等令牌）：
+             # 认领留到到期，下一个人到时先按标题收编，不再建第二个
+             case "$code" in InternalServerException|ServiceUnavailableException|RequestTimeout|unknown) ;; *) sa_claim_release ;; esac
+             reviewer_fail "建本仓库的 code review 失败（代号 ${code}）"
+           fi; }
   fi
   [[ "$SA_CR_ID" =~ ^cr-[0-9a-f-]{8,64}$ ]] || reviewer_fail "code review id 的形状不对（代号 sa-create）"
   rc=0
@@ -162,6 +179,7 @@ sa_ensure_code_review() {  # → 全局 SA_CR_ID
     [[ "$cr" =~ ^cr-[0-9a-f-]{8,64}$ ]] && SA_CR_ID="$cr"
     log "登记 code review 映射时认领已被接管（rc=${rc}），使用 ${SA_CR_ID}"
   fi
+  SA_CLAIM=""
   log "本仓库的 code review：${SA_CR_ID}"
 }
 

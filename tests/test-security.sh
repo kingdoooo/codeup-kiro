@@ -193,6 +193,15 @@ case "\$1 \$2" in
       echo "An error occurred (InternalServerException) when calling the BatchGetCodeReviewJobs operation: injected" >&2; exit 254
     fi
     exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
+  # issue 17：\$tmp/steal-claim → 建 code review 之前别人接管了认领；\$tmp/slow-list → 收编那次 ListCodeReviews 慢 3 秒（好在认领期间发 TERM）
+  "securityagent create-code-review")
+    if [ -e "$tmp/steal-claim" ]; then
+      jq '.["repo_id=7"].holder.S = "other" | .["repo_id=7"].until.N = "9999999999"' "$tmp/ddb.json" > "$tmp/ddb.steal" && mv "$tmp/ddb.steal" "$tmp/ddb.json"
+    fi
+    exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
+  "securityagent list-code-reviews")
+    if [ -e "$tmp/slow-list" ]; then touch "$tmp/in-list"; sleep 3; fi
+    exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
   securityagent*) exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
   # \$tmp/stale-get：映射表的下一次 get-item 读到这份旧记录（一次）——模拟「读到 creating 之后、认领之前，别人已经置了 ready」（终审 I-3）
   "dynamodb get-item")
@@ -225,7 +234,7 @@ cp "$FIX/files-head-clean.txt" "$tmp/s3/files.txt"; cp "$tmp/meta.json" "$tmp/s3
 SPACE=as-11111111-1111-4111-8111-111111111111
 SHA=$(printf 'a%.0s' {1..40}); RUNID=$(printf 'b%.0s' {1..32})
 SRC="s3://bkt/security/7/$SHA/$RUNID/source.zip"; PATCH="s3://bkt/security/7/$SHA/$RUNID/changes.patch"
-fresh() { rm -f "$tmp"/sa.json* "$tmp/sa.log" "$tmp/s3.argv" "$tmp/date.n" "$tmp/superseded" "$tmp/hc.seen" "$tmp/lease-at-poll" "$tmp/stale-get" "$tmp/bgj-fail"; echo '{}' > "$tmp/ddb.json"; rm -f "$tmp/ddb.json.lock"; }
+fresh() { rm -f "$tmp"/sa.json* "$tmp/sa.log" "$tmp/s3.argv" "$tmp/date.n" "$tmp/superseded" "$tmp/hc.seen" "$tmp/lease-at-poll" "$tmp/stale-get" "$tmp/bgj-fail" "$tmp/steal-claim" "$tmp/slow-list" "$tmp/in-list"; echo '{}' > "$tmp/ddb.json"; rm -f "$tmp/ddb.json.lock"; }
 drive() {  # [KEY=VAL …] → rc；输出在 $tmp/out
   rm -rf "$tmp/w"; mkdir -p "$tmp/w"
   local rc=0
@@ -329,6 +338,32 @@ printf '{"Item": {"repo_id": {"S": "7"}, "status": {"S": "creating"}, "holder": 
 assert_eq "$(drive)" "0" "④ I-3 读到旧的 creating → 0"
 assert_eq "$(ops | cut -d' ' -f1-2)" "update-code-review start-code-review-job" "④ I-3 认领没有覆盖已 ready 的映射：不再列、不再建，直接用表里那个"
 assert_eq "$(mapping | jq -r .cr)" "cr-0000000b-0000-4000-8000-000000000000" "④ I-3 映射表仍是原来那个 code review"
+# issue 17：CreateCodeReview 被明确拒绝（= 没建出来）→ 放掉本进程的 creating 认领，同仓库下一次评审立刻能认领、自己建（不等 120 秒到期）
+claim() { jq -r '.["repo_id=7"] | "\(.status.S // "-")/\(.until.N // "-")/\(.holder.S // "-" | if . == "other" then "other" else "me" end)"' "$tmp/ddb.json"; }
+fresh
+assert_eq "$(drive FAKE_SA_FAIL_CREATECODEREVIEW=ValidationException)" "0" "④ issue 17 建 code review 被拒 → 失败评论（终态 0）"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "建本仓库的 code review 失败（代号 ValidationException）" "④ issue 17 失败评论带代号"
+assert_eq "$(claim)" "creating/0/me" "④ issue 17 明确拒绝 → 认领复位（until = 0，status 不删）"
+assert_eq "$(drive MR_LOCAL_ID=8 LOCK_KEY=k8 SA_LOCK_WAIT=5)" "0" "④ issue 17 另一个 MR 紧接着评审 → 0"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "DIFF 扫描发现 2 个安全问题" "④ issue 17 另一个 MR 立刻认领、建成并出汇总（不卡在 sa-mapping-wait）"
+assert_eq "$(mapping | jq -r .status)" "ready" "④ issue 17 映射表登记为 ready"
+# 含糊失败（5xx：可能已经建了，没有幂等令牌）→ 认领留到到期，免得下一个人再建一个
+fresh
+assert_eq "$(drive FAKE_SA_FAIL_CREATECODEREVIEW=InternalServerException)" "0" "④ issue 17 建 code review 含糊失败 → 失败评论"
+assert_eq "$(claim | cut -d/ -f1,3)" "creating/me" "④ issue 17 含糊失败：认领还在"
+assert_eq "$(( $(claim | cut -d/ -f2) > $(date +%s) ))" "1" "④ issue 17 含糊失败：认领没有复位（留到到期）"
+# 别人已接管认领（我卡太久）→ 失败路径不碰表
+fresh; touch "$tmp/steal-claim"
+assert_eq "$(drive FAKE_SA_FAIL_CREATECODEREVIEW=ValidationException)" "0" "④ issue 17 认领被接管后建失败 → 失败评论"
+assert_eq "$(claim)" "creating/9999999999/other" "④ issue 17 别人接管的认领原样不动（条件 #h = :me）"
+# 认领之后、建之前被 TERM（收编那次 ListCodeReviews 期间）→ EXIT 陷阱放掉认领
+fresh; touch "$tmp/slow-list"; rm -f "$tmp/drv.pid"
+( DRIVE_PIDFILE="$tmp/drv.pid" drive > "$tmp/rc.i17" ) & bg17=$!
+for _ in $(seq 1 200); do [[ -s "$tmp/drv.pid" && -e "$tmp/in-list" ]] && break; sleep 0.1; done
+assert_eq "$(claim | cut -d/ -f1,3)" "creating/me" "④ issue 17（准备）TERM 之前本进程持有认领"
+kill -TERM "$(cat "$tmp/drv.pid")"; wait "$bg17"
+assert_eq "$(claim)" "creating/0/me" "④ issue 17 认领期间被 TERM → 退出时复位认领"
+assert_eq "$(ops | tr ' ' '\n' | grep -c '^create-code-review$')" "0" "④ issue 17（对照）被 TERM 的那次没有建 code review"
 # R9：并发满（明确拒绝、不建作业）→ 放开仓库租约、退避重试
 fresh
 assert_eq "$(drive FAKE_SA_START_THROTTLE=2)" "0" "④ R9：前两次 Start 被限流 → 重试后成功"
