@@ -76,8 +76,14 @@ assert_contains "$out" "计数为 DIFF 扫描发现：CRITICAL+HIGH / MEDIUM / L
 assert_contains "$out" '| 7 个文件 · 归档 7 个文件（剔除 1 个符号链接） · 作业 `cj-1f981f2a-0e5b-4910-b8a5-a16f0e64a25c` |' \
   "③ 元信息：diff 文件数、归档文件数、剔除的符号链接、作业 id"
 assert_contains "$out" "**CRITICAL（1）**" "③ 按 riskLevel 分组"
-assert_contains "$out" '1. **Unauthenticated OS command injection in new /ping endpoint (shell=True)** · `COMMAND_INJECTION` · 置信度 HIGH' \
-  "③ 每条：名字、riskType、置信度"
+assert_contains "$out" '1. **Unauthenticated OS command injection in new /ping endpoint (shell=True)** · 命令注入 `COMMAND_INJECTION` · 置信度 HIGH' \
+  "③ 每条：名字、riskType（固定中文名 + 原代号）、置信度"
+# riskType 的中文名是固定对照表（Kent 2026-10-09：不翻译服务原文，只给代号配中文名）：SDK 枚举外、真实输出里见过的也有；
+# 对照表里没有的代号只显示代号；不合形状的已归一成 OTHER
+for rt in "SECURITY_MISCONFIGURATION|安全配置错误 \`SECURITY_MISCONFIGURATION\`" "OTHER|其它 \`OTHER\`" "BRAND_NEW_TYPE|· \`BRAND_NEW_TYPE\` · 置信度"; do
+  jq --arg t "${rt%%|*}" '.findings[0].riskType = $t' "$tmp/rep.json" > "$tmp/rt.json"
+  assert_contains "$(render "$tmp/rt.json")" "${rt#*|}" "③ riskType ${rt%%|*} 的显示"
+done
 assert_contains "$out" '   - `src/工具/ping.py:8–11` — sink: shell=True with user input' "③ 位置 path:start–end + 标签（非 ASCII 路径原样）"
 assert_contains "$out" '   - `src/app/routes.py:37` — sink: concatenated SQL' "③ 起止同一行时只写一个行号"
 assert_contains "$out" "<details><summary>Security Agent 的总结</summary>" "③ 作业 overview 进折叠区"

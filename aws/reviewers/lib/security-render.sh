@@ -17,11 +17,36 @@ _sa_cut() {  # <取值> <上限>
   jq -nr --arg v "$1" --argjson m "$2" '$v | if length > $m then .[0:$m] + "…" else . end'
 }
 
+# riskType 的固定中文名（Kent 2026-10-09：服务原文不翻译，只给代号配中文名，代号照旧显示）。SDK 模型的 28 个枚举值，
+# 加上真实输出里见过的枚举外取值（AUTHENTICATION_BYPASS、SECURITY_MISCONFIGURATION，issue 09）；对照表里没有的 → 空（只显示代号）
+_sa_risk_type_cn() {
+  case "$1" in
+    ARBITRARY_FILE_UPLOAD) echo "任意文件上传" ;;           BUSINESS_LOGIC_VULNERABILITIES) echo "业务逻辑漏洞" ;;
+    CODE_INJECTION) echo "代码注入" ;;                      COMMAND_INJECTION) echo "命令注入" ;;
+    CROSS_SITE_SCRIPTING) echo "跨站脚本（XSS）" ;;          CRYPTOGRAPHIC_VULNERABILITIES) echo "密码学缺陷" ;;
+    DATABASE_ACCESS) echo "数据库越权访问" ;;                DATABASE_MODIFICATION) echo "数据库越权修改" ;;
+    DEFAULT_CREDENTIALS) echo "默认凭证" ;;                 DENIAL_OF_SERVICE) echo "拒绝服务" ;;
+    FILE_ACCESS) echo "文件越权访问" ;;                      FILE_CREATION) echo "文件越权创建" ;;
+    FILE_DELETION) echo "文件越权删除" ;;                    GRAPHQL_VULNERABILITIES) echo "GraphQL 漏洞" ;;
+    INFORMATION_DISCLOSURE) echo "信息泄露" ;;               INSECURE_DESERIALIZATION) echo "不安全的反序列化" ;;
+    INSECURE_DIRECT_OBJECT_REFERENCE) echo "不安全的直接对象引用（IDOR）" ;;
+    JSON_WEB_TOKEN_VULNERABILITIES) echo "JWT 漏洞" ;;       LOCAL_FILE_INCLUSION) echo "本地文件包含" ;;
+    OUTBOUND_SERVICE_REQUEST) echo "出站服务请求" ;;          PATH_TRAVERSAL) echo "路径穿越" ;;
+    PRIVILEGE_ESCALATION) echo "权限提升" ;;                 SERVER_SIDE_REQUEST_FORGERY) echo "服务端请求伪造（SSRF）" ;;
+    SERVER_SIDE_TEMPLATE_INJECTION) echo "服务端模板注入（SSTI）" ;;
+    SQL_INJECTION) echo "SQL 注入" ;;                       XML_EXTERNAL_ENTITY) echo "XML 外部实体（XXE）" ;;
+    AUTHENTICATION_BYPASS) echo "认证绕过" ;;                SECURITY_MISCONFIGURATION) echo "安全配置错误" ;;
+    OTHER) echo "其它" ;;                                   UNKNOWN) echo "未知" ;;
+    *) echo "" ;;
+  esac
+}
+
 # 一条发现（compact JSON）→ 一段 Markdown
 _sa_render_finding() {  # <序号> <发现 JSON>
-  local n="$1" f="$2" name loc path start end label known range desc
+  local n="$1" f="$2" name loc path start end label known range desc rt cn
   name=$(_review_sanitize_oneline "$(_sa_cut "$(jq -r '.name' <<< "$f")" 200)")
-  printf '%s. **%s** · `%s` · 置信度 %s\n' "$n" "$name" "$(jq -r '.riskType' <<< "$f")" "$(jq -r '.confidence' <<< "$f")"
+  rt=$(jq -r '.riskType' <<< "$f"); cn=$(_sa_risk_type_cn "$rt")
+  printf '%s. **%s** · %s`%s` · 置信度 %s\n' "$n" "$name" "${cn:+$cn }" "$rt" "$(jq -r '.confidence' <<< "$f")"
   while IFS= read -r loc; do
     path=$(_review_meta_cell "$(jq -r '.path' <<< "$loc")")
     start=$(jq -r '.start // ""' <<< "$loc"); end=$(jq -r '.end // ""' <<< "$loc")
