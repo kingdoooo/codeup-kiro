@@ -255,6 +255,12 @@ assert_contains "$body" "DIFF 扫描发现 2 个安全问题" "④ 汇总里是�
 assert_contains "$body" '`src/工具/ping.py:8–11`' "④ 位置已规范化"
 assert_contains "$out" "的 report：[{\"name\":" "④ I-7 完整的发现列表记进扫描任务日志（评论按字节预算折叠时，折叠行指向它）"
 assert_not_contains "$(LC_ALL=C grep '的 report：' <<< "$out")" "attackScript" "④ I-7 日志里的 report 同样不带 attackScript"
+# 针对性复审 M-2：发现里引用的密钥在评论里被掩码，日志里的 report 一行同样要掩（日志组保留 30 天）
+fresh
+jq --arg k "$(fake_token akia)" '.findings[0].description += " Hardcoded key \($k) in config."' "$FIX/findings-diff.json" > "$tmp/f-secret.json"
+assert_eq "$(drive FAKE_SA_FINDINGS="$tmp/f-secret.json")" "0" "④ M-2 发现里带密钥 → 0"
+assert_contains "$(LC_ALL=C grep '的 report：' "$tmp/out")" "AKIA****MPLE" "④ M-2 日志里的 report 一行经过掩码（正向：掩码形状在）"
+assert_not_contains "$(cat "$tmp/out")" "$(fake_token akia)" "④ M-2 日志与评论里都没有密钥原文"
 assert_eq "$(ops)" "list-code-reviews create-code-review update-code-review start-code-review-job batch-get-code-review-jobs batch-get-code-review-jobs list-findings batch-get-findings " \
   "④ 调用顺序：收编（无）→ 建 → 重指向 → Start → 核对作业的源 → 轮询 → 取发现"
 creq=$(req_of create-code-review)
