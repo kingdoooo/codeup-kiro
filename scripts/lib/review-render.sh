@@ -71,9 +71,9 @@ case "${REVIEW_PROFILE:-kiro}" in
     REVIEW_MARKER_NAME="kiro-security-review"
     REVIEW_HISTORY_PREFIX="<!-- kiro-security-history:"
     REVIEW_POST_NONCE_PREFIX='<!-- kiro-security-post:'
-    REVIEW_LEGEND="计数为差分扫描发现：CRITICAL+HIGH / MEDIUM / LOW 及其它"
+    REVIEW_LEGEND="计数为 DIFF 扫描发现：CRITICAL+HIGH / MEDIUM / LOW 及其它"
     REVIEW_COUNTS_HEADER="高/中/低"
-    REVIEW_META_NOTE_HEADER="差分"
+    REVIEW_META_NOTE_HEADER="DIFF"
     REVIEW_HISTORY_OK_LABEL="完成" ;;
   *)
     echo "review-render: 未知的评审员档案 REVIEW_PROFILE=${REVIEW_PROFILE}（只认 kiro / inspector / security）" >&2

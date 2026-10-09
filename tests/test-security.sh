@@ -68,8 +68,11 @@ render() {  # <报告 JSON 文件> [overview 文件] → 评论
 }
 out=$(render "$tmp/rep.json" "$tmp/overview.md")
 assert_contains "$out" "# Security Agent 安全评审"$'\n'"<!-- kiro-security-review:abc1234 run:3 -->" "③ 评论头是 security 档案的"
-assert_contains "$out" "差分扫描发现 2 个安全问题（CRITICAL 1 · HIGH 1 · MEDIUM 0 · LOW 0 · 其它 0）。" "③ 结论行带各级计数"
-assert_contains "$out" "> Security Agent 的结论非确定：同一提交重跑，条数与位置可能不同。" "③ R10：非确定性的固定文案"
+assert_contains "$out" "DIFF 扫描发现 2 个安全问题（CRITICAL 1 · HIGH 1 · MEDIUM 0 · LOW 0 · 其它 0）。" "③ 结论行带各级计数"
+assert_not_contains "$out" "非确定" "③ 不再有「结论非确定」的固定提示（Kent 2026-10-09 撤掉 R10 的这条文案）"
+assert_contains "$out" '作业 `cj-1f981f2a-0e5b-4910-b8a5-a16f0e64a25c` |'$'\n\n''## 结论' "③ 元信息表之后直接是结论（中间没有提示行）"
+assert_contains "$out" "| Commit | 分支 | 时间 | DIFF |" "③ 元信息表第四列的表头是 DIFF"
+assert_contains "$out" "计数为 DIFF 扫描发现：CRITICAL+HIGH / MEDIUM / LOW 及其它" "③ 页脚的计数图例"
 assert_contains "$out" '| 7 个文件 · 归档 7 个文件（剔除 1 个符号链接） · 作业 `cj-1f981f2a-0e5b-4910-b8a5-a16f0e64a25c` |' \
   "③ 元信息：diff 文件数、归档文件数、剔除的符号链接、作业 id"
 assert_contains "$out" "**CRITICAL（1）**" "③ 按 riskLevel 分组"
@@ -127,13 +130,13 @@ assert_contains "$wout" "第 3 次评审 · " "③ I-7 页脚（重新评审的�
 assert_not_contains "$out" "条发现因评论长度上限" "③ I-7 放得下时不折叠"
 # 服务上限 30 条、误报计数、没有发现
 jq '.returned = 30' "$tmp/rep.json" > "$tmp/cap.json"
-assert_contains "$(render "$tmp/cap.json")" "本次返回 30 条，达到服务上限（每次差分扫描最多 30 条），可能还有未报出的问题。" "③ 恰好 30 条 → 注明服务上限"
+assert_contains "$(render "$tmp/cap.json")" "本次返回 30 条，达到服务上限（每次 DIFF 扫描最多 30 条），可能还有未报出的问题。" "③ 恰好 30 条 → 注明服务上限"
 assert_not_contains "$out" "达到服务上限" "③ 不到 30 条不写"
 jq '.false_positives = 2' "$tmp/rep.json" > "$tmp/fp.json"
 assert_contains "$(render "$tmp/fp.json")" "另有 2 条被 Security Agent 判为误报，未列出。" "③ 误报只计数"
 jq -n '{findings: [], counts: {CRITICAL:0,HIGH:0,MEDIUM:0,LOW:0,INFORMATIONAL:0,UNKNOWN:0}, returned: 0, false_positives: 0, unmatched: 0}' > "$tmp/none.json"
 nout=$(render "$tmp/none.json")
-assert_contains "$nout" '未发现安全问题（差分扫描 · 提交 `abc1234`）。' "③ 没有发现 → 一句话"
+assert_contains "$nout" '未发现安全问题（DIFF 扫描 · 提交 `abc1234`）。' "③ 没有发现 → 一句话"
 assert_not_contains "$nout" "## 发现" "③ 没有发现时不出「发现」一节"
 assert_contains "$nout" "| 3 | \`abc1234\` | 完成 | 0/0/0 |" "③ 没有发现时历次表是 0/0/0"
 # 注入：名字、说明、标签、路径、overview 都是模型输出（不受信）
@@ -154,10 +157,13 @@ assert_eq "$(lib "review_select_prior_comment bot < '$tmp/evil-list.json' | jq -
 # 说明汇总（skipped:*）
 sk() { lib "SHORT_SHA=abc1234; REVIEW_RUN=2; PRIOR_HISTORY_FILE=''; CI_COMMIT_REF_NAME=feat; MR_TARGET_BRANCH=main; security_render_skipped '$1'"; }
 skout=$(sk empty-diff)
-assert_contains "$skout" "本次没有执行差分扫描：MR 相对目标分支没有改动（空 diff），没有可扫描的内容。" "③ skipped:empty-diff → 说明汇总"
+assert_contains "$skout" "本次没有执行 DIFF 扫描：MR 相对目标分支没有改动（空 diff），没有可扫描的内容。" "③ skipped:empty-diff → 说明汇总"
 assert_contains "$skout" "<!-- kiro-security-review:abc1234 run:2 -->" "③ 说明汇总同样带评审标记（下一次原地更新它）"
 assert_contains "$skout" "| 2 | \`abc1234\` | 完成 | -/-/- |" "③ 说明汇总的历次行没有计数"
-assert_contains "$(sk diff-too-large)" "3,000 个文件或 5 MB" "③ skipped:diff-too-large 的说明"
+assert_contains "$(sk diff-too-large)" "改动超过 Security Agent DIFF 扫描的上限（3,000 个文件或 5 MB）" "③ skipped:diff-too-large 的说明"
+for _v in "$out" "$nout" "$skout" "$(sk diff-too-large)" "$(render "$tmp/cap.json")"; do
+  assert_not_contains "$_v" "差分" "③ 渲染文案里不再有「差分」（汇总、无发现、空 diff、超限、服务上限五种形态）"
+done
 assert_contains "$(sk archive-too-large)" "2 GB" "③ skipped:archive-too-large 的说明"
 assert_contains "$(sk 'weird-x')" "代号 weird-x" "③ 其它代号原样（已经过 [a-z0-9-] 校验）"
 
@@ -239,7 +245,7 @@ fresh
 assert_eq "$(drive)" "0" "④ 正常 → 0（已回写）"
 out=$(cat "$tmp/out"); body=$(posted_comment "$out")
 assert_eq "$(req_count "$out" POST 'comments$')" "1" "④ 新建一条汇总"
-assert_contains "$body" "差分扫描发现 2 个安全问题" "④ 汇总里是作业的发现"
+assert_contains "$body" "DIFF 扫描发现 2 个安全问题" "④ 汇总里是作业的发现"
 assert_contains "$body" '`src/工具/ping.py:8–11`' "④ 位置已规范化"
 assert_contains "$out" "的 report：[{\"name\":" "④ I-7 完整的发现列表记进扫描任务日志（评论按字节预算折叠时，折叠行指向它）"
 assert_not_contains "$(LC_ALL=C grep '的 report：' <<< "$out")" "attackScript" "④ I-7 日志里的 report 同样不带 attackScript"
@@ -334,7 +340,7 @@ assert_eq "$(drive FAKE_SA_START_AMBIGUOUS=1)" "0" "④ Q3：含糊失败 → �
 assert_eq "$(ops | tr ' ' '\n' | grep -c '^start-code-review-job$')" "1" "④ Q3：只 Start 了一次（没有因为重试起出第二个作业）"
 assert_eq "$(jq '.jobs | length' "$tmp/sa.json")" "1" "④ Q3：服务里只有一个作业"
 assert_contains "$(cat "$tmp/out")" "收编了本次的作业" "④ Q3：日志写明收编"
-assert_contains "$(posted_comment "$(cat "$tmp/out")")" "差分扫描发现 2 个安全问题" "④ Q3：收编的作业照常出汇总"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "DIFF 扫描发现 2 个安全问题" "④ Q3：收编的作业照常出汇总"
 # 终审 I-11：收编只按「sourceCode = 本次键」（键里有本次的 run_id），不按状态筛——作业列表里报的若不是 IN_PROGRESS（初始状态没实测过）也照样收编
 fresh
 assert_eq "$(drive FAKE_SA_START_AMBIGUOUS=1 FAKE_SA_LIST_STATUS=PENDING)" "0" "④ I-11 列表里的作业状态不是 IN_PROGRESS → 0"
@@ -349,7 +355,7 @@ assert_eq "$(ops | tr ' ' '\n' | grep -c '^list-findings$')" "0" "④ Q2：不�
 # 终审 I-6：核对时读作业记录失败 ≠ 源不符。一次失败 → 再读、照常评审；一直读不到 → sa-source-unknown + 停作业（不说成 sa-source-mismatch）
 fresh; echo 1 > "$tmp/bgj-fail"
 assert_eq "$(drive)" "0" "④ I-6 核对时读作业记录失败一次 → 0"
-assert_contains "$(posted_comment "$(cat "$tmp/out")")" "差分扫描发现 2 个安全问题" "④ I-6 再读一次就对上了，照常出汇总"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "DIFF 扫描发现 2 个安全问题" "④ I-6 再读一次就对上了，照常出汇总"
 assert_eq "$(ops | tr ' ' '\n' | grep -c '^stop-code-review-job$')" "0" "④ I-6 没有停掉一个正常的作业"
 fresh
 assert_eq "$(drive FAKE_SA_FAIL_BATCHGETCODEREVIEWJOBS=InternalServerException)" "0" "④ I-6 一直读不到作业记录 → 失败评论"
@@ -414,7 +420,7 @@ assert_contains "$(posted_comment "$(cat "$tmp/out")")" "本次返回 60 条，�
 # 输入状态：skipped → 说明汇总、不调 SA；failed → 失败评论、不调 SA；部署配置不对 → 失败评论
 fresh
 assert_eq "$(drive SECURITY_INPUT=skipped:empty-diff)" "0" "④ skipped:empty-diff → 说明汇总"
-assert_contains "$(posted_comment "$(cat "$tmp/out")")" "本次没有执行差分扫描：MR 相对目标分支没有改动" "④ 说明汇总"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "本次没有执行 DIFF 扫描：MR 相对目标分支没有改动" "④ 说明汇总"
 assert_eq "$([ -e "$tmp/sa.log" ] && echo yes || echo no)" "no" "④ skipped 时一次 SA 调用都没有（不起作业）"
 assert_eq "$(drive SECURITY_INPUT=failed:zip-timeout)" "0" "④ failed:* → 失败评论"
 assert_contains "$(posted_comment "$(cat "$tmp/out")")" "执行器没能准备 Security Agent 的扫描输入（代号 zip-timeout）" "④ 失败评论带输入状态的代号"

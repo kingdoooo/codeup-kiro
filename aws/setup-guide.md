@@ -461,7 +461,7 @@ merge-base 两棵树（删掉全部符号链接），以非 root 用户、空环
 ### 6.6 可选：扫描评审员（Security Agent）
 
 AWS Security Agent 是第三位评审员：做架构与数据流层面的安全分析（注入、越权、敏感数据外泄之类），**不报依赖漏洞**（那是 Inspector 的事）。
-每次评审在 MR 上维护**一条自己的汇总评论**（标题「Security Agent 安全评审」），与 Kiro、Inspector 互不接管。只做**差分扫描**：分析本 MR
+每次评审在 MR 上维护**一条自己的汇总评论**（标题「Security Agent 安全评审」），与 Kiro、Inspector 互不接管。只做 **DIFF 扫描**：分析本 MR
 改动的代码，整个仓库只作上下文。只发汇总、不发行内评论：每条发现在汇总里带 `文件:行`。
 
 **开通**（然后重新部署：先 `CodeupKiroExecutor`，后 `CodeupKiroDispatcher`）：
@@ -476,20 +476,20 @@ AWS Security Agent 是第三位评审员：做架构与数据流层面的安全�
 
 **不需要在 Security Agent 控制台做任何开通**：CDK 建 Agent Space（名字 `codeup-kiro-security`）与它的服务角色（只能读输入桶的 `security/`
 前缀、写自己的作业日志）。**不建 Application**：Application 是 Security Agent Web 控制台的区域级配置（Identity Center、Web 应用角色），
-API 发起的差分扫描用不到它。想在 Security Agent 控制台里看发现，按 Security Agent 文档在本区域建一次 Application（一个区域一个，已有就不必再建）。
+API 发起的 DIFF 扫描用不到它。想在 Security Agent 控制台里看发现，按 Security Agent 文档在本区域建一次 Application（一个区域一个，已有就不必再建）。
 
 **每次评审做什么**：执行器在 Kiro 开始之前，用钉死的参数生成 merge-base 到 MR 提交的 diff（树内 `.gitattributes` 的 `-diff` 失效，
 改动藏不成「二进制」；`-M` 识别改名），再从 git 对象导出 MR 提交的整棵树（删掉符号链接）打成 zip（不带归档注释：Security Agent 拒收带注释的
 zip），连同文件清单放进输入桶的 `security/` 前缀。扫描任务里的 Security Agent 子进程：每个仓库一个 code review（标题 `codeup-kiro-<仓库 id>`，
-映射表 `CodeReviewMapping` 记着它）；把它重指向本次的归档 → 启动差分作业 → 核对作业记下的源确实是本次的（不是就停掉、发失败评论）→ 每 30 秒
+映射表 `CodeReviewMapping` 记着它）；把它重指向本次的归档 → 启动 DIFF 作业 → 核对作业记下的源确实是本次的（不是就停掉、发失败评论）→ 每 30 秒
 查一次作业状态 → 取发现 → 汇总。同一仓库的两个 MR 只在「重指向 + 启动」那几秒里串行（作业在启动时记下源，之后再重指向不影响它）。
-一次差分作业实测约 10 分钟。源分支在作业运行中又有了新提交时，旧作业被停掉，交给新提交那次。
+一次 DIFF 作业实测约 10 分钟。源分支在作业运行中又有了新提交时，旧作业被停掉，交给新提交那次。
 
-**不起作业的情况**：空 diff、改动超过 3,000 个文件或 5 MB、归档超过 2 GB——汇总里写一句「本次没有执行差分扫描：…」。
+**不起作业的情况**：空 diff、改动超过 3,000 个文件或 5 MB、归档超过 2 GB——汇总里写一句「本次没有执行 DIFF 扫描：…」。
 
 **汇总里有什么**：按严重级别分组（CRITICAL / HIGH / MEDIUM / LOW / 其它）的发现：名字、类型、置信度、全部位置（`文件:起–止行` 加 Security
-Agent 给的标签）、截短的说明；Security Agent 对本次作业的总结在折叠区；它判为误报的只计数。**结论非确定**：同一提交重跑，条数与位置可能不同
-（评论里有一行固定说明）。每次差分扫描最多 30 条（服务上限），恰好 30 条时评论写明。不渲染 Security Agent 生成的攻击脚本与验证脚本。
+Agent 给的标签）、截短的说明；Security Agent 对本次作业的总结在折叠区；它判为误报的只计数。**结论非确定**：同一提交重跑，条数与位置可能不同。
+每次 DIFF 扫描最多 30 条（服务上限），恰好 30 条时评论写明。不渲染 Security Agent 生成的攻击脚本与验证脚本。
 
 **配额与成本**：代码评审目前处于预览期、不收费（以 AWS 公布为准）。并发作业数默认每账号每区域 5 个（Service Quotas 里的
 `Concurrently Running Code Review Jobs`，可申请调高）：满了时启动被拒，扫描员每 60 秒重试、最多 15 分钟，仍满就发失败评论

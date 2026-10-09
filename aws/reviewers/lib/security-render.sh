@@ -11,7 +11,6 @@ SA_DESC_MAX=800        # 每条说明的码点上限（issue 09 实测差分作�
 SA_LABEL_MAX=80        # 每个位置标签的码点上限（全库扫描的标签长达上百字符）
 SA_OVERVIEW_MAX=3000   # 作业总结（overview）的码点上限，进折叠区
 SA_SERVICE_CAP=30      # 服务上限：每次差分扫描最多 30 条发现（run-diff-scan-s3.html）
-SA_NONDETERMINISM_NOTE="Security Agent 的结论非确定：同一提交重跑，条数与位置可能不同。"
 
 # 按码点截断（jq 的字符串切片按码点，不会切出半个 UTF-8 字符）
 _sa_cut() {  # <取值> <上限>
@@ -39,7 +38,7 @@ _sa_render_finding() {  # <序号> <发现 JSON>
   return 0
 }
 
-# 元信息表（四列，第四列是「差分」）
+# 元信息表（四列，第四列是「DIFF」）
 _sa_render_meta() {  # <第四格>
   echo "| Commit | 分支 | 时间 | ${REVIEW_META_NOTE_HEADER} |"
   echo "|---|---|---|---|"
@@ -63,20 +62,18 @@ security_render_summary() {
   note+=" · 作业 \`$(_review_meta_cell "$job")\`"
   _sa_render_meta "$note"
   echo ""
-  echo "> ${SA_NONDETERMINISM_NOTE}"
-  echo ""
   echo "## 结论"
   echo ""
   total=$(jq '.findings | length' "$report")
   if [[ "$total" == 0 ]]; then
-    printf '未发现安全问题（差分扫描 · 提交 `%s`）。\n' "$SHORT_SHA"
+    printf '未发现安全问题（DIFF 扫描 · 提交 `%s`）。\n' "$SHORT_SHA"
   else
-    printf '差分扫描发现 %s 个安全问题（%s）。\n' "$total" \
+    printf 'DIFF 扫描发现 %s 个安全问题（%s）。\n' "$total" \
       "$(jq -r '.counts | "CRITICAL \(.CRITICAL) · HIGH \(.HIGH) · MEDIUM \(.MEDIUM) · LOW \(.LOW) · 其它 \(.INFORMATIONAL + .UNKNOWN)"' "$report")"
   fi
   if [[ "$(jq '.returned' "$report")" -ge "$SA_SERVICE_CAP" ]]; then
     echo ""
-    printf '本次返回 %s 条，达到服务上限（每次差分扫描最多 %s 条），可能还有未报出的问题。\n' "$(jq '.returned' "$report")" "$SA_SERVICE_CAP"
+    printf '本次返回 %s 条，达到服务上限（每次 DIFF 扫描最多 %s 条），可能还有未报出的问题。\n' "$(jq '.returned' "$report")" "$SA_SERVICE_CAP"
   fi
   if [[ "$(jq '.false_positives' "$report")" != 0 ]]; then
     echo ""
@@ -141,7 +138,7 @@ security_render_skipped() {  # <代号>
   local code="$1" hist reason
   case "$code" in
     empty-diff)        reason="MR 相对目标分支没有改动（空 diff），没有可扫描的内容" ;;
-    diff-too-large)    reason="改动超过 Security Agent 差分扫描的上限（3,000 个文件或 5 MB）" ;;
+    diff-too-large)    reason="改动超过 Security Agent DIFF 扫描的上限（3,000 个文件或 5 MB）" ;;
     archive-too-large) reason="仓库归档超过 Security Agent 的上限（2 GB）" ;;
     *)                 reason="代号 $(_review_meta_cell "$code")" ;;
   esac
@@ -153,7 +150,7 @@ security_render_skipped() {  # <代号>
   echo ""
   echo "## 结论"
   echo ""
-  printf '本次没有执行差分扫描：%s。\n' "$reason"
+  printf '本次没有执行 DIFF 扫描：%s。\n' "$reason"
   echo ""
   review_render_history_table "$hist"
   rm -f "$hist"
