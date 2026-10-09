@@ -408,6 +408,21 @@ kill -TERM "$(cat "$tmp/drv.pid")"; wait "$bg9"
 assert_eq "$(jq -r '.["lease#7#7#security"] | [(.lease_until.N // "none"), has("holder")] | join("/")' "$tmp/ddb.json")" "0/false" \
   "④ I-9 收到 TERM 时放的是按 MR 的 L7 租约（下一次同 MR 的评审不必等它到期）"
 assert_eq "$(jq -r '.["lease#7#security-repo"].holder.S' "$tmp/ddb.json")" "other" "④ I-9 别人持有的仓库租约没被动过"
+# 针对性复审 M-4：TERM 落在**持有**按仓库租约的临界区里（核对作业源：前两次读失败、各等 2 秒）→ EXIT 陷阱停掉作业、放掉仓库租约与 L7 租约
+fresh; echo 2 > "$tmp/bgj-fail"
+rm -f "$tmp/drv.pid"
+( DRIVE_PIDFILE="$tmp/drv.pid" drive > "$tmp/rc.m4" ) & bgm4=$!
+# 等到进了核对作业源的循环（替身每次 BatchGetCodeReviewJobs 都往 lease-at-poll 记一行）：Start 已返回、作业已记为在跑
+for _ in $(seq 1 200); do
+  [[ -s "$tmp/drv.pid" && -s "$tmp/lease-at-poll" \
+     && "$(jq -r '.["lease#7#security-repo"].holder.S // ""' "$tmp/ddb.json" 2>/dev/null)" == *"|repo" ]] && break; sleep 0.1
+done
+assert_contains "$(jq -r '.["lease#7#security-repo"].holder.S // ""' "$tmp/ddb.json")" "|repo" "④ M-4（准备）TERM 之前本进程持有按仓库租约"
+kill -TERM "$(cat "$tmp/drv.pid")"; wait "$bgm4"
+assert_eq "$(jq -r '.["lease#7#security-repo"] | [(.lease_until.N // "none"), has("holder")] | join("/")' "$tmp/ddb.json")" "0/false" \
+  "④ M-4 持有仓库租约时收到 TERM → 退出时放掉它（同仓库别的评审不必等 60 秒到期）"
+assert_eq "$(jq -r '.["lease#7#7#security"] | [(.lease_until.N // "none"), has("holder")] | join("/")' "$tmp/ddb.json")" "0/false" "④ M-4 L7 租约同样放掉"
+assert_eq "$(ops | tr ' ' '\n' | grep -c '^stop-code-review-job$')" "1" "④ M-4 已起的作业被停掉"
 # code review 在别处被删了（映射表还指着它）→ 标成过期、重新建一个、照常评审
 fresh
 printf '{"repo_id=7": {"repo_id": {"S": "7"}, "status": {"S": "ready"}, "code_review_id": {"S": "cr-dead0000-0000-4000-8000-000000000000"}, "agent_space_id": {"S": "%s"}}}' "$SPACE" > "$tmp/ddb.json"
