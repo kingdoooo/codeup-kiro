@@ -36,7 +36,7 @@ _Avoid_: 扫描器、scanner（仅在代码标识符里使用）
 
 **评审**:
 对一个 MR 在某个提交上的一次完整自动评审过程，由一位评审员完成，产出一份评审报告。
-_Avoid_: 扫描（保留给扫描评审员调用的扫描服务：Security Agent 的差分扫描、Inspector 的依赖扫描）、检查、审查
+_Avoid_: 扫描（保留给扫描评审员调用的扫描服务：Security Agent 的 DIFF 扫描、Inspector 的依赖扫描）、检查、审查
 
 **评审报告**:
 评审员对一次评审的结构化产出：若干条问题加一个总体结论。
@@ -127,7 +127,7 @@ AWS 档位里由执行器在 Kiro 评审之前拉起的第二个容器任务（�
 _Avoid_: Task B（仅在 spec 与计划里使用）、扫描器、扫描作业
 
 **扫描输入**:
-执行器为扫描评审员准备、经输入桶交给扫描任务的数据：Inspector 是 MR 提交与 merge-base 两份依赖清单（SBOM），Security Agent 是差分与全库上下文。
+执行器为扫描评审员准备、经输入桶交给扫描任务的数据：Inspector 是 MR 提交与 merge-base 两份依赖清单（SBOM），Security Agent 是 DIFF（`.patch`）与全库上下文。
 一律取自 git 对象，不取自工作树。
 _Avoid_: 扫描数据、上传物
 
@@ -143,12 +143,12 @@ _Avoid_: 历史漏洞、旧漏洞
 只用于排序与预算（折叠区上限、截断优先级）的严重级别先后：Inspector 为 critical、high、medium、low、其它（none / unknown）；Security Agent 为 CRITICAL、HIGH、MEDIUM、LOW、INFORMATIONAL、UNKNOWN。
 _Avoid_: 风险分、优先级
 
-**差分扫描**:
+**DIFF 扫描**:
 Security Agent 评审员针对一份 diff、以全库上下文为背景所做的安全分析。
-_Avoid_: 增量扫描、diff scan
+_Avoid_: 差分扫描（旧称，2026-10-09 起统一写 DIFF 扫描）、增量扫描、diff scan
 
 **全库上下文**:
-供差分扫描参考的业务库完整源码副本。
+供 DIFF 扫描参考的业务库完整源码副本。
 _Avoid_: 代码快照、归档
 
 ### 评审引擎的安装与核对

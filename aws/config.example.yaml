@@ -32,7 +32,7 @@ review_command: 0
 # 扫描评审员（Phase 2b）：Inspector（依赖漏洞）与 Security Agent（安全分析）。任一为 1 → 部署扫描任务（Task B）与输入桶；
 # 都为 0 → 二者都不存在、MR 上与 2a 相同。各自要一个云效令牌密钥（setup-guide.md 第 3 节；PoC 可与 Kiro 用同一个 PAT）。
 inspector: 0
-security_agent: 0   # 1 = CDK 建 Agent Space 与服务角色（不建 Application，见 setup-guide.md 的 SA 一节），扫描任务做差分扫描
+security_agent: 0   # 1 = CDK 建 Agent Space 与服务角色（不建 Application，见 setup-guide.md 的 SA 一节），扫描任务做 DIFF 扫描
 
 # ── 可选：评审行为（执行器环境；默认值与 scripts/ 里的缺省值逐项一致，取值语义同 Flow 档位）──
 # inline_profile: quiet         # INLINE_PROFILE：quiet / balanced / critical
@@ -75,4 +75,4 @@ security_agent: 0   # 1 = CDK 建 Agent Space 与服务角色（不建 Applicati
 # scan_cpu: 512                     # 扫描任务的 CPU（扫描员只调 API、不跑模型，小规格即可）
 # scan_memory_mib: 1024             # 扫描任务的内存
 # security_agent_timeout: 3600      # SA 作业的总预算（秒，600–7200）：从第一次 Start 到作业终态，含并发满时的排队重试；
-#                                   # 超时 → StopCodeReviewJob + 失败评论。实测差分作业约 10 分钟
+#                                   # 超时 → StopCodeReviewJob + 失败评论。实测 DIFF 作业约 10 分钟
