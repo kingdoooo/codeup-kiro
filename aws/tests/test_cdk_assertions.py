@@ -2015,6 +2015,24 @@ def test_security_agent_timeout_is_a_strict_integer_between_600_and_7200(write_c
         load_config(write_cfg(_base_cfg(security_agent=1, security_agent_timeout=bad)))
 
 
+@pytest.mark.parametrize("scanner", [{"inspector": 1}, {"security_agent": 1}])
+@pytest.mark.parametrize("bad", ["sixty", "60000 ", -1, 1.5, 1234567890, True, None])
+def test_max_comment_bytes_must_pass_the_scan_task_gate_when_a_scanner_is_on(write_cfg, scanner, bad):
+    # 针对性复审 M-3：扫描入口对 MAX_COMMENT_BYTES 不是十进制整数（^[0-9]{1,9}$）时一律 95（终审 I-1），Kiro 却只警告、按缺省继续——
+    # 开了扫描员时 synth 就按同一条规则拦下，否则部署后两位扫描员在每个 MR 上都失败
+    from config import load_config
+    with pytest.raises(ValueError, match="max_comment_bytes"):
+        load_config(write_cfg(_base_cfg(max_comment_bytes=bad, **scanner)))
+
+
+def test_max_comment_bytes_gate_matches_what_the_stack_writes(write_cfg):
+    from config import load_config
+    for ok in (60000, "60000", 0):   # 栈写进任务定义的是 str(取值)：过得了扫描入口的那道正则就放行（下界由引擎按缺省兜）
+        load_config(write_cfg(_base_cfg(inspector=1, max_comment_bytes=ok)))
+    # 正向对照：没开扫描员时不查（取值语义归共享评审引擎，Kiro 警告后按缺省继续，与 Flow 档位一致）
+    load_config(write_cfg(_base_cfg(max_comment_bytes="sixty")))
+
+
 def test_default_bot_usernames_cover_every_enabled_reviewer_once():
     from config import default_bot_usernames
     assert default_bot_usernames(_base_cfg()) == ["aliyun:kirobot"]

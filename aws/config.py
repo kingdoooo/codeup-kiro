@@ -200,4 +200,14 @@ def load_config(path):
     if type(timeout) is not int or not 600 <= timeout <= 7200:
         raise ValueError(f"security_agent_timeout 取值 {timeout!r} 非法：600–7200 的整数（秒）")
 
+    # max_comment_bytes 是评审行为变量（取值语义归共享评审引擎、本档位不另做校验），但它也进扫描任务的白名单，而扫描入口对
+    # 不是十进制整数的取值一律退出 95（终审 I-1：不让它进 bash 算术）——Kiro 只警告、按缺省继续。开了扫描员时在这里按扫描入口
+    # 同一条规则（栈写进任务定义的 str(取值) 要过 ^[0-9]{1,9}$）拦下，否则部署后两位扫描员在每个 MR 上都失败（针对性复审 M-3）。
+    if "max_comment_bytes" in cfg and any(cfg.get(t) == 1 for t in ("inspector", "security_agent")):
+        mcb = cfg["max_comment_bytes"]
+        if type(mcb) is bool or not re.fullmatch(r"[0-9]{1,9}", str(mcb)):
+            raise ValueError(
+                f"max_comment_bytes 取值 {mcb!r} 非法：开了 Inspector 或 Security Agent 时必须是十进制整数（最多 9 位，"
+                "扫描任务对别的取值一律拒绝运行）")
+
     return cfg

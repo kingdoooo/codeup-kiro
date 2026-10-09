@@ -60,7 +60,8 @@ def scanners_on(cfg):
 
 # 评审行为变量：config.yaml 键 → (容器环境变量名, 缺省值)。缺省值与 scripts/ 里的 `${VAR:-默认}`
 # 逐项一致（tests/test_cdk_assertions.py 读脚本比对），写进任务定义是为了让取值在任务定义里看得见，
-# 而不是隐含在脚本里。取值语义归共享评审引擎，本档位不另做校验（与 Flow 档位同一套规则）。
+# 而不是隐含在脚本里。取值语义归共享评审引擎，本档位不另做校验（与 Flow 档位同一套规则）；
+# 唯一例外是 max_comment_bytes：它也进扫描任务，开了扫描员时 config.py 按扫描入口的规则校验（针对性复审 M-3）。
 BEHAVIOUR_VARS = {
     "inline_profile": ("INLINE_PROFILE", "quiet"),
     "max_inline_comments": ("MAX_INLINE_COMMENTS", 10),
