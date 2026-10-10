@@ -2755,6 +2755,22 @@ def test_the_guide_documents_the_egress_lockdown_the_way_the_code_builds_it():
     assert len([f for f in firsts if "DNS Firewall 拦下了" in f]) == 1
 
 
+# sandbox 2026-10-10（Phase 2c Task 17）：ALERT 一轮里名单外的只有 Kiro CLI 的遥测与更新检查这四个，BLOCK 下评审照常——刻意不进名单（少放一个出口）。
+# 手册要点名它们，免得运维照第 6.8 节第 3 步把它们当「评审需要的」加回去
+KIRO_UNNEEDED_HOSTS = ("cognito-identity.us-east-1.amazonaws.com", "client-telemetry.us-east-1.amazonaws.com",
+                       "prod.us-east-1.telemetry-v2.kiro.dev", "desktop-release.q.us-east-1.amazonaws.com")
+
+
+def test_the_kiro_telemetry_and_update_hosts_stay_off_the_list_and_the_guide_says_why():
+    import stacks.egress as egress
+    listed = egress.allowed_domains("us-east-1", "123456789012", ("inspector", "security"))
+    sec = _guide_subsection("6.8")
+    for host in KIRO_UNNEEDED_HOSTS:
+        assert host not in listed, host
+        assert f"`{host}`" in sec, host
+    assert "评审不需要" in sec and "BLOCK 下照常评审" in sec
+
+
 # ── 每个开关的「功能区别 / 配置区别」（Kent 2026-10-10）：config.example.yaml 每个开关键之上一个注释块，手册 §4.3「开关一览」表每个开关一行 ──
 # 开关 = 0/1 与枚举取值的键（inline_profile 之类的评审行为变量不是开关）。以后新增 0/1 开关、忘了写说明，守卫那一句先红
 SWITCHES = ("inline_comment", "review_command", "inspector", "security_agent", "feishu_notify", "feishu_domain",

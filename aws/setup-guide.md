@@ -587,7 +587,9 @@ Lambda 一律不发、日志里是 `reason=no-email`。
 3. 在查询日志里取这一轮解析过的全部域名（CloudWatch Logs Insights，日志组见上）：
    `fields query_name, firewall_rule_action | stats count(*) by query_name, firewall_rule_action | sort query_name`。
    `firewall_rule_action` 为 `ALERT` 的是名单外的：确属评审需要的，把它加进 `aws/stacks/egress.py` 的名单（按区域写成参数，不写死区域）；
-   不认识的先查清是谁发起的，再决定。
+   不认识的先查清是谁发起的，再决定。**这四个评审不需要，刻意不在名单上**：`cognito-identity.us-east-1.amazonaws.com`、`client-telemetry.us-east-1.amazonaws.com`、
+   `prod.us-east-1.telemetry-v2.kiro.dev`（Kiro CLI 的遥测，前一个是给它取凭证的）与 `desktop-release.q.us-east-1.amazonaws.com`（Kiro CLI 的更新检查；版本是钉死的）——
+   sandbox 实测（2026-10-10，Kiro CLI 2.21.4）它们在 ALERT 一轮里出现，BLOCK 下照常评审、耗时不变。另外 `<名字>.<区域>.compute.internal` 这类搜索域展开被拦也无害（NXDOMAIN 本来就是对的答案）。
 4. 改 `egress_dns_action: block` 再部署，再跑一轮；查询日志里本次评审没有 `BLOCK` 的合法域名，就算完成。
 5. **Kiro CLI 换版本后**（新的已探测镜像摘要），回到第 1 步取一次名单：新版本可能连新的主机。
 
