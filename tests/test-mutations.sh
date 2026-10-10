@@ -18,6 +18,8 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # （每用例仍是独立目录树；派生时 work 的 origin 会改指向副本的 origin.git，见 tests/fixture-repo.sh）
 FIXTURE_TEMPLATE_DIR="$tmp/fixture-template"
 export PATH="$ROOT/tests/mockbin:$PATH"
+# 档位相关的三个隐式输入（v1.9.1 复审 m-3）：调用方环境里导出了它们，AWS / Flow 两种措辞的断言就会莫名失败
+unset REVIEW_RERUN_HINT REVIEW_LOG_HINT BUILD_NUMBER
 # KIRO_INSTALL_PROFILE 没有缺省值（ADR-0006 / I1：缺失即拒绝运行），公共环境给 latest——
 # 既有变异测的都是现装档位下的既有行为。钉版档位那两个变异在自己的用例里显式覆盖成 pinned。
 export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456 KIRO_INSTALL_PROFILE=latest

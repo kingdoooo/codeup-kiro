@@ -1341,7 +1341,8 @@ def test_the_guide_names_both_hints_that_differ_from_the_engine_default():
     assert "唯一一个刻意与引擎缺省值不同" not in sec, "§4.3 还在说只有一个变量与引擎缺省值不同"
     assert "**两个刻意与引擎缺省值不同的是 `REVIEW_RERUN_HINT` 与 `REVIEW_LOG_HINT`**" in sec
     row = next((ln for ln in sec.splitlines() if ln.startswith("| `REVIEW_LOG_HINT` |")), "")
-    assert "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。" in row and "构建号" in row, row
+    assert "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。" in row and "请查看流水线日志或重跑流水线。" in row, row
+    assert "构建号 ?" not in row, "§4.3 还说不设时会出现「构建号 ?」（v1.9.1 起没有构建号时不再打那一段）"
 
 
 def test_the_cross_region_inference_note_describes_the_shipped_continuum_not_a_future_milestone(write_cfg, capsys):

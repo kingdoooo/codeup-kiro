@@ -1554,7 +1554,7 @@ review_retry_advice() {
 # runError 是「Internal error」、v3 才说「account does not have access」（sandbox 2026-10-01）。实测形状（kiro-cli 2.21.x）：
 #   {"type":"runError","data":{"sessionId":…,"stage":"engine"|"prompt","message":"…"}}
 # 取**最后一个** runError 的 message（不是字符串就当没有）。它外部可控：先清洗（review_clean_text）、再掩码（review_redact_secrets；
-# 掩码不可用时整条不取——宁可不带原因，也不带出没掩过的取值），然后折成一行、截到 REVIEW_RUN_ERROR_MAX 个字符。**先掩码后截断**：
+# 掩码不可用时整条不取——宁可不带原因，也不带出没掩过的取值），然后折成一行、再掩一次、截到 REVIEW_RUN_ERROR_MAX 个字符。**先掩码后截断**：
 # 截在令牌中间，掩码规则就认不出残片。stage 只认 [a-z]{1,16}，否则不带。结果由调用方作为不受信细节交给 die_review（评论再过一遍
 # 渲染器的单行清洗与整篇掩码，日志过 _untrusted_for_log）。
 # 用法：review_stream_run_error <stream.jsonl> → stdout 一行「runError（<stage>）：<message>」；没有 → rc 1、无输出
@@ -1568,7 +1568,8 @@ review_stream_run_error() {
   stage=$(printf '%s' "$ev" | jq -r 'if (.stage | type) == "string" then .stage else "" end' 2>/dev/null) || stage=""
   [[ "$stage" =~ ^[a-z]{1,16}$ ]] || stage=""
   msg=$(printf '%s' "$ev" | jq -r '.message' 2>/dev/null | review_clean_text | review_redact_secrets) || return 1
-  msg=$(printf '%s' "$msg" | tr '\r\n\t' '   ' | jq -Rrs --argjson n "$REVIEW_RUN_ERROR_MAX" \
+  # 折成一行之后**再掩一次**才截断（复审 I-1）：掩码按行，`password:` 与取值分在两行时第一遍认不出，折行后才连成一个可认的形状
+  msg=$(printf '%s' "$msg" | tr '\r\n\t' '   ' | review_redact_secrets | jq -Rrs --argjson n "$REVIEW_RUN_ERROR_MAX" \
           'sub("^ +"; "") | sub(" +$"; "") | if length > $n then .[0:$n] + "…" else . end') || return 1
   [[ -n "${msg//[[:space:]]/}" ]] || return 1
   printf 'runError%s：%s' "${stage:+（${stage}）}" "$msg"

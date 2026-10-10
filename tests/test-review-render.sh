@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 source helpers.sh
 # REVIEW_RERUN_HINT 是本库唯一的隐式环境输入：外部环境里带着它会让 6 个 golden 全部失败，
 # 更糟的是配上 GOLDEN_UPDATE=1 会把错误的页脚烤进 golden。测试里显式清掉。
-unset REVIEW_RERUN_HINT REVIEW_LOG_HINT
+unset REVIEW_RERUN_HINT REVIEW_LOG_HINT BUILD_NUMBER
 ROOT=$(cd .. && pwd)
 source "$ROOT/scripts/lib/review-render.sh"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -3321,5 +3321,26 @@ assert_eq "${out: -1}" "…" "run_error：截断处带省略号"
 jq -cn --arg m "$(printf 'A%.0s' {1..195})${SEC_GHP}" '{type: "runError", data: {stage: "prompt", message: $m}}' > "$tmp/rerr-edge.jsonl"
 out=$(review_stream_run_error "$tmp/rerr-edge.jsonl")
 assert_not_contains "$out" "ghp_a" "run_error：截断点落在令牌里也不漏残片（先掩码后截断）"
+# 复审 I-1：掩码按行，键（password:）与取值分在两行时第一次掩码认不出；折成一行之后要再掩一次、再截断——否则截断点落在取值里，
+# 留下的残片短于掩码阈值，评论与日志都带出半截口令
+jq -cn --arg m "$(printf 'A%.0s' {1..180})password:"$'\n'"Zq7hunt3rS3cretValue99" '{type: "runError", data: {stage: "prompt", message: $m}}' > "$tmp/rerr-split.jsonl"
+out=$(review_stream_run_error "$tmp/rerr-split.jsonl")
+assert_not_contains "$out" "Zq7hunt3" "run_error：键与取值分两行、截断点落在取值里也不带出残片（折行后再掩码，复审 I-1）"
+assert_contains "$out" "password:" "run_error：（准备）键还在，截断点确实落在取值附近"
+
+# 复审 m-1 / m-2：Flow 的三份文档与 #06 对拍（REVIEW_LOG_HINT 有一行；BUILD_NUMBER 不再说「构建号 ?」；REVIEW_RERUN_HINT 写明它也换掉「重跑流水线即可」）
+pg="$ROOT/pipeline/setup-guide.md"
+bn_row=$(grep '^| `BUILD_NUMBER` |' "$pg" || true)
+assert_not_contains "$bn_row" "构建号 ?" "Flow 手册：BUILD_NUMBER 那一行不再说未注入时写成「构建号 ?」"
+lh_row=$(grep '^| `REVIEW_LOG_HINT` |' "$pg" || true)
+assert_contains "$lh_row" "请查看流水线日志（构建号 N）或重跑流水线。" "Flow 手册：REVIEW_LOG_HINT 那一行写明缺省（= 引擎 review_log_hint 的 Flow 原文）"
+assert_contains "$lh_row" "请查看流水线日志或重跑流水线。" "Flow 手册：REVIEW_LOG_HINT 那一行写明没有构建号时的样子"
+rr_row=$(grep '^| `REVIEW_RERUN_HINT` |' "$pg" || true)
+assert_contains "$rr_row" "重跑流水线即可" "Flow 手册：REVIEW_RERUN_HINT 那一行写明它也换掉行内评论 bail 的「重跑流水线即可」"
+assert_contains "$(grep '^| `REVIEW_LOG_HINT` |' "$ROOT/README.md" || true)" "失败评论" "README：变量表有 REVIEW_LOG_HINT"
+assert_contains "$(cat "$ROOT/pipeline/flow-pipeline.yaml")" "REVIEW_LOG_HINT" "flow-pipeline.yaml：变量说明里有 REVIEW_LOG_HINT"
+# 两句缺省文案与引擎同源：引擎改了措辞、手册没跟上，这里先红
+assert_eq "$(BUILD_NUMBER=N review_log_hint)" "请查看流水线日志（构建号 N）或重跑流水线。" "（对拍）引擎有构建号时的缺省"
+assert_eq "$(unset BUILD_NUMBER; review_log_hint)" "请查看流水线日志或重跑流水线。" "（对拍）引擎没有构建号时的缺省"
 
 report
