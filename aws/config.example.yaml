@@ -76,3 +76,8 @@ security_agent: 0   # 1 = CDK 建 Agent Space 与服务角色（不建 Applicati
 # scan_memory_mib: 1024             # 扫描任务的内存
 # security_agent_timeout: 3600      # SA 作业的总预算（秒，600–7200）：从第一次 Start 到作业终态，含并发满时的排队重试；
 #                                   # 超时 → StopCodeReviewJob + 失败评论。实测 DIFF 作业约 10 分钟
+
+# ── 可选：飞书通知（Phase 2c，只在本档位）──────────────────────────────
+# feishu_notify: 0                  # 1 = 每位评审员发出 / 更新自己的评论后，给 MR 作者发一条飞书消息（固定文案 + 评论链接）。
+#                                   # 要一个飞书企业自建应用与密钥 codeup-kiro/feishu-app（setup-guide.md 第 6.7 节）；严格 0/1
+# feishu_domain: feishu             # 应用建在哪个平台：feishu（飞书，open.feishu.cn）或 lark（Lark，open.larksuite.com）

@@ -2033,6 +2033,40 @@ def test_max_comment_bytes_gate_matches_what_the_stack_writes(write_cfg):
     load_config(write_cfg(_base_cfg(max_comment_bytes="sixty")))
 
 
+# ── Phase 2c：飞书通知的开关与平台（issue 20，spec F2）────────────────────────────────────────────
+def test_feishu_notify_defaults_off_and_the_platform_defaults_to_feishu(write_cfg):
+    from config import load_config
+    cfg = load_config(write_cfg(_base_cfg()))
+    assert (cfg["feishu_notify"], cfg["feishu_domain"]) == (0, "feishu")
+    for v in (0, 1):
+        assert load_config(write_cfg(_base_cfg(feishu_notify=v)))["feishu_notify"] == v
+    assert load_config(write_cfg(_base_cfg(feishu_domain="lark")))["feishu_domain"] == "lark"
+
+
+@pytest.mark.parametrize("bad", [True, False, "1", 2, -1, 1.0, None, "on"])
+def test_feishu_notify_must_be_exactly_0_or_1(write_cfg, bad):
+    from config import load_config
+    with pytest.raises(ValueError, match="feishu_notify"):
+        load_config(write_cfg(_base_cfg(feishu_notify=bad)))
+
+
+@pytest.mark.parametrize("bad", ["Feishu", "LARK", "open.feishu.cn", "larksuite", "", None, 1, True])
+def test_feishu_domain_is_exactly_feishu_or_lark(write_cfg, bad):
+    from config import load_config
+    with pytest.raises(ValueError, match="feishu_domain"):
+        load_config(write_cfg(_base_cfg(feishu_domain=bad)))
+
+
+def test_the_unquoted_yaml_yes_is_refused_for_feishu_notify(tmp_path):
+    # 与开关同一个坑：PyYAML 把没加引号的 yes/on 解析成布尔值
+    from config import load_config
+    p = tmp_path / "config.yaml"
+    p.write_text("region: us-west-2\norg_id: o1\nbot_username: aliyun:bot\nfeishu_notify: yes\n"
+                 f"kiro_image_digests: \"{D1}\"\nkiro_pinned_artifact_sha256: \"{'c' * 64}\"\nkiro_cli_sha256: \"{'d' * 64}\"\n")
+    with pytest.raises(ValueError, match="feishu_notify"):
+        load_config(str(p))
+
+
 def test_default_bot_usernames_cover_every_enabled_reviewer_once():
     from config import default_bot_usernames
     assert default_bot_usernames(_base_cfg()) == ["aliyun:kirobot"]

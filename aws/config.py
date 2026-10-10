@@ -210,4 +210,17 @@ def load_config(path):
                 f"max_comment_bytes 取值 {mcb!r} 非法：开了 Inspector 或 Security Agent 时必须是十进制整数（最多 9 位，"
                 "扫描任务对别的取值一律拒绝运行）")
 
+    # 飞书通知（Phase 2c issue 20，spec F2）：开关严格 0/1、缺省 0；平台只认 feishu / lark、缺省 feishu（两个平台 API 路径相同、域名不同）。
+    # 不并进 TOGGLES：那四个开关总会进某个函数或容器的环境（test_every_validated_toggle_reaches_…），这一个为 0 时模板与不开时逐字节相同
+    notify = cfg.setdefault("feishu_notify", 0)
+    if type(notify) is not int or notify not in (0, 1):
+        raise ValueError(
+            f"feishu_notify 取值 {notify!r} 非法：必须严格为 0 或 1（缺省 0 = 不发飞书通知）。"
+            "刻意不回落默认——拼错的取值静默关闭功能是最难排查的失败")
+    domain = cfg.setdefault("feishu_domain", "feishu")
+    if type(domain) is not str or domain not in ("feishu", "lark"):
+        raise ValueError(
+            f"feishu_domain 取值 {domain!r} 非法：只认 feishu（飞书，open.feishu.cn）或 lark（Lark，open.larksuite.com），"
+            "按你的企业自建应用建在哪个平台上填")
+
     return cfg
