@@ -2935,7 +2935,7 @@ def test_the_guide_says_how_long_a_feishu_secret_change_takes_to_show():
     # 数字前面不能紧挨着数字：「10 分钟」不能靠「110 分钟」蒙混过去（变异实测过）
     assert re.search(rf"(?<![0-9]){secret_fetch.CACHE_TTL_SECONDS // 60} 分钟", seg), seg
     assert re.search(rf"约 {(7200 - notifier.TOKEN_REFRESH_MARGIN) // 60} 分钟", seg), seg
-    assert "不缓存" in seg and "轮换" in seg, seg
+    assert "取令牌失败不缓存令牌" in seg and "（轮换或改错）之后这段时间里照样发得出去" in seg, seg
 
 
 def test_the_guide_says_to_wait_for_running_tasks_before_switching_egress_mode():
@@ -2944,7 +2944,8 @@ def test_the_guide_says_to_wait_for_running_tasks_before_switching_egress_mode()
     sec = _guide_subsection("6.8")
     row = next(ln for ln in _guide_section_lines("4.") if ln.startswith("| `egress_mode` |"))
     for name, text in (("§6.8", sec), ("§4.3 egress_mode 那一行", row)):
-        assert "等所有任务结束" in text, name
+        # 带方向：「之前**不必**等…」这种改写不能蒙混过关
+        assert "之前等所有任务结束" in text, name
     assert "list-tasks" in sec and "--desired-status RUNNING" in sec and "第 2 步之前" in sec
 
 
@@ -2958,5 +2959,5 @@ def test_the_guide_says_a_compromised_task_can_still_trigger_fixed_text_messages
               if "dynamodb:UpdateItem" in (s["Action"] if isinstance(s["Action"], list) else [s["Action"]])]
         assert len(st) == 1 and "Condition" not in st[0], (prefix, st)
     sec = _guide_subsection("6.7")
-    for needle in ("**触发**", "`UpdateItem`", "任意一条锁记录", "`posted_<评审员>`", "骚扰"):
+    for needle in ("仍能**触发**消息", "`UpdateItem`、不按键限制", "任意一条锁记录", "`posted_<评审员>`", "拿不来钓鱼", "但能拿来骚扰"):
         assert needle in sec, needle
