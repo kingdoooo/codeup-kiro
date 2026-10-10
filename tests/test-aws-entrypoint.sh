@@ -1263,6 +1263,17 @@ echo FELL_THROUGH" ) > "$stmp/out" 2> "$stmp/err" </dev/null || rc=$?
   assert_eq "$(scan_run kiro,inspector INSPECTOR=1 FAKE_DDB_FAIL=update-item)" "0" "㉗k 写标记失败不中断"
   assert_eq "$(cat "$stmp/out")" "FELL_THROUGH" "㉗k 写标记失败照常走 Kiro"
   assert_contains "$(cat "$stmp/err")" "mark-lock attr=dispatched_inspector result=failed code=ProvisionedThroughputExceededException" "㉗k 写标记失败留代号"
+  # l. Phase 2c 阶段二（issue 19）：扫描任务的公网 IP 随出站形态——没设 = ENABLED（公有子网，2b 的部署）；NAT 形态 = DISABLED；
+  #    别的取值不派发（任务定义是我们自己 CDK 写的，坏了就该看得见，而不是猜一个）
+  scan_run kiro,inspector INSPECTOR=1 >/dev/null
+  assert_eq "$(ecs_arg --network-configuration 1 | /usr/bin/jq -r '.awsvpcConfiguration.assignPublicIp')" "ENABLED" "㉗l 缺省分配公网 IP（公有子网形态）"
+  scan_run kiro,inspector INSPECTOR=1 SCAN_ASSIGN_PUBLIC_IP=DISABLED >/dev/null
+  assert_eq "$(ecs_arg --network-configuration 1 | /usr/bin/jq -c '.awsvpcConfiguration')" \
+    '{"subnets":["s1","s2"],"securityGroups":["sg1"],"assignPublicIp":"DISABLED"}' "㉗l NAT 形态：不分配公网 IP"
+  assert_eq "$(scan_run kiro,inspector INSPECTOR=1 SCAN_ASSIGN_PUBLIC_IP=disabled)" "0" "㉗l 取值不对不改变退出码"
+  assert_eq "$([ -e "$stmp/ecs.argv.1" ] && echo yes || echo no)" "no" "㉗l 取值不对（只认 ENABLED / DISABLED）→ 不调 RunTask"
+  assert_contains "$(cat "$stmp/err")" "scan-dispatch result=failed code=bad-network-config" "㉗l 日志说明原因"
+  assert_eq "$(cat "$stmp/out")" "FELL_THROUGH" "㉗l 派发失败照常走 Kiro（F2）"
   rm -rf "$stmp"
 else
   echo "SKIP: 无 /usr/bin/jq 或 python3，跳过 ㉗ 扫描员派发行为断言" >&2

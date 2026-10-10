@@ -443,6 +443,7 @@ def _runtime_cfg():
         "container_name": os.environ["ECS_CONTAINER_NAME"],
         "subnets": os.environ["SUBNET_IDS"].split(","),
         "security_groups": os.environ["SECURITY_GROUP_IDS"].split(","),
+        "assign_public_ip": _assign_public_ip_env(),
         "lock_ttl_seconds": int(os.environ.get("LOCK_TTL_SECONDS", "86400")),
         "bot_usernames": [u for u in os.environ.get("BOT_USERNAMES", "").split(",") if u],
         "review_command": int(os.environ.get("REVIEW_COMMAND", "0")),
@@ -463,6 +464,15 @@ def _toggle_env(name):
     if v not in ("0", "1"):
         raise ValueError(f"{name} 必须是 0 或 1")
     return int(v)
+
+
+def _assign_public_ip_env():
+    """任务要不要公网 IP（Phase 2c 阶段二，issue 19）：缺失 = ENABLED（公有子网直连 IGW，2b 的部署没有这个变量）；NAT 形态下 CDK 写 DISABLED。
+    只认这两个取值，别的抛 ValueError（与开关同一条规则：我们自己写的值坏了就响亮地失败，不猜）。"""
+    v = os.environ.get("ASSIGN_PUBLIC_IP", "ENABLED")
+    if v not in ("ENABLED", "DISABLED"):
+        raise ValueError("ASSIGN_PUBLIC_IP 必须是 ENABLED 或 DISABLED")
+    return v
 
 
 def _clients(cfg):
@@ -557,7 +567,8 @@ def run_task(ecs, cfg, fields, key):
         launchType="FARGATE", count=1,
         networkConfiguration={"awsvpcConfiguration": {
             "subnets": cfg["subnets"], "securityGroups": cfg["security_groups"],
-            "assignPublicIp": "ENABLED"}},
+            # 公有子网形态要公网 IP 才连得上 IGW；NAT 形态（私有子网）不要（issue 19）。没有这一项的配置 = 2b 的部署
+            "assignPublicIp": cfg.get("assign_public_ip", "ENABLED")}},
         overrides={"containerOverrides": [
             {"name": cfg["container_name"], "environment": env}]})
     tasks = resp.get("tasks") or []

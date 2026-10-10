@@ -130,6 +130,38 @@ def test_run_task_never_passes_secrets_in_overrides():
     for forbidden in ("KIRO_API_KEY", "YUNXIAO_TOKEN", "WEBHOOK_SECRET", "secret"):
         assert forbidden not in blob
 
+# Phase 2c 阶段二（issue 19）：公网 IP 随出站形态。公有子网形态（缺省，2b 的部署没有这个变量）要 ENABLED，否则任务连不上 IGW；
+# NAT 形态（私有子网）是 DISABLED
+@pytest.mark.parametrize("cfg_ip,want", [(None, "ENABLED"), ("ENABLED", "ENABLED"), ("DISABLED", "DISABLED")])
+def test_run_task_assigns_a_public_ip_only_in_the_public_subnet_shape(cfg_ip, want):
+    ecs = mock.Mock()
+    ecs.run_task.return_value = {"tasks": [{"taskArn": "a"}]}
+    cfg = {"cluster": "c", "task_definition": "td", "subnets": ["s1"], "security_groups": ["sg"], "container_name": "review"}
+    if cfg_ip is not None:
+        cfg["assign_public_ip"] = cfg_ip
+    handler_mod.run_task(ecs, cfg, F, "r1#7#abc123")
+    assert ecs.run_task.call_args.kwargs["networkConfiguration"] == {"awsvpcConfiguration": {
+        "subnets": ["s1"], "securityGroups": ["sg"], "assignPublicIp": want}}
+
+
+@pytest.mark.parametrize("env,want", [(None, "ENABLED"), ("ENABLED", "ENABLED"), ("DISABLED", "DISABLED")])
+def test_runtime_cfg_reads_assign_public_ip_with_the_2b_default(monkeypatch, env, want):
+    _set_runtime_env(monkeypatch)
+    monkeypatch.delenv("ASSIGN_PUBLIC_IP", raising=False)
+    if env is not None:
+        monkeypatch.setenv("ASSIGN_PUBLIC_IP", env)
+    assert handler_mod._runtime_cfg()["assign_public_ip"] == want
+
+
+@pytest.mark.parametrize("bad", ["disabled", "", "NO", "DISABLED "])
+def test_a_malformed_assign_public_ip_fails_loudly_instead_of_guessing(monkeypatch, bad):
+    # 那是我们自己 CDK 写的值：坏了就在第一次投递时响亮地失败（与两个开关同一条规则），不猜成 ENABLED
+    _set_runtime_env(monkeypatch)
+    monkeypatch.setenv("ASSIGN_PUBLIC_IP", bad)
+    with pytest.raises(ValueError, match="ASSIGN_PUBLIC_IP"):
+        handler_mod._runtime_cfg()
+
+
 def _token_ok(monkeypatch):
     """dispatch 在留痕那一步才取云效令牌（issue 05 G3）。这几条管的是 RunTask 失败的形状、不是取密钥，
     所以直接给一个取得到的令牌；取密钥本身走真实 secret_fetch 的用例在后面（_stub_token）。"""

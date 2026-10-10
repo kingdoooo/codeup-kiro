@@ -46,6 +46,10 @@ scan_prep() {  # <评审员>
 # 环境覆盖只放标量、不放任何密钥（I3：RunTask 入参进 CloudTrail），总长受 ECS 的 8,192 字符上限约束。
 scan_dispatch() {  # <逗号分隔的扫描员>
   local rids="$1" rid st run_id overrides netcfg out tries=0 arn
+  # 公网 IP 随出站形态（Phase 2c 阶段二，issue 19）：没设 = ENABLED（公有子网直连 IGW，2b 的部署）；NAT 形态下任务定义给 DISABLED。
+  # 只认这两个取值：任务定义是我们自己 CDK 写的，坏了就让它看得见（兜底以各扫描员的机器人回写），不猜
+  local ip="${SCAN_ASSIGN_PUBLIC_IP:-ENABLED}"
+  [[ "$ip" == ENABLED || "$ip" == DISABLED ]] || { echo "scan-dispatch result=failed code=bad-network-config" >&2; return 1; }
   run_id=$(/usr/bin/od -An -tx1 -N16 /dev/urandom 2>/dev/null | /usr/bin/tr -d ' \n') || return 1
   [[ "$run_id" =~ ^[0-9a-f]{32}$ ]] || { echo "scan-dispatch result=failed code=no-random" >&2; return 1; }
   SCAN_RUN_ID="$run_id"   # 输入准备（scan_prep_<评审员>）按它拼不可变的对象键
@@ -68,8 +72,8 @@ scan_dispatch() {  # <逗号分隔的扫描员>
         environment: [range(0; $kv | length; 2) as $i | {name: $kv[$i], value: $kv[$i + 1]}]}]}' \
     --args "${env_pairs[@]}") || return 1
   (( ${#overrides} < 8192 )) || { echo "scan-dispatch result=failed code=overrides-too-long" >&2; return 1; }
-  netcfg=$(/usr/bin/jq -cn --arg s "$SCAN_SUBNETS" --arg g "$SCAN_SECURITY_GROUPS" \
-    '{awsvpcConfiguration: {subnets: ($s | split(",")), securityGroups: ($g | split(",")), assignPublicIp: "ENABLED"}}') || return 1
+  netcfg=$(/usr/bin/jq -cn --arg s "$SCAN_SUBNETS" --arg g "$SCAN_SECURITY_GROUPS" --arg ip "$ip" \
+    '{awsvpcConfiguration: {subnets: ($s | split(",")), securityGroups: ($g | split(",")), assignPublicIp: $ip}}') || return 1
   while (( tries < 2 )); do
     tries=$((tries + 1))
     if out=$(/usr/local/bin/aws ecs run-task --region "$AWS_REGION" --cluster "$SCAN_CLUSTER" \
