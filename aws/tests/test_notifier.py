@@ -264,6 +264,16 @@ def test_a_wrong_app_secret_is_logged_and_nothing_is_sent(fake, capsys):
     assert capsys.readouterr().out == "notify reviewer=kiro repo=7215683 mr=10 result=failed step=token code=feishu-10014\n"
 
 
+def test_a_failed_token_fetch_caches_nothing_so_a_fixed_secret_works_on_the_next_notification(fake, capsys):
+    # 手册 §8（终审 M-9）：取令牌失败不缓存令牌——写错的 app_secret 改对之后，只等密钥缓存过期（5 分钟），不等令牌的约 110 分钟
+    fake.token_reply = {"code": 10014}
+    _run(_posted(rid="inspector"))
+    fake.token_reply = {"code": 0, "msg": "ok", "tenant_access_token": "t-fake-tenant", "expire": 7200}
+    _run(_posted(rid="security"))
+    assert sum("tenant_access_token" in p for p in fake.paths()) == 2 and len(fake.sends()) == 1
+    assert capsys.readouterr().out.splitlines()[-1].endswith("result=sent")
+
+
 @pytest.mark.parametrize("status", [401, 403, 404, 429, 500])
 def test_a_failed_get_change_request_is_logged_and_feishu_is_never_called(fake, status, capsys):
     fake.change_request_status = status

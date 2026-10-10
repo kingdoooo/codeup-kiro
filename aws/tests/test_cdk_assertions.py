@@ -2915,3 +2915,46 @@ def test_the_start_call_names_its_one_residual_term_window():
     comment = "\n".join(ln for ln in lines[max(j - 8, 0):j] if ln.lstrip().startswith("#"))
     for needle in ("残余", "SA_START_PID=$!", "终审 M-3"):
         assert needle in comment, (needle, comment)
+
+
+# ── Phase 2c minors：手册与代码对拍（终审 M-9 / M-6 / M-4；改了代码没改手册，这几条先红）────────────────────────────────────────────
+def _guide_rows(heading):
+    return "\n".join(ln for ln in _guide_section_lines(heading) if ln.startswith("|"))
+
+
+def test_the_guide_says_how_long_a_feishu_secret_change_takes_to_show():
+    # 终审 M-9 + 执行时记的那条：改了 codeup-kiro/feishu-app 之后，热的执行环境最多 5 分钟仍用缓存的旧值（secret_fetch 的缓存）；取令牌失败
+    # 不缓存令牌，所以写错的 app_secret 改对后最多再报这 5 分钟；已经取到的租户令牌最多缓存约 110 分钟（有效期 2 小时减重取余量），所以把
+    # 有效的 app_secret 换掉（轮换或改错）之后，这段时间里照样发得出去、不会马上报错
+    import secret_fetch
+    root = pathlib.Path(__file__).resolve().parents[1]
+    notifier = load_lambda("notifier_for_cache_guide", root / "lambda" / "notifier" / "handler.py")
+    rows = _guide_rows("8.")
+    seg = rows[rows.index("`step=token`"):rows.index("`step=codeup`")]
+    assert f"{secret_fetch.CACHE_TTL_SECONDS // 60} 分钟" in seg, seg
+    assert f"约 {(7200 - notifier.TOKEN_REFRESH_MARGIN) // 60} 分钟" in seg, seg
+    assert "不缓存" in seg and "轮换" in seg, seg
+
+
+def test_the_guide_says_to_wait_for_running_tasks_before_switching_egress_mode():
+    # 终审 M-6：切 egress_mode（尤其 nat → public 第 2 步删掉私有子网与 NAT 网关）时，任务的网卡还在那些子网里，CloudFormation 的清理会失败、
+    # 或者评审中途断网（Security Agent 一次评审可能超过一小时）。sandbox 每一步之前都核对过 RUNNING 为空，手册要叫运维也这么做
+    sec = _guide_subsection("6.8")
+    row = next(ln for ln in _guide_section_lines("4.") if ln.startswith("| `egress_mode` |"))
+    for name, text in (("§6.8", sec), ("§4.3 egress_mode 那一行", row)):
+        assert "等所有任务结束" in text, name
+    assert "list-tasks" in sec and "--desired-status RUNNING" in sec and "第 2 步之前" in sec
+
+
+def test_the_guide_says_a_compromised_task_can_still_trigger_fixed_text_messages():
+    # 终审 M-4：两个任务角色对锁表都有 UpdateItem、没有按键的条件（dynamodb:LeadingKeys）——被攻破的任务能在任意一条锁记录上写
+    # posted_<评审员> + 一个形状合法的 comment_<评审员>（不带条件的 UpdateItem 还能新建记录），通知 Lambda 就给那个 MR 的作者发一条固定文案。
+    # 不能钓鱼（N-F3），但能骚扰；手册要说出来。以后给任务角色加上按键的条件，这条先红、手册跟着改
+    stacks = _notify_stacks(feishu_notify=1, inspector=1)
+    for prefix in ("TaskRole", "ScanTaskRole"):
+        st = [s for s in _role_statements(stacks["executor"], prefix)
+              if "dynamodb:UpdateItem" in (s["Action"] if isinstance(s["Action"], list) else [s["Action"]])]
+        assert len(st) == 1 and "Condition" not in st[0], (prefix, st)
+    sec = _guide_subsection("6.7")
+    for needle in ("**触发**", "`UpdateItem`", "任意一条锁记录", "`posted_<评审员>`", "骚扰"):
+        assert needle in sec, needle
