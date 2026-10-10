@@ -66,7 +66,7 @@ summary_note_comment_id() {  # <已知的评论 id，或空 = 刚新建>
   [[ "${FEISHU_NOTIFY:-0}" == 1 ]] || return 0
   local cid="$1"
   if [[ -z "$cid" && -n "${BOT_USERNAME:-}" && "${REVIEW_POST_NONCE:-}" =~ ^[0-9a-f]{16}$ ]] \
-     && codeup_list_global_comments "$LOCAL_ID" > "$WORK/comments-posted.json" 2>/dev/null; then
+     && _summary_list_posted "$WORK/comments-posted.json"; then
     cid=$(jq -r --arg bot "$BOT_USERNAME" --arg pn "${REVIEW_POST_NONCE_PREFIX}${REVIEW_POST_NONCE} -->" '
       def str(v): if (v | type) == "string" then v else "" end;
       (if type == "object" then (.result // []) else . end) | (if type == "array" then . else [] end)
@@ -80,6 +80,14 @@ summary_note_comment_id() {  # <已知的评论 id，或空 = 刚新建>
     log "notify-mark result=skipped code=no-comment-id"
   fi
   return 0
+}
+# 新建之后那一次列评论最多 45 秒（终审 M-1，与执行器 lib/notify-mark.sh 同一手法）：它在持有 L7 租约时、在 POST 与扫描入口置 posted_<评审员>
+# 之间发，Codeup 限流时 codeup-api.sh 自己的重试最坏约 195 秒；这段时间里被 StopTask，已经发了汇总的评审员会多一条兜底评论。超时只少一条通知。
+# 子进程的环境里有 YUNXIAO_TOKEN / YUNXIAO_ORG_ID / CODEUP_REPO_ID（scan-entrypoint.sh 的白名单给的，都已导出）。
+_summary_list_posted() {  # <输出文件> → rc 0 / 非 0
+  /usr/bin/timeout 45 /bin/bash -p -c 'REVIEW_PROFILE="$2"; source "$1/scripts/lib/review-render.sh" \
+      && source "$1/scripts/lib/codeup-api.sh" && codeup_list_global_comments "$3"' summary-list "$PKG" "$REVIEW_PROFILE" "$LOCAL_ID" \
+    > "$1" 2>/dev/null
 }
 
 # 文档级兜底掩码 + 截断（顺序与 kiro-review.sh 第 7 步相同：先掩码、后截断）。rc 0 = 可以发；其余 = 不得发（调用方走失败评论）。

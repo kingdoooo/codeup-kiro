@@ -21,7 +21,23 @@ mkdir -p "$tmp/pkg/reviewers"
 ln -s "$ROOT/scripts" "$tmp/pkg/scripts"
 # lib/ 必须是**换过路径的副本**，不能是符号链接：库里写死的 /usr/local/bin/aws 不换掉就会打到真的 AWS
 mkdir -p "$tmp/pkg/lib"
-ln -s "$ROOT/aws/reviewers/lib" "$tmp/pkg/reviewers/lib"
+# reviewers/lib 同样是副本：summary.sh 里写死的 /usr/bin/timeout 换成替身（macOS 没有它；⑨b 要看它的参数）
+mkdir -p "$tmp/pkg/reviewers/lib"
+for f in "$ROOT"/aws/reviewers/lib/*.sh; do
+  sed -e "s#/usr/bin/timeout #$tmp/timeout #g" "$f" > "$tmp/pkg/reviewers/lib/$(basename "$f")"
+done
+assert_eq "$(LC_ALL=C grep -rl '/usr/bin/timeout' "$tmp/pkg/reviewers/lib" 2>/dev/null || true)" "" "（准备）测试包根里的评审员库都换成了 timeout 替身"
+# timeout 替身：记下参数、照跑命令。被包住的命令在子进程里跑，DRY_RUN 的 fixture 序号是 shell 变量、在那里从 1 重新数，所以
+# 子进程改读 <fixture 目录>/after/（就是「新建之后 MR 上的样子」）；TIMEOUT_STUB_RC 给了就不跑命令、直接以它退出（124 = 超时）
+cat > "$tmp/timeout" <<STUB
+#!/bin/sh
+echo "\$*" >> "$tmp/timeout.log"
+shift
+if [ -n "\${TIMEOUT_STUB_RC:-}" ]; then exit "\$TIMEOUT_STUB_RC"; fi
+if [ -d "\${DRY_RUN_FIXTURE_DIR:-}/after" ]; then DRY_RUN_FIXTURE_DIR="\$DRY_RUN_FIXTURE_DIR/after"; export DRY_RUN_FIXTURE_DIR; fi
+exec "\$@"
+STUB
+chmod +x "$tmp/timeout"
 DIGEST=$(printf 'e%.0s' {1..64})
 printf '#!/bin/sh\nprintf "{\\"ImageID\\": \\"sha256:%s\\", \\"TaskARN\\": \\"arn:aws:ecs:us-west-2:123456789012:task/c/abc\\"}"\n' "$DIGEST" > "$tmp/curl"
 printf '#!/bin/sh\nexec python3 "%s/fake-aws-dynamodb.py" "$@"\n' "$PWD" > "$tmp/aws"
@@ -325,14 +341,14 @@ assert_eq "$(sed 's/=.*//' "$tmp/env.inspector" | LC_ALL=C grep -c '^FEISHU_NOTI
 CIDN=00112233445566778899aabbccddeeff
 mkfix "$tmp/fx9u" inspector aliyun:bot 3
 jq --arg id "$CIDI" '.[0].comment_biz_id = $id' "$tmp/fx9u/list-comments.json" > "$tmp/fx9u/l.json" && mv "$tmp/fx9u/l.json" "$tmp/fx9u/list-comments.json"
-mkdir -p "$tmp/fx9n" "$tmp/fx9m"; echo '[]' > "$tmp/fx9n/list-comments.1.json"; echo '[]' > "$tmp/fx9m/list-comments.1.json"
+mkdir -p "$tmp/fx9n/after" "$tmp/fx9m/after"; echo '[]' > "$tmp/fx9n/list-comments.1.json"; echo '[]' > "$tmp/fx9m/list-comments.1.json"
 nonce_line='<!-- kiro-inspector-post:0123456789abcdef -->'
-# 新建之后的列表：别人贴了一条带同一行随机串的评论（排在前面），本机器人的那条才是本次建的
+# 新建之后的列表（after/：那一次列表经 timeout 在子进程里跑，见顶部的替身）：别人贴了一条带同一行随机串的评论（排在前面），本机器人的那条才是本次建的
 jq -n --arg n "$nonce_line" --arg id "$CIDN" '[
   {comment_biz_id: "ffffffffffffffffffffffffffffffff", comment_type: "GLOBAL_COMMENT", state: "OPENED", author: {username: "aliyun:other"}, content: ("x\n" + $n)},
   {comment_biz_id: $id, comment_type: "GLOBAL_COMMENT", state: "OPENED", author: {username: "aliyun:bot"}, content: ("# Inspector 依赖漏洞扫描 · ⚠️ 评审未完成\n" + $n + "  \n正文")}]' \
-  > "$tmp/fx9n/list-comments.2.json"
-jq '.[0:1]' "$tmp/fx9n/list-comments.2.json" > "$tmp/fx9m/list-comments.2.json"
+  > "$tmp/fx9n/after/list-comments.json"
+jq '.[0:1]' "$tmp/fx9n/after/list-comments.json" > "$tmp/fx9m/after/list-comments.json"
 cat > "$tmp/drv9.sh" <<DRV
 PKG=$tmp/pkg; REVIEW_PROFILE=inspector
 source "\$PKG/reviewers/lib/reviewer.sh"
@@ -342,7 +358,7 @@ reviewer_fail "Inspector 扫描输入准备失败（代号 sbomgen-timeout）"
 DRV
 run9() {  # <fixture 目录> [KEY=VAL …] → 输出（含 rc=）；评论 id 文件在 $tmp/w9/comment-id
   local fx="$1"; shift
-  rm -rf "$tmp/w9"; mkdir -p "$tmp/w9"
+  rm -rf "$tmp/w9" "$tmp/timeout.log"; mkdir -p "$tmp/w9"
   REVIEWER_WORKDIR="$tmp/w9" DRY_RUN=1 DRY_RUN_FIXTURE_DIR="$fx" CODEUP_BOT_USERNAME=aliyun:bot CODEUP_RETRY_BACKOFF=0 \
     YUNXIAO_ORG_ID=o1 CODEUP_REPO_ID=7 MR_LOCAL_ID=7 HEAD_SHA="$SHA40" CI_COMMIT_REF_NAME=feat MR_TARGET_BRANCH=main \
     /usr/bin/env "$@" /bin/bash --norc --noprofile -c "set -euo pipefail; source '$tmp/drv9.sh'" 2>&1 </dev/null; echo "rc=$?"
@@ -353,10 +369,18 @@ assert_contains "$out" "rc=0" "⑨b 原地更新 → 0"
 assert_eq "$(req_count "$out" PUT "comments/$CIDI")" "1" "⑨b（准备）原地更新了那一条"
 assert_eq "$(cid9)" "$CIDI" "⑨b 原地更新：记下的就是那一条的 id"
 assert_eq "$(req_count "$out" POST 'comments/list')" "1" "⑨b 原地更新时不多查一次列表"
+assert_eq "$(cat "$tmp/timeout.log" 2>/dev/null || true)" "" "⑨b 原地更新时也不经 timeout"
 out=$(run9 "$tmp/fx9n" FEISHU_NOTIFY=1)
 assert_contains "$out" "rc=0" "⑨b 新建 → 0"
 assert_eq "$(req_count "$out" POST 'comments$')" "1" "⑨b（准备）新建了一条"
 assert_eq "$(cid9)" "$CIDN" "⑨b 新建：按作者 + 本次发布随机串找回本次那一条（别人复制的同一行不算）"
+assert_eq "$(LC_ALL=C grep -c '^45 /bin/bash -p -c ' "$tmp/timeout.log" 2>/dev/null || true)" "1" \
+  "⑨b 新建之后那一次列评论套着 45 秒上限（它在持有 L7 租约、POST 与置 posted 之间发；终审 M-1）"
+# 那一次列表超时（timeout 以 124 退出）→ 不记 id、留一行日志、评审照常
+out=$(run9 "$tmp/fx9n" FEISHU_NOTIFY=1 TIMEOUT_STUB_RC=124)
+assert_eq "$(cid9)" "none" "⑨b 列表超时 → 不记 id"
+assert_contains "$out" "notify-mark result=skipped code=no-comment-id" "⑨b 列表超时也留那一行日志"
+assert_contains "$out" "rc=0" "⑨b 列表超时不影响评审结果（N-F2）"
 out=$(run9 "$tmp/fx9m" FEISHU_NOTIFY=1)
 assert_eq "$(cid9)" "none" "⑨b 新建后在 MR 上找不到本次那一条 → 不记 id"
 assert_contains "$out" "notify-mark result=skipped code=no-comment-id" "⑨b 找不到时留一行日志"
