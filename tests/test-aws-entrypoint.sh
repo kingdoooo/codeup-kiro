@@ -1278,4 +1278,109 @@ guard=$(awk '/^# ── 评审员清单与扫描员派发/{f=1} /^# ── 按 M
 assert_eq "$([ -n "$early" ] && [ -n "$guard" ] && [ "$guard" -lt "$early" ] && echo yes)" "yes" \
   "㉗ 提前那次核对只在有扫描员时做（在 if [[ -n \$scan_rids ]] 里）"
 
+# ㉘ Phase 2c 飞书通知（issue 20，spec「组件设计 · 锁记录新增字段」）：FEISHU_NOTIFY=1 时引擎前后各取一次 MR 全局评论，本次发出 / 更新的
+#    Kiro 评论 id 与 posted_kiro 一起写进锁记录（lib/notify-mark.sh）。把「调引擎 + 收尾」那一段与 notify-mark.sh、scan-dispatch.sh（mark_lock）、
+#    lease.sh（aws_err_code）原样抽出来跑：Codeup 走 DRY_RUN（引擎替身在两次之间换掉列表 fixture——就是引擎原地更新 / 新建了评论），
+#    dynamodb 走 fake-aws-dynamodb.py（真的求值条件），引擎换成替身。
+if [[ -x /usr/bin/jq ]] && command -v python3 >/dev/null; then
+  ntmp=$(mktemp -d); NROOT="$(cd .. && pwd)"
+  mkdir -p "$ntmp/pkg" "$ntmp/fx" "$ntmp/w"; ln -s "$NROOT/scripts" "$ntmp/pkg/scripts"
+  printf '#!/bin/sh\nexec python3 "%s" "$@"\n' "$PWD/fake-aws-dynamodb.py" > "$ntmp/aws"
+  cat > "$ntmp/engine" <<'STUB'
+#!/bin/sh
+if [ -n "${ENGINE_HOOK:-}" ]; then sh -c "$ENGINE_HOOK"; fi
+exit "${ENGINE_RC:-0}"
+STUB
+  # timeout 替身：记下参数、照跑命令（列评论那两次套着 45 秒上限；macOS 没有 /usr/bin/timeout）
+  cat > "$ntmp/timeout" <<STUB
+#!/bin/sh
+echo "\$*" >> "$ntmp/timeout.log"
+shift
+exec "\$@"
+STUB
+  chmod +x "$ntmp/aws" "$ntmp/engine" "$ntmp/timeout"
+  tail_block=$(awk '/^rc=0$/{f=1} f{print} f&&/^exit "\$rc"$/{exit}' "$ENTRY")
+  assert_contains "$tail_block" 'notify_kiro_snapshot "$NOTIFY_SNAPSHOT"' "㉘ 抽到的收尾段在引擎之前取快照"
+  assert_contains "$tail_block" 'notify_kiro_mark "$NOTIFY_SNAPSHOT"' "㉘ 抽到的收尾段在引擎之后认评论"
+  nblock=$(printf '%s\n%s\n%s\n%s\nengine_cap=60\n%s\n' "$(cat "$LEASE_LIB")" "$(cat ../aws/executor/lib/scan-dispatch.sh)" \
+             "$(cat ../aws/executor/lib/notify-mark.sh)" "$RETRY_SRC" "$tail_block" \
+    | sed -e "s#/usr/local/bin/aws#$ntmp/aws#g" \
+          -e "s#/usr/bin/timeout -k 30 \"\$engine_cap\" /bin/bash -p \"\$PKG/scripts/kiro-review.sh\"#$ntmp/engine#" \
+          -e "s#/usr/bin/timeout #$ntmp/timeout #g")
+  assert_contains "$nblock" "$ntmp/engine || rc=\$?" "㉘ 引擎调用换成了替身"
+  assert_not_contains "$nblock" "/usr/local/bin/aws" "㉘ aws 全部换成了替身"
+  assert_not_contains "$nblock" "/usr/bin/timeout" "㉘ timeout 全部换成了替身"
+  NPK="7#7#$(printf 'a%.0s' {1..40})"
+  # 一条评论对象：<id> <作者> <档案> <run>（评论头出自 review_render_comment_head，与引擎同一份）
+  mkc() {
+    local body
+    body=$(REVIEW_PROFILE="$3" /bin/bash --norc --noprofile -c "source '$NROOT/scripts/lib/review-render.sh'; echo '[]' > '$ntmp/h.json'
+      review_render_comment_head \"\$REVIEW_TITLE\" abc1234 $4 '$ntmp/h.json'; echo; echo 正文 $4" </dev/null)
+    jq -cn --arg id "$1" --arg a "$2" --arg c "$body" '{comment_biz_id: $id, comment_type: "GLOBAL_COMMENT", state: "OPENED", author: {username: $a}, content: $c}'
+  }
+  A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; I=cccccccccccccccccccccccccccccccc; H=dddddddddddddddddddddddddddddddd
+  KA2=$(mkc $A aliyun:bot kiro 2); KA3=$(mkc $A aliyun:bot kiro 3); KB1=$(mkc $B aliyun:bot kiro 1)
+  IN1=$(mkc $I aliyun:bot inspector 1); IN2=$(mkc $I aliyun:bot inspector 2); HU=$(mkc $H aliyun:human kiro 9)
+  nrun() {  # <引擎之前的列表 JSON> <引擎之后的列表 JSON> [KEY=VAL …] → rc；stderr 在 $ntmp/err
+    printf '%s' "$1" > "$ntmp/fx/list-comments.json"; printf '%s' "$2" > "$ntmp/after.json"; shift 2
+    printf '{"%s": {"pk": {"S": "%s"}}}' "$NPK" "$NPK" > "$ntmp/state.json"; rm -f "$ntmp/state.json.lock" "$ntmp/w"/notify-* "$ntmp/timeout.log"
+    local rc=0
+    env AWS_REGION=us-west-2 LOCK_TABLE=t LOCK_KEY="$NPK" CODEUP_REPO_ID=7 MR_LOCAL_ID=7 YUNXIAO_ORG_ID=o1 YUNXIAO_TOKEN=x \
+        CODEUP_BOT_USERNAME=aliyun:bot DRY_RUN=1 DRY_RUN_FIXTURE_DIR="$ntmp/fx" CODEUP_RETRY_BACKOFF=0 PKG="$ntmp/pkg" WORKROOT="$ntmp/w" \
+        FAKE_DDB_STATE="$ntmp/state.json" FAKE_DDB_LOG="$ntmp/ddb.log" FEISHU_NOTIFY=1 \
+        ENGINE_HOOK="cp '$ntmp/after.json' '$ntmp/fx/list-comments.json'" "$@" \
+        /bin/bash -c "set -euo pipefail; $nblock" >/dev/null 2>"$ntmp/err" </dev/null || rc=$?
+    echo "$rc"
+  }
+  nattr() { jq -r --arg k "$NPK" --arg a "$1" '(.[$k][$a] // {}) | if has("S") then .S elif has("BOOL") then (.BOOL | tostring) else "none" end' \
+              "$ntmp/state.json" 2>/dev/null || echo none; }
+  # a. 原地更新（引擎把 A 从 run:2 改成 run:3）→ posted_kiro + comment_kiro = A；引擎的 rc=0 标记照旧
+  assert_eq "$(nrun "[$KA2,$IN1]" "[$KA3,$IN1]")" "0" "㉘a 原地更新 → 0"
+  assert_eq "$(nattr posted_kiro)/$(nattr comment_kiro)/$(nattr posted)" "true/$A/true" "㉘a 记下的是本次原地更新的那一条；兜底读的 posted 照旧"
+  assert_contains "$(cat "$ntmp/err")" "notify-mark reviewer=kiro result=ok" "㉘a 日志"
+  assert_eq "$(LC_ALL=C grep -c '^45 /bin/bash -p -c ' "$ntmp/timeout.log" || true)" "2" \
+    "㉘a 列评论的两次请求都套着 45 秒上限（持有租约期间，限流时不吃掉后来者的等待余量）"
+  # b. 新建（之前没有 Kiro 汇总）→ comment_kiro = B
+  assert_eq "$(nrun "[$IN1]" "[$IN1,$KB1]")" "0" "㉘b 新建 → 0"
+  assert_eq "$(nattr comment_kiro)" "$B" "㉘b 记下新建的那一条"
+  # c. 引擎没发评论（空 diff 之类）→ 不写
+  assert_eq "$(nrun "[$KA2]" "[$KA2]")" "0" "㉘c 没有变化 → 0"
+  assert_eq "$(nattr posted_kiro)/$(nattr comment_kiro)" "none/none" "㉘c 引擎没发评论 → 不写 posted_kiro / comment_kiro"
+  assert_contains "$(cat "$ntmp/err")" "notify-mark reviewer=kiro result=skipped code=no-comment" "㉘c 日志"
+  # d. 只有 Inspector 的汇总变了（同一 MR 上并发的扫描员）→ 不是 Kiro 的
+  assert_eq "$(nrun "[$KA2,$IN1]" "[$KA2,$IN2]")" "0" "㉘d → 0"
+  assert_eq "$(nattr comment_kiro)" "none" "㉘d 别的评审员的评论变了不算 Kiro 的"
+  # e. 有人贴了一条带 Kiro 标记的评论（作者不是机器人）→ 不算
+  assert_eq "$(nrun "[$KA2]" "[$KA2,$HU]")" "0" "㉘e → 0"
+  assert_eq "$(nattr comment_kiro)" "none" "㉘e 别人贴的同标记评论不算（选择器只认机器人账号）"
+  # f. 引擎失败但发了失败评论（rc=1）→ 照样写（失败评论也是 Kiro 自己的评论，F5）；退出码原样
+  assert_eq "$(nrun "[$KA2]" "[$KA3]" ENGINE_RC=1)" "1" "㉘f 引擎 rc=1 → 入口仍以 1 退出"
+  assert_eq "$(nattr posted_kiro)/$(nattr comment_kiro)/$(nattr posted)" "true/$A/none" "㉘f 失败评论也通知；rc≠0 时 posted 照旧不置"
+  # g. 开关为 0：一次列表请求都没有、什么都不写（与现在逐字节相同的行为）
+  assert_eq "$(nrun "[$KA2]" "[$KA3]" FEISHU_NOTIFY=0)" "0" "㉘g 不开 → 0"
+  assert_eq "$(nattr posted_kiro)" "none" "㉘g 不开飞书通知 → 不写 posted_kiro"
+  assert_eq "$(LC_ALL=C grep -c 'DRY_RUN POST' "$ntmp/err" || true)" "0" "㉘g 不开飞书通知 → 一次 Codeup 请求都没有"
+  # h. 引擎之前取不到列表 → 不通知、不影响退出码
+  assert_eq "$(nrun "[$KA2]" "[$KA3]" DRY_RUN_FAIL_ROUTES=list-comments:404)" "0" "㉘h 列表取不到 → 0"
+  assert_eq "$(nattr posted_kiro)" "none" "㉘h 没有快照就不通知"
+  assert_contains "$(cat "$ntmp/err")" "notify-mark reviewer=kiro result=skipped code=list-before" "㉘h 日志"
+  # i. 引擎之后的列表不是合法 JSON → 不通知
+  assert_eq "$(nrun "[$KA2]" "not json")" "0" "㉘i → 0"
+  assert_eq "$(nattr posted_kiro)" "none" "㉘i 认不出就不通知"
+  # j. 锁记录不在（TTL 已清）→ 不新建一条没有 expires_at 的记录（N4），只留代号
+  printf '[%s]' "$KA2" > "$ntmp/fx/list-comments.json"
+  assert_eq "$(nrun "[$KA2]" "[$KA3]" LOCK_KEY="other#key")" "0" "㉘j 锁记录不在 → 0"
+  assert_eq "$(jq -r 'keys | join(",")' "$ntmp/state.json")" "$NPK" "㉘j 没有新建记录"
+  assert_contains "$(cat "$ntmp/err")" "mark-lock attr=posted_kiro result=failed code=ConditionalCheckFailedException" "㉘j 留代号"
+  rm -rf "$ntmp"
+else
+  echo "SKIP: 无 /usr/bin/jq 或 python3，跳过 ㉘ 飞书通知的评论 id 断言" >&2
+fi
+# ㉘ 静态：notify-mark.sh 顶层只有函数定义；入口在 clone 之前 source 它（与别的库同一处）
+nm_top=$(LC_ALL=C grep -vE '^[[:space:]]*(#|$)' ../aws/executor/lib/notify-mark.sh | LC_ALL=C grep -vE '^[[:space:]]' \
+         | LC_ALL=C grep -vE '^([a-z_]+\(\) \{([[:space:]]+#.*)?|\})$' || true)
+assert_eq "$nm_top" "" "㉘ notify-mark.sh 顶层只有函数定义（source 时不执行任何动作）"
+nm_src=$(entry_code_line '^source "\$PKG/lib/notify-mark\.sh"$')
+assert_eq "$([ -n "$nm_src" ] && [ -n "$clone_line" ] && [ "$nm_src" -lt "$clone_line" ] && echo yes)" "yes" "㉘ notify-mark.sh 在 clone 之前 source"
+
 report

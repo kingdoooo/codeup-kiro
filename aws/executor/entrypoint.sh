@@ -145,6 +145,8 @@ source "$PKG/lib/lease.sh"
 source "$PKG/lib/scan-dispatch.sh"
 # 扫描员的输入准备（lib/scan-input.sh：钉死属性的 git 导出、sbomgen；只有函数定义）
 source "$PKG/lib/scan-input.sh"
+# 飞书通知要的「本次 Kiro 评论 id」（lib/notify-mark.sh，Phase 2c issue 20；只有函数定义，FEISHU_NOTIFY=1 时引擎前后各调一次）
+source "$PKG/lib/notify-mark.sh"
 retry_git_429 /usr/bin/git clone --no-tags "$clone_url" \
   "$WORKROOT/business" >/dev/null 2>"$GIT_ERR" \
   || { echo "clone 业务库失败（凭证、网络或仓库权限）" >&2; git_err_tail; exit 91; }
@@ -330,6 +332,10 @@ export KIRO_INSTALL_PROFILE=pinned
 export KIRO_PINNED_ARTIFACT=/opt/kiro/kirocli-x86_64-linux-musl.zip
 
 rc=0
+# 飞书通知（issue 20，FEISHU_NOTIFY=1 才做；开关为 0 时这两行什么都不做）：引擎之前记一份 MR 全局评论的快照，引擎之后据此认出本次
+# 发出 / 更新的 Kiro 评论（lib/notify-mark.sh）。通知只读锁记录，不改评审结果与退出码（N-F2）
+NOTIFY_SNAPSHOT="$WORKROOT/notify-before.json"
+[[ "${FEISHU_NOTIFY:-0}" != 1 ]] || notify_kiro_snapshot "$NOTIFY_SNAPSHOT"
 # 总时长上限（见租约那一段开头）：超时 124 原样透出——兜底 Lambda 的通用文案写着「任务超时」；
 # 30 秒内不理 TERM 就 KILL（137）。137 与 OOM 同码，所以只在确实跑满了上限时才打那行消息，运维靠它区分两者。
 # 引擎内层 timeout 下的 kiro-cli 自成进程组、不被这里杀掉，但本文件一退出整个任务就结束（本文件是 PID 1；开了 init 时
@@ -360,4 +366,6 @@ if [[ "$rc" -eq 0 ]]; then
     --expression-attribute-names '{"#p":"posted"}' \
     --expression-attribute-values '{":t":{"BOOL":true}}' >/dev/null 2>&1 || true
 fi
+# 不论退出码：失败评论也是 Kiro 自己发出的评论（spec F5）。posted_kiro 是通知专用的标记，兜底读的仍是上面那个 posted
+[[ "${FEISHU_NOTIFY:-0}" != 1 ]] || notify_kiro_mark "$NOTIFY_SNAPSHOT"
 exit "$rc"
