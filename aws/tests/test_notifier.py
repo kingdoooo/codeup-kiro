@@ -5,7 +5,9 @@
 """
 import json
 import pathlib
+import socket
 import sys
+import time
 from unittest import mock
 
 import pytest
@@ -282,6 +284,101 @@ def test_an_unreachable_upstream_is_logged_as_network(fake, monkeypatch, capsys)
     monkeypatch.setattr(notifier, "CODEUP_API_BASE", "http://127.0.0.1:9")   # discard 端口：连接被拒
     _run(_posted())
     assert capsys.readouterr().out.endswith("result=failed step=codeup code=network\n")
+
+
+# ── 终审 M-5：每条通知一个总时限（NOTIFY_BUDGET）；用完记 code=deadline、这一条不再试 ─────────────────────────────────────
+# sandbox 2026-10-10：一个执行环境连不上云效时一次请求约 120 秒（OpenAPI 解析出 12 个地址，urllib 逐个试、每个 10 秒）；批 1、一个分片，
+# 后面的记录全排在它后面。用例把时限缩到 1 秒以内、上游的慢由 HTTP 替身的 delays 或下面的 blackhole 给。
+def _timed(*records):
+    t0 = time.monotonic()
+    _run(*records)
+    return time.monotonic() - t0
+
+
+def test_a_slow_upstream_ends_the_notification_at_its_budget(fake, monkeypatch, capsys):
+    monkeypatch.setattr(notifier, "NOTIFY_BUDGET", 1.0, raising=False)
+    fake.delays["/codeup/"] = 3
+    took = _timed(_posted())
+    assert capsys.readouterr().out == "notify reviewer=kiro repo=7215683 mr=10 result=failed step=codeup code=deadline\n"
+    assert took < 2, took
+    assert [p.split("/")[1] for p in fake.paths()] == ["codeup"], "用完时限就不再取飞书令牌、不发消息"
+
+
+def test_the_budget_covers_the_whole_notification_not_each_request(fake, monkeypatch, capsys):
+    # 云效与取令牌各 0.6 秒：单看都在每次 socket 操作的超时之内，合起来超过 1 秒的总时限 → 停在取令牌那一步
+    monkeypatch.setattr(notifier, "NOTIFY_BUDGET", 1.0, raising=False)
+    fake.delays.update({"/codeup/": 0.6, "tenant_access_token": 0.6})
+    took = _timed(_posted())
+    assert capsys.readouterr().out == "notify reviewer=kiro repo=7215683 mr=10 result=failed step=token code=deadline\n"
+    assert took < 1.6, took
+    assert fake.sends() == []
+
+
+def test_each_notification_in_a_record_gets_its_own_budget(fake, monkeypatch, capsys):
+    monkeypatch.setattr(notifier, "NOTIFY_BUDGET", 1.0, raising=False)
+    fake.delays["/codeup/"] = 0.6
+    _run(_rec(_img(posted_inspector=True, comment_inspector=CID, posted_security=True, comment_security="f" * 32), _img()))
+    assert capsys.readouterr().out.splitlines() == ["notify reviewer=inspector repo=7215683 mr=10 result=sent",
+                                                    "notify reviewer=security repo=7215683 mr=10 result=sent"]
+
+
+def test_a_rate_limit_wait_never_outlasts_the_budget(fake, monkeypatch, capsys):
+    slept = []
+    monkeypatch.setattr(notifier.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(notifier, "NOTIFY_BUDGET", 1.0, raising=False)
+    fake.send_replies = [(429, {"code": 99991400}, {"x-ogw-ratelimit-reset": "3"})]
+    _run(_posted())
+    assert len(slept) == 1 and 0 <= slept[0] <= 1.0, slept
+    assert capsys.readouterr().out.endswith("result=sent\n")
+
+
+BLACKHOLE = "blackhole.invalid"
+_real_sleep = time.sleep   # fake 夹具把 time.sleep 换成了空操作；这里的连接替身要真睡
+
+
+@pytest.fixture
+def blackhole(monkeypatch):
+    """BLACKHOLE 解析出 12 个地址（云效 OpenAPI 实测就是 12 个），每个都要等满连接超时才失败。socket.create_connection 的替身照标准库的
+    行为：给主机名 → 逐个地址试、每个地址都套**完整的**超时（120 秒就是这么来的）；给地址 → 睡满超时、TimeoutError。返回每次连接的超时。"""
+    real_gai, real_cc = socket.getaddrinfo, socket.create_connection
+    ips = [f"192.0.2.{i}" for i in range(1, 13)]
+    tried = []
+
+    def gai(host, port, *a, **kw):
+        if host == BLACKHOLE:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in ips]
+        return real_gai(host, port, *a, **kw)
+
+    def cc(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **kw):
+        host, port = address[:2]
+        if host == BLACKHOLE:
+            err = None
+            for *_, sa in gai(host, port):
+                try:
+                    return cc(sa, timeout, source_address)
+                except OSError as exc:
+                    err = exc
+            raise err
+        if host in ips:
+            tried.append(timeout)
+            _real_sleep(timeout)
+            raise TimeoutError("timed out")
+        return real_cc(address, timeout, source_address, **kw)
+
+    monkeypatch.setattr(socket, "getaddrinfo", gai)
+    monkeypatch.setattr(socket, "create_connection", cc)
+    return tried
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_connecting_stops_trying_addresses_once_the_budget_is_spent(fake, blackhole, monkeypatch, capsys, scheme):
+    monkeypatch.setattr(notifier, "NOTIFY_BUDGET", 0.5, raising=False)
+    monkeypatch.setattr(notifier, "HTTP_TIMEOUT", 0.2)
+    monkeypatch.setattr(notifier, "CODEUP_API_BASE", f"{scheme}://{BLACKHOLE}")
+    took = _timed(_posted())
+    assert capsys.readouterr().out == "notify reviewer=kiro repo=7215683 mr=10 result=failed step=codeup code=deadline\n"
+    assert took < 1.0, took
+    assert 1 <= len(blackhole) <= 3 and max(blackhole) <= 0.2, blackhole
 
 
 def test_an_unexpected_bug_is_contained_per_message(fake, monkeypatch, capsys):

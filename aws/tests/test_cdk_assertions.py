@@ -2397,6 +2397,17 @@ def test_the_notifiers_env_has_secret_names_only_and_the_configured_platform():
         "FEISHU_APP_SECRET_ID": "codeup-kiro/feishu-app", "FEISHU_DOMAIN": "lark"}
 
 
+def test_three_notifications_at_their_budget_fit_in_the_notifier_timeout():
+    # 终审 M-5：一条记录最多三条通知（三位评审员）。每条最坏 = 总时限 + 读阶段的最后一次 socket 操作 + 两次取密钥（bounded_config 的最坏）。
+    # 三条加起来要小于函数超时：函数一超时，ESM 就重放整批，最后按记录年龄（1 小时）无声丢弃——总时限要防的正是这个
+    import bounded_config
+    root = pathlib.Path(__file__).resolve().parents[1]
+    notifier = load_lambda("notifier_for_budget", root / "lambda" / "notifier" / "handler.py")
+    (fn,) = [v for k, v in _resources(_notify_stacks(feishu_notify=1)["state"], "AWS::Lambda::Function").items() if "NotifierFn" in k]
+    per = notifier.NOTIFY_BUDGET + notifier.HTTP_TIMEOUT + 2 * bounded_config.worst_case_seconds()
+    assert 3 * per < fn["Properties"]["Timeout"], (per, fn["Properties"]["Timeout"])
+
+
 def _role_statements(tpl, role_ref_prefix):
     out = []
     for v in _resources(tpl, "AWS::IAM::Policy").values():
@@ -2527,6 +2538,10 @@ def test_the_guide_documents_the_feishu_notifier_the_way_the_code_behaves():
     # sandbox 2026-10-10（Phase 2c Task 11 Step 6.5）实测：app_secret 写错时 tenant_access_token/internal 返回的是 10014，不是飞书通用错误码表里
     # 「App Secret 错误」的 10015。手册得照实测说「写错 app_secret 就是 10014」，不能按通用表把 10014 说成「应用被停用」、把人引去查错地方
     assert re.search(r"`feishu-10014`[^；]*`app_secret`[^；]*实测", rows), "§8 的 step=token 那一段没照实测写：app_secret 写错时是 feishu-10014"
+    # 终审 M-5：每条通知的总时限用完时是 code=deadline（任何一步都可能）；手册写明时限多长，以及仍然不留日志的那一条路（Stream 里积压超过 1 小时）
+    assert '"deadline"' in src, "handler 里没有 deadline 这个错误码"
+    assert "`code=deadline`" in rows and f"{notifier.NOTIFY_BUDGET} 秒" in rows, "§8 没写 code=deadline 与每条通知的总时限"
+    assert "IteratorAge" in rows and "1 小时" in rows, "§8 没写积压超过 1 小时被事件源丢掉、只有 IteratorAge 看得到"
     assert "第 8 节「result=skipped」与「result=failed」那两行" in sec
     # §1.3 的数据流表与 §3 的密钥表各有一行
     sec13 = _guide_subsection("1.3")

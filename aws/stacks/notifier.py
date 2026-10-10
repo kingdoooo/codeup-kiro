@@ -49,8 +49,8 @@ class FeishuNotifier(Construct):
             handler="handler.handler",
             code=lambda_.Code.from_asset(os.path.join(LAMBDA_ROOT, "notifier")),
             layers=[shared],
-            # 一条记录最多三条通知，每条最多四次 HTTP 往返（云效、取租户令牌、发消息、限流后再发一次）加 5 秒等待，每次 socket 操作 10 秒上限：
-            # 上游很慢时一条记录约 4 分钟。一批只给一条记录（批 1）：超时重放的只是它自己，uuid 保证重放不重发
+            # 一条记录最多三条通知，每条有一个总时限（handler.py 的 NOTIFY_BUDGET，40 秒；最坏再多一次 socket 操作与两次取密钥）：一条记录最坏约
+            # 4 分钟，留在这 300 秒之内（test_cdk_assertions 核对），函数不会跑到超时。一批只给一条记录（批 1）：万一超时，重放的只是它自己，uuid 保证重放不重发
             timeout=cdk.Duration.seconds(300),
             environment={
                 "YUNXIAO_ORG_ID": cfg["org_id"],
@@ -67,7 +67,9 @@ class FeishuNotifier(Construct):
         # posted_<rid>）与 eventName 由 handler 自己做——过滤器的 exists 只认类型叶子（NewImage.x.S），eventName 过滤在两份 AWS 文档里说法不一，
         # 不靠它们。租约续期、Kiro 的 posted、dispatched_* 这些 MODIFY 在这里就被丢掉，不调用函数。
         # 重试只给函数自己崩溃 / 超时用（handler 对每条通知的失败只记日志、不抛）：缺省是无限重试到记录过期（24 小时），这里 2 次、记录 1 小时
-        # 就丢（请求带 uuid，重试不重发）。TRIM_HORIZON：LATEST 在建、改事件源映射的那几分钟里可能漏事件（Lambda 文档 with-ddb）。
+        # 就丢（请求带 uuid，重试不重发）。函数不超时之后，只有 Stream 里积压超过 1 小时（一个卡住的执行环境里几十条通知各自用满时限）才会丢，
+        # 丢的不留日志、只在 IteratorAge 指标上看得到（终审 M-5，手册第 8 节；没有配失败目的地）。
+        # TRIM_HORIZON：LATEST 在建、改事件源映射的那几分钟里可能漏事件（Lambda 文档 with-ddb）。
         self.function.add_event_source(event_sources.DynamoEventSource(
             lock_table,
             starting_position=lambda_.StartingPosition.TRIM_HORIZON,

@@ -7,9 +7,13 @@
 - GetChangeRequest：`change_request` 是返回的 JSON（缺省一位绑了邮箱的作者 + 本组织本 MR 的 detailUrl），`change_request_status` 是状态码。
 - tenant_access_token：`token_reply` 是返回的 JSON（缺省 code 0、expire 7200）。
 - 发消息：`send_replies` 是按次序给出的 (状态码, JSON, 额外响应头)；用完之后一律成功（code 0）。
+- `delays`：{路径里的子串: 秒}，命中的请求先睡这么久再回（上游很慢；终审 M-5 的总时限用例）。客户端先放弃时回写会断管，这里吞掉。
 """
 import json
 import threading
+import time
+
+_sleep = time.sleep   # 用例会把 time.sleep 换成空操作（限流等待），替身自己的延迟要真睡
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ORG = "0123456789abcdef01234567"
@@ -29,6 +33,7 @@ class FakeNotify:
         self.change_request_status = 200
         self.token_reply = {"code": 0, "msg": "ok", "tenant_access_token": "t-fake-tenant", "expire": 7200}
         self.send_replies = []
+        self.delays = {}
         self._lock = threading.Lock()
         self._server = None
 
@@ -63,6 +68,9 @@ class FakeNotify:
                 body = json.loads(raw) if raw else None
                 with fake._lock:
                     fake.requests.append((self.command, self.path, {k.lower(): v for k, v in self.headers.items()}, body))
+                for needle, secs in list(fake.delays.items()):
+                    if needle in self.path:
+                        _sleep(secs)
                 return body
 
             def do_GET(self):
@@ -87,6 +95,7 @@ class FakeNotify:
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
+        self._server.handle_error = lambda request, client_address: None   # 客户端超时后断开：回写断管不是用例失败
         # poll_interval 缺省 0.5 秒：每条用例收尾的 shutdown() 都要等满一轮
         threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
         return self
