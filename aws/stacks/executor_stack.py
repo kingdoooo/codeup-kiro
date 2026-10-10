@@ -13,7 +13,7 @@ from aws_cdk import (
 )
 from constructs import Construct
 
-from config import DEFAULT_COMMAND_PHRASE, PHRASE_DEFAULTS
+from config import DEFAULT_COMMAND_PHRASE, PHRASE_DEFAULTS, feishu_notify_on
 
 # aws/executor/Dockerfile 的构建上下文是仓库根（COPY scripts/ prompts/ kiro/ 都是相对仓库根的路径），
 # 这里必须给出同一个根，否则 DockerImageAsset 的目录内容与 Dockerfile 里的 COPY 源路径对不上。
@@ -205,6 +205,9 @@ class ExecutorStack(cdk.Stack):
                 "REVIEW_RERUN_HINT": rerun_hint(cfg),
                 **{var: str(cfg.get(key, default))
                    for key, (var, default) in BEHAVIOUR_VARS.items()},
+                # 飞书通知（Phase 2c issue 20）：只是一个开关——执行器据此记下本次 Kiro 评论的 id（lib/notify-mark.sh）。飞书凭证不进任何任务（N-F1）；
+                # 开关为 0 时不写这个变量，任务定义与不开时逐字节相同
+                **({"FEISHU_NOTIFY": "1"} if feishu_notify_on(cfg) else {}),
             },
             secrets={
                 "KIRO_API_KEY": ecs.Secret.from_secrets_manager(kiro_api_key),
@@ -292,6 +295,8 @@ class ExecutorStack(cdk.Stack):
                 "INSPECTOR_RERUN_HINT": scanner_rerun_hint(cfg, "inspector_command_phrase"),
                 "SECURITY_RERUN_HINT": scanner_rerun_hint(cfg, "security_command_phrase"),
                 "INSPECTOR_MAX_SCAN_CALLS": str(cfg.get("inspector_max_scan_calls", 3)),
+                # 飞书通知的开关（同执行器那一处）：扫描员据此记下本次评论的 id（aws/reviewers/lib/summary.sh）
+                **({"FEISHU_NOTIFY": "1"} if feishu_notify_on(cfg) else {}),
             },
             secrets=scan_secrets,
         )

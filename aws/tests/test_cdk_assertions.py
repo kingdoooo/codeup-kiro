@@ -2292,3 +2292,113 @@ def test_the_scan_task_gets_the_agent_space_service_role_mapping_table_and_timeo
     _, t2 = _scan_templates(security_agent=1)
     env2 = {e["Name"]: e["Value"] for e in _td_by_container(t2, "scan")["ContainerDefinitions"][0]["Environment"]}
     assert env2["SECURITY_AGENT_TIMEOUT"] == "3600"
+
+
+
+# ── Phase 2c：飞书通知（issue 20，spec「组件设计 · 通知 Lambda」、失败矩阵第一行、N-F1）─────────────────────────────────────
+def _notify_stacks(**over):
+    """三个栈都用同一份配置（StateStack 也拿完整配置：通知 Lambda 在它里面）。"""
+    app = cdk.App()
+    cfg = _full_cfg(**over)
+    state = StateStack(app, "S", cfg=cfg)
+    executor = ExecutorStack(app, "E", cfg=cfg, state=state)
+    disp = DispatcherStack(app, "D", cfg=cfg, state=state, executor=executor)
+    return {k: Template.from_stack(v).to_json() for k, v in (("state", state), ("executor", executor), ("dispatcher", disp))}
+
+
+def _resources(tpl, typ):
+    return {k: v for k, v in tpl.get("Resources", {}).items() if v["Type"] == typ}
+
+
+@pytest.mark.parametrize("over", [{}, {"inspector": 1, "security_agent": 1}])
+def test_with_feishu_notify_off_every_template_is_identical_to_not_configuring_it(over):
+    # 失败矩阵第一行：feishu_notify: 0 → 不建 Lambda、不开 Stream，三个栈的模板与不写这个键时逐字节相同
+    absent, off = _notify_stacks(**over), _notify_stacks(feishu_notify=0, feishu_domain="lark", **over)
+    for name in absent:
+        assert json.dumps(off[name], sort_keys=True) == json.dumps(absent[name], sort_keys=True), name
+        assert "feishu" not in json.dumps(off[name]).lower(), name
+    (lock,) = [t for t in _resources(off["state"], "AWS::DynamoDB::Table").values()
+               if t["Properties"].get("TimeToLiveSpecification", {}).get("Enabled")]
+    assert "StreamSpecification" not in lock["Properties"]
+    assert _resources(off["state"], "AWS::Lambda::Function") == {}
+
+
+def test_feishu_notify_on_streams_the_lock_table_into_one_notifier_outside_any_vpc():
+    t = _notify_stacks(feishu_notify=1)["state"]
+    tables = _resources(t, "AWS::DynamoDB::Table")
+    (lock,) = [v for v in tables.values() if v["Properties"].get("TimeToLiveSpecification", {}).get("Enabled")]
+    (mapping,) = [v for k, v in tables.items() if "Mapping" in k]
+    assert lock["Properties"]["StreamSpecification"] == {"StreamViewType": "NEW_AND_OLD_IMAGES"}
+    assert "StreamSpecification" not in mapping["Properties"], "只有锁表开 Stream"
+    assert lock["DeletionPolicy"] == "Retain", "开 Stream 不改表的删除策略"
+    (fn_id, fn), = [(k, v) for k, v in _resources(t, "AWS::Lambda::Function").items() if "NotifierFn" in k]
+    assert "VpcConfig" not in fn["Properties"], "通知 Lambda 不进 VPC（P2c-01：与调度器、兜底同）"
+    assert fn["Properties"]["Runtime"] == "python3.12" and fn["Properties"]["Handler"] == "handler.handler"
+    assert fn["Properties"]["Timeout"] == 300, "一条记录最多三条通知、上游很慢时约 4 分钟"
+    (esm,) = _resources(t, "AWS::Lambda::EventSourceMapping").values()
+    assert esm["Properties"]["FunctionName"] == {"Ref": fn_id}
+    assert "StreamArn" in json.dumps(esm["Properties"]["EventSourceArn"]), esm["Properties"]["EventSourceArn"]
+
+
+def test_the_event_source_only_passes_posted_with_a_comment_id_and_retries_little():
+    (esm,) = _resources(_notify_stacks(feishu_notify=1)["state"], "AWS::Lambda::EventSourceMapping").values()
+    p = esm["Properties"]
+    patterns = [json.loads(f["Pattern"]) for f in p["FilterCriteria"]["Filters"]]
+    assert patterns == [{"dynamodb": {"NewImage": {f"posted_{rid}": {"BOOL": [True]}, f"comment_{rid}": {"S": [{"exists": True}]}}}}
+                        for rid in ("kiro", "inspector", "security")], patterns
+    assert (p["StartingPosition"], p["BatchSize"], p["MaximumRetryAttempts"], p["MaximumRecordAgeInSeconds"]) == \
+        ("TRIM_HORIZON", 1, 2, 3600), p
+    assert p.get("BisectBatchOnFunctionError") in (None, False)
+
+
+def test_the_notifiers_env_has_secret_names_only_and_the_configured_platform():
+    t = _notify_stacks(feishu_notify=1, feishu_domain="lark")["state"]
+    (fn,) = [v for k, v in _resources(t, "AWS::Lambda::Function").items() if "NotifierFn" in k]
+    assert fn["Properties"]["Environment"]["Variables"] == {
+        "YUNXIAO_ORG_ID": "o1", "YUNXIAO_TOKEN_ID": "codeup-kiro/yunxiao-token-kiro",
+        "FEISHU_APP_SECRET_ID": "codeup-kiro/feishu-app", "FEISHU_DOMAIN": "lark"}
+
+
+def _role_statements(tpl, role_ref_prefix):
+    out = []
+    for v in _resources(tpl, "AWS::IAM::Policy").values():
+        if any(isinstance(r, dict) and r.get("Ref", "").startswith(role_ref_prefix) for r in v["Properties"].get("Roles", [])):
+            out += v["Properties"]["PolicyDocument"]["Statement"]
+    return out
+
+
+def test_only_the_notifier_role_can_read_the_feishu_secret_and_no_task_definition_references_it():
+    # N-F1：飞书凭证不进任何任务定义、任务环境或镜像；只有通知 Lambda 的执行角色能读 codeup-kiro/feishu-app（三位评审员都开着）
+    stacks = _notify_stacks(feishu_notify=1, inspector=1, security_agent=1)
+    holders = set()
+    for name, tpl in stacks.items():
+        for v in _resources(tpl, "AWS::IAM::Policy").values():
+            if "feishu-app" in json.dumps(v["Properties"]["PolicyDocument"]):
+                holders |= {(name, r.get("Ref", "")) for r in v["Properties"]["Roles"]}
+        for td in _resources(tpl, "AWS::ECS::TaskDefinition").values():
+            # 任务里只有开关 FEISHU_NOTIFY（让评审员记下评论 id），没有飞书密钥的名字、ARN 或任何取值
+            blob = json.dumps(td)
+            assert "feishu-app" not in blob and "FEISHU_APP" not in blob, "任务定义里不得出现飞书凭证或它的名字"
+            for c in td["Properties"]["ContainerDefinitions"]:
+                assert not [s for s in c.get("Secrets", []) if "FEISHU" in s["Name"].upper()], c.get("Secrets")
+    assert len(holders) == 1 and all(n == "state" and "NotifierFn" in r for n, r in holders), holders
+    st = _role_statements(stacks["state"], next(r for _, r in holders))
+    sm = [s for s in st if "secretsmanager" in json.dumps(s["Action"])]
+    assert len(sm) == 1 and sm[0]["Action"] == "secretsmanager:GetSecretValue", sm
+    res = json.dumps(sm[0]["Resource"])
+    assert "yunxiao-token-kiro-??????" in res and "feishu-app-??????" in res and "inspector" not in res and "security" not in res, res
+    acts = {a for s in st for a in ([s["Action"]] if isinstance(s["Action"], str) else s["Action"])}
+    assert not {a for a in acts if a in ("dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query",
+                                         "dynamodb:Scan", "dynamodb:DeleteItem")}, "通知只读 Stream，不碰表里的数据"
+    assert {"dynamodb:GetRecords", "dynamodb:GetShardIterator"} <= acts, acts
+    # 两个持有业务库的任务的环境与密钥块里都没有飞书相关的名字（N-F1 的任务这一侧）
+    for fn in _resources(stacks["dispatcher"], "AWS::Lambda::Function").values():
+        assert "FEISHU" not in json.dumps(fn["Properties"].get("Environment", {})), "调度器 / 兜底不碰飞书"
+
+
+@pytest.mark.parametrize("on", [0, 1])
+def test_feishu_notify_reaches_both_task_containers_only_when_on(on):
+    _, t = _scan_templates(inspector=1, feishu_notify=on)
+    for name in ("review", "scan"):
+        env = {e["Name"]: e["Value"] for e in _td_by_container(t, name)["ContainerDefinitions"][0]["Environment"]}
+        assert env.get("FEISHU_NOTIFY") == ("1" if on else None), (name, env.get("FEISHU_NOTIFY"))

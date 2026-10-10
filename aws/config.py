@@ -47,6 +47,12 @@ def default_bot_usernames(cfg):
     return list(dict.fromkeys(names))
 
 
+def feishu_notify_on(cfg):
+    """飞书通知开着（Phase 2c issue 20）。按 `type(v) is int` 读：绕过 load_config 传进来的 True 不算（True == 1 的坑，同上）。"""
+    v = cfg.get("feishu_notify")
+    return type(v) is int and v == 1
+
+
 def _has_invisible(s):
     """含控制字符（C0/DEL/C1，\t\r\n 都算）、格式字符（零宽空格之类）、代理项或行/段分隔符。
 
