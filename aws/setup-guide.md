@@ -117,6 +117,8 @@ Inspector 那一行只有依赖清单离开执行器，没有源码，也不经�
 评审结论（提示词注入）；评审员只读、读取范围是许可清单；评论仅供参考、不设合并卡点，
 最终合并决策始终在人工评审。
 
+**执行器与扫描任务的出站**：两个任务的容器里有整个业务库。缺省（`egress_lockdown: 0`）它们在网络层可以连到互联网上任何地址；现有防线（业务库只作数据、镜像摘要名单、Kiro 只读 + 读取许可清单、sbomgen 非 root 空环境）都防「进程失控」。`egress_lockdown: 1`（第 6.8 节）再加一道网络层的：本区域的 S3 / DynamoDB 只许本部署的资源、出站只放 443、域名按名单解析（`egress_dns_action: block` 时；缺省的 `alert` 只记录、不拦）。**它挡不住的**：直接连写死的 IP 的 443 端口（那要第 6.8 节末尾的做法 B）；以及**名单上的主机本身被拿来当外传通道**——失控进程用攻击者自己的凭证，把代码推到云效上别人的仓库、写进攻击者账号里的 CloudWatch Logs / Secrets Manager 等本区域 AWS API、经攻击者的 Kiro Key 发给 Kiro。只有 S3 与 DynamoDB 被终端节点策略钉在本部署的资源上；做法 B 也只是多给接口终端节点加策略的机会，云效仍然开着。
+
 ## 2. 部署集成包（信任边界）
 
 Flow 档位靠「受保护分支」当集成包的信任锚；本档位没有这条路径——评审代码被烤进容器镜像，
@@ -399,7 +401,7 @@ cdk --app "python3 probe_app.py" -c region=<区域> destroy CodeupKiroIngressPro
   执行器任务虽在同一个 VPC 里也连不上它。
 - **费用与耗时**：内网 ALB 按小时计固定费用（与流量无关，没有评审也在计费）；VPC origin 的创建与删除
   各需约 15 分钟，`cdk deploy`/`cdk destroy` 会在这一步停留较久，属正常现象；执行器 VPC 另有两个隔离子网，
-  不需要 NAT。
+  不需要 NAT（`egress_mode: nat` 时另有一个 NAT 网关：约 $32/月 + $0.045/GB，美国东部定价，见第 6.8 节）。
 
 ### 6.3 部署
 
@@ -561,6 +563,44 @@ Lambda 一律不发、日志里是 `reason=no-email`。
 见第 8 节「result=skipped」与「result=failed」那两行；函数名是 `CodeupKiroState` 栈的输出 `NotifierFunctionName`。
 评审员这一侧找不到本次评论的 id 时，执行器 / 扫描任务的日志里有一行 `notify-mark … result=skipped`（不发通知，评审照常）。
 
+### 6.8 可选：执行器与扫描任务的出站限制
+
+两个任务的容器里有整个业务库。`egress_lockdown: 1` 给它们加一道网络层的限制（第 1.5 节）。这一档每月约 $0，不改网络结构：
+
+- **S3 / DynamoDB 网关终端节点 + 终端节点策略**（免费）：任务子网里到本区域 S3、DynamoDB 的流量都经它，策略只许本部署的输入桶（读、写对象）、
+  ECR 的镜像层桶 `prod-<区域>-starport-layer-bucket`（Fargate 拉镜像要读）与本部署用到的表（锁表；开了 Security Agent 时还有映射表）。
+  传到别人的 S3 桶、写别的表都会被拒（`AccessDenied`，原因是终端节点策略）。
+- **任务安全组出站只放 TCP 443**。到 Amazon DNS 与任务元数据 / 凭证端点（`169.254.170.2`）的流量不受安全组约束；拉镜像、取密钥、写日志都走 443。
+- **Route 53 Resolver DNS Firewall**：名单上的域名放行，其余按 `egress_dns_action` **ALERT**（只记录，缺省）或 **BLOCK**（解析返回 NXDOMAIN）。
+  服务出故障时缺省 fail-closed（解析失败）。查询日志进日志组（`CodeupKiroExecutor` 栈的输出 `DnsQueryLogGroup`，保留 30 天）。
+  名单在 `aws/stacks/egress.py`：云效（`codeup.aliyun.com`、`openapi-rdc.aliyuncs.com`）、Kiro CLI 要连的主机、本区域的 AWS 端点
+  （Secrets Manager、CloudWatch Logs、ECS、DynamoDB、ECR、S3；开了扫描员时还有 Inspector Scan 与 Security Agent——后者在 `api.aws` 下）。
+  **不放 `*.amazonaws.com` 这种宽通配**：那会把别的区域的 S3 一起放进来（网关终端节点只管本区域）。
+
+**开通（先 ALERT、后 BLOCK）**——名单不靠猜，靠这一轮的查询日志：
+
+1. `config.yaml` 写 `egress_lockdown: 1`（`egress_dns_action` 缺省 `alert`），部署 `cdk deploy --all`。
+2. 跑一轮完整评审：三位评审员都开（`/review`），等三条汇总都回写。
+3. 在查询日志里取这一轮解析过的全部域名（CloudWatch Logs Insights，日志组见上）：
+   `fields query_name, firewall_rule_action | stats count(*) by query_name, firewall_rule_action | sort query_name`。
+   `firewall_rule_action` 为 `ALERT` 的是名单外的：确属评审需要的，把它加进 `aws/stacks/egress.py` 的名单（按区域写成参数，不写死区域）；
+   不认识的先查清是谁发起的，再决定。
+4. 改 `egress_dns_action: block` 再部署，再跑一轮；查询日志里本次评审没有 `BLOCK` 的合法域名，就算完成。
+5. **Kiro CLI 换版本后**（新的已探测镜像摘要），回到第 1 步取一次名单：新版本可能连新的主机。
+
+**可选：NAT 网关形态（`egress_mode: nat`）**：任务放进两个私有子网、不分配公网 IP，经一个 NAT 网关出站（约 $32/月 + $0.045/GB）。
+VPC Block Public Access（BPA）打开后，公有子网经 IGW 的出站会被拦下（「仅入站」模式也拦），NAT 网关是 BPA 下最便宜的合规出站
+（「仅入站」模式放行 NAT 网关的出站；「双向」模式连 NAT 也拦，要给它的子网做排除）。与 `egress_lockdown` 互相独立，可以只开其中一个。
+public → nat：改配置后一次 `cdk deploy --all`。**nat → public 要两步**：先 `cdk deploy CodeupKiroDispatcher --exclusively`（调度器改用公有子网），
+再 `cdk deploy --all`（执行器栈去掉私有子网与 NAT 网关）；一步到位会卡在 CloudFormation「导出仍被另一个栈使用」上。
+
+**做法 B（更严，不实现，合规要求高时参考）**：私有子网 + 8 个接口终端节点（`secretsmanager`、`ecr.api`、`ecr.dkr`、`logs`、`ecs`、Kiro 的 `q`、
+`inspector-scan`、`securityagent`）+ 安全组按 IP 放行（终端节点的安全组、S3 / DynamoDB 的托管前缀列表、云效的 IP——客户托管前缀列表，配一个
+按 DNS 定时刷新的小 Lambda）。能挡住写死 IP 的外连。限制：只能部署在 `us-east-1`（Kiro 的接口终端节点只在那里与 `eu-central-1`）；单可用区
+约 $58/月、双可用区约 $115/月；连云效仍要公网 IP 或 NAT 网关。已有 AWS Network Firewall（按 SNI 过滤）的企业网络可以直接接入。
+
+**排错**：第 8 节「DNS Firewall 拦下了」那一行。
+
 ## 7. 本地测试
 
 `aws/` 下的 CDK/Lambda 测试用 pytest，依赖装进项目内的虚拟环境 `aws/.venv`（已加入
@@ -615,6 +655,7 @@ aws/.venv/bin/pip install -r aws/requirements.txt
 | Security Agent 的汇总评论写着「…（代号 sa-…）」或带 Security Agent 的错误码 | 评论里只有代号，不回显服务端的错误正文（里面有桶名与对象键）。`sa-config`：扫描任务缺 `SA_AGENT_SPACE_ID` / `SA_SERVICE_ROLE_ARN` / `SA_MAPPING_TABLE` / `SECURITY_AGENT_TIMEOUT`（开了开关却没重新部署 `CodeupKiroExecutor`）。`sa-concurrency-full`：并发作业满了 15 分钟仍没空出来（第 6.6 节「配额」；同一账号别的地方也在跑代码评审时更容易碰到）。`sa-timeout`：作业超过 `security_agent_timeout` 仍未结束，已停止。`sa-source-mismatch`：作业记下的源不是本次的归档（理应不会发生：同一仓库的「重指向 + 启动」是串行的；出现就报给集成包维护方），作业已停止。`sa-source-unknown`：启动之后连读三次都读不到作业记录（Security Agent 的 API 暂时不可用），没法核对源、作业已停止；重新推送即可。`sa-repo-lease` / `sa-mapping-wait`：同一仓库的另一次评审占着「重指向 + 启动」或「建 code review」那一步超过 300 秒（多为那个任务被强杀；仓库租约 60 秒、建 code review 的认领 120 秒内失效；重新推送即可）。`sa-mapping`：读写映射表 `CodeReviewMapping` 失败（扫描任务角色缺 `dynamodb:GetItem` / `UpdateItem`）。作业失败时代号是 Security Agent 自己的 `CLIENT_ERROR` / `INTERNAL_ERROR`，被别人停掉时是 `STOPPED_BY_USER`：看日志组 `/aws/securityagent/codeup-kiro-security/<code review id>` 里那个作业的日志。启动、重指向、取发现那几步失败时代号是 AWS 错误码：`AccessDeniedException` 多为扫描任务角色缺对应的 `securityagent:` 动作（重新部署 `CodeupKiroExecutor`），`ValidationException` 多为输入桶没登记进 Agent Space、或对象已过期（7 天） |
 | 通知 Lambda 的日志里有 `notify … result=skipped reason=<原因>` | 没有发消息，**这是预期的跳过，不是故障**。`no-email`：MR 作者在云效没绑邮箱（`GetChangeRequest` 给的是 `accounts_<id>@mail.teambition.com` 占位地址）或邮箱为空——让作者按第 6.7 节绑定与飞书一致的主邮箱；`bad-email`：邮箱形状不对；`bad-url`：云效返回的 MR 页地址不是本组织、本 MR 的形状（平台口径变了，报给集成包维护方）；`bad-lock-key`：锁记录的键不是 `仓库#MR#提交` 的形状（不应出现） |
 | 通知 Lambda 的日志里有 `notify … result=failed step=<步骤> code=<错误码>` | 评审与评论都不受影响，只是这一条消息没发出去。`step=send`：飞书拒收——`feishu-230013` 作者不在应用的可用范围（或已离职）、`feishu-230038` 跨租户、`feishu-230029` 作者已离职、`feishu-230053` 作者屏蔽了机器人、`feishu-230020` / `feishu-99991400` 发得太频繁（已等过一次再试：有 `x-ogw-ratelimit-reset` 时按它、最多 5 秒，没有时 1 秒；仍限流就只记这一行，这一条不再发）；`step=token`：取租户令牌失败，`feishu-10014` 多半是 `app_secret` 写错（sandbox 实测：写错时返回的就是它；飞书的通用错误码表把 10014 写作「应用状态不可用」，所以应用被停用时也会是它，两样都查）；`step=codeup`：查 MR 失败，`http-401` / `http-403` 是 Kiro 机器人的云效令牌失效或没有这个仓库的权限，`http-429` 是云效限流，`network` 是连不上；`step=secret`：读不到密钥（`bad-shape` = `codeup-kiro/feishu-app` 不是带 `app_id`、`app_secret` 的 JSON，别的代号是 Secrets Manager 的错误码）；`step=internal`：函数自己的异常（记的是异常类名），报给集成包维护方 |
+| 开了 `egress_lockdown: 1` 之后评审失败，日志里有 `Could not resolve host`、`Name or service not known`，或 AWS CLI 报连不上端点（DNS Firewall 拦下了） | `egress_dns_action: block` 时名单外的域名解析返回 NXDOMAIN。在查询日志（`CodeupKiroExecutor` 栈的输出 `DnsQueryLogGroup`）里按 `firewall_rule_action = "BLOCK"` 找出被拦的 `query_name`；确属评审需要的，加进 `aws/stacks/egress.py` 的名单再部署（第 6.8 节第 3 步）。临时恢复：`egress_dns_action: alert` 再部署（只记录、不拦）。S3 / DynamoDB 报 `AccessDenied`、且任务角色本身有权限时，多半是终端节点策略（只许本部署的桶与表）|
 
 「抢锁冲突」「评审未启动」「兜底回写」三行对应的代码都已实现且已接到 webhook 入口上
 （`aws/lambda/dispatcher/handler.py`、`aws/lambda/backstop/handler.py`），真实部署上这三类现象都能复现。

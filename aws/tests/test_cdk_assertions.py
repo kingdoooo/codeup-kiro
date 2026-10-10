@@ -2734,6 +2734,27 @@ def test_egress_resource_names_and_descriptions_have_no_dashes_of_the_long_kind(
     assert "—" not in blob and "–" not in blob
 
 
+
+# ── Phase 2c 阶段二：手册第 6.8 节与代码对拍（issue 19 第 6 条）─────────────────────────────────────────────────────────────
+def test_the_guide_documents_the_egress_lockdown_the_way_the_code_builds_it():
+    import stacks.egress as egress
+    sec = _guide_subsection("6.8")
+    for needle in ("egress_lockdown: 1", "egress_dns_action: block", "egress_mode: nat", "starport-layer-bucket", "DnsQueryLogGroup",
+                   "aws/stacks/egress.py", "firewall_rule_action", "cdk deploy CodeupKiroDispatcher --exclusively", "*.amazonaws.com",
+                   "做法 B", "us-east-1", "Network Firewall", "Block Public Access", "Kiro CLI 换版本后"):
+        assert needle in sec, needle
+    for host in egress.CODEUP_HOSTS:
+        assert f"`{host}`" in sec, host
+    assert "api.aws" in sec and "securityagent." in json.dumps(egress.allowed_domains("r", "a", ("security",)))
+    # §1.5 写明残余风险、§6.2 写明 NAT 的费用、§8 有一行按名字可引用
+    sec15 = _guide_subsection("1.5")
+    assert "直接连写死的 IP 的 443 端口" in sec15 and "攻击者自己的凭证" in sec15 and "缺省的 `alert` 只记录、不拦" in sec15, sec15
+    assert "egress_mode: nat" in _guide_subsection("6.2")
+    assert "第 8 节「DNS Firewall 拦下了」那一行" in sec
+    firsts = [ln.split(" | ")[0].replace("**", "").replace("`", "") for ln in _guide_section_lines("8.") if ln.startswith("|")]
+    assert len([f for f in firsts if "DNS Firewall 拦下了" in f]) == 1
+
+
 # ── 每个开关的「功能区别 / 配置区别」（Kent 2026-10-10）：config.example.yaml 每个开关键之上一个注释块，手册 §4.3「开关一览」表每个开关一行 ──
 # 开关 = 0/1 与枚举取值的键（inline_profile 之类的评审行为变量不是开关）。以后新增 0/1 开关、忘了写说明，守卫那一句先红
 SWITCHES = ("inline_comment", "review_command", "inspector", "security_agent", "feishu_notify", "feishu_domain")
