@@ -151,6 +151,14 @@ assert_eq "$(attr_true superseded_inspector)/$(attr_true posted_security)/$(attr
 assert_contains "$(cat "$tmp/err")" "scan-reviewer reviewer=security result=failed rc=3" "④ 日志里点名没有终态的那位"
 rm -f "$tmp/pkg/reviewers/security.sh"
 assert_eq "$(scan_run REVIEWERS=security)" "96" "④ 驱动不存在（还没实现）→ 没有终态 → 96，不静默"
+# ④b issue 18 B：_scan_mark 先写锁、再记 marked。反过来时 TERM 落在两句之间，陷阱按 marked 跳过这位、锁记录永远没有 posted →
+# 兜底给已经发了汇总的评审员多发一条「未完成」。先写锁时 TERM 落在任何位置都无害：陷阱重新 wait 拿到的是同一个退出码，照样置终态
+mark_fn=$(awk '/^_scan_mark\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$SCAN" | LC_ALL=C grep -vE '^[[:space:]]*#')
+assert_contains "$mark_fn" 'mark_lock "posted_' "④b 抽到了 _scan_mark"
+last_lock=$(printf '%s\n' "$mark_fn" | LC_ALL=C grep -n 'mark_lock' | tail -1 | cut -d: -f1)
+marked_at=$(printf '%s\n' "$mark_fn" | LC_ALL=C grep -n 'marked="${marked}' | cut -d: -f1)
+assert_eq "$([ -n "$last_lock" ] && [ -n "$marked_at" ] && [ "$marked_at" -gt "$last_lock" ] && echo after)" "after" \
+  "④b issue 18 B：_scan_mark 在所有 mark_lock 之后才记 marked"
 
 # ⑤ 汇总定位对拍：kiro-review.sh 的 1.5 段 vs aws/reviewers/lib/summary.sh，同一批 fixture、同一档案
 kiro_block=$(awk '/^# --- 1\.5 定位本评审员上一次的汇总评论/{f=1} /^# --- 1\.6 流水线变量的取值校验/{exit} f{print}' ../scripts/kiro-review.sh)

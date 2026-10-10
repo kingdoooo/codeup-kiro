@@ -77,14 +77,16 @@ pids=""
 # 收到 TERM 就转给每位扫描员、等它们退出、以 143 退出（没有终态的评审员由兜底 Lambda 回写，F1 不变）。
 # 扫描员（bash，没有 TERM 陷阱）收到 TERM 立刻退出 143，EXIT 陷阱照常执行（integration-local + integration-remote 实测，issue 15）。
 # 退出码 → 终态（主循环与 TERM 陷阱共用）：0 = 已回写、10 = 被取代；别的交给兜底。marked 记下已经判过的，TERM 时不重判。
+# 先写锁、再记 marked（issue 18 B）：反过来时 TERM 落在两句之间，陷阱跳过这位、锁记录永远没有 posted，兜底给已经发了汇总的评审员
+# 多发一条「未完成」。这样写时 TERM 落在任何位置，陷阱都重新 wait 这位（拿到同一个退出码）、照样置终态
 all_terminal=1; marked=" "
 _scan_mark() {  # <评审员> <退出码>
-  marked="${marked}$1 "
   case "$2" in
     0)  echo "scan-reviewer reviewer=$1 result=posted" >&2; mark_lock "posted_$1" ;;
     10) echo "scan-reviewer reviewer=$1 result=superseded" >&2; mark_lock "superseded_$1" ;;
     *)  echo "scan-reviewer reviewer=$1 result=failed rc=$2（兜底 Lambda 会以这位评审员的机器人回写）" >&2; all_terminal=0 ;;
   esac
+  marked="${marked}$1 "
 }
 # TERM 时还没判过的扫描员：先全部转 TERM，再逐个等、按退出码判——TERM 到来之前已经正常结束的那位照样置 posted / superseded
 # （终审 I-4：否则兜底给一位已经发了汇总的评审员再发一条「未完成」）
