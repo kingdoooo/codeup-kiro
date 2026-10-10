@@ -2757,7 +2757,8 @@ def test_the_guide_documents_the_egress_lockdown_the_way_the_code_builds_it():
 
 # ── 每个开关的「功能区别 / 配置区别」（Kent 2026-10-10）：config.example.yaml 每个开关键之上一个注释块，手册 §4.3「开关一览」表每个开关一行 ──
 # 开关 = 0/1 与枚举取值的键（inline_profile 之类的评审行为变量不是开关）。以后新增 0/1 开关、忘了写说明，守卫那一句先红
-SWITCHES = ("inline_comment", "review_command", "inspector", "security_agent", "feishu_notify", "feishu_domain")
+SWITCHES = ("inline_comment", "review_command", "inspector", "security_agent", "feishu_notify", "feishu_domain",
+            "egress_lockdown", "egress_dns_action", "egress_mode")
 _EXAMPLE_KEY_LINE = re.compile(r"^#?\s*([a-z_]+):(\s|$)")
 _SWITCH_TABLE_HEAD = "| 键 | 取值（缺省） | 功能区别 | 配置区别 | 详见 |"
 
@@ -2787,7 +2788,8 @@ def _switch_table_rows():
 
 def test_every_switch_says_what_each_value_does_and_what_it_needs():
     import config
-    assert set(config.TOGGLES) | {"feishu_notify", "feishu_domain"} <= set(SWITCHES), "有开关没进 SWITCHES（没写功能区别 / 配置区别）"
+    assert set(config.TOGGLES) | {"feishu_notify", "feishu_domain", "egress_lockdown", "egress_dns_action", "egress_mode"} <= set(SWITCHES), \
+        "有开关没进 SWITCHES（没写功能区别 / 配置区别）"
     rows = _switch_table_rows()
     assert sorted(r[0] for r in rows) == sorted(f"`{k}`" for k in SWITCHES), [r[0] for r in rows]
     for key in SWITCHES:

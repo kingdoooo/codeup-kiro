@@ -118,9 +118,23 @@ security_agent: 0
 # feishu_domain: feishu
 
 # ── 可选：执行器与扫描任务的出站（Phase 2c 阶段二，setup-guide.md 第 6.8 节）──────────
-# egress_lockdown: 0                # 1 = S3 / DynamoDB 网关终端节点（策略只许本部署的桶与两张表）+ 安全组出站只放 TCP 443
-#                                   #     + Route 53 Resolver DNS Firewall（名单外的域名记录或拦下）；严格 0/1
-# egress_dns_action: alert          # DNS Firewall 兜底规则：alert（只记录，先跑满一轮取名单）或 block（拦下名单外的域名）；
-#                                   # block 要 egress_lockdown: 1
-# egress_mode: public               # public：公有子网 + 公网 IP 直连（缺省）；nat：私有子网 + 一个 NAT 网关（约 $32/月 + $0.045/GB，
-#                                   # VPC Block Public Access 打开时仍能出站）
+
+# egress_lockdown（0 / 1，缺省 0）
+#   功能区别：1 = 两个持有业务库的任务只能连本部署的 S3 / DynamoDB 资源（网关终端节点 + 终端节点策略：输入桶、ECR 镜像层桶、用到的表）、
+#             安全组出站只放 TCP 443、域名经 Route 53 Resolver DNS Firewall（名单外的按 egress_dns_action 记录或拦下）、查询日志保留 30 天；
+#             0 = 不限制，任务在网络层能连到互联网上任何地址（模板与不写这个键时逐字节相同）。挡不住的残余风险见 setup-guide.md 第 1.5 节。
+#   配置区别：先以 egress_dns_action: alert 部署、跑满一轮三位评审员、从查询日志定名单（aws/stacks/egress.py）再切 block；Kiro CLI 换版本后
+#             重取一次名单。只改 CodeupKiroExecutor；费用约 $0（网关终端节点免费，DNS Firewall 按查询数计，查询日志按量）。
+# egress_lockdown: 0
+
+# egress_dns_action（alert / block，缺省 alert）
+#   功能区别：alert = 名单外的域名照常解析，只在查询日志里标 ALERT；block = 名单外的域名解析返回 NXDOMAIN（评审用到它就会失败）。
+#   配置区别：只在 egress_lockdown: 1 时有意义（写 block 而没开 lockdown 时 synth 报错）；只改 CodeupKiroExecutor。
+# egress_dns_action: alert
+
+# egress_mode（public / nat，缺省 public）
+#   功能区别：public = 任务在公有子网、分配公网 IP、经 IGW 直连（2b 的形状）；nat = 任务在两个私有子网、不分配公网 IP、经一个 NAT 网关出站
+#             （VPC Block Public Access 打开时仍能出站）。
+#   配置区别：nat 约 $32/月 + $0.045/GB；改执行器与调度器两个栈：public → nat 一次 cdk deploy --all，nat → public 要两步（先
+#             cdk deploy CodeupKiroDispatcher --exclusively，再 --all）。与 egress_lockdown 互相独立，可以只开其中一个。
+# egress_mode: public
