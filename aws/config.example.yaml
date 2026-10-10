@@ -116,3 +116,11 @@ security_agent: 0
 #   功能区别：feishu = 通知 Lambda 发往飞书（open.feishu.cn）；lark = 发往 Lark（open.larksuite.com）。两个平台 API 路径相同、域名与账号体系不通。
 #   配置区别：与企业自建应用建在哪个平台一致；只在 feishu_notify: 1 时有意义，只改通知 Lambda 的环境（重新部署 CodeupKiroState）。
 # feishu_domain: feishu
+
+# ── 可选：执行器与扫描任务的出站（Phase 2c 阶段二，setup-guide.md 第 6.8 节）──────────
+# egress_lockdown: 0                # 1 = S3 / DynamoDB 网关终端节点（策略只许本部署的桶与两张表）+ 安全组出站只放 TCP 443
+#                                   #     + Route 53 Resolver DNS Firewall（名单外的域名记录或拦下）；严格 0/1
+# egress_dns_action: alert          # DNS Firewall 兜底规则：alert（只记录，先跑满一轮取名单）或 block（拦下名单外的域名）；
+#                                   # block 要 egress_lockdown: 1
+# egress_mode: public               # public：公有子网 + 公网 IP 直连（缺省）；nat：私有子网 + 一个 NAT 网关（约 $32/月 + $0.045/GB，
+#                                   # VPC Block Public Access 打开时仍能出站）

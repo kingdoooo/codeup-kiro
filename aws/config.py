@@ -229,4 +229,20 @@ def load_config(path):
             f"feishu_domain 取值 {domain!r} 非法：只认 feishu（飞书，open.feishu.cn）或 lark（Lark，open.larksuite.com），"
             "按你的企业自建应用建在哪个平台上填")
 
+    # 出站限制（Phase 2c 阶段二，issue 19）：egress_lockdown 严格 0/1、缺省 0（S3 / DynamoDB 网关终端节点 + 终端节点策略、安全组出站只放
+    # TCP 443、Route 53 Resolver DNS Firewall）；egress_dns_action 是 DNS Firewall 兜底那条规则的动作，alert（缺省，只记录）或 block（不在
+    # 名单上的域名解析失败），先 alert 跑满一轮、从查询日志取名单再切 block（setup-guide.md 第 6.8 节）；egress_mode 是任务的出站形态，
+    # public（缺省：公有子网 + 公网 IP 直连 IGW，2b 的形状）或 nat（私有子网 + 一个 NAT 网关，VPC BPA 下最便宜的合规出站）。
+    lockdown = cfg.setdefault("egress_lockdown", 0)
+    if type(lockdown) is not int or lockdown not in (0, 1):
+        raise ValueError(f"egress_lockdown 取值 {lockdown!r} 非法：必须严格为 0 或 1（缺省 0 = 不限制任务出站）")
+    mode = cfg.setdefault("egress_mode", "public")
+    if type(mode) is not str or mode not in ("public", "nat"):
+        raise ValueError(f"egress_mode 取值 {mode!r} 非法：只认 public（公有子网直连）或 nat（私有子网 + NAT 网关）")
+    action = cfg.setdefault("egress_dns_action", "alert")
+    if type(action) is not str or action not in ("alert", "block"):
+        raise ValueError(f"egress_dns_action 取值 {action!r} 非法：只认 alert（只记录）或 block（拦下名单外的域名）")
+    if action == "block" and lockdown != 1:
+        raise ValueError("egress_dns_action: block 只在 egress_lockdown: 1 时有意义（没开出站限制就没有 DNS Firewall 可切）")
+
     return cfg

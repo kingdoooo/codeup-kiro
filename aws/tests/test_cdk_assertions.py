@@ -2067,6 +2067,44 @@ def test_the_unquoted_yaml_yes_is_refused_for_feishu_notify(tmp_path):
         load_config(str(p))
 
 
+
+# ── Phase 2c 阶段二：出站限制的三个键（issue 19，spec「范围」第 2 条）──────────────────────────────────────────────
+def test_egress_settings_default_to_the_2b_shape(write_cfg):
+    from config import load_config
+    cfg = load_config(write_cfg(_base_cfg()))
+    assert (cfg["egress_lockdown"], cfg["egress_mode"], cfg["egress_dns_action"]) == (0, "public", "alert")
+    ok = load_config(write_cfg(_base_cfg(egress_lockdown=1, egress_mode="nat", egress_dns_action="block")))
+    assert (ok["egress_lockdown"], ok["egress_mode"], ok["egress_dns_action"]) == (1, "nat", "block")
+
+
+@pytest.mark.parametrize("bad", [True, "1", 2, None, 1.0])
+def test_egress_lockdown_must_be_exactly_0_or_1(write_cfg, bad):
+    from config import load_config
+    with pytest.raises(ValueError, match="egress_lockdown"):
+        load_config(write_cfg(_base_cfg(egress_lockdown=bad)))
+
+
+@pytest.mark.parametrize("bad", ["NAT", "private", "", None, 1])
+def test_egress_mode_is_exactly_public_or_nat(write_cfg, bad):
+    from config import load_config
+    with pytest.raises(ValueError, match="egress_mode"):
+        load_config(write_cfg(_base_cfg(egress_mode=bad)))
+
+
+@pytest.mark.parametrize("bad", ["BLOCK", "Alert", "deny", "", None, 1])
+def test_egress_dns_action_is_exactly_alert_or_block(write_cfg, bad):
+    from config import load_config
+    with pytest.raises(ValueError, match="egress_dns_action"):
+        load_config(write_cfg(_base_cfg(egress_lockdown=1, egress_dns_action=bad)))
+
+
+def test_blocking_dns_without_the_lockdown_is_refused(write_cfg):
+    # block 只在 egress_lockdown: 1 时有意义（没有 DNS Firewall 可切）：写了却不生效的设置不让它静默通过
+    from config import load_config
+    with pytest.raises(ValueError, match="egress_dns_action"):
+        load_config(write_cfg(_base_cfg(egress_dns_action="block")))
+
+
 def test_default_bot_usernames_cover_every_enabled_reviewer_once():
     from config import default_bot_usernames
     assert default_bot_usernames(_base_cfg()) == ["aliyun:kirobot"]
