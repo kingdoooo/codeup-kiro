@@ -32,6 +32,15 @@ def test_bash_and_lambda_profiles_agree(rid):
     assert p["lambda_heading"] == "## 🤖 " + p["title"]
 
 
+def test_security_agent_is_titled_continuum_and_keeps_its_markers_and_secret():
+    # Phase 2c spec F8：标题改成「Continuum 代码安全扫描」（与飞书通知的文案一致）；评审员 id、标记、令牌密钥都不变——MR 上已有的评论照样认得出来
+    p = reviewers.PROFILES["security"]
+    assert p["title"] == "Continuum 代码安全扫描"
+    assert (p["marker_name"], p["backstop_marker"], p["dispatch_failed_marker"], p["secret_name"]) == (
+        "kiro-security-review", "<!-- kiro-backstop-security -->", "<!-- kiro-dispatch-failed-security -->",
+        "codeup-kiro/yunxiao-token-security")
+
+
 def test_every_lambda_marker_is_in_the_kiro_family_the_dispatcher_ignores():
     dispatcher = load_lambda("dispatcher_handler_profiles", ROOT / "aws" / "lambda" / "dispatcher" / "handler.py")
     for p in reviewers.PROFILES.values():

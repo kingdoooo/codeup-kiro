@@ -67,7 +67,7 @@ case "${REVIEW_PROFILE:-kiro}" in
     REVIEW_META_NOTE_HEADER="组件"
     REVIEW_HISTORY_OK_LABEL="完成" ;;
   security)
-    REVIEW_TITLE="# Security Agent 安全评审"
+    REVIEW_TITLE="# Continuum 代码安全扫描"
     REVIEW_MARKER_NAME="kiro-security-review"
     REVIEW_HISTORY_PREFIX="<!-- kiro-security-history:"
     REVIEW_POST_NONCE_PREFIX='<!-- kiro-security-post:'

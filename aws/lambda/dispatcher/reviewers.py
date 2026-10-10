@@ -38,8 +38,8 @@ PROFILES = {
     },
     "security": {
         "marker_name": "kiro-security-review",
-        "title": "Security Agent 安全评审",
-        "lambda_heading": "## 🤖 Security Agent 安全评审",
+        "title": "Continuum 代码安全扫描",
+        "lambda_heading": "## 🤖 Continuum 代码安全扫描",
         "backstop_marker": "<!-- kiro-backstop-security -->",
         "dispatch_failed_marker": "<!-- kiro-dispatch-failed-security -->",
         "token_secret_env": "YUNXIAO_TOKEN_SECURITY_ID",

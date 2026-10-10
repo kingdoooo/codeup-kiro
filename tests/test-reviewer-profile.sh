@@ -94,7 +94,14 @@ assert_contains "$(cat "$tmp/inspector.md")" "# Inspector 依赖漏洞扫描 · 
 assert_contains "$(cat "$tmp/inspector.md")" "| Commit | 分支 | 时间 | 组件 |" "⑤ Inspector 元信息第四列"
 assert_contains "$(cat "$tmp/inspector.md")" "| 次 | 提交 | 结论 | 引入 高/中/低 |" "⑤ Inspector 历次表计数列"
 assert_contains "$(cat "$tmp/inspector.md")" "第 4 次评审 · 计数为本 MR 引入的依赖漏洞" "⑤ Inspector 页脚图例"
-assert_contains "$(cat "$tmp/security.md")" "# Security Agent 安全评审 · ⚠️ 评审未完成" "⑤ Security Agent 标题"
+assert_contains "$(cat "$tmp/security.md")" "# Continuum 代码安全扫描 · ⚠️ 评审未完成" "⑤ Security Agent 标题（Phase 2c spec F8：与飞书通知的文案一致）"
+assert_not_contains "$(cat "$tmp/security.md")" "Security Agent 安全评审" "⑤ 旧标题不再出现"
+# F8：只改标题——命令、标记、评审员 id 不变，所以 MR 上旧标题的那条 SA 汇总照样被认出来、原地更新（run 递增，不新建第二条）
+sed '1s/.*/# Security Agent 安全评审 · ⚠️ 评审未完成/' "$tmp/security.md" > "$tmp/security-old.md"
+assert_eq "$(head -1 "$tmp/security-old.md")" "# Security Agent 安全评审 · ⚠️ 评审未完成" "⑤（准备）一条旧标题的 SA 汇总"
+jq -n --rawfile c "$tmp/security-old.md" '[{comment_biz_id: "c-old", comment_type: "GLOBAL_COMMENT", state: "OPENED", author: {username: "bot"}, content: $c}]' > "$tmp/security-old.json"
+assert_eq "$(in_profile security "review_select_prior_comment bot < '$tmp/security-old.json' | jq -r '\"\(.comment_biz_id) \(.run)\"'")" "c-old 4" \
+  "⑤ F8：旧标题的 SA 汇总照样被选中（原地更新那一条，run 接着数）"
 assert_contains "$(cat "$tmp/kiro.md")" "| Commit | 分支 | 时间 | diff |" "⑤ Kiro 元信息第四列不变"
 # 「完成」标签只给扫描员档案：一行 status=ok 的历史在 Inspector 表里显示「完成」，在 Kiro 表里仍按契约结论中文化
 printf '[{"run":1,"sha":"abc1234","verdict":"","status":"","p0":1,"p1":0,"p2":2}]\n' > "$tmp/h.json"

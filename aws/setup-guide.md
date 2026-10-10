@@ -461,7 +461,7 @@ merge-base 两棵树（删掉全部符号链接），以非 root 用户、空环
 ### 6.6 可选：扫描评审员（Security Agent）
 
 AWS Security Agent 是第三位评审员：做架构与数据流层面的安全分析（注入、越权、敏感数据外泄之类），**不报依赖漏洞**（那是 Inspector 的事）。
-每次评审在 MR 上维护**一条自己的汇总评论**（标题「Security Agent 安全评审」），与 Kiro、Inspector 互不接管。只做 **DIFF 扫描**：分析本 MR
+每次评审在 MR 上维护**一条自己的汇总评论**（标题「Continuum 代码安全扫描」；命令 `/security review`、评论里的标记不变），与 Kiro、Inspector 互不接管。只做 **DIFF 扫描**：分析本 MR
 改动的代码，整个仓库只作上下文。只发汇总、不发行内评论：每条发现在汇总里带 `文件:行`。
 
 **开通**（然后重新部署：先 `CodeupKiroExecutor`，后 `CodeupKiroDispatcher`）：

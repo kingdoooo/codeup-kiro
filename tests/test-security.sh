@@ -67,7 +67,7 @@ render() {  # <报告 JSON 文件> [overview 文件] → 评论
        security_render_summary '$1' '$tmp/meta.json' cj-1f981f2a-0e5b-4910-b8a5-a16f0e64a25c '${2:-}'"
 }
 out=$(render "$tmp/rep.json" "$tmp/overview.md")
-assert_contains "$out" "# Security Agent 安全评审"$'\n'"<!-- kiro-security-review:abc1234 run:3 -->" "③ 评论头是 security 档案的"
+assert_contains "$out" "# Continuum 代码安全扫描"$'\n'"<!-- kiro-security-review:abc1234 run:3 -->" "③ 评论头是 security 档案的（标题 Phase 2c F8）"
 assert_contains "$out" "DIFF 扫描发现 2 个安全问题（CRITICAL 1 · HIGH 1 · MEDIUM 0 · LOW 0 · 其它 0）。" "③ 结论行带各级计数"
 assert_not_contains "$out" "非确定" "③ 不再有「结论非确定」的固定提示（Kent 2026-10-09 撤掉 R10 的这条文案）"
 assert_contains "$out" '作业 `cj-1f981f2a-0e5b-4910-b8a5-a16f0e64a25c` |'$'\n\n''## 结论' "③ 元信息表之后直接是结论（中间没有提示行）"
