@@ -229,10 +229,13 @@ sa_start_job() {  # → 全局 SA_JOB_ID
            >/dev/null; then
       local code; code=$(sa_err)
       sa_repo_lease release
-      # code review 在别处被删了（映射表还指着它）：把映射标成过期、重新取/建一次（只试一次）
+      # code review 在别处被删了（映射表还指着它）：把映射标成过期、重新取/建一次（只试一次）。
+      # 条件带 #s <> :creating（issue 18 C）：同仓库另一个评审可能刚撞上同一个 ResourceNotFound、已经认领了 creating（认领不清
+      # code_review_id，#c 仍是旧 id）——盖掉它，两边都会去建，同仓库多出一个 code review（孤儿，占每账号 1,000 的配额）
       if [[ "$code" == ResourceNotFoundException && "$recreated" == 0 ]]; then
         recreated=1
-        sa_map_update '#c = :cr' 'SET #s = :stale' "$(jq -cn --arg cr "$SA_CR_ID" '{":cr": {S: $cr}, ":stale": {S: "stale"}}')" || true
+        sa_map_update '#c = :cr AND #s <> :creating' 'SET #s = :stale' \
+          "$(jq -cn --arg cr "$SA_CR_ID" '{":cr": {S: $cr}, ":stale": {S: "stale"}, ":creating": {S: "creating"}}')" || true
         log "code review ${SA_CR_ID} 已不存在，重新取/建"
         sa_ensure_code_review; continue
       fi

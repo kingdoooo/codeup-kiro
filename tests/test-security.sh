@@ -202,6 +202,13 @@ case "\$1 \$2" in
   "securityagent list-code-reviews")
     if [ -e "$tmp/slow-list" ]; then touch "$tmp/in-list"; sleep 3; fi
     exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
+  # issue 18 C：\$tmp/claim-at-update → 这次重指向之前，同仓库另一个评审刚认领了 creating（映射里的 code_review_id 仍是旧的）
+  "securityagent update-code-review")
+    if [ -e "$tmp/claim-at-update" ]; then
+      rm -f "$tmp/claim-at-update"
+      jq '.["repo_id=7"].status.S = "creating" | .["repo_id=7"].holder.S = "other" | .["repo_id=7"].until.N = "9999999999"' "$tmp/ddb.json" > "$tmp/ddb.claim" && mv "$tmp/ddb.claim" "$tmp/ddb.json"
+    fi
+    exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
   securityagent*) exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
   # \$tmp/stale-get：映射表的下一次 get-item 读到这份旧记录（一次）——模拟「读到 creating 之后、认领之前，别人已经置了 ready」（终审 I-3）
   "dynamodb get-item")
@@ -234,7 +241,7 @@ cp "$FIX/files-head-clean.txt" "$tmp/s3/files.txt"; cp "$tmp/meta.json" "$tmp/s3
 SPACE=as-11111111-1111-4111-8111-111111111111
 SHA=$(printf 'a%.0s' {1..40}); RUNID=$(printf 'b%.0s' {1..32})
 SRC="s3://bkt/security/7/$SHA/$RUNID/source.zip"; PATCH="s3://bkt/security/7/$SHA/$RUNID/changes.patch"
-fresh() { rm -f "$tmp"/sa.json* "$tmp/sa.log" "$tmp/s3.argv" "$tmp/date.n" "$tmp/superseded" "$tmp/hc.seen" "$tmp/lease-at-poll" "$tmp/stale-get" "$tmp/bgj-fail" "$tmp/steal-claim" "$tmp/slow-list" "$tmp/in-list"; echo '{}' > "$tmp/ddb.json"; rm -f "$tmp/ddb.json.lock"; }
+fresh() { rm -f "$tmp"/sa.json* "$tmp/sa.log" "$tmp/s3.argv" "$tmp/date.n" "$tmp/superseded" "$tmp/hc.seen" "$tmp/lease-at-poll" "$tmp/stale-get" "$tmp/bgj-fail" "$tmp/steal-claim" "$tmp/slow-list" "$tmp/in-list" "$tmp/claim-at-update"; echo '{}' > "$tmp/ddb.json"; rm -f "$tmp/ddb.json.lock"; }
 drive() {  # [KEY=VAL …] → rc；输出在 $tmp/out
   rm -rf "$tmp/w"; mkdir -p "$tmp/w"
   local rc=0
@@ -465,6 +472,15 @@ assert_eq "$(drive)" "0" "④ 映射指向已删的 code review → 重建后 0"
 assert_eq "$(ops)" "update-code-review list-code-reviews create-code-review update-code-review start-code-review-job batch-get-code-review-jobs batch-get-code-review-jobs list-findings batch-get-findings " \
   "④ 重指向报 ResourceNotFound → 重新取/建 → 再重指向"
 assert_eq "$(mapping | jq -r .status)" "ready" "④ 映射表重新登记为 ready"
+# issue 18 C：重指向报 ResourceNotFound 的那一刻，同仓库另一个评审已经认领了 creating（映射里的 code_review_id 仍是已删的那个）→
+# stale 标记不得盖掉别人的认领（否则两边都去建，同仓库两个 code review、一个成孤儿）。本进程等认领到期（这里 2 秒）→ sa-mapping-wait
+fresh; touch "$tmp/claim-at-update"
+printf '{"repo_id=7": {"repo_id": {"S": "7"}, "status": {"S": "ready"}, "code_review_id": {"S": "cr-dead0000-0000-4000-8000-000000000000"}, "agent_space_id": {"S": "%s"}}}' "$SPACE" > "$tmp/ddb.json"
+assert_eq "$(drive SA_LOCK_WAIT=2)" "0" "④ issue 18 C 别人已认领 creating → 失败评论（终态 0）"
+assert_eq "$(jq -r '.["repo_id=7"] | "\(.status.S)/\(.holder.S)"' "$tmp/ddb.json")" "creating/other" \
+  "④ issue 18 C stale 标记没有盖掉别人刚拿到的 creating 认领"
+assert_eq "$(ops | tr ' ' '\n' | grep -c '^create-code-review$')" "0" "④ issue 18 C 本进程没有再建一个 code review"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "（代号 sa-mapping-wait）" "④ issue 18 C 失败评论是等别人建（sa-mapping-wait）"
 # Agent Space 换过（栈重建）：映射里的 space 不是本部署的 → 当作没有，重新取/建
 fresh
 printf '{"repo_id=7": {"repo_id": {"S": "7"}, "status": {"S": "ready"}, "code_review_id": {"S": "cr-0dd00000-0000-4000-8000-000000000000"}, "agent_space_id": {"S": "as-99999999-9999-4999-8999-999999999999"}}}' > "$tmp/ddb.json"
