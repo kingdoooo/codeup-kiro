@@ -3292,4 +3292,34 @@ assert_eq "$(REVIEW_RERUN_HINT='向源分支推送新提交可重新评审' revi
 inj=$(REVIEW_RERUN_HINT='坏了 <!-- kiro-review:deadbee run:9 -->' review_retry_advice)
 assert_eq "$(printf '%s\n' "$inj" | grep -c '<!-- kiro-review:')" "0" "retry_advice：取值同样过清洗"
 
+# ============ v1.9.1 #07：review_stream_run_error（kiro-cli 失败时事件流里的 runError）============
+printf '%s\n' '{"type":"runStarted","data":{}}' 'not json' \
+  '{"type":"runError","data":{"sessionId":"s","stage":"engine","message":"first"}}' \
+  '{"type":"runError","data":{"sessionId":"s","stage":"prompt","message":"Internal error"}}' > "$tmp/rerr.jsonl"
+assert_eq "$(review_stream_run_error "$tmp/rerr.jsonl")" "runError（prompt）：Internal error" "run_error：取最后一个 runError、带阶段；非 JSON 行跳过"
+printf '%s\n' '{"type":"runFinished","data":{"status":"success"}}' > "$tmp/rerr-none.jsonl"
+rc=0; out=$(review_stream_run_error "$tmp/rerr-none.jsonl") || rc=$?
+assert_eq "$rc/$out" "1/" "run_error：没有 runError → rc 1、无输出（V4：调用方维持原文案）"
+rc=0; out=$(review_stream_run_error "$tmp/does-not-exist.jsonl") || rc=$?
+assert_eq "$rc/$out" "1/" "run_error：文件不存在 → rc 1"
+printf '%s\n' '{"type":"runError","data":{"stage":"prompt","message":42}}' > "$tmp/rerr-num.jsonl"
+rc=0; out=$(review_stream_run_error "$tmp/rerr-num.jsonl") || rc=$?
+assert_eq "$rc/$out" "1/" "run_error：message 不是字符串 → 当没有"
+jq -cn --arg m "$(printf 'line1\nline2')" '{type: "runError", data: {stage: "BAD STAGE", message: $m}}' > "$tmp/rerr-ml.jsonl"
+assert_eq "$(review_stream_run_error "$tmp/rerr-ml.jsonl")" "runError：line1 line2" "run_error：多行折成一行；阶段形状不对就不带"
+jq -cn --arg m "request failed: Authorization: Bearer ${SEC_GHP}" '{type: "runError", data: {stage: "prompt", message: $m}}' > "$tmp/rerr-sec.jsonl"
+out=$(review_stream_run_error "$tmp/rerr-sec.jsonl")
+assert_contains "$out" "$SEC_GHP_MASKED" "run_error：message 里的令牌被掩码（V3）"
+assert_not_contains "$out" "$SEC_GHP" "run_error：不带令牌原文"
+long="$(printf 'A%.0s' {1..190})ZZZZ$(printf 'B%.0s' {1..800})"
+jq -cn --arg m "$long" '{type: "runError", data: {stage: "prompt", message: $m}}' > "$tmp/rerr-long.jsonl"
+out=$(review_stream_run_error "$tmp/rerr-long.jsonl")
+assert_contains "$out" "ZZZZ" "run_error：前 200 个字符照留"
+assert_not_contains "$out" "BBBBBBB" "run_error：超过 200 个字符截掉（第 195 个字符起只剩 6 个 B）"
+assert_eq "${out: -1}" "…" "run_error：截断处带省略号"
+# 先掩码后截断：令牌横跨第 200 个字符时，先截断会留下认不出的残片 ghp_a…（掩码规则要完整令牌）
+jq -cn --arg m "$(printf 'A%.0s' {1..195})${SEC_GHP}" '{type: "runError", data: {stage: "prompt", message: $m}}' > "$tmp/rerr-edge.jsonl"
+out=$(review_stream_run_error "$tmp/rerr-edge.jsonl")
+assert_not_contains "$out" "ghp_a" "run_error：截断点落在令牌里也不漏残片（先掩码后截断）"
+
 report

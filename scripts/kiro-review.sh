@@ -1638,7 +1638,10 @@ if [[ "$kiro_rc" -ne 0 ]]; then
   # 124 = 到点、TERM 后退出；137 = 子进程忽略 TERM、`-k 30` 之后被 KILL（128+9，GNU timeout 文档）。两种都是超时（票 18 ③）：
   # 137 落到下面的通用分支时 MR 上只剩「kiro-cli 退出码 137」这种不可行动的信息。写成一行：变异测试删掉 137 那一半即模拟「漏判」。
   [[ "$kiro_rc" == "124" || "$kiro_rc" == "137" ]] && die_review "Kiro 评审超时（${KIRO_TIMEOUT}s$([[ "$kiro_rc" == "137" ]] && printf '；进程未响应 TERM，已强制结束')）"
-  die_review "Kiro 评审失败（kiro-cli 退出码 ${kiro_rc}）"
+  # 真正的原因常常只在事件流的 runError 里（issue 07；例如 KIRO_API_KEY 放错时 stderr 说不出原因）：取得到就作为不受信细节
+  # 交给 die_review（评论过渲染器清洗与整篇掩码、日志过 _untrusted_for_log）；取不到时文案与以前相同
+  _run_err=$(review_stream_run_error "$WORK/stream.jsonl") || _run_err=""
+  die_review "Kiro 评审失败（kiro-cli 退出码 ${kiro_rc}）" "$_run_err"
 fi
 [[ -s "$WORK/stream.jsonl" ]] || die_review "Kiro 退出码为 0 但事件流为空"
 

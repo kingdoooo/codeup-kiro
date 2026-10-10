@@ -22,6 +22,7 @@
 #
 # 故障注入：
 #   MOCK_KIRO_FAIL=1            chat 失败（退出码 1）
+#   MOCK_KIRO_RUNERROR=<串>     与 MOCK_KIRO_FAIL=1 搭配：先往事件流写一条 runError（message = 这个串），issue 07
 #   MOCK_KIRO_HANG=1            挂起（验证超时强杀）
 #   MOCK_KIRO_HANG_IGNORE_TERM=1 与 MOCK_KIRO_HANG=1 搭配：忽略 TERM（`trap '' TERM` + 可重入的 sleep 循环），timeout 只能在 -k 之后
 #                               用 KILL 结束它 → 退出码 137（票 18 ③：脚本必须把 137 也当超时）
@@ -248,6 +249,9 @@ if [[ "${MOCK_KIRO_HANG:-0}" == "1" ]]; then
   sleep 300
 fi
 [[ -n "${MOCK_KIRO_STDERR_TEXT:-}" ]] && printf '%s\n' "$MOCK_KIRO_STDERR_TEXT" >&2
+# MOCK_KIRO_RUNERROR=<串>：事件流里先写一条 runError（实测形状，stage=prompt），与 MOCK_KIRO_FAIL=1 搭配（issue 07）
+[[ -n "${MOCK_KIRO_RUNERROR:-}" ]] && jq -cn --arg m "$MOCK_KIRO_RUNERROR" \
+  '{type: "runError", data: {sessionId: "mock-session", stage: "prompt", message: $m}}'
 if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
   echo "mock: 模拟 kiro 失败" >&2; exit 1
 fi

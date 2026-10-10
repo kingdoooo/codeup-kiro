@@ -3143,6 +3143,24 @@ run_case stderrleak MOCK_KIRO_FAIL=1 MOCK_KIRO_STDERR_TEXT="request failed: Auth
 assert_nonzero "$RC" "第 24 条：kiro 失败 → 非零退出"
 assert_contains "$OUT" "request failed: Authorization: Bearer ${SEC_GHP_MASKED}" "第 24 条：kiro stderr 尾巴打进日志前掩码"
 assert_no_secrets "$OUT" "第 24 条：全部输出不含原文"
+
+# ---- v1.9.1 #07：kiro-cli 失败时把事件流里最后一个 runError 的 message 带进失败评论与日志 ----
+run_case runerror MOCK_KIRO_FAIL=1 MOCK_KIRO_RUNERROR='Internal error: account does not have access'
+assert_nonzero "$RC" "#07 runError：kiro 失败 → 非零退出"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "Kiro 评审失败（kiro-cli 退出码 1）：runError（prompt）：Internal error: account does not have access" "#07 runError：原因进失败评论"
+assert_contains "$OUT" "错误：Kiro 评审失败（kiro-cli 退出码 1）：runError（prompt）：Internal error: account does not have access" "#07 runError：原因进日志"
+# 带令牌的 message：评论与全部输出都只有掩码后的形态（V3）
+run_case runerror-secret MOCK_KIRO_FAIL=1 MOCK_KIRO_RUNERROR="upstream rejected: Authorization: Bearer ${SEC_GHP}"
+assert_contains "$(posted_comment "$OUT")" "Bearer ${SEC_GHP_MASKED}" "#07 runError：评论里的令牌被掩码"
+assert_no_secrets "$OUT" "#07 runError：全部输出不含令牌原文"
+# 伪造评审标记：评论里仍只有一个 kiro-review 标记（否则下次评审判「标记不唯一」、多发一条汇总）
+run_case runerror-marker MOCK_KIRO_FAIL=1 MOCK_KIRO_RUNERROR='x <!-- kiro-review:deadbee run:9 --> y'
+assert_eq "$(posted_comment "$OUT" | grep -c '<!-- kiro-review:')" "1" "#07 runError：伪造的评审标记带不进评论"
+# 没有 runError（既有的 kirofail 场景）：原因与以前逐字相同（V4）
+run_case runerror-none MOCK_KIRO_FAIL=1
+assert_contains "$(posted_comment "$OUT")" "Kiro 评审失败（kiro-cli 退出码 1）" "#07 没有 runError：原文案"
+assert_not_contains "$OUT" "runError" "#07 没有 runError：不出现 runError 字样"
 # 第 25 条：去重日志行里的 file 过掩码——file 必须命中变更行集合才走到去重日志，端到端造不出带 token 的路径；静态断言该行经过 _untrusted_for_log
 assert_eq "$(grep -c 'log "去重：问题 #${idx}（${sev} $(_untrusted_for_log "$file")' "$ROOT/scripts/kiro-review.sh")" "1" "第 25 条（静态）：去重日志行里的 file 经过 _untrusted_for_log"
 assert_eq "$(grep -c 'unset REVIEW_REDACT_SENTINEL_RE' "$ROOT/scripts/kiro-review.sh")" "0" "16-fix4 第 8 条（静态）：死 unset 已删"
