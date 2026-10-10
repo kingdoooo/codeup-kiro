@@ -77,7 +77,9 @@ sa_call_once() { AWS_MAX_ATTEMPTS=1 sa_call "$@"; }
 # 退出时作业还在跑（被 TERM、被取代、轮询出错之外的意外退出）：先停掉它（不占并发名额、不白跑），再走 reviewer.sh 的租约释放
 _sa_exit() {
   # Start 在途时退出（被 TERM，issue 18 A）：先等这次调用结束——服务端不知道调用方已经退出，作业照样会建出来。拿到了作业 id 就照下面
-  # 停掉它；应答含糊（没拿到 id）时按本次的源键收编（键里有本次的 run_id，sa_adopt_job）
+  # 停掉它；应答含糊（没拿到 id）时按本次的源键收编（键里有本次的 run_id，sa_adopt_job）。
+  # 这次 wait 只受 aws CLI 自己的超时约束（只试一次，连接与读各 60 秒，CLI 缺省），比任务的 stopTimeout 30 秒（Fargate 缺省）长：Start 卡住时
+  # SIGKILL 先到，下面的停作业与释放租约都来不及做——由 L7 租约 120 秒、仓库租约 60 秒的 TTL 兜底，作业照样跑满。正常的 Start 约 1 秒，接受（终审 M-2）
   if [[ -n "${SA_START_PID:-}" ]]; then
     wait "$SA_START_PID" 2>/dev/null || true
     SA_JOB_ID=$(jq -r '.codeReviewJobId // empty' "$WORK/sa-start.json" 2>/dev/null || true)
@@ -254,7 +256,8 @@ sa_start_job() {  # → 全局 SA_JOB_ID
       reviewer_fail "重指向 code review 失败（代号 ${code}）"
     fi
     # Start 放后台、前台 wait（issue 18 A）：TERM 落在这次调用在途的那一两秒里时，EXIT 陷阱等得到它、停掉它建出的作业。
-    # 写成 out=$(…) 时 aws CLI 跑在陷阱够不着的命令替换子进程里：本进程退出了它照样把作业建出来，作业跑满约 10 分钟、占一个并发名额、无人接收
+    # 写成 out=$(…) 时 aws CLI 跑在陷阱够不着的命令替换子进程里：本进程退出了它照样把作业建出来，作业跑满约 10 分钟、占一个并发名额、无人接收。
+    # 残余窗口：TERM 落在下面的 `… &` 与 `SA_START_PID=$!` 之间时，陷阱还不知道这个子进程，作业同样无人停——两句之间只有这一条赋值，接受（终审 M-3）
     sa_call_once start-code-review-job "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" --arg c "$SA_CR_ID" --arg p "$SA_PATCH_URI" \
               '{agentSpaceId: $s, codeReviewId: $c, diffSource: {s3Uri: $p}}')" > "$WORK/sa-start.json" &
     SA_START_PID=$!

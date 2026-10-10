@@ -2881,3 +2881,37 @@ def test_every_switch_says_what_each_value_does_and_what_it_needs():
         row = [r for r in rows if r[0] == f"`{key}`"]
         assert len(row) == 1 and len(row[0]) == 5, f"§4.3 开关一览里 {key} 那一行找不到、不止一行或不是五格：{row}"
         assert all(row[0][1:]), f"§4.3 开关一览里 {key} 那一行有空格子：{row[0]}"
+
+
+# ── Phase 2c minors：security.sh 里两处残余窗口的注释与代码对拍（终审 M-2 / M-3；改了代码没改注释，这两条先红）────────────────────────
+def _security_sh():
+    return (pathlib.Path(__file__).resolve().parents[1] / "reviewers" / "security.sh").read_text()
+
+
+def test_the_sa_exit_trap_says_what_bounds_its_wait_on_an_in_flight_start():
+    # 终审 M-2：EXIT 陷阱 wait 在途的 Start 只受 aws CLI 自己的超时约束（sa_call 没改 CLI 的连接 / 读超时 → 缺省各 60 秒），比任务的
+    # stopTimeout（扫描容器没设 → Fargate 缺省 30 秒）长：Start 卡住时 SIGKILL 先到、租约没释放，由两个租约的 TTL 兜底。注释里的数与代码一致
+    root = pathlib.Path(__file__).resolve().parents[1]
+    src = _security_sh()
+    l7 = re.search(r"LEASE_TTL=(\d+)", (root / "reviewers" / "lib" / "reviewer.sh").read_text()).group(1)
+    repo = re.search(r"^sa_repo_lease\(\) \{.*?LEASE_TTL=(\d+)", src, re.S | re.M).group(1)
+    _, t = _scan_templates(inspector=1, security_agent=1)
+    scan = _td_by_container(t, "scan")["ContainerDefinitions"][0]
+    assert "StopTimeout" not in scan, "扫描容器设了 stopTimeout：_sa_exit 注释里的 30 秒要跟着改"
+    call = re.search(r"^sa_call\(\) \{.*?^\}", src, re.S | re.M).group(0)
+    assert "--cli-connect-timeout" not in call and "--cli-read-timeout" not in call, "sa_call 改了 CLI 的超时：注释里的 60 秒要跟着改"
+    trap = re.search(r"^_sa_exit\(\) \{.*?^\}", src, re.S | re.M).group(0)
+    for needle in ("各 60 秒", "stopTimeout 30 秒", f"L7 租约 {l7} 秒", f"仓库租约 {repo} 秒", "终审 M-2"):
+        assert needle in trap, needle
+
+
+def test_the_start_call_names_its_one_residual_term_window():
+    # 终审 M-3：TERM 落在 `sa_call_once … &` 与 `SA_START_PID=$!` 之间时，陷阱还不知道这个子进程。注释说两句之间只有这一条赋值——
+    # 再插任何命令，这句话就不对了
+    lines = _security_sh().splitlines()
+    i = next(n for n, ln in enumerate(lines) if ln.rstrip().endswith('> "$WORK/sa-start.json" &'))
+    assert lines[i + 1].strip() == "SA_START_PID=$!", lines[i + 1]
+    j = next(n for n in range(i, -1, -1) if lines[n].lstrip().startswith("sa_call_once start-code-review-job"))
+    comment = "\n".join(ln for ln in lines[max(j - 8, 0):j] if ln.lstrip().startswith("#"))
+    for needle in ("残余", "SA_START_PID=$!", "终审 M-3"):
+        assert needle in comment, (needle, comment)
