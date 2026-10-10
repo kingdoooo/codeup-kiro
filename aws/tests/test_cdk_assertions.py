@@ -765,7 +765,7 @@ def test_behaviour_vars_pass_configured_values_through():
 
 # ── I7：app.py / stacks/ 读取的每一个 config 键都写在 config.example.yaml 里 ─────
 # 由 app.py 用 ExecutorStack 的真实资源填入、不是 config.yaml 字段的键（见 app.py 的注释），
-NOT_CONFIG_KEYS = {"cluster", "task_definition", "subnets", "security_groups"}
+NOT_CONFIG_KEYS = {"cluster", "task_definition", "subnets", "security_groups", "assign_public_ip"}
 
 
 def test_every_config_key_the_code_reads_is_documented_in_the_example():
@@ -2483,6 +2483,104 @@ def test_the_guide_documents_the_feishu_notifier_the_way_the_code_behaves():
     sec13 = _guide_subsection("1.3")
     assert "`feishu_notify: 1`" in sec13 and "author.email" in sec13 and "open.feishu.cn" in sec13
     assert "| `codeup-kiro/feishu-app` |" in "\n".join(_guide_section_lines("3."))
+
+
+
+# ── Phase 2c 阶段二：可选的 NAT 网关形态（issue 19「新增：可选的 NAT 网关形态」，spec G3）──────────────────────────────────────
+def _app_templates(**over):
+    """走 app.py 的 build_stacks（调度器的子网、公网 IP 取自 ExecutorStack 的真实资源）。"""
+    state, executor, disp = _app_mod.build_stacks(cdk.App(), _full_cfg(**over))
+    return {"state": Template.from_stack(state).to_json(), "executor": Template.from_stack(executor).to_json(),
+            "dispatcher": Template.from_stack(disp).to_json()}
+
+
+def _subnets(tpl):
+    return {k: v["Properties"] for k, v in _resources(tpl, "AWS::EC2::Subnet").items()}
+
+
+@pytest.mark.parametrize("over", [{}, {"inspector": 1, "security_agent": 1}])
+def test_the_public_egress_mode_is_byte_identical_to_not_configuring_it(over):
+    a, b = _app_templates(**over), _app_templates(egress_mode="public", **over)
+    for name in a:
+        assert json.dumps(a[name], sort_keys=True) == json.dumps(b[name], sort_keys=True), name
+    assert _resources(a["executor"], "AWS::EC2::NatGateway") == {}
+
+
+def test_nat_mode_adds_two_private_subnets_and_one_nat_gateway_without_touching_existing_subnets():
+    pub, nat = _app_templates(inspector=1), _app_templates(inspector=1, egress_mode="nat")
+    ps, ns = _subnets(pub["executor"]), _subnets(nat["executor"])
+    assert len(ps) == 4 and len(ns) == 6
+    # 新的子网组排在最后：已有的公有、隔离子网逻辑 id 与 CIDR 一个不变（换了就是替换子网，ALB 与 VPC origin 跟着重建）
+    for k, v in ps.items():
+        assert ns[k]["CidrBlock"] == v["CidrBlock"], k
+    private = {k: v for k, v in ns.items() if k not in ps}
+    assert all("private" in k for k in private) and all(v["MapPublicIpOnLaunch"] is False for v in private.values()), private
+    assert len(_resources(nat["executor"], "AWS::EC2::NatGateway")) == 1, "一个 NAT 网关（约 $32/月）"
+    routes = [r["Properties"] for r in _resources(nat["executor"], "AWS::EC2::Route").values() if "NatGatewayId" in r["Properties"]]
+    assert len(routes) == 2 and all(r["DestinationCidrBlock"] == "0.0.0.0/0" for r in routes), routes
+
+
+def _env_of(tpl, container):
+    return {e["Name"]: e["Value"] for e in _td_by_container_tpl(tpl, container)["ContainerDefinitions"][0]["Environment"]}
+
+
+def _td_by_container_tpl(tpl, name):
+    hits = [v["Properties"] for v in _resources(tpl, "AWS::ECS::TaskDefinition").values()
+            if v["Properties"]["ContainerDefinitions"][0]["Name"] == name]
+    assert len(hits) == 1, (name, len(hits))
+    return hits[0]
+
+
+def test_nat_mode_launches_both_tasks_into_the_private_subnets_without_a_public_ip():
+    t = _app_templates(inspector=1, egress_mode="nat")
+    private = {k for k in _subnets(t["executor"]) if "private" in k}
+    env = _env_of(t["executor"], "review")
+    assert env["SCAN_ASSIGN_PUBLIC_IP"] == "DISABLED"
+    refs = {r["Ref"] for r in env["SCAN_SUBNETS"]["Fn::Join"][1] if isinstance(r, dict)}
+    assert refs == private, refs
+    (disp,) = [v for k, v in _resources(t["dispatcher"], "AWS::Lambda::Function").items() if "DispatcherFn" in k]
+    denv = disp["Properties"]["Environment"]["Variables"]
+    assert denv["ASSIGN_PUBLIC_IP"] == "DISABLED"
+    # 调度器的子网来自执行器栈的导出（跨栈引用）：私有子网那两个
+    assert "privateSubnet" in json.dumps(denv["SUBNET_IDS"]) and "publicSubnet" not in json.dumps(denv["SUBNET_IDS"]), denv["SUBNET_IDS"]
+
+
+def test_public_mode_keeps_the_public_subnets_and_writes_no_assign_public_ip_variable():
+    t = _app_templates(inspector=1)
+    env = _env_of(t["executor"], "review")
+    assert "SCAN_ASSIGN_PUBLIC_IP" not in env and "publicSubnet" in json.dumps(env["SCAN_SUBNETS"])
+    (disp,) = [v for k, v in _resources(t["dispatcher"], "AWS::Lambda::Function").items() if "DispatcherFn" in k]
+    assert "ASSIGN_PUBLIC_IP" not in disp["Properties"]["Environment"]["Variables"]
+
+
+def test_nat_mode_keeps_the_webhook_alb_in_the_isolated_subnets():
+    t = _app_templates(egress_mode="nat")
+    (alb,) = _resources(t["dispatcher"], "AWS::ElasticLoadBalancingV2::LoadBalancer").values()
+    assert "isolatedSubnet" in json.dumps(alb["Properties"]["Subnets"]) and "private" not in json.dumps(alb["Properties"]["Subnets"])
+
+
+
+def _exports(tpl):
+    return {v["Export"]["Name"] for v in tpl.get("Outputs", {}).values() if "Export" in v}
+
+
+def _imports(tpl):
+    return set(re.findall(r'"Fn::ImportValue": "([^"]+)"', json.dumps(tpl)))
+
+
+def test_switching_between_public_and_nat_never_strands_a_cross_stack_import():
+    # 调度器的子网 id 经跨栈导出从执行器栈来；CloudFormation 不许删一个仍被导入的导出（using-cfn-stack-exports）。
+    # public → nat：执行器先加私有子网与它们的导出，调度器再改导入——一次 cdk deploy --all 即可。
+    # nat → public：执行器去掉私有子网时，调度器还导入着它们——所以要两步（setup-guide 第 6.8 节）：先只部署调度器栈（改为导入公有子网），
+    # 再部署全部。第一步要求 nat 形态的执行器栈**仍导出**公有子网的 id，且名字与 public 形态下自动生成的一致。
+    pub, nat = _app_templates(), _app_templates(egress_mode="nat")
+    # 隔离子网（webhook 的 ALB）两种形态都导入、都在，不受影响；只看任务子网
+    pub_subnet_imports = {n for n in _imports(pub["dispatcher"]) if "publicSubnet" in n or "privateSubnet" in n}
+    nat_subnet_imports = {n for n in _imports(nat["dispatcher"]) if "publicSubnet" in n or "privateSubnet" in n}
+    assert len(pub_subnet_imports) == 2 and all("publicSubnet" in n for n in pub_subnet_imports), pub_subnet_imports
+    assert len(nat_subnet_imports) == 2 and all("privateSubnet" in n for n in nat_subnet_imports), nat_subnet_imports
+    assert pub_subnet_imports <= _exports(nat["executor"]), "nat 形态的执行器栈要继续导出公有子网的 id（改回 public 的第一步要导入它们）"
+    assert nat_subnet_imports <= _exports(nat["executor"])
 
 
 # ── 每个开关的「功能区别 / 配置区别」（Kent 2026-10-10）：config.example.yaml 每个开关键之上一个注释块，手册 §4.3「开关一览」表每个开关一行 ──

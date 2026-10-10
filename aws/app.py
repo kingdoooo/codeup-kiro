@@ -44,7 +44,9 @@ def build_stacks(app, cfg):
     dispatcher_cfg["cluster"] = executor.cluster.cluster_name
     dispatcher_cfg["task_definition"] = executor.task_definition.family
     dispatcher_cfg["container_name"] = executor.container_name
-    dispatcher_cfg["subnets"] = [s.subnet_id for s in executor.vpc.public_subnets]
+    # 出站形态（Phase 2c issue 19）：public = 公有子网 + 公网 IP；nat = 私有子网、不分配公网 IP（ExecutorStack 定，两边用同一对）
+    dispatcher_cfg["subnets"] = [s.subnet_id for s in executor.task_subnets]
+    dispatcher_cfg["assign_public_ip"] = executor.assign_public_ip
     dispatcher_cfg["security_groups"] = [executor.task_security_group.security_group_id]
 
     dispatcher = DispatcherStack(

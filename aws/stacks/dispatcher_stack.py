@@ -91,6 +91,9 @@ class DispatcherStack(cdk.Stack):
                 "SECURITY_COMMAND_PHRASE": cfg.get("security_command_phrase", ""),
                 "ALL_COMMAND_PHRASE": cfg.get("all_command_phrase", ""),
                 "TARGET_BRANCH_FILTER": cfg.get("target_branch_filter", ""),
+                # NAT 形态才写（Phase 2c issue 19）：任务在私有子网、不分配公网 IP。public 形态不写，模板与 2b 逐字节相同（没设 = ENABLED）
+                **({"ASSIGN_PUBLIC_IP": cfg["assign_public_ip"]}
+                   if cfg.get("assign_public_ip", "ENABLED") != "ENABLED" else {}),
                 # 两个密钥只注入 **SecretId**（GetSecretValue 的入参名，接受 ARN 或密钥名），
                 # 值由 handler 在调用时自己向 Secrets Manager 取
                 # （lambda/dispatcher/secret_fetch.py）。这里绝不注入明文：CloudFormation 动态引用

@@ -90,15 +90,33 @@ class ExecutorStack(cdk.Stack):
                 f"ephemeral_storage_gib={ephemeral_gib} 未超过 20 GiB 默认值："
                 "业务库完整副本 + 归档在默认额度下容易撑爆临时存储，必须显式调大")
 
+        # 出站形态（Phase 2c 阶段二，issue 19）：public = 任务在公有子网、分配公网 IP、直连 IGW（2b 的形状）；nat = 任务在私有子网、不分配
+        # 公网 IP、经一个 NAT 网关出站（约 $32/月 + $0.045/GB）——VPC Block Public Access 会拦住公有子网经 IGW 的出站，NAT 网关是它下面
+        # 最便宜的合规出站（ingress-only 模式放行 NAT 网关的出站，VPC 文档 security-vpc-bpa）。私有子网组**排在最后**：CDK 按
+        # subnet_configuration 的顺序分 CIDR，排在中间会改掉已有子网的 CIDR、替换它们（ALB 与 VPC origin 跟着重建）。一个 NAT 网关放在
+        # 第一个公有子网，两个私有子网都经它出站（跨可用区的那一份流量另有少量费用）。
+        nat = cfg.get("egress_mode", "public") == "nat"
+        subnet_groups = [
+            ec2.SubnetConfiguration(
+                name="public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24),
+            ec2.SubnetConfiguration(
+                name="isolated", subnet_type=ec2.SubnetType.PRIVATE_ISOLATED, cidr_mask=24),
+        ]
+        if nat:
+            subnet_groups.append(ec2.SubnetConfiguration(
+                name="private", subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS, cidr_mask=24))
         self.vpc = ec2.Vpc(
-            self, "Vpc", max_azs=2, nat_gateways=0,
-            subnet_configuration=[
-                ec2.SubnetConfiguration(
-                    name="public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24),
-                ec2.SubnetConfiguration(
-                    name="isolated", subnet_type=ec2.SubnetType.PRIVATE_ISOLATED, cidr_mask=24),
-            ],
+            self, "Vpc", max_azs=2, nat_gateways=1 if nat else 0,
+            subnet_configuration=subnet_groups,
         )
+        # 两个任务（执行器、扫描任务）落在哪些子网、要不要公网 IP：调度器（app.py 传给 DispatcherStack）与执行器派发扫描任务都用这一对
+        self.task_subnets = self.vpc.private_subnets if nat else self.vpc.public_subnets
+        self.assign_public_ip = "DISABLED" if nat else "ENABLED"
+        if nat:
+            # 改回 public 要两步（setup-guide 第 6.8 节）：先只部署调度器栈、让它改为导入公有子网的 id——这要求本栈此时仍导出它们
+            # （名字与 public 形态下自动生成的导出相同）；否则执行器栈去掉私有子网时，它们的导出还被调度器导入着，CloudFormation 拒绝删除
+            for subnet in self.vpc.public_subnets:
+                self.export_value(subnet.subnet_id)
 
         self.cluster = ecs.Cluster(
             self, "Cluster", vpc=self.vpc,
@@ -332,11 +350,14 @@ class ExecutorStack(cdk.Stack):
                 ("SCAN_CLUSTER", self.cluster.cluster_name),
                 ("SCAN_TASK_DEFINITION", self.scan_task_definition.family),
                 ("SCAN_CONTAINER_NAME", self.scan_container_name),
-                ("SCAN_SUBNETS", ",".join(s.subnet_id for s in self.vpc.public_subnets)),
+                ("SCAN_SUBNETS", ",".join(s.subnet_id for s in self.task_subnets)),
                 ("SCAN_SECURITY_GROUPS", self.task_security_group.security_group_id),
                 ("SCAN_BUCKET", self.scan_bucket.bucket_name),
                 ("SCAN_BUCKET_OWNER", account)):
             self.container.add_environment(name, value)
+        # NAT 形态才写（public 形态与 2b 逐字节相同；没设 = ENABLED，lib/scan-dispatch.sh）
+        if self.assign_public_ip != "ENABLED":
+            self.container.add_environment("SCAN_ASSIGN_PUBLIC_IP", self.assign_public_ip)
 
     # Security Agent 的 Agent Space、服务角色、扫描任务这一侧的权限（spec「Security Agent 评审员 · CDK」，issue 10）。
     # Agent Space 名字不带 codeup-kiro/ 前缀的密钥能匹配上的形状：控制台给服务角色生成的 base policy 允许读 secret:<Space 名>*，
