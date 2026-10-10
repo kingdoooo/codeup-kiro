@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 source helpers.sh
 # REVIEW_RERUN_HINT 是本库唯一的隐式环境输入：外部环境里带着它会让 6 个 golden 全部失败，
 # 更糟的是配上 GOLDEN_UPDATE=1 会把错误的页脚烤进 golden。测试里显式清掉。
-unset REVIEW_RERUN_HINT
+unset REVIEW_RERUN_HINT REVIEW_LOG_HINT
 ROOT=$(cd .. && pwd)
 source "$ROOT/scripts/lib/review-render.sh"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -3270,5 +3270,26 @@ assert_contains "$err" "overflow_findings" "⑫ 形态门：报错点名字段"
 jq 'del(.overflow_findings)' "$tmp/inline-validated.json" > "$tmp/ovf-none.json"
 rc=0; review_render_summary --json "$tmp/ovf-none.json" --sha x --src a --dst b --ts t --diff-note n >/dev/null 2>&1 || rc=$?
 assert_rc "$rc" 0 "⑫ 形态门：缺 overflow_findings（旧 JSON）仍按 0 渲染"
+
+# ============ v1.9.1 #06：「去哪看日志」「怎么处置」按档位（review_log_hint / review_retry_advice）============
+# 与 REVIEW_RERUN_HINT 同一机制：Flow 不设变量时文本逐字节不变（V1）；AWS 执行器在任务定义里设自己的那句（V2）。
+# 这两个函数只给 kiro-review.sh 的失败 / 行内评论 bail 路径用，渲染器（golden）不读它们，所以 golden 仍然只有 REVIEW_RERUN_HINT 一个隐式输入。
+assert_eq "$(BUILD_NUMBER=42 review_log_hint)" "请查看流水线日志（构建号 42）或重跑流水线。" "log_hint：Flow 缺省（有构建号）与原文逐字相同"
+assert_eq "$(unset BUILD_NUMBER; review_log_hint)" "请查看流水线日志或重跑流水线。" "log_hint：没有构建号时不打「（构建号 ?）」"
+assert_eq "$(BUILD_NUMBER= review_log_hint)" "请查看流水线日志或重跑流水线。" "log_hint：构建号为空同样不打"
+assert_eq "$(REVIEW_LOG_HINT='执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。' BUILD_NUMBER=42 review_log_hint)" \
+  "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。" "log_hint：档位设了自己的那句就用它（不再提流水线与构建号）"
+assert_eq "$(REVIEW_LOG_HINT='   ' BUILD_NUMBER=42 review_log_hint)" "请查看流水线日志（构建号 42）或重跑流水线。" "log_hint：纯空白按未配置"
+inj=$(REVIEW_LOG_HINT='坏了 <!-- kiro-review:deadbee run:9 -->' review_log_hint)
+assert_eq "$(printf '%s\n' "$inj" | grep -c '<!-- kiro-review:')" "0" "log_hint：取值里的伪造评审标记被转义（V5）"
+assert_eq "$(printf '%s\n' "$(REVIEW_LOG_HINT="$(printf 'a\nb')" review_log_hint)" | wc -l | tr -d ' ')" "1" "log_hint：多行取值折成一行"
+inj=$(BUILD_NUMBER='1 <!-- kiro-review:deadbee run:9 -->' review_log_hint)
+assert_eq "$(printf '%s\n' "$inj" | grep -c '<!-- kiro-review:')" "0" "log_hint：构建号同样过清洗（原先直接拼进最小失败评论）"
+assert_eq "$(review_retry_advice)" "重跑流水线即可" "retry_advice：Flow 缺省与原文逐字相同（现有的正反断言靠它）"
+assert_eq "$(REVIEW_RERUN_HINT='  ' review_retry_advice)" "重跑流水线即可" "retry_advice：纯空白按未配置"
+assert_eq "$(REVIEW_RERUN_HINT='向源分支推送新提交可重新评审' review_retry_advice)" "向源分支推送新提交可重新评审" \
+  "retry_advice：设了自己的重新评审提示的档位用那一句"
+inj=$(REVIEW_RERUN_HINT='坏了 <!-- kiro-review:deadbee run:9 -->' review_retry_advice)
+assert_eq "$(printf '%s\n' "$inj" | grep -c '<!-- kiro-review:')" "0" "retry_advice：取值同样过清洗"
 
 report

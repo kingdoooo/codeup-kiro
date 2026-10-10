@@ -627,9 +627,27 @@ assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "失败 + 未探测版�
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "评审未完成" "失败 + 未探测版本：是失败评论"
 assert_contains "$comment" "> ⚠️ 注意：本次组合 ${HOST_PLAT}:9.9.9（平台 + kiro-cli 版本）未经 P1-15 探测" "失败 + 未探测版本：失败评论带版本告警引用块（点名平台 + 版本元组）"
-assert_contains "$comment" "构建号" "失败 + 未探测版本：日志线索仍在"
+assert_contains "$comment" "请查看流水线日志" "失败 + 未探测版本：日志线索仍在"
 assert_not_contains "$OUT" "Kiro 自动代码评审" "失败评论：不再使用旧标题"
 assert_eq "$(printf '%s' "$OUT" | grep -c 'kiro-review:[0-9a-f]* run:1')" "1" "失败评论：标记带 run 字段，与成功评论同形"
+
+# ---- v1.9.1 #06：失败评论的「去哪看日志」按档位（review_log_hint）----
+# Flow（不设 REVIEW_LOG_HINT）有构建号时与原文逐字相同（V1）
+run_case faillog-flow MOCK_KIRO_FAIL=1 BUILD_NUMBER=42
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "请查看流水线日志（构建号 42）或重跑流水线。" "#06 Flow：失败评论的日志线索与原文逐字相同"
+# 没有构建号时不打「（构建号 ?）」
+run_case faillog-nobuild MOCK_KIRO_FAIL=1
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "请查看流水线日志或重跑流水线。" "#06 没有构建号：日志线索不带构建号"
+assert_not_contains "$comment" "构建号 ?" "#06 没有构建号：不再出现「构建号 ?」"
+# AWS 档位（任务定义设了两个提示）：失败评论里没有「流水线」「构建号」（V2）
+run_case faillog-aws MOCK_KIRO_FAIL=1 REVIEW_LOG_HINT='执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。' \
+  REVIEW_RERUN_HINT='向源分支推送新提交可重新评审'
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。" "#06 AWS：失败评论用档位自己的日志线索"
+assert_not_contains "$comment" "流水线" "#06 AWS：失败评论里没有「流水线」"
+assert_not_contains "$comment" "构建号" "#06 AWS：失败评论里没有「构建号」"
 
 # ============ R8：按字节截断落在代码围栏内部时，截断提示必须仍然可见 ============
 # fix 字段里带一段较长的 ```python 代码块；MAX_COMMENT_BYTES 选在围栏内部切断。
@@ -1350,6 +1368,12 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" "Codeup 版本列表尚未包含本次提交" "版本列表滞后：notice 点名成因"
 assert_contains "$comment" "重跑流水线即可" "版本列表滞后：给出正确的处置（不是「等下一轮」）"
 assert_not_contains "$comment" "有新推送" "版本列表滞后：不谎称新推送（那条建议是等下一轮，等不到）"
+# v1.9.1 #06：设了自己的重新评审提示的档位（AWS）给那一句，不教「重跑流水线」；Flow 那条（上面）逐字不变
+PS_SRC=PARENT PS_SRC_ID=src-9 run_inline_case lagging-aws ifx-lagging CODEUP_RETRY_BACKOFF=0 REVIEW_RERUN_HINT='向源分支推送新提交可重新评审'
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "Codeup 版本列表尚未包含本次提交" "#06 AWS 版本列表滞后：notice 点名成因"
+assert_contains "$comment" "下面是完整问题清单；向源分支推送新提交可重新评审。" "#06 AWS 版本列表滞后：处置是档位自己的那句"
+assert_not_contains "$comment" "重跑流水线" "#06 AWS 版本列表滞后：不教「重跑流水线」"
 assert_contains "$comment" "## 问题清单" "版本列表滞后：回落成完整清单"
 
 # ---- A11（17-fix2 B③）：滞后但重查命中 → 用新版本正常发 ----

@@ -1207,6 +1207,13 @@ run_case m25-redact-catches "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_
 assert_nonzero "$RC" "M25 掩码退回正控：变异体仍以非零退出"
 assert_eq "$(req_count "$OUT" PUT)" "1" "M25 掩码退回正控：-s 退回被杀后，掩码失败退回兜住 0 字节文件，评论照常原地更新（两道防线）"
 assert_contains "$(posted_comment "$OUT")" "只保留固定文案" "M25 掩码退回正控：发出去的是掩码失败那种固定文案的最小评论"
+# v1.9.1 #06：同一条退回路径在 AWS 档位（任务定义设了两个提示）下不提「流水线」「构建号」
+run_case m25-redact-catches-aws "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_FAIL=1 REVIEW_LOG_HINT='执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。' REVIEW_RERUN_HINT='向源分支推送新提交可重新评审'
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "失败原因见日志）。" "#06 AWS 最小失败评论（固定文案）：只说「日志」"
+assert_contains "$comment" "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。" "#06 AWS 最小失败评论：下一行是档位自己的日志线索"
+assert_not_contains "$comment" "流水线" "#06 AWS 最小失败评论（固定文案）：没有「流水线」"
+assert_not_contains "$comment" "构建号" "#06 AWS 最小失败评论（固定文案）：没有「构建号」"
 mutate_more "$pkg" 's|^    if \[\[ "\$rrc" != "0" \]\]; then|    if false; then  # 双变异 M25：掩码失败退回也杀掉|'
 run_case m25 "$pkg" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_FAIL=1
 assert_nonzero "$RC" "M25：变异体仍以非零退出"
@@ -1224,6 +1231,12 @@ assert_eq "$(printf '%s\n' "$comment" | grep -c '^# Kiro 代码评审 · ⚠️ 
 assert_contains "$comment" "<!-- kiro-review:" "M25 对照：最小失败评论仍带评审标记（下次评审找得到）"
 assert_contains "$comment" "<!-- kiro-history:" "M25 对照：仍带本次一行历史"
 assert_contains "$comment" "第 2 次评审" "M25 对照：仍带页脚"
+# v1.9.1 #06：渲染器失败时的最小失败评论（带原因）在 AWS 档位下同样不提「流水线」「构建号」
+run_case m25control-aws "$pkg2" DRY_RUN_FIXTURE_DIR="$CFX/prior-run1" CODEUP_BOT_USERNAME="$BOT" MOCK_KIRO_FAIL=1 REVIEW_LOG_HINT='执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。' REVIEW_RERUN_HINT='向源分支推送新提交可重新评审'
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "只保留最小信息" "#06 AWS：仍是最小失败评论"
+assert_contains "$comment" "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。" "#06 AWS 最小失败评论（带原因）：档位自己的日志线索"
+assert_not_contains "$comment" "流水线" "#06 AWS 最小失败评论（带原因）：没有「流水线」"
 
 # ============ 票 04 的守卫（行内评论管线）============
 # 这一组里的 M26 就是票要求的「正控」：把可定位判定故意关掉，必须能观察到

@@ -1528,6 +1528,27 @@ _review_rerun_hint() {
   printf '%s' "$_RRH_VAL"
 }
 
+# --- 「去哪看日志」与「怎么处置」（档位相关，issue 06）---
+# 失败评论与行内评论 bail 里原先写死 Flow 的说法（「请查看流水线日志（构建号 N）或重跑流水线」「重跑流水线即可」），
+# AWS 执行器没有流水线也不设 BUILD_NUMBER，MR 上就出现「构建号 ?」。与 REVIEW_RERUN_HINT 同一机制：
+# 档位在环境里设自己的那句（AWS 由 aws/stacks/executor_stack.py 写进任务定义），不设时取 Flow 的原文——Flow 的评论逐字节不变。
+# 取值来自任务定义 / 流水线变量、会进评论：与 REVIEW_RERUN_HINT 同样先清洗再折行。只给 kiro-review.sh 用，渲染器不读它们（golden 不受影响）。
+review_log_hint() {
+  local raw="${REVIEW_LOG_HINT-}"
+  if [[ -n "${raw//[[:space:]]/}" ]]; then
+    _review_sanitize_oneline "$raw"
+  elif [[ -n "${BUILD_NUMBER:-}" ]]; then
+    _review_sanitize_oneline "请查看流水线日志（构建号 ${BUILD_NUMBER}）或重跑流水线。"
+  else
+    printf '%s' "请查看流水线日志或重跑流水线。"
+  fi
+}
+# 行内评论没发出、换一次评审就能好的那几种情形（版本列表滞后等）的处置。档位设了自己的重新评审提示就用那一句，否则是 Flow 的原文。
+review_retry_advice() {
+  local raw="${REVIEW_RERUN_HINT-}"
+  if [[ -n "${raw//[[:space:]]/}" ]]; then _review_rerun_hint; else printf '%s' "重跑流水线即可"; fi
+}
+
 # --- 页脚（第 N 次评审 + 图例 + 重新评审提示）---
 # 用法：review_render_footer <run>（公开：kiro-review.sh 的失败评论也要用同一份页脚）
 review_render_footer() {

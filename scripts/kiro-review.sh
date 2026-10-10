@@ -322,10 +322,16 @@ _die_review_minimal() {
     _review_sanitize_oneline "$reason"   # 与失败评论同款折行（票 18 ⑫）
     echo ""
   else
-    echo "⚠️ 评审未完成（脚本侧密钥掩码不可用，为避免泄漏只保留固定文案；失败原因见流水线日志）。"
+    # 「流水线日志」是 Flow 的说法：档位设了自己的日志提示（REVIEW_LOG_HINT，issue 06）时只说「日志」，下一行那句提示讲在哪
+    local _lh="${REVIEW_LOG_HINT:-}"
+    if [[ -n "${_lh//[[:space:]]/}" ]]; then
+      echo "⚠️ 评审未完成（脚本侧密钥掩码不可用，为避免泄漏只保留固定文案；失败原因见日志）。"
+    else
+      echo "⚠️ 评审未完成（脚本侧密钥掩码不可用，为避免泄漏只保留固定文案；失败原因见流水线日志）。"
+    fi
   fi
   echo ""
-  echo "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。"
+  printf '%s\n' "$(review_log_hint)"   # 档位相关（issue 06）：Flow 是原文，没有构建号时不打「（构建号 ?）」
   echo ""
   review_render_footer "$REVIEW_RUN"
   rm -f "$mh"
@@ -349,7 +355,7 @@ die_review() {
       --ts "$(date '+%Y-%m-%d %H:%M:%S')" --diff-note "${DIFF_NOTE:-（本次未生成 diff）}" \
       --run "$REVIEW_RUN" "${hist_args[@]+"${hist_args[@]}"}" \
       --notice "$(degrade_notice)" \
-      --log-hint "请查看流水线日志（构建号 ${BUILD_NUMBER:-?}）或重跑流水线。" > "$f" \
+      --log-hint "$(review_log_hint)" > "$f" \
       || log "警告：失败评论渲染异常（rc≠0），改用最小失败评论"
     # 渲染器在参数不合规时（例如 --ts 为空、--history 不可读）以 rc 2 提前返回，$f 就是 0 字节。
     # 那份空文件绝不能交给 post_summary：PUT 空正文会把上一条完整报告覆盖成空白且不可恢复。
@@ -474,10 +480,10 @@ inline_bail_to() { # <状态> <to_ps> <to_commit 原值> <head 全 sha>
       inline_bail "行内评论未发出：评审期间源分支有新推送（Codeup 侧最新合并源版本是 ${INLINE_TO_NORM:0:12}，本次评审的是 ${head:0:12}），下面是完整问题清单；新推送触发的评审会补上行内评论。" \
         "警告：最新合并源版本的提交（${INLINE_TO_NORM:0:12}）是当前 HEAD（${head:0:12}）的后代（对象已在克隆里）——判定为评审期间有新推送，本次不发任何行内评论（fail-closed，ADR-0005）；新推送触发的那次评审会补上" ;;
     lag)
-      inline_bail "行内评论未发出：Codeup 版本列表尚未包含本次提交（${head:0:12}，版本列表滞后），下面是完整问题清单；重跑流水线即可。" \
-        "警告：Codeup 版本列表仍未包含本次提交（${head:0:12}），最新合并源版本是它的祖先（${INLINE_TO_NORM:0:12}）——本次不发任何行内评论（fail-closed，ADR-0005）：绑到旧版本上会挂错位置；重跑流水线即可" ;;
+      inline_bail "行内评论未发出：Codeup 版本列表尚未包含本次提交（${head:0:12}，版本列表滞后），下面是完整问题清单；$(review_retry_advice)。" \
+        "警告：Codeup 版本列表仍未包含本次提交（${head:0:12}），最新合并源版本是它的祖先（${INLINE_TO_NORM:0:12}）——本次不发任何行内评论（fail-closed，ADR-0005）：绑到旧版本上会挂错位置；$(review_retry_advice)" ;;
     unknown_shallow)
-      inline_bail "行内评论未发出：无法确认 Codeup 侧最新合并源版本（${raw:0:12}）与本次评审的提交（${head:0:12}）的关系——执行器上是浅克隆且加深失败，下面是完整问题清单；放开克隆深度后重跑流水线即可。" \
+      inline_bail "行内评论未发出：无法确认 Codeup 侧最新合并源版本（${raw:0:12}）与本次评审的提交（${head:0:12}）的关系——执行器上是浅克隆且加深失败，下面是完整问题清单；放开克隆深度后$(review_retry_advice)。" \
         "警告：最新合并源版本的提交（${raw:0:12}）在浅克隆里解析不出、加深也失败——无从判定成因（可能是新推送，也可能是 graft 边界之下的旧提交），本次不发任何行内评论（fail-closed，ADR-0005）" ;;
     diverged)
       inline_bail "行内评论未发出：Codeup 侧最新合并源版本（${INLINE_TO_NORM:0:12}）与本次评审的提交（${head:0:12}）不在同一条历史上（源分支被改写或强推），下面是完整问题清单；新推送触发的评审会补上行内评论。" \
