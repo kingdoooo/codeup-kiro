@@ -25,6 +25,9 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 # 的「重跑流水线可重新评审」，而 AWS 档位根本没有流水线——不设就是每条汇总评论末尾都教读者做一件
 # 做不到的事（pipeline/setup-guide.md 第 11.2 节那张表也把本档位列为要改这个变量的一方）。
 RERUN_HINT_PUSH = "向源分支推送新提交可重新评审"
+# 失败评论里那句「去哪看日志」（REVIEW_LOG_HINT，issue 06，scripts/lib/review-render.sh::review_log_hint）同理必须由本档位设置：
+# 引擎的默认值是「请查看流水线日志（构建号 N）或重跑流水线。」。流前缀要与下面 review 容器日志驱动的 stream_prefix 一致（有测试比对）。
+LOG_HINT = "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。"
 
 
 def rerun_hint(cfg):
@@ -225,6 +228,7 @@ class ExecutorStack(cdk.Stack):
                 "INLINE_COMMENT": str(cfg["inline_comment"]),
                 # 派生值，不是 config.yaml 的键（见 rerun_hint 的 docstring）
                 "REVIEW_RERUN_HINT": rerun_hint(cfg),
+                "REVIEW_LOG_HINT": LOG_HINT,
                 **{var: str(cfg.get(key, default))
                    for key, (var, default) in BEHAVIOUR_VARS.items()},
                 # 飞书通知（Phase 2c issue 20）：只是一个开关——执行器据此记下本次 Kiro 评论的 id（lib/notify-mark.sh）。飞书凭证不进任何任务（N-F1）；

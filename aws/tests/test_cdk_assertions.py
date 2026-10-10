@@ -1319,6 +1319,31 @@ def test_the_rerun_hint_is_never_the_flow_tier_default():
         assert "重跑流水线" not in _container_env(_full_cfg(review_command=toggle))["REVIEW_RERUN_HINT"]
 
 
+# ── v1.9.1 #06：AWS 档位同样要自己设 REVIEW_LOG_HINT，否则失败评论教读者「请查看流水线日志（构建号 ?）」────────────
+def test_the_log_hint_reaches_the_container_env_and_names_the_real_stream_prefix():
+    app = cdk.App()
+    state = StateStack(app, "S", cfg={"region": "us-west-2"})
+    t = Template.from_stack(ExecutorStack(app, "E", cfg=_full_cfg(), state=state))
+    c = _td_by_container(t, "review")["ContainerDefinitions"][0]
+    env = {e["Name"]: e["Value"] for e in c["Environment"]}
+    # 期望值写成字面量（同上面 F6 的理由）
+    assert env.get("REVIEW_LOG_HINT") == "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。", env.get("REVIEW_LOG_HINT")
+    # 句子里的流前缀 = 容器日志驱动真实的 awslogs-stream-prefix：改了前缀没改这句，这条先红
+    prefix = c["LogConfiguration"]["Options"]["awslogs-stream-prefix"]
+    assert f"流前缀 {prefix}/" in env["REVIEW_LOG_HINT"], (prefix, env["REVIEW_LOG_HINT"])
+    render = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "lib" / "review-render.sh").read_text()
+    assert 'local raw="${REVIEW_LOG_HINT-}"' in render, "引擎读的环境变量名变了，任务定义里那一项就白设了"
+
+
+def test_the_guide_names_both_hints_that_differ_from_the_engine_default():
+    # 手册 §4.3 原先说「唯一一个刻意与引擎缺省值不同的是 REVIEW_RERUN_HINT」；v1.9.1 #06 起 REVIEW_LOG_HINT 也是，表里要有它的那一行
+    sec = "\n".join(_guide_section_lines("4."))
+    assert "唯一一个刻意与引擎缺省值不同" not in sec, "§4.3 还在说只有一个变量与引擎缺省值不同"
+    assert "**两个刻意与引擎缺省值不同的是 `REVIEW_RERUN_HINT` 与 `REVIEW_LOG_HINT`**" in sec
+    row = next((ln for ln in sec.splitlines() if ln.startswith("| `REVIEW_LOG_HINT` |")), "")
+    assert "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。" in row and "构建号" in row, row
+
+
 def test_the_command_phrase_default_is_written_in_exactly_one_place():
     """短语默认值有两个消费者（调度器判正文、执行器印页脚）。两边各写一份字面量的话，改默认值时
     漏掉一处就是「页脚教的短语触发不了评审」——那是静默的假承诺，没有任何报错。
