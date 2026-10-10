@@ -104,3 +104,18 @@ def test_the_lease_key_is_disjoint_from_every_claim_key():
     bad = dict(NOTE_FIELDS, repo_id="lease", clone_url="https://codeup.aliyun.com/o1/r1.git",
                head_sha="a" * 40, dedupe_extra="")
     assert dispatcher._reject_reason(bad, {"org_id": "o1"}) == "repo-id"
+
+
+# ── Phase 2c issue 20：通知 Lambda 从锁记录的 pk 取仓库 id 与 MR 号（Stream 记录里只有锁记录本身）。键用真实的 lock_key() 生成 ──
+notifier = load_lambda("lock_contract_notifier", ROOT / "lambda" / "notifier" / "handler.py")
+
+
+@pytest.mark.parametrize("extra", [None, "", "0123456789abcdef0123456789abcdef"])
+def test_the_notifier_parses_repo_and_mr_out_of_the_key_claim_wrote(extra):
+    key = dispatcher.lock_key({"repo_id": "7215683", "mr_local_id": "10", "head_sha": "a" * 40, "dedupe_extra": extra})
+    assert notifier.mr_of({"dynamodb": {"NewImage": {"pk": {"S": key}}}}) == (key, "7215683", "10")
+
+
+def test_the_notifier_does_not_take_a_lease_key_for_a_lock_key():
+    for pk in ("lease#7215683#10", "lease#7215683#10#security", "lease#7215683#security-repo"):
+        assert notifier.mr_of({"dynamodb": {"NewImage": {"pk": {"S": pk}}}}) is None, pk
