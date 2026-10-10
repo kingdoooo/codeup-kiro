@@ -2583,6 +2583,157 @@ def test_switching_between_public_and_nat_never_strands_a_cross_stack_import():
     assert nat_subnet_imports <= _exports(nat["executor"])
 
 
+# ── Phase 2c 阶段二：出站限制（issue 19 做法 A：网关终端节点 + 策略、安全组只放 443、Route 53 Resolver DNS Firewall）──────────────────
+@pytest.mark.parametrize("over", [{}, {"inspector": 1, "security_agent": 1}, {"egress_mode": "nat"}])
+def test_with_egress_lockdown_off_every_template_is_identical_to_not_configuring_it(over):
+    a, b = _app_templates(**over), _app_templates(egress_lockdown=0, egress_dns_action="alert", **over)
+    for name in a:
+        assert json.dumps(a[name], sort_keys=True) == json.dumps(b[name], sort_keys=True), name
+    t = a["executor"]
+    for typ in ("AWS::EC2::VPCEndpoint", "AWS::Route53Resolver::FirewallRuleGroup", "AWS::Route53Resolver::ResolverQueryLoggingConfig"):
+        assert _resources(t, typ) == {}, typ
+
+
+def _task_sg(tpl):
+    (sg,) = [v["Properties"] for k, v in _resources(tpl, "AWS::EC2::SecurityGroup").items() if k.startswith("TaskSg")]
+    return sg
+
+
+@pytest.mark.parametrize("mode", ["public", "nat"])
+def test_lockdown_lets_the_task_security_group_out_only_on_tcp_443_without_replacing_it(mode):
+    on, off = _app_templates(inspector=1, egress_lockdown=1, egress_mode=mode), _app_templates(inspector=1, egress_mode=mode)
+    assert _task_sg(on["executor"])["SecurityGroupEgress"] == [
+        {"CidrIp": "0.0.0.0/0", "Description": "HTTPS only (codeup-kiro egress lockdown)", "FromPort": 443, "IpProtocol": "tcp", "ToPort": 443}]
+    # 描述不变：EC2 安全组的描述一改就是替换（新 id），调度器经跨栈导入的安全组 id 也跟着变——卡在导出上
+    assert _task_sg(on["executor"])["GroupDescription"] == _task_sg(off["executor"])["GroupDescription"]
+    assert not [r for r in _resources(on["executor"], "AWS::EC2::SecurityGroupIngress").values()
+                if "TaskSg" in json.dumps(r["Properties"].get("GroupId"))], "任务安全组仍然没有入站规则"
+
+
+def _endpoints(tpl):
+    out = {}
+    for v in _resources(tpl, "AWS::EC2::VPCEndpoint").values():
+        svc = json.dumps(v["Properties"]["ServiceName"])
+        out["s3" if ".s3" in svc else "dynamodb" if ".dynamodb" in svc else svc] = v["Properties"]
+    return out
+
+
+@pytest.mark.parametrize("mode,group", [("public", "publicSubnet"), ("nat", "privateSubnet")])
+def test_lockdown_adds_s3_and_dynamodb_gateway_endpoints_on_the_task_subnets_route_tables(mode, group):
+    eps = _endpoints(_app_templates(inspector=1, security_agent=1, egress_lockdown=1, egress_mode=mode)["executor"])
+    assert set(eps) == {"s3", "dynamodb"}, eps.keys()
+    for name, ep in eps.items():
+        assert ep["VpcEndpointType"] == "Gateway", name
+        rts = json.dumps(ep["RouteTableIds"])
+        assert rts.count(group) == 2 and "isolatedSubnet" not in rts, (name, rts)
+
+
+def _statements(ep):
+    return ep["PolicyDocument"]["Statement"]
+
+
+def test_the_s3_endpoint_policy_allows_only_this_deployments_bucket_and_the_ecr_layer_bucket():
+    executor = _app_mod.build_stacks(cdk.App(), _full_cfg(inspector=1, security_agent=1, egress_lockdown=1))[1]
+    eps = _endpoints(Template.from_stack(executor).to_json())
+    st = _statements(eps["s3"])
+    assert len(st) == 2, st
+    (layer,) = [x for x in st if "starport-layer-bucket" in json.dumps(x["Resource"])]
+    assert layer["Action"] == "s3:GetObject" and layer["Principal"] == {"AWS": "*"} and "Condition" not in layer
+    assert "prod-" in json.dumps(layer["Resource"]) and "-starport-layer-bucket/*" in json.dumps(layer["Resource"])
+    (own,) = [x for x in st if x is not layer]
+    assert sorted(own["Action"]) == ["s3:GetObject", "s3:PutObject"]
+    assert "ScanInputs" in json.dumps(own["Resource"]) and json.dumps(own["Resource"]).endswith('"/*"]]}'), own["Resource"]
+    assert own["Condition"] == {"StringEquals": {"aws:PrincipalAccount": {"Ref": "AWS::AccountId"}}}
+    assert '"s3:*"' not in json.dumps(st) and '"Resource": "*"' not in json.dumps(st)
+
+
+def test_without_scanners_the_s3_endpoint_only_allows_the_ecr_layer_bucket():
+    st = _statements(_endpoints(_app_templates(egress_lockdown=1)["executor"])["s3"])
+    assert len(st) == 1 and "starport-layer-bucket" in json.dumps(st[0]["Resource"]), st
+
+
+def test_the_dynamodb_endpoint_policy_allows_only_get_and_update_on_the_two_tables():
+    st = _statements(_endpoints(_app_templates(security_agent=1, egress_lockdown=1)["executor"])["dynamodb"])
+    (x,) = st
+    assert sorted(x["Action"]) == ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    res = json.dumps(x["Resource"])
+    assert "ReviewLock" in res and "CodeReviewMapping" in res, res
+    assert x["Condition"] == {"StringEquals": {"aws:PrincipalAccount": {"Ref": "AWS::AccountId"}}}
+
+
+def test_without_security_agent_the_dynamodb_endpoint_names_only_the_lock_table_and_adds_no_new_export():
+    # 映射表只有 SA 用；不开 SA 时把它写进终端节点策略，会给 StateStack 多一个只有这里导入的导出——关掉 egress_lockdown 时
+    # StateStack 先部署、删这个导出，执行器栈还导入着它，部署卡住（CloudFormation 不许删仍被导入的导出）
+    on, off = _app_templates(inspector=1, egress_lockdown=1), _app_templates(inspector=1)
+    (x,) = _statements(_endpoints(on["executor"])["dynamodb"])
+    assert "ReviewLock" in json.dumps(x["Resource"]) and "CodeReviewMapping" not in json.dumps(x["Resource"]), x["Resource"]
+    assert _exports(on["state"]) == _exports(off["state"]), "开出站限制不给 StateStack 增加导出"
+
+
+def _dns(tpl):
+    lists = {k: v["Properties"] for k, v in _resources(tpl, "AWS::Route53Resolver::FirewallDomainList").items()}
+    (group,) = [v["Properties"] for v in _resources(tpl, "AWS::Route53Resolver::FirewallRuleGroup").values()]
+    return lists, group
+
+
+@pytest.mark.parametrize("action,want", [("alert", "ALERT"), ("block", "BLOCK")])
+def test_dns_firewall_allows_the_list_then_alerts_or_blocks_everything_else(action, want):
+    t = _app_templates(inspector=1, security_agent=1, egress_lockdown=1, egress_dns_action=action)["executor"]
+    lists, group = _dns(t)
+    rules = sorted(group["FirewallRules"], key=lambda r: r["Priority"])
+    assert [(r["Priority"], r["Action"]) for r in rules] == [(100, "ALLOW"), (200, want)], rules
+    assert rules[0]["FirewallDomainRedirectionAction"] == "TRUST_REDIRECTION_DOMAIN", "CNAME 链上的名字不必逐个列"
+    assert rules[1].get("BlockResponse") == ("NXDOMAIN" if want == "BLOCK" else None), rules[1]
+    catch_all = [v for v in lists.values() if v["Domains"] == ["*"]]
+    assert len(catch_all) == 1, lists
+    (assoc,) = [v["Properties"] for v in _resources(t, "AWS::Route53Resolver::FirewallRuleGroupAssociation").values()]
+    assert 100 <= assoc["Priority"] <= 9900 and "Vpc" in json.dumps(assoc["VpcId"])
+
+
+def _allowed(tpl):
+    lists, _ = _dns(tpl)
+    (allowed,) = [v["Domains"] for v in lists.values() if v["Domains"] != ["*"]]
+    return json.dumps(allowed)
+
+
+def test_the_allow_list_names_what_the_tasks_reach_and_no_wide_wildcards():
+    t = _app_templates(inspector=1, security_agent=1, egress_lockdown=1)["executor"]
+    allowed = _allowed(t)
+    for need in ("codeup.aliyun.com", "openapi-rdc.aliyuncs.com", "secretsmanager.", "logs.", "ecs.", "dynamodb.", "api.ecr.",
+                 ".dkr.ecr.", ".ddb.", "inspector-scan.", "securityagent."):
+        assert need in allowed, need
+    for wide in ('"*.amazonaws.com"', '"amazonaws.com"', '"*.aliyuncs.com"', '"*"'):
+        assert wide not in allowed, wide
+    # N-F1 的旁证：飞书只在通知 Lambda（不在 VPC 里）发，任务那一侧的名单里不该有它
+    assert "feishu" not in allowed and "larksuite" not in allowed
+
+
+def test_scanner_endpoints_are_only_allowed_when_that_scanner_is_on():
+    allowed = _allowed(_app_templates(egress_lockdown=1)["executor"])
+    assert "inspector-scan." not in allowed and "securityagent." not in allowed
+
+
+def test_dns_queries_are_logged_to_a_log_group_in_this_stack():
+    t = _app_templates(egress_lockdown=1)["executor"]
+    (qlc,) = [v["Properties"] for v in _resources(t, "AWS::Route53Resolver::ResolverQueryLoggingConfig").values()]
+    assert "DnsQueryLogs" in json.dumps(qlc["DestinationArn"]), qlc
+    (qla,) = [v["Properties"] for v in _resources(t, "AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation").values()]
+    assert "Vpc" in json.dumps(qla["ResourceId"])
+    (lg,) = [v for k, v in _resources(t, "AWS::Logs::LogGroup").items() if "DnsQueryLogs" in k]
+    assert lg["Properties"]["RetentionInDays"] == 30
+    # 投递服务的资源策略：条件按 CloudWatch Logs「V1 权限」的写法（aws:SourceArn 是 logs 的 ARN）
+    (rp,) = [json.loads(json.dumps(v["Properties"])) for v in _resources(t, "AWS::Logs::ResourcePolicy").values()]
+    doc = json.dumps(rp)
+    assert "delivery.logs.amazonaws.com" in doc and ":logs:" in doc and "route53resolver" not in doc, doc
+
+
+def test_egress_resource_names_and_descriptions_have_no_dashes_of_the_long_kind():
+    t = _app_templates(inspector=1, egress_lockdown=1)["executor"]
+    blob = json.dumps({k: v for k, v in t["Resources"].items() if v["Type"].startswith(("AWS::Route53Resolver::", "AWS::EC2::"))},
+                      ensure_ascii=False)
+    assert "—" not in blob and "–" not in blob
+
+
 # ── 每个开关的「功能区别 / 配置区别」（Kent 2026-10-10）：config.example.yaml 每个开关键之上一个注释块，手册 §4.3「开关一览」表每个开关一行 ──
 # 开关 = 0/1 与枚举取值的键（inline_profile 之类的评审行为变量不是开关）。以后新增 0/1 开关、忘了写说明，守卫那一句先红
 SWITCHES = ("inline_comment", "review_command", "inspector", "security_agent", "feishu_notify", "feishu_domain")

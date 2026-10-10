@@ -14,6 +14,7 @@ from aws_cdk import (
 from constructs import Construct
 
 from config import DEFAULT_COMMAND_PHRASE, PHRASE_DEFAULTS, feishu_notify_on
+from stacks.egress import EgressLockdown
 
 # aws/executor/Dockerfile 的构建上下文是仓库根（COPY scripts/ prompts/ kiro/ 都是相对仓库根的路径），
 # 这里必须给出同一个根，否则 DockerImageAsset 的目录内容与 Dockerfile 里的 COPY 源路径对不上。
@@ -126,10 +127,13 @@ class ExecutorStack(cdk.Stack):
         # Codeup/云效 API、Kiro API、Secrets Manager、DynamoDB——保留默认放行出站，不加入站规则。
         # description 必须是 ASCII——EC2 SecurityGroupDescription 的校验正则不接受中文，
         # cdk synth 会把这个当模板校验警告打出来（本任务实测踩到过，见任务报告）。
+        # 出站限制（Phase 2c 阶段二，issue 19，egress_lockdown: 1）：不再全放行，只放 TCP 443（规则在 stacks/egress.py 里加）。
+        # 描述**不跟着改**：EC2 安全组的描述一改就是替换（新的安全组 id），调度器经跨栈导入的 id 也随之变——卡在导出上
+        lockdown = cfg.get("egress_lockdown", 0) == 1
         self.task_security_group = ec2.SecurityGroup(
             self, "TaskSg", vpc=self.vpc,
             description="Kiro review Fargate task: no inbound, default-allow outbound",
-            allow_all_outbound=True,
+            allow_all_outbound=not lockdown,
         )
 
         image_asset = ecr_assets.DockerImageAsset(
@@ -246,6 +250,13 @@ class ExecutorStack(cdk.Stack):
         scanners = scanners_on(cfg)
         if scanners:
             self._add_scan_task(cfg, state, image_asset, log_group, scanners)
+        if lockdown:
+            # 映射表只有 Security Agent 用：不开 SA 时不写进终端节点策略（否则 StateStack 多一个只有这里导入的导出，关掉出站限制时卡住）
+            EgressLockdown(
+                self, "EgressLockdown", vpc=self.vpc, task_subnets=self.task_subnets,
+                security_group=self.task_security_group, scan_bucket=self.scan_bucket,
+                tables=[state.lock_table] + ([state.mapping_table] if "security" in scanners else []),
+                scanners=scanners, dns_action=cfg.get("egress_dns_action", "alert"))
 
     def _add_scan_task(self, cfg, state, image_asset, log_group, scanners):
         account = cdk.Aws.ACCOUNT_ID
