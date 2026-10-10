@@ -2398,7 +2398,8 @@ def test_the_notifiers_env_has_secret_names_only_and_the_configured_platform():
 
 
 def test_three_notifications_at_their_budget_fit_in_the_notifier_timeout():
-    # 终审 M-5：一条记录最多三条通知（三位评审员）。每条最坏 = 总时限 + 读阶段的最后一次 socket 操作 + 两次取密钥（bounded_config 的最坏）。
+    # 终审 M-5：一条记录最多三条通知（三位评审员）。连不上、对方不应答时每条最坏 = 总时限 + 一次 socket 操作 + 两次取密钥（bounded_config 的最坏）；
+    # 对方连上之后慢慢回不在时限内（复审 m-1，handler.py 的 _Budget），这里算的不是那种情形。
     # 三条加起来要小于函数超时：函数一超时，ESM 就重放整批，最后按记录年龄（1 小时）无声丢弃——总时限要防的正是这个
     import bounded_config
     root = pathlib.Path(__file__).resolve().parents[1]
@@ -2542,7 +2543,14 @@ def test_the_guide_documents_the_feishu_notifier_the_way_the_code_behaves():
     assert '"deadline"' in src, "handler 里没有 deadline 这个错误码"
     assert "`code=deadline`" in rows and re.search(rf"(?<![0-9]){notifier.NOTIFY_BUDGET} 秒的总时限", rows), \
         "§8 没写 code=deadline 与每条通知的总时限"
-    assert "IteratorAge" in rows and "1 小时" in rows, "§8 没写积压超过 1 小时被事件源丢掉、只有 IteratorAge 看得到"
+    # 小时数取自事件源的 MaximumRecordAgeInSeconds、按整数匹配（复审 m-2：「11 小时」不能蒙混过去）
+    (esm,) = _resources(_notify_stacks(feishu_notify=1)["state"], "AWS::Lambda::EventSourceMapping").values()
+    hours = esm["Properties"]["MaximumRecordAgeInSeconds"] // 3600
+    assert "IteratorAge" in rows and re.search(rf"排队超过 (?<![0-9]){hours} 小时", rows), "§8 没写积压超过记录年龄上限被事件源丢掉、只有 IteratorAge 看得到"
+    # 会用到总时限的步骤 = 经 _call 发请求的那几步（复审 m-3：取密钥、读配置不查时限，手册不能说「任何一步」）
+    timed = sorted(set(re.findall(r'_call\("([a-z]+)"', src)))
+    assert timed == ["codeup", "send", "token"], timed
+    assert "`code=deadline`（" + " / ".join(f"`{x}`" for x in ("codeup", "token", "send")) + " 三步都可能）" in rows, "§8 的 code=deadline 没点名哪几步"
     assert "第 8 节「result=skipped」与「result=failed」那两行" in sec
     # §1.3 的数据流表与 §3 的密钥表各有一行
     sec13 = _guide_subsection("1.3")

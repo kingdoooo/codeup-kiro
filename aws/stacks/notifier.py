@@ -49,8 +49,8 @@ class FeishuNotifier(Construct):
             handler="handler.handler",
             code=lambda_.Code.from_asset(os.path.join(LAMBDA_ROOT, "notifier")),
             layers=[shared],
-            # 一条记录最多三条通知，每条有一个总时限（handler.py 的 NOTIFY_BUDGET，40 秒；最坏再多一次 socket 操作与两次取密钥）：一条记录最坏约
-            # 4 分钟，留在这 300 秒之内（test_cdk_assertions 核对），函数不会跑到超时。一批只给一条记录（批 1）：万一超时，重放的只是它自己，uuid 保证重放不重发
+            # 一条记录最多三条通知，每条有一个总时限（handler.py 的 NOTIFY_BUDGET，40 秒；再加一次 socket 操作与两次取密钥）：连不上、对方不应答时
+            # 一条记录最坏约 4 分钟，留在这 300 秒之内（test_cdk_assertions 核对）。对方连上之后慢慢回不在时限内（handler.py 的 _Budget），那时仍可能超时。一批只给一条记录（批 1）：万一超时，重放的只是它自己，uuid 保证重放不重发
             timeout=cdk.Duration.seconds(300),
             environment={
                 "YUNXIAO_ORG_ID": cfg["org_id"],
