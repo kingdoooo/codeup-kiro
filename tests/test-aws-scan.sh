@@ -39,6 +39,8 @@ mkstub() {  # <评审员>
   cat > "$tmp/pkg/reviewers/${rid}.sh" <<STUB
 #!/bin/bash
 env > "$tmp/env.${rid}"
+# ⑨：\$tmp/cid.<评审员> 存在时，像真的评审员那样把「本次评论 id」写进自己的工作目录（Phase 2c issue 20）
+if [ -e "$tmp/cid.${rid}" ]; then cp "$tmp/cid.${rid}" "\$REVIEWER_WORKDIR/comment-id"; fi
 if [ -e "$tmp/hang" ] || [ -e "$tmp/hang.${rid}" ]; then
   /bin/sleep 30 & sp=\$!
   trap 'kill \$sp 2>/dev/null; echo ran > "$tmp/exit.${rid}"' EXIT
@@ -119,7 +121,7 @@ assert_eq "$(LC_ALL=C grep -c 'pwned' "$tmp/env.inspector" || true)" "0" "③b �
 common="AWS_REGION CI_COMMIT_REF_NAME CODEUP_BOT_USERNAME CODEUP_REPO_ID ECS_CONTAINER_METADATA_URI_V4 HEAD_SHA LOCK_KEY LOCK_TABLE MR_LOCAL_ID MR_TARGET_BRANCH PATH REVIEWER_WORKDIR REVIEW_RERUN_HINT SCAN_REPO_URL SCAN_RUN_ID YUNXIAO_ORG_ID YUNXIAO_TOKEN"
 # 名单里另几项 scan_run 不设、取决于跑测试的机器（LANG、HOME 之类）：本机设了就应当在
 for n in HOME LANG LC_ALL TZ AWS_DEFAULT_REGION AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_EXECUTION_ENV SCAN_BUCKET \
-         SCAN_BUCKET_OWNER MAX_COMMENT_BYTES; do
+         SCAN_BUCKET_OWNER MAX_COMMENT_BYTES FEISHU_NOTIFY; do
   [[ -n "${!n+x}" ]] && common+=" $n"
 done
 want_names() { printf '%s\n' $common "$@" | sort | tr '\n' ' '; }
@@ -291,5 +293,76 @@ rm -f "$tmp/hang.inspector"
 assert_eq "$(cat "$tmp/rc8b")" "143" "⑧b 入口收到 TERM → 143"
 assert_eq "$(attr_true posted_inspector)/$(attr_true posted_security)" "false/true" \
   "⑧b 已经正常结束的 security 照样置 posted（兜底不再给它发「未完成」）；被停下的 inspector 交给兜底"
+
+# ⑨ Phase 2c 飞书通知（issue 20）：评审员把本次评论的 id 写进 $REVIEWER_WORKDIR/comment-id，入口在置 posted_<评审员> 的**同一次**写入里
+#    带上 comment_<评审员>——通知 Lambda 只认「posted 从无到有、且带合法 id」的那一次变化，不会看到「有 posted、还没有 id」的半截状态
+mkstub inspector; mkstub security; rm -f "$tmp"/hang* "$tmp"/rc.* "$tmp"/cid.*
+CIDI=0123456789abcdef0123456789abcdef; CIDS=fedcba9876543210fedcba9876543210
+attr_s() { /usr/bin/jq -r --arg k "r1#7#$SHA40" --arg a "$1" '.[$k][$a].S // "none"' "$tmp/state.json"; }
+printf '%s' "$CIDI" > "$tmp/cid.inspector"; printf '%s' "$CIDS" > "$tmp/cid.security"; : > "$tmp/ddb.log"
+assert_eq "$(scan_run REVIEWERS=inspector,security FEISHU_NOTIFY=1)" "0" "⑨ 两位都回写了 → 0"
+assert_eq "$(attr_true posted_inspector)/$(attr_s comment_inspector)" "true/$CIDI" "⑨ posted_inspector 与 comment_inspector 一起写进锁记录"
+assert_eq "$(attr_true posted_security)/$(attr_s comment_security)" "true/$CIDS" "⑨ 各写各的 comment_<评审员>"
+assert_eq "$(LC_ALL=C grep -c "^update-item r1#7#$SHA40 ok$" "$tmp/ddb.log" | tr -d ' ')" "2" "⑨ 每位评审员只写一次锁记录（posted 与评论 id 同一次写入）"
+assert_contains $'\n'"$(cat "$tmp/env.inspector")"$'\n' $'\n'"FEISHU_NOTIFY=1"$'\n' "⑨ FEISHU_NOTIFY 在扫描子进程的白名单里（评审员据此决定记不记评论 id）"
+# 形状不对的 id（不是 32 位小写十六进制）→ 只置 posted，不带 id
+printf 'not-an-id' > "$tmp/cid.inspector"; rm -f "$tmp/cid.security"
+assert_eq "$(scan_run REVIEWERS=inspector)" "0" "⑨ 评论 id 形状不对 → 照样 0"
+assert_eq "$(attr_true posted_inspector)/$(attr_s comment_inspector)" "true/none" "⑨ 形状不对的 id 不进锁记录"
+# 被取代（10）或没有终态（3）时即使留了 id 文件也不写：通知只跟着 posted 走
+printf '%s' "$CIDI" > "$tmp/cid.inspector"; printf '%s' "$CIDS" > "$tmp/cid.security"
+echo 10 > "$tmp/rc.inspector"; echo 3 > "$tmp/rc.security"
+assert_eq "$(scan_run REVIEWERS=inspector,security)" "96" "⑨ 10 与 3 → 入口 96"
+assert_eq "$(attr_true superseded_inspector)/$(attr_s comment_inspector)/$(attr_s comment_security)" "true/none/none" \
+  "⑨ 被取代、没有终态时都不写评论 id"
+rm -f "$tmp"/rc.* "$tmp"/cid.*
+# 开关为 0（不设 FEISHU_NOTIFY）时子进程的环境里没有它（③b 的白名单断言同样覆盖：本机没设的名字不进子进程）
+assert_eq "$(scan_run REVIEWERS=inspector)" "0" "⑨（对照）不开飞书通知 → 0"
+assert_eq "$(sed 's/=.*//' "$tmp/env.inspector" | LC_ALL=C grep -c '^FEISHU_NOTIFY$' || true)" "0" "⑨ 不开时子进程里没有 FEISHU_NOTIFY"
+
+# ⑨b 评审员这一侧（aws/reviewers/lib/summary.sh）：FEISHU_NOTIFY=1 时 summary_post 记下本次评论的 id。原地更新 = 那一条；新建 = 按作者 +
+#     本次发布随机串行在 MR 上找回（创建响应在 codeup_post_comment 里用完即删，scripts/ 不改）。不开时一次多余的请求都没有
+CIDN=00112233445566778899aabbccddeeff
+mkfix "$tmp/fx9u" inspector aliyun:bot 3
+jq --arg id "$CIDI" '.[0].comment_biz_id = $id' "$tmp/fx9u/list-comments.json" > "$tmp/fx9u/l.json" && mv "$tmp/fx9u/l.json" "$tmp/fx9u/list-comments.json"
+mkdir -p "$tmp/fx9n" "$tmp/fx9m"; echo '[]' > "$tmp/fx9n/list-comments.1.json"; echo '[]' > "$tmp/fx9m/list-comments.1.json"
+nonce_line='<!-- kiro-inspector-post:0123456789abcdef -->'
+# 新建之后的列表：别人贴了一条带同一行随机串的评论（排在前面），本机器人的那条才是本次建的
+jq -n --arg n "$nonce_line" --arg id "$CIDN" '[
+  {comment_biz_id: "ffffffffffffffffffffffffffffffff", comment_type: "GLOBAL_COMMENT", state: "OPENED", author: {username: "aliyun:other"}, content: ("x\n" + $n)},
+  {comment_biz_id: $id, comment_type: "GLOBAL_COMMENT", state: "OPENED", author: {username: "aliyun:bot"}, content: ("# Inspector 依赖漏洞扫描 · ⚠️ 评审未完成\n" + $n + "  \n正文")}]' \
+  > "$tmp/fx9n/list-comments.2.json"
+jq '.[0:1]' "$tmp/fx9n/list-comments.2.json" > "$tmp/fx9m/list-comments.2.json"
+cat > "$tmp/drv9.sh" <<DRV
+PKG=$tmp/pkg; REVIEW_PROFILE=inspector
+source "\$PKG/reviewers/lib/reviewer.sh"
+REVIEW_POST_NONCE=0123456789abcdef
+summary_locate_prior
+reviewer_fail "Inspector 扫描输入准备失败（代号 sbomgen-timeout）"
+DRV
+run9() {  # <fixture 目录> [KEY=VAL …] → 输出（含 rc=）；评论 id 文件在 $tmp/w9/comment-id
+  local fx="$1"; shift
+  rm -rf "$tmp/w9"; mkdir -p "$tmp/w9"
+  REVIEWER_WORKDIR="$tmp/w9" DRY_RUN=1 DRY_RUN_FIXTURE_DIR="$fx" CODEUP_BOT_USERNAME=aliyun:bot CODEUP_RETRY_BACKOFF=0 \
+    YUNXIAO_ORG_ID=o1 CODEUP_REPO_ID=7 MR_LOCAL_ID=7 HEAD_SHA="$SHA40" CI_COMMIT_REF_NAME=feat MR_TARGET_BRANCH=main \
+    /usr/bin/env "$@" /bin/bash --norc --noprofile -c "set -euo pipefail; source '$tmp/drv9.sh'" 2>&1 </dev/null; echo "rc=$?"
+}
+cid9() { cat "$tmp/w9/comment-id" 2>/dev/null || echo none; }
+out=$(run9 "$tmp/fx9u" FEISHU_NOTIFY=1)
+assert_contains "$out" "rc=0" "⑨b 原地更新 → 0"
+assert_eq "$(req_count "$out" PUT "comments/$CIDI")" "1" "⑨b（准备）原地更新了那一条"
+assert_eq "$(cid9)" "$CIDI" "⑨b 原地更新：记下的就是那一条的 id"
+assert_eq "$(req_count "$out" POST 'comments/list')" "1" "⑨b 原地更新时不多查一次列表"
+out=$(run9 "$tmp/fx9n" FEISHU_NOTIFY=1)
+assert_contains "$out" "rc=0" "⑨b 新建 → 0"
+assert_eq "$(req_count "$out" POST 'comments$')" "1" "⑨b（准备）新建了一条"
+assert_eq "$(cid9)" "$CIDN" "⑨b 新建：按作者 + 本次发布随机串找回本次那一条（别人复制的同一行不算）"
+out=$(run9 "$tmp/fx9m" FEISHU_NOTIFY=1)
+assert_eq "$(cid9)" "none" "⑨b 新建后在 MR 上找不到本次那一条 → 不记 id"
+assert_contains "$out" "notify-mark result=skipped code=no-comment-id" "⑨b 找不到时留一行日志"
+assert_contains "$out" "rc=0" "⑨b 找不到 id 不影响评审结果（N-F2）"
+out=$(run9 "$tmp/fx9n")
+assert_eq "$(cid9)" "none" "⑨b 不开飞书通知 → 不记 id"
+assert_eq "$(req_count "$out" POST 'comments/list')" "1" "⑨b 不开飞书通知 → 一次多余的列表请求都没有"
 
 report

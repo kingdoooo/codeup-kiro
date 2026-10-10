@@ -70,7 +70,8 @@ source "$PKG/scripts/lib/kiro-agent.sh"   # KIRO_ENV_EXEC_SHIM（「恰好一份
 # Fargate 给 AWS CLI 找任务角色凭证用的两个（AWS_CONTAINER_CREDENTIALS_RELATIVE_URI、AWS_EXECUTION_ENV）。未设置的名字跳过。
 SCAN_CHILD_COMMON=(PATH HOME LANG LC_ALL TZ AWS_REGION AWS_DEFAULT_REGION AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_EXECUTION_ENV
                    ECS_CONTAINER_METADATA_URI_V4 CODEUP_REPO_ID MR_LOCAL_ID HEAD_SHA CI_COMMIT_REF_NAME MR_TARGET_BRANCH LOCK_KEY
-                   LOCK_TABLE SCAN_RUN_ID SCAN_REPO_URL YUNXIAO_ORG_ID SCAN_BUCKET SCAN_BUCKET_OWNER MAX_COMMENT_BYTES)
+                   LOCK_TABLE SCAN_RUN_ID SCAN_REPO_URL YUNXIAO_ORG_ID SCAN_BUCKET SCAN_BUCKET_OWNER MAX_COMMENT_BYTES
+                   FEISHU_NOTIFY)
 pids=""
 # StopTask 时及时停下（issue 15）：任务定义开了 initProcessEnabled，PID 1 是 init（tini），本入口不再是 PID 1，SIGTERM 能到达；
 # 但 init 只把信号转给它的直接子进程（就是本入口），扫描员子进程收不到——它们的租约要在各自的 EXIT 陷阱里释放。所以本入口
@@ -81,8 +82,12 @@ pids=""
 # 多发一条「未完成」。这样写时 TERM 落在任何位置，陷阱都重新 wait 这位（拿到同一个退出码）、照样置终态
 all_terminal=1; marked=" "
 _scan_mark() {  # <评审员> <退出码>
+  local cid
   case "$2" in
-    0)  echo "scan-reviewer reviewer=$1 result=posted" >&2; mark_lock "posted_$1" ;;
+    0)  echo "scan-reviewer reviewer=$1 result=posted" >&2
+        # 飞书通知（Phase 2c issue 20）：评审员记下的本次评论 id（FEISHU_NOTIFY=1 时才有）与 posted 同一次写入
+        cid=$(/bin/cat "$WORKROOT/$1/comment-id" 2>/dev/null || true)
+        if [[ "$cid" =~ ^[0-9a-f]{32}$ ]]; then mark_lock "posted_$1" "comment_$1" "$cid"; else mark_lock "posted_$1"; fi ;;
     10) echo "scan-reviewer reviewer=$1 result=superseded" >&2; mark_lock "superseded_$1" ;;
     *)  echo "scan-reviewer reviewer=$1 result=failed rc=$2（兜底 Lambda 会以这位评审员的机器人回写）" >&2; all_terminal=0 ;;
   esac

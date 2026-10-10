@@ -6,14 +6,22 @@
 
 # 在本次投递的锁记录上置一个 BOOL true 属性。只给调度器抢锁时建好的那条记录置（attribute_exists，N4：绝不新建一条没有
 # expires_at 的记录）。失败只留一行代号、不中断：标记缺了的后果是兜底多发一条（重复好于沉默），不该因此连 Kiro 都不评。
-mark_lock() {  # <属性名>
-  local err
+# 可选的后两个参数：同一次写入再置一个字符串属性（飞书通知的评论 id，Phase 2c issue 20）——posted_<评审员> 与 comment_<评审员> 一起落地，
+# 通知 Lambda 看不到「有 posted、还没有 id」的半截状态。
+mark_lock() {  # <属性名> [<字符串属性名> <取值>]
+  local err update='SET #a = :t' names values='{":t":{"BOOL":true}}'
+  names=$(/usr/bin/jq -cn --arg a "$1" '{"#a": $a}')
+  if [[ $# -ge 3 ]]; then
+    update='SET #a = :t, #c = :c'
+    names=$(/usr/bin/jq -cn --arg a "$1" --arg c "$2" '{"#a": $a, "#c": $c}')
+    values=$(/usr/bin/jq -cn --arg v "$3" '{":t": {BOOL: true}, ":c": {S: $v}}')
+  fi
   if ! err=$(/usr/local/bin/aws dynamodb update-item --region "$AWS_REGION" --table-name "$LOCK_TABLE" \
         --key "$(/usr/bin/jq -cn --arg k "$LOCK_KEY" '{pk: {S: $k}}')" \
         --condition-expression 'attribute_exists(pk)' \
-        --update-expression 'SET #a = :t' \
-        --expression-attribute-names "$(/usr/bin/jq -cn --arg a "$1" '{"#a": $a}')" \
-        --expression-attribute-values '{":t":{"BOOL":true}}' 2>&1 >/dev/null); then
+        --update-expression "$update" \
+        --expression-attribute-names "$names" \
+        --expression-attribute-values "$values" 2>&1 >/dev/null); then
     echo "mark-lock attr=${1} result=failed code=$(aws_err_code "$err")" >&2
   fi
   return 0

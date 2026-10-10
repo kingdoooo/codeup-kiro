@@ -49,11 +49,37 @@ summary_post() {  # <评论文件>
   if [[ -n "$PRIOR_COMMENT_ID" ]]; then
     if codeup_update_comment "$LOCAL_ID" "$PRIOR_COMMENT_ID" "$file"; then
       log "已原地更新汇总评论 ${PRIOR_COMMENT_ID}（第 ${REVIEW_RUN} 次评审）"
+      summary_note_comment_id "$PRIOR_COMMENT_ID"
       return 0
     fi
     log "警告：原地更新汇总评论 ${PRIOR_COMMENT_ID} 失败（已按既有重试策略处理），退回新建"
   fi
-  codeup_post_comment "$LOCAL_ID" "$file" "${BOT_USERNAME:-}"
+  codeup_post_comment "$LOCAL_ID" "$file" "${BOT_USERNAME:-}" || return 1
+  summary_note_comment_id ""
+}
+
+# 飞书通知（Phase 2c issue 20，只在 FEISHU_NOTIFY=1 时）：把本次发出 / 更新的评论 id 写进 $WORK/comment-id，扫描入口在置 posted_<评审员>
+# 的同一次写入里带上 comment_<评审员>，通知 Lambda 据此给 MR 作者发链接。原地更新时就是那一条；新建时创建响应在 codeup_post_comment 里
+# 用完即删（scripts/ 不改，I9），所以按「作者 = 本评审员的机器人 + 正文里有本次发布随机串那一行」在 MR 上找回它（随机串每次运行新生成，
+# 旧评论与别人都复制不到）。任何一步不成只留一行日志，永不失败：通知不改评审结果（N-F2）。
+summary_note_comment_id() {  # <已知的评论 id，或空 = 刚新建>
+  [[ "${FEISHU_NOTIFY:-0}" == 1 ]] || return 0
+  local cid="$1"
+  if [[ -z "$cid" && -n "${BOT_USERNAME:-}" && "${REVIEW_POST_NONCE:-}" =~ ^[0-9a-f]{16}$ ]] \
+     && codeup_list_global_comments "$LOCAL_ID" > "$WORK/comments-posted.json" 2>/dev/null; then
+    cid=$(jq -r --arg bot "$BOT_USERNAME" --arg pn "${REVIEW_POST_NONCE_PREFIX}${REVIEW_POST_NONCE} -->" '
+      def str(v): if (v | type) == "string" then v else "" end;
+      (if type == "object" then (.result // []) else . end) | (if type == "array" then . else [] end)
+      | map(select(type == "object" and (.author | type) == "object" and str(.author.username) == $bot))
+      | map(select([str(.content) | split("\n")[] | sub("[[:space:]]+$"; "")] | index($pn) != null))
+      | (.[0] // {}) | str(.comment_biz_id)' "$WORK/comments-posted.json" 2>/dev/null) || cid=""
+  fi
+  if [[ "$cid" =~ ^[0-9a-f]{32}$ ]]; then
+    printf '%s' "$cid" > "$WORK/comment-id"
+  else
+    log "notify-mark result=skipped code=no-comment-id"
+  fi
+  return 0
 }
 
 # 文档级兜底掩码 + 截断（顺序与 kiro-review.sh 第 7 步相同：先掩码、后截断）。rc 0 = 可以发；其余 = 不得发（调用方走失败评论）。
