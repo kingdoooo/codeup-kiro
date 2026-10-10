@@ -2540,7 +2540,8 @@ def test_the_guide_documents_the_feishu_notifier_the_way_the_code_behaves():
     assert re.search(r"`feishu-10014`[^；]*`app_secret`[^；]*实测", rows), "§8 的 step=token 那一段没照实测写：app_secret 写错时是 feishu-10014"
     # 终审 M-5：每条通知的总时限用完时是 code=deadline（任何一步都可能）；手册写明时限多长，以及仍然不留日志的那一条路（Stream 里积压超过 1 小时）
     assert '"deadline"' in src, "handler 里没有 deadline 这个错误码"
-    assert "`code=deadline`" in rows and f"{notifier.NOTIFY_BUDGET} 秒" in rows, "§8 没写 code=deadline 与每条通知的总时限"
+    assert "`code=deadline`" in rows and re.search(rf"(?<![0-9]){notifier.NOTIFY_BUDGET} 秒的总时限", rows), \
+        "§8 没写 code=deadline 与每条通知的总时限"
     assert "IteratorAge" in rows and "1 小时" in rows, "§8 没写积压超过 1 小时被事件源丢掉、只有 IteratorAge 看得到"
     assert "第 8 节「result=skipped」与「result=failed」那两行" in sec
     # §1.3 的数据流表与 §3 的密钥表各有一行
@@ -2931,8 +2932,9 @@ def test_the_guide_says_how_long_a_feishu_secret_change_takes_to_show():
     notifier = load_lambda("notifier_for_cache_guide", root / "lambda" / "notifier" / "handler.py")
     rows = _guide_rows("8.")
     seg = rows[rows.index("`step=token`"):rows.index("`step=codeup`")]
-    assert f"{secret_fetch.CACHE_TTL_SECONDS // 60} 分钟" in seg, seg
-    assert f"约 {(7200 - notifier.TOKEN_REFRESH_MARGIN) // 60} 分钟" in seg, seg
+    # 数字前面不能紧挨着数字：「10 分钟」不能靠「110 分钟」蒙混过去（变异实测过）
+    assert re.search(rf"(?<![0-9]){secret_fetch.CACHE_TTL_SECONDS // 60} 分钟", seg), seg
+    assert re.search(rf"约 {(7200 - notifier.TOKEN_REFRESH_MARGIN) // 60} 分钟", seg), seg
     assert "不缓存" in seg and "轮换" in seg, seg
 
 
