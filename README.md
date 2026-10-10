@@ -97,6 +97,7 @@
 每次评审另发一条自己的汇总评论，只详列本 MR 引入的依赖上的漏洞；它的任何失败都不影响 Kiro。
 **AWS 档位可选 Security Agent 安全评审员**（`security_agent: 1`，见 [aws/setup-guide.md](aws/setup-guide.md) 第 6.6 节）：
 对本 MR 的改动做 DIFF 安全扫描（整个仓库作上下文），另发一条自己的汇总评论，每条发现带 `文件:行`；同样不影响 Kiro。
+**AWS 档位可选飞书通知**（`feishu_notify: 1`，见 [aws/setup-guide.md](aws/setup-guide.md) 第 6.7 节）：每位评审员发出自己的评论后，给 MR 作者发一条飞书消息（固定文案 + 评论链接）；飞书凭证只在一个通知 Lambda 里，持有业务库的任务拿不到。
 Flow 档位只做 Kiro 代码评审。
 
 ## 快速开始

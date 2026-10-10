@@ -2402,3 +2402,43 @@ def test_feishu_notify_reaches_both_task_containers_only_when_on(on):
     for name in ("review", "scan"):
         env = {e["Name"]: e["Value"] for e in _td_by_container(t, name)["ContainerDefinitions"][0]["Environment"]}
         assert env.get("FEISHU_NOTIFY") == ("1" if on else None), (name, env.get("FEISHU_NOTIFY"))
+
+
+
+# ── Phase 2c：手册里飞书通知的那几处与代码对拍（issue 20 第 7 条；改了代码没改手册，这几条先红）────────────────────────────
+def _guide_subsection(heading):
+    lines = _guide_text().splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith(f"### {heading}")), None)
+    assert start is not None, f"找不到小节标题：### {heading}"
+    end = next((i for i, ln in enumerate(lines[start + 1:], start + 1) if ln.startswith(("## ", "### "))), len(lines))
+    return "\n".join(lines[start:end])
+
+
+def test_the_guide_documents_the_feishu_notifier_the_way_the_code_behaves():
+    import stacks.notifier as stack_notifier
+    root = pathlib.Path(__file__).resolve().parents[1]
+    notifier = load_lambda("notifier_for_guide", root / "lambda" / "notifier" / "handler.py")
+    src = (root / "lambda" / "notifier" / "handler.py").read_text()
+    sec = _guide_subsection("6.7")
+    for text in notifier.MESSAGES.values():
+        assert f"`{text}<链接>`" in sec, text
+    assert stack_notifier.FEISHU_SECRET_NAME == "codeup-kiro/feishu-app" and "`codeup-kiro/feishu-app`" in sec
+    for needle in ("im:message:send_as_bot", "可用范围", "发布版本", "feishu_notify: 1", "feishu_domain: lark", "mail.teambition.com",
+                   "主邮箱", "feishu_notify: 0", "NotifierFunctionName"):
+        assert needle in sec, needle
+    rows = "\n".join(ln for ln in _guide_section_lines("8.") if ln.startswith("|"))
+    reasons = set(re.findall(r'return "skipped:([a-z-]+)"', src)) | {"bad-lock-key"}
+    assert reasons == {"no-email", "bad-email", "bad-url", "bad-lock-key"}, reasons
+    for r in reasons:
+        assert f"`{r}`" in rows, r
+    steps = set(re.findall(r'NotifyError\("([a-z]+)"', src)) - {"config"} | {"internal"}
+    assert steps == {"secret", "codeup", "token", "send", "internal"}, steps
+    for st in steps:
+        assert f"`step={st}`" in rows, st
+    for code in (230013, 230038, 230029, 230053, 10015):
+        assert f"feishu-{code}" in rows, code
+    assert "第 8 节「result=skipped」与「result=failed」那两行" in sec
+    # §1.3 的数据流表与 §3 的密钥表各有一行
+    sec13 = _guide_subsection("1.3")
+    assert "`feishu_notify: 1`" in sec13 and "author.email" in sec13 and "open.feishu.cn" in sec13
+    assert "| `codeup-kiro/feishu-app` |" in "\n".join(_guide_section_lines("3."))

@@ -93,6 +93,7 @@ spec 对这个功能的验收就是「一条评论触发重审，而它产生的
 | 业务库完整副本 | Fargate 任务（所选区域） | 临时存储，随任务销毁，**不持久化** | **本档位（2a）新增** |
 | diff 与 Kiro 读到的文件内容 | Kiro 自己的服务（美国） | Kiro 侧 | Flow 档位**已存在**，非本档位新增 |
 | 依赖清单（SBOM：包名、版本、清单文件在仓库里的相对路径） | S3 输入桶的 `inspector/` 前缀 + Amazon Inspector `ScanSbom`（都在所选区域） | S3 1 天后过期；Inspector 侧按其服务条款 | **2b 新增**，只在 `inspector: 1` 时（第 6.5 节） |
+| MR 作者的邮箱（云效 `GetChangeRequest` 返回的 `author.email`）+ 一句固定文案与评论链接（不含 MR 标题、分支、代码或发现） | 飞书开放平台（`open.feishu.cn`，Lark 为 `open.larksuite.com`）：通知 Lambda 用企业自建应用的机器人按邮箱给作者发一条消息 | 消息按客户飞书租户的留存规则；本部署不存邮箱（只在一次调用里用，日志不记） | **2c 新增**，只在 `feishu_notify: 1` 时（第 6.7 节） |
 | 业务库完整归档（MR 提交的整棵树）+ 本 MR 的 diff | S3 输入桶的 `security/` 前缀 + AWS Security Agent（都在所选区域；SA 的模型推理按第 1.2 节的跨区规则） | S3 7 天后过期；SA 在作业开始时取一份副本，删除后 30 天内从 SA 的系统里清除 | **2b 新增**，只在 `security_agent: 1` 时（第 6.6 节、[ADR-0003](../docs/adr/0003-security-agent-via-s3-differential-scan.md)） |
 
 Inspector 那一行只有依赖清单离开执行器，没有源码，也不经过任何模型推理。但不要把它说成「源码不出境、只有 SBOM 出境」：
@@ -135,6 +136,7 @@ Flow 档位靠「受保护分支」当集成包的信任锚；本档位没有这
 | `codeup-kiro/kiro-api-key` | Kiro API Key | 是 |
 | `codeup-kiro/webhook-secret` | Lambda 调度器校验 Codeup webhook 共享密钥用（调度器在每次调用时按注入的 `WEBHOOK_SECRET_ID`——即这里的密钥名——向 Secrets Manager 取值，见 `aws/lambda/dispatcher/secret_fetch.py`）。**信任边界**：一个部署只有这一个共享密钥，填进每一个接入仓库的 webhook。持有它的人能伪造或重放投递，触发组织里云效令牌读得到的任何仓库的 MR 评审；但评审的内容总是来自 MR 所在的那个仓库：执行器按仓库 id 向 Codeup 取 clone 地址，报文里的地址只拿来比对（不一致时日志里有一行 `clone-url-mismatch`，见第 8 节「clone-url-mismatch」那一行）。所以只把它交给被信任拥有云效令牌读权限的人，其中有人离开时轮换它 | 是 |
 | `codeup-kiro/yunxiao-token-inspector` | Inspector 评审员使用的云效令牌（代码只读 + 合并请求读写） | **否**，只在 `inspector: 1` 时创建（第 6.5 节） |
+| `codeup-kiro/feishu-app` | 飞书企业自建应用的凭证，JSON：`{"app_id": "cli_…", "app_secret": "…"}`。**只有通知 Lambda 的角色读得到**，两个任务（执行器、扫描任务）都拿不到它（第 6.7 节） | **否**，只在 `feishu_notify: 1` 时创建 |
 | `codeup-kiro/yunxiao-token-security` | Security Agent 评审员使用的云效令牌（代码只读 + 合并请求读写） | **否**，只在 `security_agent: 1` 时创建（第 6.6 节） |
 
 创建命令（值本身在命令行历史与终端 scrollback 里可见，生产环境建议改用 `--cli-input-json`
@@ -503,6 +505,50 @@ Agent 给的标签）、截短的说明；Security Agent 对本次作业的总�
 **排错**：第 8 节「scan-prep reviewer=security」与「Security Agent 的汇总评论」那两行；Security Agent 自己的作业日志在 CloudWatch 日志组
 `/aws/securityagent/codeup-kiro-security/<code review id>`。
 
+### 6.7 可选：飞书通知（MR 作者）
+
+每位评审员发出或原地更新了**它自己的那条评论**（汇总、它自己的失败评论、「本次没有执行 DIFF 扫描」那种说明）之后，给 MR 作者发一条飞书
+消息。每次评审都发（每次推送、每条评论命令）；被新推送取代的那次不发（它不发评论）；兜底 Lambda 发的「评审未完成」不发。消息只有一句固定
+文案和一个链接，点开就是那条评论：
+
+- `Kiro 评审结束，请查阅：<链接>`
+- `Inspector 依赖漏洞扫描结束，请查阅：<链接>`
+- `Continuum 代码安全扫描结束，请查阅：<链接>`
+
+链接 = 云效返回的 MR 页地址 + `?comment=<评论 id>`。MR 标题、分支名、发现计数都不进消息：它们来自业务库、作者可控，被评审的代码不能借这条
+消息给公司里的人发钓鱼文本。只在本档位（Flow 档位没有）。
+
+**谁来发**：一个通知 Lambda 挂在锁表（`ReviewLock`）的 DynamoDB Stream 上。评审员只在锁记录上写「我发了评论、id 是多少」
+（`posted_<评审员>` 与 `comment_<评审员>` 同一次写入）；Lambda 用 Kiro 机器人的云效令牌查 MR 作者的邮箱，再用飞书应用的机器人发消息。
+**飞书凭证与到飞书的出站只在这个 Lambda 里**：两个持有业务库的任务都拿不到它（被攻破的任务拿着一个能给全公司发消息的凭证就是钓鱼工具）。
+Lambda 不在 VPC 里。通知失败永远不改评审结果、不改任何评论，只在 Lambda 的日志里留一行。
+
+**开通**：
+
+1. 在飞书开放平台建一个**企业自建应用**（Lark 租户在 Lark 开放平台）：开**机器人**能力；权限只申请 `im:message:send_as_bot`
+   （以应用的身份发消息）；**可用范围**覆盖要收通知的 MR 作者（不在范围里的人收不到，日志里是错误码 230013）；然后**发布版本**——机器人能力、
+   权限与可用范围的改动都要发版本之后才生效。这几步要客户的飞书管理员做或审批。群里的自定义机器人不行：它不能按人发。
+2. 建密钥 `codeup-kiro/feishu-app`（第 3 节那张表）：JSON，两个键 `app_id`、`app_secret`，取自应用的「凭证与基础信息」。建法同第 3 节；
+   值不要出现在命令行历史里时用 `--secret-string file://<0600 的临时文件>`，用完删掉。
+3. `config.yaml` 写 `feishu_notify: 1`（严格 0/1）；应用建在 Lark 上时再写 `feishu_domain: lark`（缺省 `feishu`）。
+4. 重新部署（`cdk deploy --all`：`CodeupKiroState` 给锁表开 Stream、建 Lambda；`CodeupKiroExecutor` 给两个任务定义各加一个开关变量
+   `FEISHU_NOTIFY`；`CodeupKiroDispatcher` 不变）。
+   开 Stream 不中断锁表。关掉（改回 0 再部署）时 Lambda 与 Stream 一起去掉，再开是一个新 Stream。
+
+**作者那一侧**：消息按**邮箱**找人。MR 作者要在云效「个人设置 → 账户设置 → 个人信息」绑定邮箱，**主邮箱**与他在飞书个人资料里的邮箱
+一致（飞书的企业邮箱地址查不到人，要个人资料里那个）。没绑邮箱时云效返回 `accounts_<id>@mail.teambition.com` 这样的占位地址，
+Lambda 一律不发、日志里是 `reason=no-email`。
+
+**与云效原生的飞书通知并存**：云效自己也能给飞书推 MR 事件（评论、评审），开着时作者可能多收一条云效的原生通知；不想要我们这一条就
+`feishu_notify: 0`。
+
+**费用**：只有带着某位评审员的 `posted_<评审员>` + `comment_<评审员>` 的锁记录会调用 Lambda（事件源按这两个属性过滤；这条记录之后的改动
+也会再调用一次，函数按旧映像认出「不是这一次」、不发；租约续期之类的记录不调用），每次评审最多三条消息；DynamoDB Stream 的读取对 Lambda 事件源不另收费（以 AWS 公布为准）。
+
+**排错**：Lambda 每条通知打一行 `notify reviewer=<评审员> repo=<仓库 id> mr=<MR 号> result=…`（不记邮箱与令牌），
+见第 8 节「result=skipped」与「result=failed」那两行；函数名是 `CodeupKiroState` 栈的输出 `NotifierFunctionName`。
+评审员这一侧找不到本次评论的 id 时，执行器 / 扫描任务的日志里有一行 `notify-mark … result=skipped`（不发通知，评审照常）。
+
 ## 7. 本地测试
 
 `aws/` 下的 CDK/Lambda 测试用 pytest，依赖装进项目内的虚拟环境 `aws/.venv`（已加入
@@ -555,6 +601,8 @@ aws/.venv/bin/pip install -r aws/requirements.txt
 | Inspector 的汇总评论写着「Inspector ScanSbom 调用失败（代号 …）」 | `AccessDeniedException`：扫描任务角色缺 `inspector-scan:ScanSbom`（重新部署 `CodeupKiroExecutor`）；`ValidationException`：送检的 SBOM 不合法或组件过多（一块最多 1,900 个，正常不会触发；持续出现时报给集成包维护方）；`ThrottlingException` 等限流已按 AWS CLI 的 standard 重试模式重试过。评论里只有代号，不回显服务端的错误正文 |
 | 日志里有 `scan-prep reviewer=security status=failed:<代号>`，Security Agent 的汇总评论写着「执行器没能准备 Security Agent 的扫描输入（代号 …）」 | **Kiro 不受影响、照常评审**。代号：`no-target-branch`、`merge-base`、`export`、`export-timeout`、`upload` 与 Inspector 那一行同义；`diff`（生成 diff 失败）、`zip`（打包失败，多为临时盘满：调大 `ephemeral_storage_gib`）、`zip-timeout`（打包超过 600 秒，仓库特别大）、`zip-comment`（打出来的 zip 带归档注释——只会在有人改过打包方式之后出现，Security Agent 拒收这种 zip）、`upload-timeout`（上传输入桶超过 300 秒：归档很大且执行器到 S3 的吞吐低，或 S3 不可达）、`meta`（写计数失败）、`prep`（建工作目录失败）。`status=skipped:<代号>` 不是错误：`empty-diff`、`diff-too-large`、`archive-too-large` 时不起作业、汇总里写一句说明 |
 | Security Agent 的汇总评论写着「…（代号 sa-…）」或带 Security Agent 的错误码 | 评论里只有代号，不回显服务端的错误正文（里面有桶名与对象键）。`sa-config`：扫描任务缺 `SA_AGENT_SPACE_ID` / `SA_SERVICE_ROLE_ARN` / `SA_MAPPING_TABLE` / `SECURITY_AGENT_TIMEOUT`（开了开关却没重新部署 `CodeupKiroExecutor`）。`sa-concurrency-full`：并发作业满了 15 分钟仍没空出来（第 6.6 节「配额」；同一账号别的地方也在跑代码评审时更容易碰到）。`sa-timeout`：作业超过 `security_agent_timeout` 仍未结束，已停止。`sa-source-mismatch`：作业记下的源不是本次的归档（理应不会发生：同一仓库的「重指向 + 启动」是串行的；出现就报给集成包维护方），作业已停止。`sa-source-unknown`：启动之后连读三次都读不到作业记录（Security Agent 的 API 暂时不可用），没法核对源、作业已停止；重新推送即可。`sa-repo-lease` / `sa-mapping-wait`：同一仓库的另一次评审占着「重指向 + 启动」或「建 code review」那一步超过 300 秒（多为那个任务被强杀；仓库租约 60 秒、建 code review 的认领 120 秒内失效；重新推送即可）。`sa-mapping`：读写映射表 `CodeReviewMapping` 失败（扫描任务角色缺 `dynamodb:GetItem` / `UpdateItem`）。作业失败时代号是 Security Agent 自己的 `CLIENT_ERROR` / `INTERNAL_ERROR`，被别人停掉时是 `STOPPED_BY_USER`：看日志组 `/aws/securityagent/codeup-kiro-security/<code review id>` 里那个作业的日志。启动、重指向、取发现那几步失败时代号是 AWS 错误码：`AccessDeniedException` 多为扫描任务角色缺对应的 `securityagent:` 动作（重新部署 `CodeupKiroExecutor`），`ValidationException` 多为输入桶没登记进 Agent Space、或对象已过期（7 天） |
+| 通知 Lambda 的日志里有 `notify … result=skipped reason=<原因>` | 没有发消息，**这是预期的跳过，不是故障**。`no-email`：MR 作者在云效没绑邮箱（`GetChangeRequest` 给的是 `accounts_<id>@mail.teambition.com` 占位地址）或邮箱为空——让作者按第 6.7 节绑定与飞书一致的主邮箱；`bad-email`：邮箱形状不对；`bad-url`：云效返回的 MR 页地址不是本组织、本 MR 的形状（平台口径变了，报给集成包维护方）；`bad-lock-key`：锁记录的键不是 `仓库#MR#提交` 的形状（不应出现） |
+| 通知 Lambda 的日志里有 `notify … result=failed step=<步骤> code=<错误码>` | 评审与评论都不受影响，只是这一条消息没发出去。`step=send`：飞书拒收——`feishu-230013` 作者不在应用的可用范围（或已离职）、`feishu-230038` 跨租户、`feishu-230029` 作者已离职、`feishu-230053` 作者屏蔽了机器人、`feishu-230020` / `feishu-99991400` 发得太频繁（已等过一次再试：有 `x-ogw-ratelimit-reset` 时按它、最多 5 秒，没有时 1 秒；仍限流就只记这一行，这一条不再发）；`step=token`：取租户令牌失败，`feishu-10015` 多半是 `app_secret` 写错、`feishu-10014` 应用被停用；`step=codeup`：查 MR 失败，`http-401` / `http-403` 是 Kiro 机器人的云效令牌失效或没有这个仓库的权限，`http-429` 是云效限流，`network` 是连不上；`step=secret`：读不到密钥（`bad-shape` = `codeup-kiro/feishu-app` 不是带 `app_id`、`app_secret` 的 JSON，别的代号是 Secrets Manager 的错误码）；`step=internal`：函数自己的异常（记的是异常类名），报给集成包维护方 |
 
 「抢锁冲突」「评审未启动」「兜底回写」三行对应的代码都已实现且已接到 webhook 入口上
 （`aws/lambda/dispatcher/handler.py`、`aws/lambda/backstop/handler.py`），真实部署上这三类现象都能复现。
