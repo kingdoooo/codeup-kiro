@@ -2464,7 +2464,8 @@ def test_every_secrets_manager_grant_names_exactly_one_secret(over):
     # 终审 M-7：上一条只认字面 `feishu-app`，以后有人给任务角色加一条 `secret:codeup-kiro/*`（或 Resource "*"）它也会通过。这里换成形状：
     # 三个栈里凡是能落到 secretsmanager 上的授权（含 `*`、`secretsmanager:*` 这类通配动作），每个资源都必须是 `codeup-kiro/<名字>-??????`——
     # 名字里没有 `*` / `?`，只有末尾那六个 `?`（按名导入的密钥只有 partial ARN，见 dispatcher_stack.py）
-    one = re.compile(r"arn:<ref>:secretsmanager:<ref>:<ref>:secret:codeup-kiro/[A-Za-z0-9/_+=.@-]+-\?{6}")
+    one = re.compile(r"arn:(?:<ref>|aws[a-z-]*):secretsmanager:(?:<ref>|[a-z0-9-]+):(?:<ref>|[0-9]{12})"
+                     r":secret:codeup-kiro/[A-Za-z0-9/_+=.@-]+-\?{6}")
     seen = 0
     for name, tpl in _notify_stacks(**over).items():
         for k, s in _iam_statements(tpl):
