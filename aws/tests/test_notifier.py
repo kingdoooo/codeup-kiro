@@ -255,10 +255,11 @@ def test_an_expired_tenant_token_is_refetched_once(fake):
 
 
 def test_a_wrong_app_secret_is_logged_and_nothing_is_sent(fake, capsys):
-    fake.token_reply = {"code": 10015, "msg": "app secret invalid"}
+    # sandbox 2026-10-10 实测：app_secret 写错时 tenant_access_token/internal 返回 code 10014（不是通用错误码表里「App Secret 错误」的 10015）
+    fake.token_reply = {"code": 10014}
     _run(_posted())
     assert fake.sends() == []
-    assert capsys.readouterr().out == "notify reviewer=kiro repo=7215683 mr=10 result=failed step=token code=feishu-10015\n"
+    assert capsys.readouterr().out == "notify reviewer=kiro repo=7215683 mr=10 result=failed step=token code=feishu-10014\n"
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 429, 500])

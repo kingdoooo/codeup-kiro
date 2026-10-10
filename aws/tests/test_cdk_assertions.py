@@ -2435,8 +2435,11 @@ def test_the_guide_documents_the_feishu_notifier_the_way_the_code_behaves():
     assert steps == {"secret", "codeup", "token", "send", "internal"}, steps
     for st in steps:
         assert f"`step={st}`" in rows, st
-    for code in (230013, 230038, 230029, 230053, 10015):
+    for code in (230013, 230038, 230029, 230053, 10014):
         assert f"feishu-{code}" in rows, code
+    # sandbox 2026-10-10（Phase 2c Task 11 Step 6.5）实测：app_secret 写错时 tenant_access_token/internal 返回的是 10014，不是飞书通用错误码表里
+    # 「App Secret 错误」的 10015。手册得照实测说「写错 app_secret 就是 10014」，不能按通用表把 10014 说成「应用被停用」、把人引去查错地方
+    assert re.search(r"`feishu-10014`[^；]*`app_secret`[^；]*实测", rows), "§8 的 step=token 那一段没照实测写：app_secret 写错时是 feishu-10014"
     assert "第 8 节「result=skipped」与「result=failed」那两行" in sec
     # §1.3 的数据流表与 §3 的密钥表各有一行
     sec13 = _guide_subsection("1.3")
