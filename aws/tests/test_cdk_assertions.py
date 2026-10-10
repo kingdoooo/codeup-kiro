@@ -1344,6 +1344,20 @@ def test_the_guide_names_both_hints_that_differ_from_the_engine_default():
     assert "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。" in row and "构建号" in row, row
 
 
+def test_the_cross_region_inference_note_describes_the_shipped_continuum_not_a_future_milestone(write_cfg, capsys):
+    # v1.9.1：手册 §1.2 与 synth 时那行警告原先写的是 2a 时的状态（「本档位（2a）本身不调用任何模型推理」「若日后启用 Security Agent（2b 里程碑）」），
+    # Continuum 早已发布。三个全局推理区域与 config.py 的 GLOBAL_INFERENCE_REGIONS 对拍
+    import config as cfgmod
+    sec = _guide_subsection("1.2")
+    for stale in ("本档位（2a）本身不调用任何模型推理", "若日后启用", "2b 里程碑"):
+        assert stale not in sec, stale
+    assert "`security_agent: 1`" in sec, "§1.2 没说推理只在开了 Continuum 时发生"
+    assert set(re.findall(r"`([a-z]{2}-[a-z]+-[0-9])`", sec.split("\n\n")[1])) == set(cfgmod.GLOBAL_INFERENCE_REGIONS), sec
+    load_config(write_cfg(_cfg(region="ap-southeast-1")))
+    out = capsys.readouterr().out
+    assert "any commercial" in out and "若日后" not in out and "security_agent: 1" in out, out
+
+
 def test_the_command_phrase_default_is_written_in_exactly_one_place():
     """短语默认值有两个消费者（调度器判正文、执行器印页脚）。两边各写一份字面量的话，改默认值时
     漏掉一处就是「页脚教的短语触发不了评审」——那是静默的假承诺，没有任何报错。

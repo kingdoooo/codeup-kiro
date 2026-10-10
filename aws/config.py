@@ -7,7 +7,7 @@ VALID_REGIONS = frozenset({
     "us-east-1", "us-west-2", "ap-south-1", "ap-southeast-1", "ap-southeast-2",
     "ap-northeast-1", "eu-central-1", "eu-west-1", "sa-east-1"})
 
-# 这三个区域用 global 跨区推理，会把推理请求路由到任意商业区域（仅在启用 Security Agent 后生效）
+# 这三个区域用 global 跨区推理，会把推理请求路由到任意商业区域（只在 security_agent: 1 时有源码推理，手册第 1.2 节）
 GLOBAL_INFERENCE_REGIONS = frozenset({"ap-south-1", "ap-southeast-1", "sa-east-1"})
 
 TOGGLES = ("inline_comment", "review_command", "inspector", "security_agent")
@@ -196,7 +196,7 @@ def load_config(path):
 
     if region in GLOBAL_INFERENCE_REGIONS:
         print(
-            f"警告：{region} 使用 global 跨区推理。若日后启用 Security Agent，"
+            f"警告：{region} 使用 global 跨区推理。开了 Continuum（security_agent: 1）时，"
             "源码的模型推理可能被路由到 any commercial AWS Region；"
             "其余六个区域为地理跨区推理，留在本地理边界内。", flush=True)
 
