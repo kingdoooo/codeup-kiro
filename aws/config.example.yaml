@@ -23,16 +23,41 @@ kiro_pinned_artifact_sha256: "bbb0a22161d5aea045919cc75e9210e61b63b8c877525f123a
 kiro_cli_sha256: "940b47e51692c5ccb65f50a5036cb658b284bc824c2932e5b34460189c0ce4a9"
 
 # ── 开关：缺省即关闭；非空值必须严格是 0 或 1，写错会直接报错而不是静默生效/失效 ──
-inline_comment: 0       # 执行器：INLINE_COMMENT
-# 评论命令（REVIEW_COMMAND）：1 = MR 上正文含 command_phrase 的评论会触发一次重审，结果以**原地更新**
-# 的那条汇总评论呈现（run:N 递增）。短语见下面「可选：调度器」里的 command_phrase。
-# 这个开关还决定汇总评论页脚那句「怎么重新评审」（REVIEW_RERUN_HINT，派生值，不是本文件的键）：
-# 1 → 「评论 `<command_phrase>` 可重新评审」；0 → 「向源分支推送新提交可重新评审」。
+# 每个开关上方一个注释块：功能区别 = 各个取值下 MR 上看到什么不同；配置区别 = 打开时还要配什么、新增哪些资源、
+# 要重新部署哪几个栈。同一份说明的一览表在 setup-guide.md 第 4.3 节。
+
+# inline_comment（0 / 1，缺省 0）
+#   功能区别：1 = Kiro 把落在本次改动行上的问题发成行内评论（哪些级别发见 inline_profile，条数上限 max_inline_comments），被档位挡下、
+#             超出上限、定位不到改动行的问题留在汇总评论的折叠区，每条问题只出现一次；0 = 全部问题都列在一条汇总评论里。
+#   配置区别：不需要别的配置（进执行器的 INLINE_COMMENT）；inline_profile / max_inline_comments 只在 1 时有意义。改它要重新部署 CodeupKiroExecutor。
+inline_comment: 0
+
+# review_command（0 / 1，缺省 0）
+#   功能区别：1 = MR 上正文含命令短语的评论会拉起一次评审（command_phrase 重跑 Kiro；开了扫描员时 inspector_command_phrase /
+#             security_command_phrase 只重跑那一位、all_command_phrase 重跑全部启用的），结果是**原地更新**那条汇总评论（run:N 递增），
+#             汇总页脚写「评论 `<短语>` 可重新评审」；0 = 只有向源分支推送会触发评审，评论一律忽略，页脚写「向源分支推送新提交可重新评审」
+#             （页脚这句是派生值 REVIEW_RERUN_HINT，不是本文件的键；短语写成空串时那一句不受理，页脚同样回落到推送那句）。
+#   配置区别：短语键见下面「可选：调度器」（注释里的取值就是缺省值；生效的短语两两不得互为子串，synth 时检查）；Codeup webhook 要勾评论事件
+#             noteEvents（setup-guide.md 第 6.4 节）。开关进调度器（REVIEW_COMMAND），页脚那句进执行器与扫描任务，所以改它要重新部署
+#             CodeupKiroExecutor 与 CodeupKiroDispatcher。
 review_command: 0
-# 扫描评审员（Phase 2b）：Inspector（依赖漏洞）与 Security Agent（安全分析）。任一为 1 → 部署扫描任务（Task B）与输入桶；
-# 都为 0 → 二者都不存在、MR 上与 2a 相同。各自要一个云效令牌密钥（setup-guide.md 第 3 节；PoC 可与 Kiro 用同一个 PAT）。
+
+# inspector（0 / 1，缺省 0）
+#   功能区别：1 = 每次评审多一条「Inspector 依赖漏洞扫描」汇总评论（只详列本 MR 引入的依赖上的漏洞，存量折叠计数；没有行内评论），
+#             它的任何失败都不影响 Kiro；0 = 没有这条评论（两位扫描员都为 0 时 MR 上与 2a 相同）。
+#   配置区别：密钥 codeup-kiro/yunxiao-token-inspector（setup-guide.md 第 3 节；PoC 可与 Kiro 用同一个令牌）；可选 inspector_bot_username、
+#             inspector_command_phrase、inspector_max_scan_calls（1–20，缺省 3，每次 ScanSbom 约 $0.03）。两位扫描员任一为 1 时 CDK 建扫描任务
+#             （Task B）与 S3 输入桶。重新部署：先 CodeupKiroExecutor，后 CodeupKiroDispatcher（setup-guide.md 第 6.5 节）。
 inspector: 0
-security_agent: 0   # 1 = CDK 建 Agent Space 与服务角色（不建 Application，见 setup-guide.md 的 SA 一节），扫描任务做 DIFF 扫描
+
+# security_agent（0 / 1，缺省 0）
+#   功能区别：1 = 每次评审多一条「Continuum 代码安全扫描」汇总评论（AWS Security Agent 对本 MR 的改动做 DIFF 扫描，整个仓库作上下文；
+#             只发汇总，每条发现带文件与行号），它的任何失败都不影响 Kiro；0 = 没有这条评论。
+#   配置区别：密钥 codeup-kiro/yunxiao-token-security；可选 security_bot_username、security_command_phrase、security_agent_timeout
+#             （600–7200 秒，缺省 3600）。CDK 建 Agent Space 与它的服务角色（不建 Application）、扫描任务与输入桶（与 Inspector 共用）；
+#             MR 提交的整棵树打成归档进输入桶 security/ 前缀（7 天过期），模型推理按 setup-guide.md 第 1.2 节的跨区规则。
+#             重新部署：先 CodeupKiroExecutor，后 CodeupKiroDispatcher（第 6.6 节）。
+security_agent: 0
 
 # ── 可选：评审行为（执行器环境；默认值与 scripts/ 里的缺省值逐项一致，取值语义同 Flow 档位）──
 # inline_profile: quiet         # INLINE_PROFILE：quiet / balanced / critical
@@ -78,6 +103,16 @@ security_agent: 0   # 1 = CDK 建 Agent Space 与服务角色（不建 Applicati
 #                                   # 超时 → StopCodeReviewJob + 失败评论。实测 DIFF 作业约 10 分钟
 
 # ── 可选：飞书通知（Phase 2c，只在本档位）──────────────────────────────
-# feishu_notify: 0                  # 1 = 每位评审员发出 / 更新自己的评论后，给 MR 作者发一条飞书消息（固定文案 + 评论链接）。
-#                                   # 要一个飞书企业自建应用与密钥 codeup-kiro/feishu-app（setup-guide.md 第 6.7 节）；严格 0/1
-# feishu_domain: feishu             # 应用建在哪个平台：feishu（飞书，open.feishu.cn）或 lark（Lark，open.larksuite.com）
+
+# feishu_notify（0 / 1，缺省 0）
+#   功能区别：1 = 每位评审员发出或原地更新了自己的评论之后，给 MR 作者发一条飞书消息（一句固定文案 + 那条评论的链接，不带业务库派生的
+#             任何文本）；0 = 不发，三个栈的模板与不写这个键时逐字节相同。
+#   配置区别：飞书企业自建应用（机器人能力、权限 im:message:send_as_bot、可用范围覆盖 MR 作者、发布版本）+ 密钥 codeup-kiro/feishu-app
+#             （JSON：app_id、app_secret）+ MR 作者在云效绑定与飞书一致的主邮箱。CDK 给锁表开 Stream、建通知 Lambda（CodeupKiroState），
+#             两个任务定义各多一个开关变量 FEISHU_NOTIFY（CodeupKiroExecutor）；CodeupKiroDispatcher 不变（setup-guide.md 第 6.7 节）。
+# feishu_notify: 0
+
+# feishu_domain（feishu / lark，缺省 feishu）
+#   功能区别：feishu = 通知 Lambda 发往飞书（open.feishu.cn）；lark = 发往 Lark（open.larksuite.com）。两个平台 API 路径相同、域名与账号体系不通。
+#   配置区别：与企业自建应用建在哪个平台一致；只在 feishu_notify: 1 时有意义，只改通知 Lambda 的环境（重新部署 CodeupKiroState）。
+# feishu_domain: feishu

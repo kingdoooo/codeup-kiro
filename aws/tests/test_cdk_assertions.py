@@ -2442,3 +2442,49 @@ def test_the_guide_documents_the_feishu_notifier_the_way_the_code_behaves():
     sec13 = _guide_subsection("1.3")
     assert "`feishu_notify: 1`" in sec13 and "author.email" in sec13 and "open.feishu.cn" in sec13
     assert "| `codeup-kiro/feishu-app` |" in "\n".join(_guide_section_lines("3."))
+
+
+# ── 每个开关的「功能区别 / 配置区别」（Kent 2026-10-10）：config.example.yaml 每个开关键之上一个注释块，手册 §4.3「开关一览」表每个开关一行 ──
+# 开关 = 0/1 与枚举取值的键（inline_profile 之类的评审行为变量不是开关）。以后新增 0/1 开关、忘了写说明，守卫那一句先红
+SWITCHES = ("inline_comment", "review_command", "inspector", "security_agent", "feishu_notify", "feishu_domain")
+_EXAMPLE_KEY_LINE = re.compile(r"^#?\s*([a-z_]+):(\s|$)")
+_SWITCH_TABLE_HEAD = "| 键 | 取值（缺省） | 功能区别 | 配置区别 | 详见 |"
+
+
+def _example_switch_block(key):
+    """config.example.yaml 里这个键那一行（`key: v` 或注释掉的 `# key: v`）正上方连续的注释行；碰到空行或别的键那一行就停。"""
+    lines = (pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml").read_text().splitlines()
+    at = [i for i, ln in enumerate(lines) if (m := _EXAMPLE_KEY_LINE.match(ln)) and m.group(1) == key]
+    assert len(at) == 1, f"config.example.yaml 里 {key} 那一行找不到（或不止一行）：{at}"
+    block, i = [], at[0] - 1
+    while i >= 0 and lines[i].startswith("#") and not _EXAMPLE_KEY_LINE.match(lines[i]):
+        block.insert(0, lines[i])
+        i -= 1
+    return block
+
+
+def _switch_table_rows():
+    sec = _guide_subsection("4.3").splitlines()
+    assert _SWITCH_TABLE_HEAD in sec, "§4.3 没有「开关一览」表（表头不是 " + _SWITCH_TABLE_HEAD + "）"
+    i = sec.index(_SWITCH_TABLE_HEAD) + 2   # 跳过表头分隔行
+    rows = []
+    while i < len(sec) and sec[i].startswith("|"):
+        rows.append([c.strip() for c in sec[i].strip()[1:-1].split("|")])
+        i += 1
+    return rows
+
+
+def test_every_switch_says_what_each_value_does_and_what_it_needs():
+    import config
+    assert set(config.TOGGLES) | {"feishu_notify", "feishu_domain"} <= set(SWITCHES), "有开关没进 SWITCHES（没写功能区别 / 配置区别）"
+    rows = _switch_table_rows()
+    assert sorted(r[0] for r in rows) == sorted(f"`{k}`" for k in SWITCHES), [r[0] for r in rows]
+    for key in SWITCHES:
+        block = _example_switch_block(key)
+        assert block and block[0].startswith(f"# {key}（"), f"config.example.yaml 里 {key} 之上没有「# {key}（取值，缺省）」开头的注释块：{block}"
+        for label in ("功能区别", "配置区别"):
+            hit = [ln for ln in block if ln.startswith(f"#   {label}：")]
+            assert len(hit) == 1 and hit[0][len(f"#   {label}："):].strip(), f"config.example.yaml 里 {key} 的注释块缺「{label}」：{block}"
+        row = [r for r in rows if r[0] == f"`{key}`"]
+        assert len(row) == 1 and len(row[0]) == 5, f"§4.3 开关一览里 {key} 那一行找不到、不止一行或不是五格：{row}"
+        assert all(row[0][1:]), f"§4.3 开关一览里 {key} 那一行有空格子：{row[0]}"

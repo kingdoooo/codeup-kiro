@@ -248,6 +248,18 @@ bot_usernames: []          # 机器人与人同号：名单留空，断环交给
 
 ### 4.3 行为开关
 
+**开关一览**：`config.yaml` 里取值为 0 / 1 或枚举的键。每个键在 [config.example.yaml](config.example.yaml) 里那一行的正上方有一个注释块，写着同样的两种区别；
+有测试核对两处都在。改任何一个都要按「配置区别」那一格重新部署对应的栈。
+
+| 键 | 取值（缺省） | 功能区别 | 配置区别 | 详见 |
+|---|---|---|---|---|
+| `inline_comment` | `0` / `1`（`0`） | `1`：Kiro 把落在本次改动行上的问题发成行内评论（哪些级别发由 `inline_profile` 定，条数上限 `max_inline_comments`），被档位挡下、超出上限、定位不到改动行的问题留在汇总评论的折叠区，每条问题只出现一次。`0`：全部问题都列在一条汇总评论里 | 不需要别的配置；`inline_profile` / `max_inline_comments` 只在 `1` 时有意义。重新部署 `CodeupKiroExecutor` | 下表 `INLINE_COMMENT` 那一行；`pipeline/setup-guide.md` 第 9.2 节 |
+| `review_command` | `0` / `1`（`0`） | `1`：MR 上正文含命令短语的评论会拉起一次评审（`command_phrase` 重跑 Kiro；开了扫描员时 `inspector_command_phrase` / `security_command_phrase` 只重跑那一位、`all_command_phrase` 重跑全部启用的），结果是原地更新那条汇总评论，页脚写「评论 `<短语>` 可重新评审」。`0`：只有向源分支推送会触发评审，评论一律忽略，页脚写「向源分支推送新提交可重新评审」 | 四句短语键（缺省值见 `config.example.yaml`；生效的短语两两不得互为子串，synth 时检查）；webhook 要勾评论事件 `noteEvents`（第 6.4 节）。开关进调度器、页脚那句进执行器与扫描任务：重新部署 `CodeupKiroExecutor` 与 `CodeupKiroDispatcher` | 下表 `REVIEW_COMMAND` 与 `REVIEW_RERUN_HINT` 两行 |
+| `inspector` | `0` / `1`（`0`） | `1`：每次评审多一条「Inspector 依赖漏洞扫描」汇总评论（只详列本 MR 引入的依赖上的漏洞，存量折叠计数；没有行内评论），它的任何失败都不影响 Kiro。`0`：没有这条评论 | 密钥 `codeup-kiro/yunxiao-token-inspector`；可选 `inspector_bot_username`、`inspector_command_phrase`、`inspector_max_scan_calls`（1–20，缺省 3，每次 ScanSbom 约 $0.03）。两位扫描员任一为 `1` 时新增扫描任务（Task B）与 S3 输入桶。重新部署：先 `CodeupKiroExecutor`，后 `CodeupKiroDispatcher` | 第 6.5 节 |
+| `security_agent` | `0` / `1`（`0`） | `1`：每次评审多一条「Continuum 代码安全扫描」汇总评论（AWS Security Agent 对本 MR 的改动做 DIFF 扫描，整个仓库作上下文；只发汇总，每条发现带文件与行号），它的任何失败都不影响 Kiro。`0`：没有这条评论 | 密钥 `codeup-kiro/yunxiao-token-security`；可选 `security_bot_username`、`security_command_phrase`、`security_agent_timeout`（600–7200 秒，缺省 3600）。新增 Agent Space 与它的服务角色（不建 Application）、扫描任务与输入桶（与 Inspector 共用）；MR 提交的整棵树进输入桶（7 天过期），推理按第 1.2 节的跨区规则。重新部署：先 `CodeupKiroExecutor`，后 `CodeupKiroDispatcher` | 第 6.6 节、第 1.3 节 |
+| `feishu_notify` | `0` / `1`（`0`） | `1`：每位评审员发出或原地更新了自己的评论之后，给 MR 作者发一条飞书消息（一句固定文案 + 那条评论的链接）。`0`：不发；三个栈的模板与不写这个键时逐字节相同 | 飞书企业自建应用（机器人、`im:message:send_as_bot`、可用范围、发布版本）+ 密钥 `codeup-kiro/feishu-app` + MR 作者在云效绑定与飞书一致的主邮箱。新增锁表 Stream 与通知 Lambda（`CodeupKiroState`）、两个任务定义各一个开关变量（`CodeupKiroExecutor`）；`CodeupKiroDispatcher` 不变 | 第 6.7 节 |
+| `feishu_domain` | `feishu` / `lark`（`feishu`） | `feishu`：通知发往飞书（`open.feishu.cn`）。`lark`：发往 Lark（`open.larksuite.com`）。两个平台 API 路径相同、账号不通 | 与企业自建应用建在哪个平台一致；只在 `feishu_notify: 1` 时有意义，只改通知 Lambda 的环境（重新部署 `CodeupKiroState`） | 第 6.7 节 |
+
 执行器的开关与评审行为变量由 `config.yaml` 写进任务定义的容器环境（默认值与 `scripts/` 里的缺省值
 逐项一致，有测试比对）；取值语义归共享评审引擎（`scripts/`），与 Flow 档位同一套规则，详见
 `pipeline/setup-guide.md` 第 11.2 节，本档位不改这些语义。**唯一一个刻意与引擎缺省值不同的是
