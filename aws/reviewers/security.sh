@@ -52,17 +52,21 @@ SA_SRC_URI="s3://${SCAN_BUCKET}/${SA_PREFIX}/source.zip"
 SA_PATCH_URI="s3://${SCAN_BUCKET}/${SA_PREFIX}/changes.patch"
 SA_DEADLINE=$(( $(/bin/date +%s) + 10#$SECURITY_AGENT_TIMEOUT ))
 SA_JOB_ID=""; SA_JOB_ACTIVE=0
+SA_START_PID=""   # StartCodeReviewJob 在途时 = 那次调用的后台进程（issue 18 A：退出时要等它、停掉它建出的作业）
 SA_CLAIM=""   # Q1 映射表认领：held = 认领了、还没调 CreateCodeReview；create = 调过（可能已经建了）；空 = 没有（issue 17）
 
 # 一次 securityagent 调用：<操作> <请求 JSON> → stdout 应答；失败时错误代号（AWS 错误码；没有代号 = unknown）写进 $WORK/sa.code，
 # 用 sa_err 读——不放全局变量：调用方几乎都是 `out=$(sa_call …)`，那是子 shell，全局赋值回不到调用方。
-# 请求经 --cli-input-json 文件传（不拼命令行参数：取值不进 argv，也不受 shell 引号影响）。
+# 请求经 --cli-input-json 文件传（不拼命令行参数：取值不进 argv，也不受 shell 引号影响）。请求与报错各用这一次调用自己的临时文件：
+# EXIT 陷阱的调用可能与一个被 TERM 打断、仍在跑的命令替换子进程（例如收编作业那一次）同时进行，共用一个文件就会互相覆盖（issue 18 A）
 sa_call() {  # <操作> <请求 JSON>
-  local op="$1" req="$WORK/sa-req.json" out rc=0
+  local op="$1" req err out rc=0
+  req=$(mktemp "$WORK/sa-req.XXXXXX") && err=$(mktemp "$WORK/sa-err.XXXXXX") || return 1
   printf '%s' "$2" > "$req"
   out=$(/usr/local/bin/aws securityagent "$op" --region "$AWS_REGION" --cli-input-json "file://$req" --output json \
-        2>"$WORK/sa.err") || rc=$?
-  if [[ "$rc" != 0 ]]; then aws_err_code "$(cat "$WORK/sa.err")" > "$WORK/sa.code"; return 1; fi
+        2>"$err") || rc=$?
+  if [[ "$rc" != 0 ]]; then aws_err_code "$(cat "$err")" > "$WORK/sa.code"; rm -f "$req" "$err"; return 1; fi
+  rm -f "$req" "$err"
   : > "$WORK/sa.code"
   printf '%s' "$out"
 }
@@ -72,6 +76,14 @@ sa_call_once() { AWS_MAX_ATTEMPTS=1 sa_call "$@"; }
 
 # 退出时作业还在跑（被 TERM、被取代、轮询出错之外的意外退出）：先停掉它（不占并发名额、不白跑），再走 reviewer.sh 的租约释放
 _sa_exit() {
+  # Start 在途时退出（被 TERM，issue 18 A）：先等这次调用结束——服务端不知道调用方已经退出，作业照样会建出来。拿到了作业 id 就照下面
+  # 停掉它；应答含糊（没拿到 id）时按本次的源键收编（键里有本次的 run_id，sa_adopt_job）
+  if [[ -n "${SA_START_PID:-}" ]]; then
+    wait "$SA_START_PID" 2>/dev/null || true
+    SA_JOB_ID=$(jq -r '.codeReviewJobId // empty' "$WORK/sa-start.json" 2>/dev/null || true)
+    [[ -n "$SA_JOB_ID" ]] || SA_JOB_ID=$(sa_adopt_job 2>/dev/null || true)
+    if [[ "$SA_JOB_ID" =~ ^cj-[0-9a-f-]{8,64}$ ]]; then SA_JOB_ACTIVE=1; fi
+  fi
   if [[ "$SA_JOB_ACTIVE" == 1 && -n "$SA_JOB_ID" ]]; then
     sa_call stop-code-review-job "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" --arg j "$SA_JOB_ID" '{agentSpaceId: $s, codeReviewJobId: $j}')" \
       >/dev/null 2>&1 || true
@@ -218,7 +230,7 @@ sa_adopt_job() {
   printf '%s' "$j"
 }
 sa_start_job() {  # → 全局 SA_JOB_ID
-  local start_deadline out src lrc ambiguous=0 recreated=0
+  local start_deadline srt src lrc ambiguous=0 recreated=0
   start_deadline=$(( $(/bin/date +%s) + SA_START_RETRY_MAX ))
   (( start_deadline < SA_DEADLINE )) || start_deadline=$SA_DEADLINE
   while :; do
@@ -241,14 +253,21 @@ sa_start_job() {  # → 全局 SA_JOB_ID
       fi
       reviewer_fail "重指向 code review 失败（代号 ${code}）"
     fi
-    if out=$(sa_call_once start-code-review-job "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" --arg c "$SA_CR_ID" --arg p "$SA_PATCH_URI" \
-              '{agentSpaceId: $s, codeReviewId: $c, diffSource: {s3Uri: $p}}')"); then
-      SA_JOB_ID=$(jq -r '.codeReviewJobId // empty' <<< "$out")
+    # Start 放后台、前台 wait（issue 18 A）：TERM 落在这次调用在途的那一两秒里时，EXIT 陷阱等得到它、停掉它建出的作业。
+    # 写成 out=$(…) 时 aws CLI 跑在陷阱够不着的命令替换子进程里：本进程退出了它照样把作业建出来，作业跑满约 10 分钟、占一个并发名额、无人接收
+    sa_call_once start-code-review-job "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" --arg c "$SA_CR_ID" --arg p "$SA_PATCH_URI" \
+              '{agentSpaceId: $s, codeReviewId: $c, diffSource: {s3Uri: $p}}')" > "$WORK/sa-start.json" &
+    SA_START_PID=$!
+    srt=0; wait "$SA_START_PID" || srt=$?
+    # SA_START_PID 留到结果定了才清：明确拒绝（没有建作业）的两支当场清；含糊那一支在收编期间也留着——那几秒里被 TERM，陷阱同样按源键收编、停掉
+    if [[ "$srt" == 0 ]]; then
+      SA_JOB_ID=$(jq -r '.codeReviewJobId // empty' "$WORK/sa-start.json")
     else
       local code; code=$(sa_err)
       case "$code" in
         ThrottlingException|ServiceQuotaExceededException|ConflictException)
           # 明确拒绝、没有建作业（issue 09：第 11 个并发 Start 同步收到 ThrottlingException）：放开仓库租约、排队重试
+          SA_START_PID=""
           sa_repo_lease release
           # 排队期间同一 MR 有了新提交（终审 I-5）：不再为旧提交起作业（它会占一个本就紧缺的名额），安静退出，交给新的那次
           if head_check_superseded; then
@@ -268,11 +287,11 @@ sa_start_job() {  # → 全局 SA_JOB_ID
             ambiguous=1; log "启动作业的应答含糊（${code}），没找到本次的作业，重试一次"; continue
           fi
           log "启动作业的应答含糊（${code}），收编了本次的作业 ${SA_JOB_ID}" ;;
-        *) sa_repo_lease release; reviewer_fail "启动 Security Agent 作业失败（代号 ${code}）" ;;
+        *) SA_START_PID=""; sa_repo_lease release; reviewer_fail "启动 Security Agent 作业失败（代号 ${code}）" ;;
       esac
     fi
     [[ "$SA_JOB_ID" =~ ^cj-[0-9a-f-]{8,64}$ ]] || { sa_repo_lease release; reviewer_fail "作业 id 的形状不对（代号 sa-start）"; }
-    SA_JOB_ACTIVE=1
+    SA_JOB_ACTIVE=1; SA_START_PID=""
     # 核对作业记下的源 = 本次键（R12 / Q2 的守卫：作业在 Start 时记下 code review 当时的 sourceCode，issue 09 J3b）
     # 读不到 ≠ 源不符（终审 I-6）：只读、幂等，再读两次；仍读不到就停掉作业、用单独的代号，不把一次读失败说成「作业读了别人的源」
     src=""

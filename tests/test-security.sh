@@ -202,6 +202,14 @@ case "\$1 \$2" in
   "securityagent list-code-reviews")
     if [ -e "$tmp/slow-list" ]; then touch "$tmp/in-list"; sleep 3; fi
     exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
+  # issue 18 A：\$tmp/slow-adopt → 收编作业那次 ListCodeReviewJobsForCodeReview 慢 3 秒（好在含糊的 Start 之后、收编期间发 TERM）
+  "securityagent list-code-review-jobs-for-code-review")
+    if [ -e "$tmp/slow-adopt" ]; then touch "$tmp/in-adopt"; sleep 3; fi
+    exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
+  # issue 18 A：\$tmp/slow-start → 这次 Start 的 aws CLI 先睡 3 秒、再真的建作业（CLI 启动中、请求还没发出去时被 TERM 的样子）
+  "securityagent start-code-review-job")
+    if [ -e "$tmp/slow-start" ]; then touch "$tmp/in-start"; sleep 3; fi
+    exec python3 "$ROOT/tests/fake-aws-securityagent.py" "\$@" ;;
   # issue 18 C：\$tmp/claim-at-update → 这次重指向之前，同仓库另一个评审刚认领了 creating（映射里的 code_review_id 仍是旧的）
   "securityagent update-code-review")
     if [ -e "$tmp/claim-at-update" ]; then
@@ -241,7 +249,7 @@ cp "$FIX/files-head-clean.txt" "$tmp/s3/files.txt"; cp "$tmp/meta.json" "$tmp/s3
 SPACE=as-11111111-1111-4111-8111-111111111111
 SHA=$(printf 'a%.0s' {1..40}); RUNID=$(printf 'b%.0s' {1..32})
 SRC="s3://bkt/security/7/$SHA/$RUNID/source.zip"; PATCH="s3://bkt/security/7/$SHA/$RUNID/changes.patch"
-fresh() { rm -f "$tmp"/sa.json* "$tmp/sa.log" "$tmp/s3.argv" "$tmp/date.n" "$tmp/superseded" "$tmp/hc.seen" "$tmp/lease-at-poll" "$tmp/stale-get" "$tmp/bgj-fail" "$tmp/steal-claim" "$tmp/slow-list" "$tmp/in-list" "$tmp/claim-at-update"; echo '{}' > "$tmp/ddb.json"; rm -f "$tmp/ddb.json.lock"; }
+fresh() { rm -f "$tmp"/sa.json* "$tmp/sa.log" "$tmp/s3.argv" "$tmp/date.n" "$tmp/superseded" "$tmp/hc.seen" "$tmp/lease-at-poll" "$tmp/stale-get" "$tmp/bgj-fail" "$tmp/steal-claim" "$tmp/slow-list" "$tmp/in-list" "$tmp/claim-at-update" "$tmp/slow-start" "$tmp/in-start" "$tmp/slow-adopt" "$tmp/in-adopt"; echo '{}' > "$tmp/ddb.json"; rm -f "$tmp/ddb.json.lock"; }
 drive() {  # [KEY=VAL …] → rc；输出在 $tmp/out
   rm -rf "$tmp/w"; mkdir -p "$tmp/w"
   local rc=0
@@ -371,6 +379,30 @@ assert_eq "$(claim | cut -d/ -f1,3)" "creating/me" "④ issue 17（准备）TERM
 kill -TERM "$(cat "$tmp/drv.pid")"; wait "$bg17"
 assert_eq "$(claim)" "creating/0/me" "④ issue 17 认领期间被 TERM → 退出时复位认领"
 assert_eq "$(ops | tr ' ' '\n' | grep -c '^create-code-review$')" "0" "④ issue 17（对照）被 TERM 的那次没有建 code review"
+assert_eq "$(ops | tr ' ' '\n' | grep -c '^stop-code-review-job$')" "0" "④ issue 18 A（正向对照）Start 之前被 TERM：不调 Stop"
+# issue 18 A：TERM 落在 StartCodeReviewJob 在途的那一两秒里 → 退出时等这次 Start 结束、停掉它建出的作业。以前 aws CLI 跑在命令替换的
+# 子进程里，陷阱看到的 SA_JOB_ACTIVE 还是 0、不停它：作业照样建出来，跑满约 10 分钟、占一个并发名额，结果无人接收
+fresh; touch "$tmp/slow-start"; rm -f "$tmp/drv.pid"
+( DRIVE_PIDFILE="$tmp/drv.pid" drive > "$tmp/rc.i18a" ) & bg18a=$!
+for _ in $(seq 1 200); do [[ -s "$tmp/drv.pid" && -e "$tmp/in-start" ]] && break; sleep 0.1; done
+assert_eq "$([ -e "$tmp/in-start" ] && echo in-start || echo no)" "in-start" "④ issue 18 A（准备）TERM 时 Start 在途"
+kill -TERM "$(cat "$tmp/drv.pid")"; wait "$bg18a"
+# 在途的那次 aws CLI 不随驱动退出（scan-entrypoint 只把 TERM 转给驱动本身）：等它把作业建出来，再看有没有被停
+for _ in $(seq 1 100); do grep -q '^start-code-review-job ' "$tmp/sa.log" 2>/dev/null && break; sleep 0.1; done
+assert_eq "$(jq '.jobs | length' "$tmp/sa.json")" "1" "④ issue 18 A 在途的 Start 照样建出了作业（服务端不知道调用方已经退出）"
+assert_eq "$(jq '[.jobs[] | select(.stopped)] | length' "$tmp/sa.json")" "1" "④ issue 18 A 退出时停掉了这个作业"
+assert_eq "$(ops | tr ' ' '\n' | grep -A99 '^start-code-review-job$' | grep -c '^stop-code-review-job$')" "1" "④ issue 18 A Stop 在 Start 之后"
+assert_eq "$(jq -r '.["lease#7#security-repo"] | [(.lease_until.N // "none"), has("holder")] | join("/")' "$tmp/ddb.json")" "0/false" \
+  "④ issue 18 A 仓库租约照常放掉"
+# 含糊的 Start（作业其实建了、应答是 5xx）之后、收编那几秒里被 TERM → 退出时同样按源键收编、停掉它（SA_START_PID 留到结果定了才清）
+fresh; touch "$tmp/slow-adopt"; rm -f "$tmp/drv.pid"
+( DRIVE_PIDFILE="$tmp/drv.pid" drive FAKE_SA_START_AMBIGUOUS=1 > "$tmp/rc.i18a2" ) & bg18a2=$!
+for _ in $(seq 1 200); do [[ -s "$tmp/drv.pid" && -e "$tmp/in-adopt" ]] && break; sleep 0.1; done
+assert_eq "$([ -e "$tmp/in-adopt" ] && echo in-adopt || echo no)" "in-adopt" "④ issue 18 A（准备）TERM 时正在收编含糊的 Start"
+kill -TERM "$(cat "$tmp/drv.pid")"; wait "$bg18a2"
+for _ in $(seq 1 100); do [[ "$(jq '[.jobs[] | select(.stopped)] | length' "$tmp/sa.json")" == 1 ]] && break; sleep 0.1; done
+assert_eq "$(jq '.jobs | length' "$tmp/sa.json")" "1" "④ issue 18 A（准备）含糊的 Start 建出了一个作业"
+assert_eq "$(jq '[.jobs[] | select(.stopped)] | length' "$tmp/sa.json")" "1" "④ issue 18 A 收编期间被 TERM → 退出时同样收编并停掉它"
 # R9：并发满（明确拒绝、不建作业）→ 放开仓库租约、退避重试
 fresh
 assert_eq "$(drive FAKE_SA_START_THROTTLE=2)" "0" "④ R9：前两次 Start 被限流 → 重试后成功"
