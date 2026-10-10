@@ -2434,6 +2434,54 @@ def test_only_the_notifier_role_can_read_the_feishu_secret_and_no_task_definitio
         assert "FEISHU" not in json.dumps(fn["Properties"].get("Environment", {})), "调度器 / 兜底不碰飞书"
 
 
+def _cfn_str(v):
+    """Fn::Join 拼成一个字符串，Ref / 导入之类的内部函数记作 <ref>（只看字面部分有没有通配）。"""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict) and set(v) == {"Fn::Join"}:
+        sep, parts = v["Fn::Join"]
+        return sep.join(_cfn_str(p) for p in parts)
+    return "<ref>"
+
+
+def _iam_statements(tpl):
+    for k, v in tpl.get("Resources", {}).items():
+        p = v.get("Properties", {})
+        if v["Type"] in ("AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"):
+            docs = [p["PolicyDocument"]]
+        elif v["Type"] == "AWS::IAM::Role":
+            docs = [d["PolicyDocument"] for d in p.get("Policies", [])]
+        else:
+            continue
+        for d in docs:
+            for s in d["Statement"]:
+                yield k, s
+
+
+@pytest.mark.parametrize("over", [{}, {"feishu_notify": 1, "inspector": 1, "security_agent": 1, "egress_lockdown": 1}],
+                         ids=["default", "all-on"])
+def test_every_secrets_manager_grant_names_exactly_one_secret(over):
+    # 终审 M-7：上一条只认字面 `feishu-app`，以后有人给任务角色加一条 `secret:codeup-kiro/*`（或 Resource "*"）它也会通过。这里换成形状：
+    # 三个栈里凡是能落到 secretsmanager 上的授权（含 `*`、`secretsmanager:*` 这类通配动作），每个资源都必须是 `codeup-kiro/<名字>-??????`——
+    # 名字里没有 `*` / `?`，只有末尾那六个 `?`（按名导入的密钥只有 partial ARN，见 dispatcher_stack.py）
+    one = re.compile(r"arn:<ref>:secretsmanager:<ref>:<ref>:secret:codeup-kiro/[A-Za-z0-9/_+=.@-]+-\?{6}")
+    seen = 0
+    for name, tpl in _notify_stacks(**over).items():
+        for k, s in _iam_statements(tpl):
+            assert "NotAction" not in s and "NotResource" not in s, (name, k, s)
+            acts = s["Action"] if isinstance(s["Action"], list) else [s["Action"]]
+            if not any(fnmatch.fnmatchcase("secretsmanager:getsecretvalue", a.lower()) for a in acts):
+                continue
+            seen += 1
+            for r in (s["Resource"] if isinstance(s["Resource"], list) else [s["Resource"]]):
+                assert one.fullmatch(_cfn_str(r)), (name, k, _cfn_str(r))
+        # 托管策略只有 Lambda 的基本执行角色（SecretsManagerReadWrite 之类整账号的读权限不得挂上来）
+        for k, v in tpl.get("Resources", {}).items():
+            for arn in v.get("Properties", {}).get("ManagedPolicyArns", []):
+                assert _cfn_str(arn) == "arn:<ref>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole", (name, k, _cfn_str(arn))
+    assert seen >= 3, "（准备）至少看到执行角色、调度器与兜底的那几条密钥授权"
+
+
 @pytest.mark.parametrize("on", [0, 1])
 def test_feishu_notify_reaches_both_task_containers_only_when_on(on):
     _, t = _scan_templates(inspector=1, feishu_notify=on)
