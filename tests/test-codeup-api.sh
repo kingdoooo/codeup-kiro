@@ -147,6 +147,15 @@ rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
             DRY_RUN_FIXTURE_DIR="$FX/post-lost-otherbot" DRY_RUN_FAIL_ROUTES="create-comment:000@1" \
             codeup_post_comment 7 "$pmd" "$TEST_BOT_USERNAME" 2>&1 >/dev/null) || rc=$?
 assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "①：同标记但作者不是机器人 → 不认，照常重试"
+# kiro-2.29 后续 C：同标记同作者、但 is_deleted=true → 不认（那条已被删除，照常重试）
+isdeldir=$(mktemp -d)
+jq 'map(.is_deleted = true)' "$FX/post-lost-created/list-comments.json" > "$isdeldir/list-comments.json"
+_codeup_dry_seq_reset; _codeup_dry_calls=""
+rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME="$TEST_BOT_USERNAME" \
+            DRY_RUN_FIXTURE_DIR="$isdeldir" DRY_RUN_FAIL_ROUTES="create-comment:000@1" \
+            codeup_post_comment 7 "$pmd" "$TEST_BOT_USERNAME" 2>&1 >/dev/null) || rc=$?
+assert_eq "$(printf '%s\n' "$err" | grep -c 'DRY_RUN POST .*changeRequests/7/comments$')" "2" "C：同标记但 is_deleted=true → 不认，照常重试"
+rm -rf "$isdeldir"
 # ① 无可信身份（第三个参数为空）：探针不能证明创建成功，按既有策略重试（CodeX 2026-09-09 P1-1：票 18 ① 原「未配置时按标记认」作废）
 _codeup_dry_seq_reset; _codeup_dry_calls=""
 rc=0; err=$(CODEUP_RETRY_BACKOFF=0 CODEUP_BOT_USERNAME= \

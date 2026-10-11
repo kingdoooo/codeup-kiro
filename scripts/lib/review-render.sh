@@ -1092,6 +1092,8 @@ _review_inline_ranges() {
        else
          map(select(.draft == true or (str(.state) | ascii_upcase) == "DRAFT"))
        end)
+    # 真实应答在 state 之外还有布尔 is_deleted（kiro-2.29 后续 C）：只认布尔 true，与 draft == true 同一判法
+    | map(select((.is_deleted == true) | not))
     | map(select(if $bot == "" then true else author_name == $bot end))
     | [ .[] | as_range
         | select(if $mode == "existing" then (.file != null and .start != null and .end != null)
@@ -1331,6 +1333,8 @@ review_select_prior_comment() {
     # comment_type 缺失或不合形 → 按 GLOBAL_COMMENT 处理（接口已按类型过滤过，这里只是纵深防御）
     | map(select(str(.comment_type) == "" or str(.comment_type) == "GLOBAL_COMMENT"))
     | map(select((str(.state) | ascii_upcase) != "DELETED"))
+    # is_deleted 只认布尔 true（kiro-2.29 后续 C）：被删的旧汇总不能再被原地更新
+    | map(select((.is_deleted == true) | not))
     # 只有布尔真才算草稿；其它取值按「不是草稿」处理
     | map(select((.draft == true) | not))
     | map(. + {_runs: marker_runs})

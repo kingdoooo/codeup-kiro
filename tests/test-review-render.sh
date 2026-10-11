@@ -851,6 +851,15 @@ assert_not_contains "$(printf '%s' "$out" | jq -r .comment_biz_id)" "c0000000000
 # 旧评论被人删除（state=DELETED）→ rc 1，应新建
 rc=0; sel deleted "$BOT" >/dev/null 2>&1 || rc=$?
 assert_rc "$rc" 1 "select：旧汇总已被删除（state=DELETED）→ rc 1（新建）"
+# kiro-2.29 后续 C：state 仍是 OPENED、但 is_deleted=true → 同样按已删除（rc 1，新建）
+jq 'map(if .comment_biz_id == "b1f0e9d8c7b6a5948372615049382716" then .is_deleted = true else . end)' \
+  "$CFX/prior-run1/list-comments.json" > "$tmp/isdel-prior.json"
+rc=0; review_select_prior_comment "$BOT" < "$tmp/isdel-prior.json" >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 1 "C：旧汇总 is_deleted=true（state 仍是 OPENED）→ rc 1（新建，不回写到已删除的评论上）"
+jq 'map(if .comment_biz_id == "b1f0e9d8c7b6a5948372615049382716" then .is_deleted = false else . end)' \
+  "$CFX/prior-run1/list-comments.json" > "$tmp/isdel-prior-false.json"
+assert_eq "$(review_select_prior_comment "$BOT" < "$tmp/isdel-prior-false.json" 2>/dev/null | jq -r .comment_biz_id)" \
+  "b1f0e9d8c7b6a5948372615049382716" "C：（对照）is_deleted=false 照常命中"
 # 带标记的评论是别人发的 → 显式配置机器人用户名时不得命中
 rc=0; sel other-author "$BOT" >/dev/null 2>&1 || rc=$?
 assert_rc "$rc" 1 "select：带标记的评论作者不是机器人 → rc 1（不去改别人的评论）"
@@ -1573,6 +1582,18 @@ assert_eq "$(printf '%s' "$out" | jq -r 'map(.id) | sort | join(",")')" \
   "115adf34175b4c0eaf33b39c3a07f631,30ed01ac16ae406a898c6dd8791073c3,39410c6f45434235bf87f60304d9d682,83e466f0a1504e8680f1691688524fad" \
   "区间：带上评论 biz_id（日志里指得出是哪条）"
 printf '%s' "$out" > "$tmp/real-ranges.json"
+# ---- kiro-2.29 后续 C：is_deleted=true 也按已删除（真实应答同时带 state 与 is_deleted；135 条样本全是 OPENED + false）----
+jq '(.[0].is_deleted) = true' "$REAL_RERUN" > "$tmp/isdel-inline.json"
+out=$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < "$tmp/isdel-inline.json")
+assert_eq "$(printf '%s' "$out" | jq -r 'length')" "3" "C：is_deleted=true 的行内评论不再算已有（4 → 3）"
+assert_not_contains "$(printf '%s' "$out" | jq -r 'map(.id) | join(",")')" "115adf34175b4c0eaf33b39c3a07f631" "C：被删的那条不在去重候选里"
+jq '(.[0].is_deleted) = "true"' "$REAL_RERUN" > "$tmp/isdel-inline-str.json"
+assert_eq "$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < "$tmp/isdel-inline-str.json" | jq -r 'length')" "4" \
+  "C：is_deleted 只认布尔 true（字符串 \"true\" 按未删除，与 draft == true 同一判法）"
+jq '[.[0] | .draft = true | .state = "DRAFT"]' "$REAL_RERUN" > "$tmp/draft-live.json"
+jq '[.[0] | .draft = true | .state = "DRAFT" | .is_deleted = true]' "$REAL_RERUN" > "$tmp/draft-deleted.json"
+assert_eq "$(review_inline_draft_ranges "$TEST_BOT_USERNAME" < "$tmp/draft-live.json" | jq -r 'length')" "1" "C：（对照）未删除的草稿仍被读回"
+assert_eq "$(review_inline_draft_ranges "$TEST_BOT_USERNAME" < "$tmp/draft-deleted.json" | jq -r 'length')" "0" "C：is_deleted=true 的草稿不再读回"
 
 # 新旧格式混合、以及各种残缺形态
 jq -n --arg fp "$FP40" --arg bot "$TEST_BOT_USERNAME" '[

@@ -336,6 +336,7 @@ _codeup_post_probe_created() {  # <本次 POST 的 HTTP 状态码，只用于日
     | (if type == "array" then . else [] end)
     | map(select(type == "object"))
     | map(select((str(.state) | ascii_upcase) != "DELETED"))
+    | map(select((.is_deleted == true) | not))
     | map(select((.draft == true) | not))
     | map(select(author_name == $bot))
     | map(select(([str(.content) | split("\n")[] | sub("[[:space:]]+$"; "")]) as $ls | ($ls | index($m) != null) and ($ls | index($pn) != null)))
