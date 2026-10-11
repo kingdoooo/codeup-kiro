@@ -1724,6 +1724,18 @@ comment=$(posted_comment "$OUT")
 assert_contains "$comment" "其中 2 条已标注在「文件改动」对应行" "R6 回读：行内计数只算真的转成公开评论的（3 → 2）"
 assert_contains "$comment" "**行内发布失败（1）**" "R6 回读：被拒的那条进折叠区"
 assert_contains "$comment" "硬编码疑似应用密钥" "R6 回读：被拒那条的内容在折叠区完整可见"
+# 复审 I-1（kiro-2.29 后续 C 的回归）：仍是草稿、同时 is_deleted=true（例如服务端拒掉后软删了它）→ 照样记为发布失败、进折叠区。
+# draft 模式若也按 is_deleted 排除，回读就「读不回来」→ 记成已创建，汇总说「已标注在对应行」，MR 上却看不到——藏起一条 P0。
+IFX_DIR="$tmp/ifx-stilldraft-del"; mkdir -p "$IFX_DIR"
+cp "$tmp/ifx-stilldraft/list-comments-inline.1.json" "$IFX_DIR/"
+jq 'map(if .comment_biz_id == "draft-1" then .is_deleted = true else . end)' "$tmp/ifx-stilldraft/list-comments-inline.2.json" \
+  > "$IFX_DIR/list-comments-inline.2.json"
+run_inline_case stilldraft-del ifx-stilldraft-del
+assert_rc "$RC" 0 "I-1 回读：评审成功"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "其中 2 条已标注在「文件改动」对应行" "I-1 回读：已删除的草稿不算已创建（3 → 2）"
+assert_contains "$comment" "**行内发布失败（1）**" "I-1 回读：已删除的草稿进折叠区（fail-closed，不藏起 P0）"
+assert_contains "$comment" "硬编码疑似应用密钥" "I-1 回读：那条的内容在折叠区完整可见"
 
 # ---- R6b：提交后回读失败 → 全部按发布失败处理（fail-closed）----
 run_inline_case readbackfail ifx-readbackfail DRY_RUN_FAIL_ROUTES="list-comments-inline:403"

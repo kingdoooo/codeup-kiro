@@ -1126,11 +1126,13 @@ _review_inline_ranges() {
          map(select((str(.state) | ascii_upcase) as $s | $s != "DELETED" and $s != "DRAFT"))
          | map(select((.draft == true) | not))
          | map(select((.out_dated == true) | not))
+         # 只在 existing 模式排除：draft 模式还服务提交后回读（kiro-review.sh 7.1），那里「读不回来」= 记为已创建，
+         # 被删的草稿必须仍被读回、记为发布失败（fail-closed，不藏起 P0；复审 I-1）——draft 模式本来也不按 state 排除。
+         # 真实应答在 state 之外还有布尔 is_deleted（kiro-2.29 后续 C）：只认布尔 true，与 draft == true 同一判法
+         | map(select((.is_deleted == true) | not))
        else
          map(select(.draft == true or (str(.state) | ascii_upcase) == "DRAFT"))
        end)
-    # 真实应答在 state 之外还有布尔 is_deleted（kiro-2.29 后续 C）：只认布尔 true，与 draft == true 同一判法
-    | map(select((.is_deleted == true) | not))
     | map(select(if $bot == "" then true else author_name == $bot end))
     | [ .[] | as_range
         | select(if $mode == "existing" then (.file != null and .start != null and .end != null)

@@ -1624,7 +1624,8 @@ assert_eq "$(review_inline_existing_ranges "$TEST_BOT_USERNAME" < "$tmp/isdel-in
 jq '[.[0] | .draft = true | .state = "DRAFT"]' "$REAL_RERUN" > "$tmp/draft-live.json"
 jq '[.[0] | .draft = true | .state = "DRAFT" | .is_deleted = true]' "$REAL_RERUN" > "$tmp/draft-deleted.json"
 assert_eq "$(review_inline_draft_ranges "$TEST_BOT_USERNAME" < "$tmp/draft-live.json" | jq -r 'length')" "1" "C：（对照）未删除的草稿仍被读回"
-assert_eq "$(review_inline_draft_ranges "$TEST_BOT_USERNAME" < "$tmp/draft-deleted.json" | jq -r 'length')" "0" "C：is_deleted=true 的草稿不再读回"
+assert_eq "$(review_inline_draft_ranges "$TEST_BOT_USERNAME" < "$tmp/draft-deleted.json" | jq -r 'length')" "1" \
+  "C：draft 模式不按 is_deleted 排除（它还服务提交后回读：读不回来 = 记为已创建，被删的草稿必须仍读回、记为发布失败；复审 I-1）"
 
 # 新旧格式混合、以及各种残缺形态
 jq -n --arg fp "$FP40" --arg bot "$TEST_BOT_USERNAME" '[
