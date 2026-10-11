@@ -258,6 +258,7 @@ fi
 case "${MOCK_KIRO_MODEL_SWITCH:-}" in
   meta)  jq -cn '{type: "metadata", data: {sessionId: "mock-session", refusalMetadata: {category: "mock"}, fallbackModelId: "claude-sonnet-4.5"}}' ;;
   model) jq -cn '{type: "sessionUpdate", data: {sessionId: "mock-session", update: {sessionUpdate: "current_model_update", currentModelId: "claude-sonnet-4.5"}}}' ;;
+  model-same) jq -cn '{type: "sessionUpdate", data: {sessionId: "mock-session", update: {sessionUpdate: "current_model_update", currentModelId: "gpt-5.6-sol"}}}' ;;
 esac
 if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
   echo "mock: 模拟 kiro 失败" >&2; exit 1

@@ -626,6 +626,8 @@ run_case mswitch-both MOCK_KIRO_MODEL_SWITCH=model MOCK_LIST_MODELS_WITHOUT=gpt-
 comment=$(posted_comment "$OUT")
 assert_contains "$comment" "不在本账号" "A：事前模型核对的 notice 仍在"
 assert_contains "$comment" "本次评审中 Kiro 报告了模型拒绝或回退" "A：事后检测的提示也在（追加，不覆盖）"
+run_case mswitch-same MOCK_KIRO_MODEL_SWITCH=model-same
+assert_not_contains "$(posted_comment "$OUT")" "模型拒绝或回退" "A：currentModelId 就是 agent 声明的模型 → 不提示（引擎确实把声明的模型传给了检测）"
 
 # ============ kiro-cli 自己截断最终消息：降级原因必须点明，别让运维反复重跑 ============
 run_case truncated MOCK_KIRO_TRUNCATED=1
