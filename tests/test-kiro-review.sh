@@ -603,6 +603,30 @@ assert_contains "$OUT" "结构化解析失败" "两个 JSON 对象：走降级�
 assert_contains "$OUT" "不是恰好一个 JSON 对象" "两个 JSON 对象：降级原因点明"
 assert_not_contains "$OUT" "syntax error" "两个 JSON 对象：不产生 bash 算术报错"
 
+# ============ kiro-2.29 后续 A：评审中途的模型拒绝 / 回退 → 挂提示、不拒绝 ============
+run_case mswitch-none
+assert_not_contains "$(posted_comment "$OUT")" "模型拒绝或回退" "A（W1）：没有信号 → 评论里没有这句"
+assert_not_contains "$OUT" "模型拒绝 / 回退检测失败" "A：正常事件流不会让检测失败"
+run_case mswitch-meta MOCK_KIRO_MODEL_SWITCH=meta
+assert_rc "$RC" 0 "A：有回退信号 → 评审照常完成（不拒绝）"
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "⚠️ 本次评审中 Kiro 报告了模型拒绝或回退（事件里出现 fallbackModelId、refusalMetadata；模型 claude-sonnet-4.5）" "A：成功评论挂提示并点名信号"
+assert_contains "$comment" "结论请结合具体问题判断" "A：提示说明后果"
+assert_contains "$OUT" "警告：Kiro 报告了模型拒绝或回退" "A：日志留痕"
+run_case mswitch-model MOCK_KIRO_MODEL_SWITCH=model
+assert_contains "$(posted_comment "$OUT")" "（模型 claude-sonnet-4.5）" "A：currentModelId 与 agent 声明的 gpt-5.6-sol 不同 → 提示"
+run_case mswitch-refusal MOCK_KIRO_MODEL_SWITCH=refusal MOCK_KIRO_NO_MARKER=1
+assert_rc "$RC" 0 "A：最后一轮被拒 + 没有契约 → 降级（退出码 0）"
+assert_contains "$OUT" "（stopReason=refusal）——V2 引擎" "A：降级评论挂提示"
+assert_contains "$OUT" "；且 Kiro 报告最后一轮被模型拒绝（stopReason=refusal）" "A：降级原因点明被拒"
+run_case mswitch-fail MOCK_KIRO_MODEL_SWITCH=meta MOCK_KIRO_FAIL=1
+assert_nonzero "$RC" "A：kiro-cli 失败 → 非零退出（与以前相同）"
+assert_contains "$(posted_comment "$OUT")" "本次评审中 Kiro 报告了模型拒绝或回退" "A：失败评论也带提示（检测在退出码分支之前）"
+run_case mswitch-both MOCK_KIRO_MODEL_SWITCH=model MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
+comment=$(posted_comment "$OUT")
+assert_contains "$comment" "不在本账号" "A：事前模型核对的 notice 仍在"
+assert_contains "$comment" "本次评审中 Kiro 报告了模型拒绝或回退" "A：事后检测的提示也在（追加，不覆盖）"
+
 # ============ kiro-cli 自己截断最终消息：降级原因必须点明，别让运维反复重跑 ============
 run_case truncated MOCK_KIRO_TRUNCATED=1
 assert_rc "$RC" 0 "finalText 被截断：退出码 0"

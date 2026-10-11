@@ -23,6 +23,9 @@
 # 故障注入：
 #   MOCK_KIRO_FAIL=1            chat 失败（退出码 1）
 #   MOCK_KIRO_RUNERROR=<串>     与 MOCK_KIRO_FAIL=1 搭配：先往事件流写一条 runError（message = 这个串），issue 07
+#   MOCK_KIRO_MODEL_SWITCH=<meta|model|refusal>  事件流里插模型拒绝 / 回退的信号（kiro-2.29 后续 A；形态按 2.29.0 二进制字段名推断，没有真实样本）：
+#                               meta = metadata 里带 refusalMetadata + fallbackModelId；model = sessionUpdate 里带 currentModelId；
+#                               refusal = runFinished.data.stopReason 为 refusal。meta / model 在 MOCK_KIRO_FAIL 之前写出（失败评论也要带提示）
 #   MOCK_KIRO_HANG=1            挂起（验证超时强杀）
 #   MOCK_KIRO_HANG_IGNORE_TERM=1 与 MOCK_KIRO_HANG=1 搭配：忽略 TERM（`trap '' TERM` + 可重入的 sleep 循环），timeout 只能在 -k 之后
 #                               用 KILL 结束它 → 退出码 137（票 18 ③：脚本必须把 137 也当超时）
@@ -252,6 +255,10 @@ fi
 # MOCK_KIRO_RUNERROR=<串>：事件流里先写一条 runError（实测形状，stage=prompt），与 MOCK_KIRO_FAIL=1 搭配（issue 07）
 [[ -n "${MOCK_KIRO_RUNERROR:-}" ]] && jq -cn --arg m "$MOCK_KIRO_RUNERROR" \
   '{type: "runError", data: {sessionId: "mock-session", stage: "prompt", message: $m}}'
+case "${MOCK_KIRO_MODEL_SWITCH:-}" in
+  meta)  jq -cn '{type: "metadata", data: {sessionId: "mock-session", refusalMetadata: {category: "mock"}, fallbackModelId: "claude-sonnet-4.5"}}' ;;
+  model) jq -cn '{type: "sessionUpdate", data: {sessionId: "mock-session", update: {sessionUpdate: "current_model_update", currentModelId: "claude-sonnet-4.5"}}}' ;;
+esac
 if [[ "${MOCK_KIRO_FAIL:-0}" == "1" ]]; then
   echo "mock: 模拟 kiro 失败" >&2; exit 1
 fi
@@ -342,7 +349,9 @@ if [[ "${MOCK_KIRO_NO_RUNFINISHED:-0}" != "1" ]]; then
   STATUS=success
   [[ "${MOCK_KIRO_STATUS_FAILED:-0}" == "1" ]] && STATUS=error
   [[ -n "${MOCK_KIRO_STATUS_TEXT:-}" ]] && STATUS="$MOCK_KIRO_STATUS_TEXT"
-  emit --arg s "$SID" --arg st "$STATUS" --arg f "$FINAL" --argjson tr "$TRUNCATED" \
-    '{type:"runFinished",data:{sessionId:$s,status:$st,stopReason:"end_turn",finalText:$f,finalTextTruncated:$tr}}'
+  STOP=end_turn
+  [[ "${MOCK_KIRO_MODEL_SWITCH:-}" == "refusal" ]] && STOP=refusal
+  emit --arg s "$SID" --arg st "$STATUS" --arg f "$FINAL" --argjson tr "$TRUNCATED" --arg sr "$STOP" \
+    '{type:"runFinished",data:{sessionId:$s,status:$st,stopReason:$sr,finalText:$f,finalTextTruncated:$tr}}'
 fi
 exit 0

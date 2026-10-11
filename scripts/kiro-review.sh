@@ -1399,6 +1399,8 @@ else
   fi
   unset _lm _lm_rc _models
 fi
+# 评审跑完后的模型拒绝 / 回退检测要拿它比对（kiro-2.29 后续 A）
+AGENT_MODEL="${_want_model:-}"
 unset _want_model
 # kiro-cli 版本 vs 探测过的版本（CodeX 2026-09-09 复审 P1-2，推翻 15-fix2 #24 的「名单外只 notice」）：读取边界（allowedPaths 之外的
 # 符号链接、../ 越界、`**/` 形状按 cwd 解析）靠 kiro-cli 的路径解析行为，这是 P1-15 在 KIRO_TESTED_TARGETS 的每个平台 + 版本上**实测**的，不是文档承诺；
@@ -1637,6 +1639,20 @@ kiro_rc=0
   --agent "$AGENT_NAME" ) \
   < "$WORK/kiro-stdin.txt" > "$WORK/stream.jsonl" 2> "$WORK/kiro-stderr.log" || kiro_rc=$?
 
+# --- 6.0 评审中途的模型拒绝 / 回退（kiro-2.29 后续 A）---
+# 2.27.1 起 v2 引擎会把被拒的一轮换到回退模型重试（没有关闭开关），事前的模型核对管不到。放在退出码分支**之前**：kiro-cli 失败时
+# 失败评论同样要带上它（MODEL_NOTICE 进成功 / 降级 / 失败三种评论）。口径同 issue 11：挂提示、不拒绝；检测自身出错 fail-open。
+# 追加而不是赋值：MODEL_NOTICE 里可能已经有事前核对的那句。摘要只含白名单字符（见 review_stream_model_switch）。
+MODEL_SWITCH=""; _ms_rc=0
+MODEL_SWITCH=$(review_stream_model_switch "$WORK/stream.jsonl" "$AGENT_MODEL") || _ms_rc=$?
+case "$_ms_rc" in
+  0) MODEL_NOTICE="${MODEL_NOTICE}${MODEL_NOTICE:+ }⚠️ 本次评审中 Kiro 报告了模型拒绝或回退（${MODEL_SWITCH}）——V2 引擎会把被拒的一轮换到回退模型重试，所以这次评审可能部分或全部由另一个模型完成，结论请结合具体问题判断。"
+     log "警告：Kiro 报告了模型拒绝或回退：${MODEL_SWITCH}——已在评论里挂提示，不拒绝评审" ;;
+  1) ;;
+  *) MODEL_SWITCH=""; log "警告：模型拒绝 / 回退检测失败，本次跳过（建议性检查，不阻断评审）" ;;
+esac
+unset _ms_rc
+
 if [[ "$kiro_rc" -ne 0 ]]; then
   # kiro-cli 自己的 stderr 会引用被评审文件内容、失败请求（含 bearer）——也是评论出口，过掩码再打（第 24 条）；
   # 掩码程序不可用时宁可不打
@@ -1697,6 +1713,11 @@ esac
 # 「重跑评审」提示一遍遍重跑同一个必然失败的评审。
 if [[ -n "$DEGRADE_REASON" ]] && review_stream_final_truncated "$WORK/stream.jsonl"; then
   DEGRADE_REASON="${DEGRADE_REASON}；且 kiro-cli 标记 finalTextTruncated=true（最终消息被其自身截断，重跑同样会截断，需要缩小 diff 或调高 kiro-cli 输出上限）"
+fi
+
+# 最后一轮被模型拒绝时契约多半没出来：点明，别让运维以为是模型不守契约（kiro-2.29 后续 A）
+if [[ -n "$DEGRADE_REASON" && "$MODEL_SWITCH" == *"stopReason=refusal"* ]]; then
+  DEGRADE_REASON="${DEGRADE_REASON}；且 Kiro 报告最后一轮被模型拒绝（stopReason=refusal）"
 fi
 
 # --- 6.3 字段校验：不合契约的问题丢弃并计数 ---

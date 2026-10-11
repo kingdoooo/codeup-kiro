@@ -3437,4 +3437,11 @@ assert_contains "$ln_row" "「$(review_log_name)」" "Flow 手册：REVIEW_LOG_N
 assert_contains "$(grep '^| `REVIEW_LOG_NAME` |' "$ROOT/README.md" || true)" "「$(review_log_name)」" "README：变量表有 REVIEW_LOG_NAME 与缺省值"
 assert_contains "$(grep 'REVIEW_LOG_NAME' "$ROOT/pipeline/flow-pipeline.yaml" || true)" "「$(review_log_name)」" "flow-pipeline.yaml：变量说明里有 REVIEW_LOG_NAME 与缺省值"
 
+# kiro-2.29 后续 A：手册写明事后检测，且提示原文与引擎同源（引擎改了措辞、手册没跟上，这里先红）
+eng_line=$(grep -o '⚠️ 本次评审中 Kiro 报告了模型拒绝或回退' "$ROOT/scripts/kiro-review.sh" | head -1)
+assert_eq "$eng_line" "⚠️ 本次评审中 Kiro 报告了模型拒绝或回退" "（对拍）引擎里有这句提示"
+assert_contains "$(cat "$ROOT/pipeline/setup-guide.md")" "$eng_line" "Flow 手册：写明这条提示的原文"
+assert_contains "$(cat "$ROOT/pipeline/setup-guide.md")" "评审中途的模型回退" "Flow 手册：第 8 节有「评审中途的模型回退」一条"
+assert_contains "$(cat "$ROOT/docs/adr/0004-pin-kiro-cli-v2-engine.md")" "v1.10.1 起在 Kiro 跑完后扫事件流" "ADR-0004：备注改成现状"
+
 report
