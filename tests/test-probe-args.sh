@@ -149,6 +149,10 @@ assert_eq "$(sed -n 's/^ART_SHA="\([0-9a-f]\{64\}\)".*/\1/p' "$GUIDE")" "$df_art
 assert_eq "$(sed -n 's#^KEY="kiro/\([0-9.]*\)/kirocli-x86_64-linux-musl.zip"$#\1#p' "$GUIDE")" "$df_ver" "09：备包脚本的对象键版本 = Dockerfile"
 assert_eq "$(sed -n 's#^URL="https://prod.download.cli.kiro.dev/stable/\([0-9.]*\)/kirocli-x86_64-linux-musl.zip"$#\1#p' "$GUIDE")" "$df_ver" "09：备包脚本的下载地址版本 = Dockerfile"
 assert_eq "$(sed -n 's#^ *sourceFilePath: "kiro/\([0-9.]*\)/kirocli-x86_64-linux-musl.zip"$#\1#p' "$YAML")" "$df_ver" "08：参考 YAML 的 sourceFilePath 版本 = Dockerfile"
+# 钉的版本必须在名单里有 linux/x86_64 那一条（两个档位的执行器都是 linux/x86_64 + musl）：顺序是探测 → 名单 → 发布，
+# 钉了一个名单外的版本，每次评审都会被版本门拒绝
+targets=$(sed -n 's/^KIRO_TESTED_TARGETS="\(.*\)"$/\1/p' "$ROOT/scripts/kiro-review.sh")
+assert_contains " $targets " " linux/x86_64:${df_ver} " "钉版：Dockerfile 钉的 ${df_ver} 在 KIRO_TESTED_TARGETS 里有 linux/x86_64 元组"
 # 钉版档位有自己的一节
 assert_contains "$(cat "$GUIDE")" "钉版档位" "09：setup-guide 有钉版档位这一节"
 # 备包三条硬要求：续传 -C -、核对通过再上传、专用私有同区域桶

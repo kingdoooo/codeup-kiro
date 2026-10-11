@@ -66,3 +66,10 @@ Kiro CLI 3.0 目前是 early access：随 2.x 稳定版一起安装，需 `--v3`
 - 切换到 V3 的门槛，全部满足才切：官方 GA 公告；headless 文档明确支持 V3；`--trust-tools` 在 V3 的语义定型；canary 负向测试（读禁止路径、AGENTS.md 注入、shell 执行）在 V3 下全部通过。**2026-09-02 实测：V3 下 `chat.disableInheritingDefaultResources=true` 不能阻止工作区 `AGENTS.md` 进入自定义 agent 的上下文（v2 可以），因此当前 V3 直接不满足 AGENTS.md 注入这一项。**
 - 探测阶段保留一个时间盒（≤ 半天）的 `--engine v3` 对照实验，只为提前发现迁移成本，不作为上线依据。
 - 不依赖 V3 独有能力（标签式 `tools`、`code` 工具）实现任何功能。
+- **实测备注（2026-10-11，不改决策）：钉版升到 2.29.0。** 2.22–2.29 的 changelog 没有动到本 ADR 依赖的面：`chat --help` 仍把
+  `--agent-engine` 写成 `"v2" (default)`、`--v2` 简写仍在（帮助文字改成「the pre-3.0 default」），所以仍然显式传 `--agent-engine v2`；
+  有位置参数时仍忽略 stdin。v2 下 `chat.disableInheritingDefaultResources=true` 仍挡住工作区 `AGENTS.md`（P1-10 隔离模式 3/3 PASS，
+  不设该开关的正控 3 次里 2 次 canary 出现——第一次没出现是模型偶发）。changelog 里两条行为变化对本 ADR 是**更安全**的方向（未单独实测）：2.27.1 起
+  `--agent` 指定的 agent 装不上时非交互以 4 退出、套用失败以 1 退出（原先静默回落默认 agent），脚本对非 0 一律回写失败评论；
+  2.24.0 起不再自动加载项目 `.env`。需要留意的一条（同样出自 changelog）：2.27.1 起 v1 / v2 被拒的一轮可在回退模型上重试，事前的 `--list-models` 核对管不到
+  这种中途换模型。证据：`.superpowers/sdd/2026-10-11-kiro-2.29/progress.md`。

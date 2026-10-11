@@ -20,7 +20,7 @@ bot_username: aliyun:kirobot
 kiro_image_digests: "0000000000000000000000000000000000000000000000000000000000000000"
 # 两个 kiro-cli 摘要（安装包 zip / 装好后的入口文件），当前集成包的发布值，见 pipeline/setup-guide.md。
 kiro_pinned_artifact_sha256: "8bfc894611c9f941e57e5b6a80c9bdbd4415ac477d71dbf6fc055c8479e1c663"
-kiro_cli_sha256: "940b47e51692c5ccb65f50a5036cb658b284bc824c2932e5b34460189c0ce4a9"
+kiro_cli_sha256: "61e82d585b47c12c5c8f7e43c8b66b36575b82f9e709b73bc4bf854d8a5c05c0"
 
 # ── 开关：缺省即关闭；非空值必须严格是 0 或 1，写错会直接报错而不是静默生效/失效 ──
 # 每个开关上方一个注释块：功能区别 = 各个取值下 MR 上看到什么不同；配置区别 = 打开时还要配什么、新增哪些资源、

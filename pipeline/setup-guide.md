@@ -263,7 +263,7 @@ aliyun oss stat "oss://${BUCKET}/${KEY}" -e "$EP"            # 确认 Content-Le
 - `KIRO_PINNED_ARTIFACT_SHA256` 核对**安装包本身**——「拉到的字节对不对」,在**解压之前**核对。
   值 = `8bfc894611c9f941e57e5b6a80c9bdbd4415ac477d71dbf6fc055c8479e1c663`。
 - `KIRO_CLI_SHA256` 核对**装完之后真正被执行的那个入口文件**——「解压 / `install -m 755` / PATH 解析之后跑的是不是那个文件」。
-  值 = `940b47e51692c5ccb65f50a5036cb658b284bc824c2932e5b34460189c0ce4a9`。它同时承担 **libc 变体那一维**:平台键取自 `uname`,
+  值 = `61e82d585b47c12c5c8f7e43c8b66b36575b82f9e709b73bc4bf854d8a5c05c0`。它同时承担 **libc 变体那一维**:平台键取自 `uname`,
   区分不出 glibc 与 musl,靠这个入口文件摘要兜住。
 
 **不是同一个数,两个都必填。** 官方按版本直链不发布校验和(`stable/<版本>/manifest.json` 返回 403),所以入口文件摘要是这条链上

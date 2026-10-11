@@ -178,7 +178,10 @@ KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 #                      十二个门禁用例全 PASS、退出码 0。
 #                      这一条是 CodeX 2026-09-13 复审 P1 逼出来的——在它之前，2.21.4 只有 darwin 的证据却被门禁当成通用。
 # darwin/arm64:2.29.0  2026-10-11 探测（钉版从 2.21.4 升到 2.29.0），十二个门禁用例 + T5 正控全 PASS、退出码 0。
-KIRO_TESTED_TARGETS="darwin/arm64:2.21.1 darwin/arm64:2.21.3 linux/x86_64:2.21.3 darwin/arm64:2.21.4 linux/x86_64:2.21.4 darwin/arm64:2.29.0"
+# linux/x86_64:2.29.0  2026-10-11 在 sandbox 的一次性 Fargate 任务里跑同一套探测（AWS 执行器同一镜像、同一子网 / 安全组、DNS Firewall BLOCK）：
+#                      入口 /root/.local/bin/kiro-cli（sha256 61e82d58…，**musl** 变体：BUILD_TARGET_TRIPLE=x86_64-unknown-linux-musl）、
+#                      十二个门禁用例 + T5 正控全 PASS、退出码 0。Flow 的钉版档位装的是同一个安装包、同一个入口文件。
+KIRO_TESTED_TARGETS="darwin/arm64:2.21.1 darwin/arm64:2.21.3 linux/x86_64:2.21.3 darwin/arm64:2.21.4 linux/x86_64:2.21.4 darwin/arm64:2.29.0 linux/x86_64:2.29.0"
 # 使用方自己探测过的元组（不变式 I8，2026-09-15）：只做**并集**——加得进来，删不掉也覆盖不了上面那个常量里的条目。
 # 为什么需要它：上面的名单写死在集成包源码里，于是升级仪式要求使用方**改集成包的源码**；他们要么 fork（然后永远合不回来），
 # 要么一直用下面的 break-glass 顶着（那等于版本门形同虚设，还多一个手工步骤）。

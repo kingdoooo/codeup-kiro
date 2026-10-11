@@ -11,7 +11,7 @@ def test_bakes_the_zip_not_the_installed_binary():
 
 
 def test_uses_musl_variant_not_glibc():
-    # 已探测元组 linux/x86_64:2.21.4 是对 musl 入口文件跑出来的；换 glibc 要重新探测
+    # 已探测元组 linux/x86_64:2.29.0 是对 musl 入口文件跑出来的；换 glibc 要重新探测
     src = DOCKERFILE.read_text()
     assert "musl" in src
     assert "glibc" not in src

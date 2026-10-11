@@ -308,7 +308,7 @@ descriptor matching platform 'linux/amd64'`；烤进镜像的 `kirocli-x86_64-li
 构建期会用 `sha256sum --strict -c` 核对这个安装包的摘要——摘要写死在 `Dockerfile` 里的
 `ARG KIRO_PINNED_ARTIFACT_SHA256`（完整 64 位十六进制值，不是截断值：截断摘要会让
 `sha256sum -c` 只发警告就 `exit 0`，门形同虚设）。**Linux 必须用 musl 变体**，不是 glibc——
-已探测的「平台 + 版本」元组 `linux/x86_64:2.21.4` 是对 musl 入口文件跑出来的，换成 glibc
+已探测的「平台 + 版本」元组 `linux/x86_64:2.29.0` 是对 musl 入口文件跑出来的，换成 glibc
 变体等于换了一个从未探测过的组合，要重新走一遍 `scripts/probe/README.md` 的探测流程。
 
 ### 5.2 摘要登记（KIRO_IMAGE_DIGESTS）
