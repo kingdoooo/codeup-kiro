@@ -137,11 +137,14 @@ ENGINE_ARGS=(); [[ -n "$KIRO_ENGINE" ]] && ENGINE_ARGS=(--agent-engine "$KIRO_EN
 # deniedPaths（P1-11）与 AGENTS.md 继承隔离（P1-10），trust 不影响 deny（deny 先于一切判定，2026-09-06 T3/T6 实测），
 # 留着它能把「模型自己没去读」这一态压到最低。生产调用行**不传** --trust-tools（免确认只来自 allowedPaths）且以
 # env -i 启动；许可清单边界（allowedPaths）与 env -i 由 probe-kiro-allowlist.sh（P1-15）单独探测。
+# 提示词走 stdin、不给位置参数（kiro-2.29 后续 B）：与生产 kiro-review.sh、probe-kiro-allowlist.sh 同一条输入路径——kiro-cli 收到位置参数
+# 就整个忽略 stdin（ADR-0004 实测），两种传法不是同一条路径（issue 13 的理由；它当时只改了 allowlist 探测）。落盘的 prompt.stdin 也是证据。
+printf '%s\n' "$PROMPT" > "$KEEP/prompt.stdin"
 run_kiro() { # out err [extra...]
   local out="$1" err="$2"; shift 2; local rc=0
   KIRO_LOG_NO_COLOR=1 "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" kiro-cli chat --no-interactive \
-    --trust-tools=read,grep,glob --agent codeup-reviewer "${ENGINE_ARGS[@]+"${ENGINE_ARGS[@]}"}" "$@" "$PROMPT" \
-    > "$out" 2> "$err" || rc=$?
+    --trust-tools=read,grep,glob --agent codeup-reviewer "${ENGINE_ARGS[@]+"${ENGINE_ARGS[@]}"}" "$@" \
+    < "$KEEP/prompt.stdin" > "$out" 2> "$err" || rc=$?
   return $rc
 }
 

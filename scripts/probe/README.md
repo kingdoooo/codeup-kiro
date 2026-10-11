@@ -15,6 +15,7 @@
 3. **升级 kiro-cli 之后**：核对事件流形态（`runFinished.data.finalText`）与引擎行为是否仍成立。
 
 **提示词的传法：探测与生产都走 stdin、都不给位置参数**（issue 13，2026-09-18；**这条推翻了票 18 ⑬ 的旧决策**）。
+（headless 探测 2026-10 才改成走 stdin——issue 13 当时只改了 `probe-kiro-allowlist.sh`，在那之前这句话只对 allowlist 探测成立；kiro-2.29 后续 B。）
 
 kiro-cli 2.21.1 的 `chat [INPUT]` 一旦收到位置参数就**整个忽略 stdin**（本机 env -i / 完整环境 × 空 cwd /
 业务库 cwd 四种组合一致，见 setup-guide §8 第 14 项与 ADR-0004 的实测备注）。生产（`scripts/kiro-review.sh`）
