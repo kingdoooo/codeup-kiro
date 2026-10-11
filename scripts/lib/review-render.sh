@@ -1543,6 +1543,13 @@ review_log_hint() {
     printf '%s' "请查看流水线日志或重跑流水线。"
   fi
 }
+# 「日志在哪」的名词短语（phase2a issue 11）：截断提示「完整内容见<名字>」与几条基础设施类 die_review 用它。整句的 REVIEW_LOG_HINT
+# 不好拼进这些句子，所以另开一个名词变量。Flow 不设时是「流水线日志」——三处截断提示（golden 覆盖）逐字节不变；AWS 两个任务设
+# 「执行器日志（CloudWatch）」。取值来自任务定义 / 流水线变量、会进评论：与 REVIEW_LOG_HINT 同样先清洗再折行。
+review_log_name() {
+  local raw="${REVIEW_LOG_NAME-}"
+  if [[ -n "${raw//[[:space:]]/}" ]]; then _review_sanitize_oneline "$raw"; else printf '%s' "流水线日志"; fi
+}
 # 行内评论没发出、换一次评审就能好的那几种情形（版本列表滞后等）的处置。档位设了自己的重新评审提示就用那一句，否则是 Flow 的原文。
 review_retry_advice() {
   local raw="${REVIEW_RERUN_HINT-}"
@@ -1772,7 +1779,7 @@ _review_render_fold_section() {
     sect=$(mktemp) || { echo "_review_render_fold_section: 建不出临时文件" >&2; return 1; }
     left=$(( REVIEW_FOLD_TOTAL_MAX - _REVIEW_FOLD_USED )); (( left < 0 )) && left=0
     jq -r --arg b "$bucket" --arg unloc "$unloc" --argjson entry_max "$REVIEW_FOLD_ENTRY_MAX" --argjson total_left "$left" \
-          --argjson total_max "$REVIEW_FOLD_TOTAL_MAX" "${_REVIEW_JQ_LOC}${_REVIEW_JQ_BYTECUT}${_REVIEW_JQ_SANITIZE}"'
+          --argjson total_max "$REVIEW_FOLD_TOTAL_MAX" --arg logname "$(review_log_name)" "${_REVIEW_JQ_LOC}${_REVIEW_JQ_BYTECUT}${_REVIEW_JQ_SANITIZE}"'
       # 切断后补同款闭合围栏的 _close_fences 在 _REVIEW_JQ_SANITIZE 里（CommonMark 状态机，与 review_truncate_comment 共用一份；
       # CodeX 2026-09-09 P1-1 复审）：不另写「数行数、一律补 ```」的简化规则——那对 `~~~` 开的块补 ``` 等于没闭合。
       def _head($f; $i): "\n**\($i + 1). \($f | _loc($unloc)) — \($f.title)**\n\n";
@@ -1785,17 +1792,17 @@ _review_render_fold_section() {
           | (_full($f)) as $text0
           | ($text0 | utf8bytelength) as $len0
           | (if $len0 > $entry_max
-             then (_bytecut($text0; $entry_max) | _close_fences) + "\n\n> ⚠️ 本条正文 \($len0) 字节超过折叠区单条上限 \($entry_max) 字节，已截断；完整内容见流水线日志。"
+             then (_bytecut($text0; $entry_max) | _close_fences) + "\n\n> ⚠️ 本条正文 \($len0) 字节超过折叠区单条上限 \($entry_max) 字节，已截断；完整内容见\($logname)。"
              else $text0 end) as $text
           | ($text | utf8bytelength) as $len
           | if (.used + $len) > $total_left
-            then .out += [_head($f; $i) + "正文 \($len0) 字节未展示：折叠区全文总量已达上限 \($total_max) 字节，完整内容见流水线日志。"]
+            then .out += [_head($f; $i) + "正文 \($len0) 字节未展示：折叠区全文总量已达上限 \($total_max) 字节，完整内容见\($logname)。"]
             else .used += $len | .out += [_head($f; $i) + $text] end)
       | .out[]' "$plan" > "$sect" || { rm -f "$sect"; echo "_review_render_fold_section: 渲染折叠区小节失败（桶 ${bucket}）" >&2; return 1; }
     cat "$sect"
     _REVIEW_FOLD_USED=$(( _REVIEW_FOLD_USED + $(wc -c < "$sect" | tr -d ' ') ))
     if grep -q '折叠区单条上限\|折叠区全文总量已达上限' "$sect"; then
-      echo "警告：折叠区「${title}」小节触发了预算（单条 ${REVIEW_FOLD_ENTRY_MAX} 字节 / 三桶合计 ${REVIEW_FOLD_TOTAL_MAX} 字节），部分正文只在流水线日志里完整可见" >&2
+      echo "警告：折叠区「${title}」小节触发了预算（单条 ${REVIEW_FOLD_ENTRY_MAX} 字节 / 三桶合计 ${REVIEW_FOLD_TOTAL_MAX} 字节），部分正文只在$(review_log_name)里完整可见" >&2
     fi
     rm -f "$sect"
     return 0
@@ -2079,7 +2086,7 @@ review_truncate_comment() {
   done
   {
     echo ""
-    echo "> ⚠️ 报告超长已截断（上限 ${max} 字节），完整内容见流水线日志。"
+    echo "> ⚠️ 报告超长已截断（上限 ${max} 字节），完整内容见$(review_log_name)。"
   } >> "$dir/out"
   # 硬守卫（与 review_redact_file 共用一份 _review_replace_guarded，第 12 条）：截断结果里必须还留着原文里的每一行脚本标记
   # （评审标记 + 隐藏历史——后者紧跟标记之后，上限小到砍掉它时下一次评审就读不回历次记录，票 18 ②）。丢了标记的残片一旦被

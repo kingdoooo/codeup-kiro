@@ -1156,7 +1156,7 @@ if [[ "$KIRO_INSTALL_PROFILE" == pinned ]]; then
   # helper 自己的 stderr（含具体形态：库内 / 符号链接）已进流水线日志；die_review 的文案点名变量、不回显路径。
   ( review_dir_not_in_repo_or_die "$KIRO_PINNED_ARTIFACT" "$REVIEW_REPO_DIR" \
       "校验钉版安装包路径（业务库内容一律不受信，安装包不能取自业务库）" ) \
-    || die_review "KIRO_PINNED_ARTIFACT 路径不可信：它落在业务仓库之内、或本身是符号链接（业务库内容一律不受信，安装包不能取自业务库；取值不回显，具体形态见流水线日志）。请把它指到业务仓库之外的物理文件路径，或把 KIRO_INSTALL_PROFILE 改成 latest"
+    || die_review "KIRO_PINNED_ARTIFACT 路径不可信：它落在业务仓库之内、或本身是符号链接（业务库内容一律不受信，安装包不能取自业务库；取值不回显，具体形态见$(review_log_name)）。请把它指到业务仓库之外的物理文件路径，或把 KIRO_INSTALL_PROFILE 改成 latest"
 fi
 log "安装档位：${KIRO_INSTALL_PROFILE}"
 # KIRO_ENV_PASSTHROUGH 只收变量名：非法名字（写成 NAME=value、带空格/连字符）与凭证形状的名字（规则表 KIRO_ENV_CRED_RULES，
@@ -1197,8 +1197,10 @@ if ! command -v kiro-cli >/dev/null; then
     # 若最新版恰好在已探测名单内，回退会静默装上一个与 KIRO_CLI_SHA256 不匹配的二进制，于是同一次故障产生
     # 三种不同的错误面。下面每一条失败路径都 die_review，不 fall through 到现装分支。
     log "kiro-cli 不存在，从钉版安装包安装（安装档位 pinned）……"
+    # 「预先备好安装包的那一步」：Flow 是流水线里的下载步骤（原文不变）；设了 REVIEW_LOG_NAME 的档位（AWS 烤进镜像）不提流水线（phase2a issue 11）
+    _pinned_prep_step() { local v="${REVIEW_LOG_NAME-}"; if [[ -n "${v//[[:space:]]/}" ]]; then printf '%s' "预先备好安装包的步骤"; else printf '%s' "流水线里预先下载安装包的步骤"; fi; }
     [[ -f "$KIRO_PINNED_ARTIFACT" && -r "$KIRO_PINNED_ARTIFACT" ]] \
-      || die_review "钉版安装包取不到（路径不存在或不可读；取值不回显）。请确认流水线里预先下载安装包的步骤已成功、且 KIRO_PINNED_ARTIFACT 指向它落盘的位置。钉版档位**不会回退**到官方安装脚本——那会把一次基础设施故障变成一次版本门拒绝，把排查引向错误的方向"
+      || die_review "钉版安装包取不到（路径不存在或不可读；取值不回显）。请确认$(_pinned_prep_step)已成功、且 KIRO_PINNED_ARTIFACT 指向它落盘的位置。钉版档位**不会回退**到官方安装脚本——那会把一次基础设施故障变成一次版本门拒绝，把排查引向错误的方向"
     # 安装包摘要在**解压之前**核对：解压本身就是把不受信字节交给 unzip 处理。
     _art_rc=0; _art_have=$(kiro_cli_sha256 "$KIRO_PINNED_ARTIFACT") || _art_rc=$?
     case "$_art_rc" in
@@ -1222,7 +1224,7 @@ if ! command -v kiro-cli >/dev/null; then
     # KIRO_CLI_SKIP_SETUP=1 让它只做 `install -m 755` 拷贝，不跑 `kiro-cli setup`（那会写交互式配置）。
     _kr_inst_env_setup=(${_kr_inst_env[@]+"${_kr_inst_env[@]}"} KIRO_CLI_SKIP_SETUP=1)
     ( cd "$_art_dir/kirocli" && kiro_env_exec _kr_inst_env_setup "${BASH:-/bin/bash}" -p ./install.sh ) \
-      || die_review "钉版安装包内层 install.sh 失败：常见原因是安装包的平台变体与执行器不匹配（gnu 变体要求 glibc ≥ 2.34；云托管执行器请用 musl 变体）。详见流水线日志里它自己打的报错"
+      || die_review "钉版安装包内层 install.sh 失败：常见原因是安装包的平台变体与执行器不匹配（gnu 变体要求 glibc ≥ 2.34；云托管执行器请用 musl 变体）。详见$(review_log_name)里它自己打的报错"
   else
     # --- 现装档位：官方安装脚本，只装最新版 ---
     # 这条路径的版本不受控（脚本参数只有 --channel、下载 URL 硬编码 latest、sha256 只对在线的 latest/manifest.json
@@ -1547,7 +1549,7 @@ fi
 # 若要在同一工作区追加别的任务，必须先重新 checkout（setup-guide §7/§12）。
 # 删除清单 isolation-removed.zlist：`class<TAB>path<NUL>`，先写清单再删（15-fix4 #6）
 ISOLATION_COUNTS=$(review_isolate_workspace "$WORK/isolation-removed.zlist") \
-  || die_review "隔离失败：无法移除业务库中的注入面文件（AGENTS.md / .kiro / 符号链接 / lsp.json），见流水线日志"
+  || die_review "隔离失败：无法移除业务库中的注入面文件（AGENTS.md / .kiro / 符号链接 / lsp.json），见$(review_log_name)"
 read -r _iso_agents _iso_kiro _iso_links _iso_lsp <<<"$ISOLATION_COUNTS"
 log "隔离：已移除业务库工作树中 ${_iso_agents} 个 AGENTS.md、${_iso_kiro} 个 .kiro、${_iso_links} 个符号链接（均任意深度）与根 lsp.json（${_iso_lsp} 个，任何类型）；工作树自己的 .git 不动"
 unset _iso_agents _iso_kiro _iso_links _iso_lsp

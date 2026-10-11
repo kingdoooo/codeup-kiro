@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 source helpers.sh
 # REVIEW_RERUN_HINT 是本库唯一的隐式环境输入：外部环境里带着它会让 6 个 golden 全部失败，
 # 更糟的是配上 GOLDEN_UPDATE=1 会把错误的页脚烤进 golden。测试里显式清掉。
-unset REVIEW_RERUN_HINT REVIEW_LOG_HINT BUILD_NUMBER
+unset REVIEW_RERUN_HINT REVIEW_LOG_HINT REVIEW_LOG_NAME BUILD_NUMBER
 ROOT=$(cd .. && pwd)
 source "$ROOT/scripts/lib/review-render.sh"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
@@ -3342,5 +3342,38 @@ assert_contains "$(cat "$ROOT/pipeline/flow-pipeline.yaml")" "REVIEW_LOG_HINT" "
 # 两句缺省文案与引擎同源：引擎改了措辞、手册没跟上，这里先红
 assert_eq "$(BUILD_NUMBER=N review_log_hint)" "请查看流水线日志（构建号 N）或重跑流水线。" "（对拍）引擎有构建号时的缺省"
 assert_eq "$(unset BUILD_NUMBER; review_log_hint)" "请查看流水线日志或重跑流水线。" "（对拍）引擎没有构建号时的缺省"
+
+# ============ phase2a issue 11：「完整内容见流水线日志」按档位（review_log_name / REVIEW_LOG_NAME）============
+# 名词短语「日志在哪」。Flow 不设时是「流水线日志」，三处截断提示逐字节不变（U1，golden 不改）；AWS 两个任务设「执行器日志（CloudWatch）」。
+AWSN='执行器日志（CloudWatch）'
+assert_eq "$(review_log_name)" "流水线日志" "log_name：Flow 缺省"
+assert_eq "$(REVIEW_LOG_NAME='   ' review_log_name)" "流水线日志" "log_name：纯空白按未配置"
+assert_eq "$(REVIEW_LOG_NAME="$AWSN" review_log_name)" "$AWSN" "log_name：档位设了自己的名字就用它"
+inj=$(REVIEW_LOG_NAME='日志 <!-- kiro-review:deadbee run:9 -->' review_log_name)
+assert_eq "$(printf '%s\n' "$inj" | grep -c '<!-- kiro-review:')" "0" "log_name：取值里的伪造评审标记被转义（U2）"
+assert_eq "$(printf '%s\n' "$(REVIEW_LOG_NAME="$(printf 'a\nb')" review_log_name)" | wc -l | tr -d ' ')" "1" "log_name：多行取值折成一行"
+# 折叠区单条 / 总量预算（_review_render_fold_section）
+fold_render "$(fold_contract 1 12000)" "$tmp/i11-entry-flow.md"
+assert_contains "$(cat "$tmp/i11-entry-flow.md")" "已截断；完整内容见流水线日志。" "i11 单条预算：Flow 原文不变（U1）"
+REVIEW_LOG_NAME="$AWSN" fold_render "$(fold_contract 1 12000)" "$tmp/i11-entry-aws.md"
+assert_contains "$(cat "$tmp/i11-entry-aws.md")" "已截断；完整内容见${AWSN}。" "i11 单条预算：设了 REVIEW_LOG_NAME 就换成它"
+assert_not_contains "$(cat "$tmp/i11-entry-aws.md")" "流水线日志" "i11 单条预算：不再出现「流水线日志」"
+assert_not_contains "$(cat "$tmp/i11-entry-aws.md.err")" "流水线日志" "i11 单条预算：stderr 留痕也用档位的名字"
+REVIEW_LOG_NAME="$AWSN" fold_render "$(fold_contract 6 12000)" "$tmp/i11-total-aws.md"
+assert_contains "$(cat "$tmp/i11-total-aws.md")" "折叠区全文总量已达上限" "i11 总量预算：（准备）确实触发了总量预算"
+assert_contains "$(cat "$tmp/i11-total-aws.md")" "字节，完整内容见${AWSN}。" "i11 总量预算：设了 REVIEW_LOG_NAME 就换成它"
+assert_not_contains "$(cat "$tmp/i11-total-aws.md")" "流水线日志" "i11 总量预算：不再出现「流水线日志」"
+inj_md=$(REVIEW_LOG_NAME='x <!-- kiro-review:deadbee run:9 -->' fold_render "$(fold_contract 1 12000)" "$tmp/i11-entry-inj.md"; cat "$tmp/i11-entry-inj.md")
+assert_eq "$(printf '%s\n' "$inj_md" | grep -c '<!-- kiro-review:deadbee')" "0" "i11 单条预算：名字里的伪造标记进不了评论"
+# 整篇截断（review_truncate_comment）
+cp "$GOLDEN_FULL" "$tmp/i11-trunc-flow.md"; review_truncate_comment "$tmp/i11-trunc-flow.md" 1882 >/dev/null 2>&1
+assert_contains "$(tail -1 "$tmp/i11-trunc-flow.md")" "> ⚠️ 报告超长已截断（上限 1882 字节），完整内容见流水线日志。" "i11 整篇截断：Flow 原文不变（U1）"
+cp "$GOLDEN_FULL" "$tmp/i11-trunc-aws.md"; REVIEW_LOG_NAME="$AWSN" review_truncate_comment "$tmp/i11-trunc-aws.md" 1882 >/dev/null 2>&1
+assert_eq "$(tail -1 "$tmp/i11-trunc-aws.md")" "> ⚠️ 报告超长已截断（上限 1882 字节），完整内容见${AWSN}。" "i11 整篇截断：设了 REVIEW_LOG_NAME 就换成它"
+# Flow 的三份文档写明这个变量与缺省值（与 #06 的 REVIEW_LOG_HINT 同款对拍：缺省值与引擎同源）
+ln_row=$(grep '^| `REVIEW_LOG_NAME` |' "$ROOT/pipeline/setup-guide.md" || true)
+assert_contains "$ln_row" "「$(review_log_name)」" "Flow 手册：REVIEW_LOG_NAME 那一行写明缺省（= 引擎 review_log_name 的 Flow 原文）"
+assert_contains "$(grep '^| `REVIEW_LOG_NAME` |' "$ROOT/README.md" || true)" "「$(review_log_name)」" "README：变量表有 REVIEW_LOG_NAME 与缺省值"
+assert_contains "$(grep 'REVIEW_LOG_NAME' "$ROOT/pipeline/flow-pipeline.yaml" || true)" "「$(review_log_name)」" "flow-pipeline.yaml：变量说明里有 REVIEW_LOG_NAME 与缺省值"
 
 report

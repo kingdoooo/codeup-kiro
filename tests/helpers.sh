@@ -417,7 +417,7 @@ reset_ps_vars
 # 替身路径由本文件位置推出（helpers.sh 在 tests/ 下），不依赖调用方是否定义了 ROOT。
 # **stdout = 转发壳的 sha256**：内层 install.sh 是逐字节 `install -m 755` 拷贝，所以这个值就是装完之后
 # 入口文件的摘要，调用方直接拿它当 KIRO_CLI_SHA256（别用替身本身的摘要——装上去的是壳）。
-make_pinned_artifact() {  # <输出 zip 绝对路径> [--no-installer] → stdout 入口文件 sha256
+make_pinned_artifact() {  # <输出 zip 绝对路径> [--no-installer | --failing-installer] → stdout 入口文件 sha256
   local out="$1" mode="${2:-}" stage here entry_sha
   here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
   stage=$(mktemp -d) || return 1
@@ -440,6 +440,11 @@ if [ -z "${KIRO_CLI_SKIP_SETUP:-}" ]; then
   : > "$HOME/.kirocli-setup-ran"
 fi
 SH
+    chmod 755 "$stage/kirocli/install.sh"
+  fi
+  # --failing-installer：内层 install.sh 自己报错并以 1 退出（平台变体不匹配那一类，phase2a issue 11 的失败文案用例）
+  if [[ "$mode" == "--failing-installer" ]]; then
+    printf '#!/bin/sh\necho "install.sh: fixture failure (variant mismatch)" >&2\nexit 1\n' > "$stage/kirocli/install.sh"
     chmod 755 "$stage/kirocli/install.sh"
   fi
   if command -v sha256sum >/dev/null 2>&1; then

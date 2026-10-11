@@ -26,7 +26,7 @@ FIXTURE_TEMPLATE_DIR="$tmp/fixture-template"
 export PATH="$ROOT/tests/mockbin:$PATH"
 # REVIEW_RERUN_HINT 是渲染器唯一的隐式环境输入：开发者环境里导出了它，
 # 「默认取 Flow 语义」的断言与 golden 比对就会莫名失败（run_case 用 env 继承外部环境）。
-unset REVIEW_RERUN_HINT REVIEW_LOG_HINT BUILD_NUMBER
+unset REVIEW_RERUN_HINT REVIEW_LOG_HINT REVIEW_LOG_NAME BUILD_NUMBER
 # KIRO_INSTALL_PROFILE 没有缺省值（ADR-0006 / I1：缺失即拒绝运行），所以公共环境里给 latest——
 # 既有用例测的都是现装档位下的既有行为。「变量缺失」那一条用 `KIRO_INSTALL_PROFILE=` 显式覆盖来表达。
 export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456 KIRO_INSTALL_PROFILE=latest
@@ -322,6 +322,26 @@ assert_eq "$([[ -e "$CASE/work/src/sub/.kiro" || -L "$CASE/work/src/sub/.kiro" ]
 assert_eq "$(cat "$MD/cwdscan")" "" ".kiro 为符号链接：Kiro 启动时工作区干净"
 assert_eq "$([[ -f "$CASE/evilcfg/settings/mcp.json" ]] && echo y || echo n)" "y" \
   "只删链接本身，不跟着链接把目标目录的内容删掉"
+
+# ============ phase2a issue 11：隔离失败（注入面文件删不掉）的文案按档位 ============
+# 把一个 AGENTS.md 放进只读目录：非 root 下 rm 删不掉 → review_isolate_workspace 失败 → die_review。root 不受目录权限约束，跳过。
+if [[ "$(id -u)" != "0" ]]; then
+  tweak_iso_locked() { mkdir -p locked && echo '# steer' > locked/AGENTS.md && chmod 555 locked; }
+  CASE_TWEAK=tweak_iso_locked run_case isofail-flow
+  chmod 755 "$CASE/work/locked" 2>/dev/null || true
+  assert_nonzero "$RC" "i11 隔离失败：非零退出"
+  assert_eq "$(grep -cx chat "$MD/calls" 2>/dev/null || true)" "0" "i11 隔离失败：Kiro 评审没有启动（chat 一次都没调用）"
+  assert_contains "$(posted_comment "$OUT")" "隔离失败：无法移除业务库中的注入面文件（AGENTS.md / .kiro / 符号链接 / lsp.json），见流水线日志" \
+    "i11 Flow：隔离失败的文案不变（U1）"
+  CASE_TWEAK=tweak_iso_locked run_case isofail-aws REVIEW_LOG_NAME='执行器日志（CloudWatch）' \
+    REVIEW_LOG_HINT='执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。' REVIEW_RERUN_HINT='向源分支推送新提交可重新评审'
+  chmod 755 "$CASE/work/locked" 2>/dev/null || true
+  comment=$(posted_comment "$OUT")
+  assert_contains "$comment" "（AGENTS.md / .kiro / 符号链接 / lsp.json），见执行器日志（CloudWatch）" "i11 AWS：隔离失败指向档位的日志"
+  assert_not_contains "$comment" "流水线" "i11 AWS：隔离失败的评论里没有「流水线」（U2）"
+else
+  echo "跳过 i11 隔离失败用例：以 root 运行时目录权限挡不住 rm"
+fi
 
 # ============ 失败路径：kiro 失败 → 回写"评审未完成" + 非零退出 ============
 run_case kirofail MOCK_KIRO_FAIL=1
@@ -2680,6 +2700,48 @@ else
     KIRO_PINNED_ARTIFACT="$ART_BAD" KIRO_PINNED_ARTIFACT_SHA256="$ART_BAD_SHA" KIRO_CLI_SHA256="$ART_ENTRY_SHA"
   assert_nonzero "$RC" "钉版安装：安装包缺 kirocli/install.sh → 拒绝评审"
   assert_contains "$(posted_comment "$OUT")" "安装包结构不认" "钉版安装：失败评论说明结构不认"
+  # ---- phase2a issue 11：基础设施类失败文案里的「流水线」按档位（REVIEW_LOG_NAME）----
+  # AWS 两个任务设的三个提示（与 aws/stacks/executor_stack.py 一致）；Flow 不设时原文不变（U1）
+  I11_AWS=(REVIEW_LOG_NAME='执行器日志（CloudWatch）' REVIEW_LOG_HINT='执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。'
+           REVIEW_RERUN_HINT='向源分支推送新提交可重新评审')
+  # 安装包取不到
+  run_case pinnedmissing-flow PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$tmp/does-not-exist.zip" KIRO_PINNED_ARTIFACT_SHA256="$ART_SHA" KIRO_CLI_SHA256="$ART_ENTRY_SHA"
+  assert_contains "$(posted_comment "$OUT")" "请确认流水线里预先下载安装包的步骤已成功" "i11 Flow：取不到安装包的文案不变（U1）"
+  run_case pinnedmissing-aws "${I11_AWS[@]}" PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$tmp/does-not-exist.zip" KIRO_PINNED_ARTIFACT_SHA256="$ART_SHA" KIRO_CLI_SHA256="$ART_ENTRY_SHA"
+  comment=$(posted_comment "$OUT")
+  assert_contains "$comment" "钉版安装包取不到" "i11 AWS：取不到安装包仍说明原因"
+  assert_contains "$comment" "请确认预先备好安装包的步骤已成功" "i11 AWS：取不到安装包的处置不提流水线"
+  assert_not_contains "$comment" "流水线" "i11 AWS：取不到安装包的失败评论里没有「流水线」（U2）"
+  # 内层 install.sh 失败
+  ART_FAIL="$tmp/kirocli-fixture-failinst.zip"
+  make_pinned_artifact "$ART_FAIL" --failing-installer >/dev/null
+  ART_FAIL_SHA=$( (command -v sha256sum >/dev/null 2>&1 && sha256sum "$ART_FAIL" || shasum -a 256 "$ART_FAIL") | cut -d' ' -f1)
+  run_case pinnedinstfail-flow PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$ART_FAIL" KIRO_PINNED_ARTIFACT_SHA256="$ART_FAIL_SHA" KIRO_CLI_SHA256="$ART_ENTRY_SHA"
+  assert_nonzero "$RC" "钉版安装：内层 install.sh 失败 → 拒绝评审"
+  assert_contains "$OUT" "install.sh: fixture failure" "（准备）内层 install.sh 确实跑了并报错"
+  assert_contains "$(posted_comment "$OUT")" "详见流水线日志里它自己打的报错" "i11 Flow：内层 install.sh 失败的文案不变（U1）"
+  run_case pinnedinstfail-aws "${I11_AWS[@]}" PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+    KIRO_PINNED_ARTIFACT="$ART_FAIL" KIRO_PINNED_ARTIFACT_SHA256="$ART_FAIL_SHA" KIRO_CLI_SHA256="$ART_ENTRY_SHA"
+  comment=$(posted_comment "$OUT")
+  assert_contains "$comment" "详见执行器日志（CloudWatch）里它自己打的报错" "i11 AWS：内层 install.sh 失败指向档位的日志"
+  assert_not_contains "$comment" "流水线" "i11 AWS：内层 install.sh 失败的评论里没有「流水线」（U2）"
+  # 安装包路径不可信（库外链接指向业务库里的 ZIP）
+  run_case_symlink_artifact() {  # <用例名> [VAR=值 ...]
+    local name="$1"; shift
+    ln -sf "$tmp/case-${name}/work/inrepo-kirocli.zip" "$tmp/${name}.zip"
+    CASE_TWEAK=plant_inrepo_artifact run_case "$name" "$@" PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=pinned \
+      KIRO_PINNED_ARTIFACT="$tmp/${name}.zip" KIRO_PINNED_ARTIFACT_SHA256="$ART_SHA" KIRO_CLI_SHA256="$ART_ENTRY_SHA"
+  }
+  run_case_symlink_artifact pinnedsymlink-flow
+  assert_contains "$(posted_comment "$OUT")" "具体形态见流水线日志" "i11 Flow：安装包路径不可信的文案不变（U1）"
+  run_case_symlink_artifact pinnedsymlink-aws "${I11_AWS[@]}"
+  comment=$(posted_comment "$OUT")
+  assert_contains "$comment" "KIRO_PINNED_ARTIFACT 路径不可信" "i11 AWS：（准备）走的是路径不可信那条"
+  assert_contains "$comment" "具体形态见执行器日志（CloudWatch）" "i11 AWS：安装包路径不可信指向档位的日志"
+  assert_not_contains "$comment" "流水线" "i11 AWS：安装包路径不可信的评论里没有「流水线」（U2）"
   # 不变式 I4 的另一半：latest 档位下即使钉版那三个变量都配着（且安装包真实存在），也一概不碰——
   # 走的是 curl 那条路，日志里不该出现任何钉版的痕迹。KIRO_INSTALL_URL 指向本地那个假安装器。
   run_case latestignorespin PATH="$PATH_NO_KIRO" KIRO_INSTALL_PROFILE=latest \
