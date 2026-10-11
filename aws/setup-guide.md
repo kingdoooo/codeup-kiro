@@ -294,7 +294,7 @@ bot_usernames: []          # 机器人与人同号：名单留空，断环交给
 `Dockerfile` 需要 `COPY scripts/ prompts/ kiro/` 这些仓库根下的目录）：
 
 ```bash
-docker build --platform linux/amd64 -f aws/executor/Dockerfile -t codeup-kiro-executor:2.21.4 .
+docker build --platform linux/amd64 -f aws/executor/Dockerfile -t codeup-kiro-executor:2.29.0 .
 ```
 
 `--platform linux/amd64` 不能省：`docker build` 的缺省是构建机当前平台，在 Apple Silicon 上会构建出

@@ -225,7 +225,7 @@ headless 调用必须依赖它认证，未配置时 chat 命令会因认证失�
 
 #### 一次性备包（必须在阿里云内部做）
 
-从本机拉安装包实测约 230 KB/s、586 MB 要 40 分钟且会断；阿里云内网约 20 秒到 1 分钟。用**阿里云 Cloud Shell**
+从本机拉安装包实测约 230 KB/s（2.21.4 的 586 MB 要 40 分钟且会断；2.29.0 起安装包缩到 166 MB，也要十几分钟）；阿里云内网约 20 秒到 1 分钟。用**阿里云 Cloud Shell**
 （跑在云内网、免开 ECS，控制台右上角 `>_`；先把左上角区域切到你要建桶的区域）。Cloud Shell 现在**不一定预装 `ossutil`**，
 但 `aliyun` CLI（≥ 3.x）内置 `aliyun oss` 子命令、Cloud Shell 的临时凭证自动带上，直接用它:
 
@@ -237,19 +237,19 @@ BUCKET=codeup-kiro-cli-CHANGEME    # 全局唯一、3-63 位小写字母/数字/
 # ========================
 set -euo pipefail
 EP="oss-${REGION}.aliyuncs.com"
-KEY="kiro/2.21.4/kirocli-x86_64-linux-musl.zip"
-URL="https://prod.download.cli.kiro.dev/stable/2.21.4/kirocli-x86_64-linux-musl.zip"
-ART_SHA="bbb0a22161d5aea045919cc75e9210e61b63b8c877525f123a30610911b6c44d"   # 安装包摘要（集成包发布值）
+KEY="kiro/2.29.0/kirocli-x86_64-linux-musl.zip"
+URL="https://prod.download.cli.kiro.dev/stable/2.29.0/kirocli-x86_64-linux-musl.zip"
+ART_SHA="8bfc894611c9f941e57e5b6a80c9bdbd4415ac477d71dbf6fc055c8479e1c663"   # 安装包摘要（集成包发布值）
 
 aliyun oss mb "oss://${BUCKET}" -e "$EP" --acl private        # 私有桶（默认 ACL 即 private）
 curl -fL -C - -o kirocli.zip "$URL"                          # -C - 续传：连接会断，不是可选的
 echo "${ART_SHA}  kirocli.zip" | sha256sum -c -              # 核对通过再上传（失败即 set -e 退出）
 aliyun oss cp kirocli.zip "oss://${BUCKET}/${KEY}" -e "$EP" -f
-aliyun oss stat "oss://${BUCKET}/${KEY}" -e "$EP"            # 确认 Content-Length = 613998311
+aliyun oss stat "oss://${BUCKET}/${KEY}" -e "$EP"            # 确认 Content-Length = 166435365
 ```
 
 三点必须照做:① `-C -` 续传**不是可选的**;② **核对通过再上传**,绝不传完再核对(错的字节进了桶,摘要门只会在评审时才拒、白跑一趟);
-③ 桶必须与执行器**同区域**、且是**专用私有**桶(公共读会让一个 586 MB 对象变成带宽账单 DoS 的靶子)。
+③ 桶必须与执行器**同区域**、且是**专用私有**桶(公共读会让一个 166 MB 对象变成带宽账单 DoS 的靶子)。
 把脚本存成文件用 `bash 文件` 跑,别把 `set -euo pipefail` 裸贴进交互 shell(命令一失败会把登录 shell 本身退出、Cloud Shell 掉线)。
 
 #### 为什么 Linux 统一钉 musl
@@ -261,7 +261,7 @@ aliyun oss stat "oss://${BUCKET}/${KEY}" -e "$EP"            # 确认 Content-Le
 #### 两个摘要的分工(最容易混)
 
 - `KIRO_PINNED_ARTIFACT_SHA256` 核对**安装包本身**——「拉到的字节对不对」,在**解压之前**核对。
-  值 = `bbb0a22161d5aea045919cc75e9210e61b63b8c877525f123a30610911b6c44d`。
+  值 = `8bfc894611c9f941e57e5b6a80c9bdbd4415ac477d71dbf6fc055c8479e1c663`。
 - `KIRO_CLI_SHA256` 核对**装完之后真正被执行的那个入口文件**——「解压 / `install -m 755` / PATH 解析之后跑的是不是那个文件」。
   值 = `940b47e51692c5ccb65f50a5036cb658b284bc824c2932e5b34460189c0ce4a9`。它同时承担 **libc 变体那一维**:平台键取自 `uname`,
   区分不出 glibc 与 musl,靠这个入口文件摘要兜住。
@@ -332,7 +332,7 @@ EOL 公告;遇到这类失败别照「回到已探测版本」的常规 runbook(
    **名单的单位是「平台 + 版本」元组**（`<os>/<arch>:<版本>`，2026-09-13 起）：探测结论只对探测所用的那个组合成立——
    越界读取、deny 优先于 allow 这些负向用例依赖 kiro-cli 的路径解析行为，而那是按平台编译的。换平台或换版本都要在
    **那个平台上**重跑 `scripts/probe/probe-kiro-allowlist.sh`，跑完它会直接打印要加进名单的那一行
-   （形如 `[probe] 本次探测的平台 + 版本：linux/x86_64:2.21.4——把这个元组原样加进…`），照抄即可，不要自己拼。
+   （形如 `[probe] 本次探测的平台 + 版本：linux/x86_64:2.29.0——把这个元组原样加进…`），照抄即可，不要自己拼。
    当前名单见 `scripts/kiro-review.sh` 的 `KIRO_TESTED_TARGETS`；用 `kiro-cli --version` 加 `uname -s` / `uname -m` 自查。
    平台键**不含** libc 变体（glibc/musl）与发行版：那一维靠下面第 7 项的镜像 digest 固定来控——把 glibc 小版本编进键，
    等于每次基础镜像打补丁都让评审停摆。所以「固定镜像 digest」与「名单里有这个元组」是**两件都要做**的事。

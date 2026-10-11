@@ -20,11 +20,11 @@ RUN curl -sSf "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp
  && rm -rf /tmp/awscliv2.zip /tmp/aws \
  && /usr/local/bin/aws --version
 
-ARG KIRO_CLI_VERSION=2.21.4
+ARG KIRO_CLI_VERSION=2.29.0
 # 完整 64 位十六进制摘要（安装包，非入口文件）——见 docs/adr/0006-flow-pinned-install-profile.md
 # 与 pipeline/setup-guide.md 的集成包发布值。截断值会让 `sha256sum -c` 只发警告而 exit 0，
 # 门形同虚设，故此处必须是完整值，并配 --strict 让格式错误本身也让构建失败。
-ARG KIRO_PINNED_ARTIFACT_SHA256=bbb0a22161d5aea045919cc75e9210e61b63b8c877525f123a30610911b6c44d
+ARG KIRO_PINNED_ARTIFACT_SHA256=8bfc894611c9f941e57e5b6a80c9bdbd4415ac477d71dbf6fc055c8479e1c663
 
 # 烤进去的是**安装包 zip**，不是安装好的二进制：pinned 档位的既有代码路径正好接受
 # 「一个本地路径 + 两个摘要」，于是 scripts/ 零改动（ADR-0006 明言此意图）。

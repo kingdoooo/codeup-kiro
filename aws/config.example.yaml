@@ -19,7 +19,7 @@ bot_username: aliyun:kirobot
 # 必须加引号：全是数字的值不加引号会被 YAML 解析成整数。
 kiro_image_digests: "0000000000000000000000000000000000000000000000000000000000000000"
 # 两个 kiro-cli 摘要（安装包 zip / 装好后的入口文件），当前集成包的发布值，见 pipeline/setup-guide.md。
-kiro_pinned_artifact_sha256: "bbb0a22161d5aea045919cc75e9210e61b63b8c877525f123a30610911b6c44d"
+kiro_pinned_artifact_sha256: "8bfc894611c9f941e57e5b6a80c9bdbd4415ac477d71dbf6fc055c8479e1c663"
 kiro_cli_sha256: "940b47e51692c5ccb65f50a5036cb658b284bc824c2932e5b34460189c0ce4a9"
 
 # ── 开关：缺省即关闭；非空值必须严格是 0 或 1，写错会直接报错而不是静默生效/失效 ──
