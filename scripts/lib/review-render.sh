@@ -318,6 +318,43 @@ review_stream_final_truncated() {
   [[ "$v" == "true" ]]
 }
 
+# --- 评审中途的模型拒绝 / 回退（kiro-2.29 后续 A）---
+# kiro-cli 2.27.1 起，v2 引擎下某一轮被模型拒绝时会换配置的或服务端提供的回退模型重试，回答它的模型可能从此成为会话的模型
+# （Kiro 文档「Model fallback notices」；没有关闭开关）。事前的 --list-models 核对管不到这种中途换模型，所以跑完之后扫一遍事件流。
+# 信号（任一即算）：S1 runFinished.data.stopReason == "refusal"；S2 键名匹配 fallback|refusal（不分大小写）；S3 currentModelId /
+# modelId / toModel / fallbackModelId 的字符串取值与 agent 声明的模型不同（没声明时出现即算）。判据按 2.29.0 二进制里的字段名推断，
+# **没有真实回退样本**：可能漏报；误报由负控守（正常事件流里没有这些键，tests/fixtures/stream/）。
+# 只看 Kiro 自己写的结构：跳过 rawInput / rawOutput / content 三棵子树（工具入参 / 出参与消息正文，被评审代码能左右），也不看任何
+# 字符串取值里的文字——模型文本伪造不出这条信号。键名与模型 id 只留白名单字符，不合形的整项丢弃（模型 id 只计数）。
+# 用法：review_stream_model_switch <stream.jsonl> [<agent 声明的模型>] → rc 0 + stdout 一行摘要；rc 1 无信号；rc 2 读不了 / 解析失败
+review_stream_model_switch() {
+  local f="${1-}" want="${2-}" out
+  [[ -r "$f" ]] || return 2
+  out=$(jq -R -r -s --arg want "$want" '
+    def kv: if type == "object" then
+              to_entries[] | select(.key | IN("rawInput", "rawOutput", "content") | not)
+              | ([.key, .value]), (.value | kv)
+            elif type == "array" then .[] | kv
+            else empty end;
+    [ split("\n")[] | fromjson? | select(type == "object") ] as $ev
+    | ([ $ev[] | select(.type == "runFinished") | select((.data | type) == "object")
+         | select(.data.stopReason == "refusal") ] | length > 0) as $s1
+    | ([ $ev[] | kv | .[0] | select(type == "string") | select(test("fallback|refusal"; "i"))
+         | select(test("^[A-Za-z0-9_]{1,64}$")) ] | unique | .[0:5]) as $s2
+    | ([ $ev[] | kv | select(.[0] | IN("currentModelId", "modelId", "toModel", "fallbackModelId")) | .[1]
+         | select(type == "string") | select(. != $want) ]) as $mv
+    | ([ $mv[] | select(test("^[A-Za-z0-9._:-]{1,64}$")) ] | unique | .[0:3]) as $s3
+    | ([ $mv[] | select(test("^[A-Za-z0-9._:-]{1,64}$") | not) ] | length) as $s3bad
+    | [ (if $s1 then "stopReason=refusal" else empty end),
+        (if ($s2 | length) > 0 then "事件里出现 " + ($s2 | join("、")) else empty end),
+        (if ($s3 | length) > 0 or $s3bad > 0
+         then "模型 " + ([$s3[], (if $s3bad > 0 then "（另有 \($s3bad) 个取值不合形，不显示）" else empty end)] | join("、"))
+         else empty end) ]
+    | join("；")' "$f" 2>/dev/null) || return 2
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+}
+
 # --- 本次运行的标记随机串（R4）---
 # 固定字面量标记是可被业务库利用的：提示词要求把注入企图作为 P0 报出来，模型常常直接原文引用
 # 那行 `<<<KIRO_REVIEW_JSON>>>`，于是标记计数变成 2、每次评审都被打成「标记不唯一」而降级——

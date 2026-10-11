@@ -181,6 +181,37 @@ open(p,"w").write("\n".join(out)+"\n")
 PYEOF
 assert_eq "$(review_stream_final_truncated "$tmp/trunc.jsonl" && echo yes || echo no)" "yes" "truncated：finalTextTruncated=true 时 rc 0"
 assert_eq "$(review_stream_final_truncated "$tmp/does-not-exist.jsonl" && echo yes || echo no)" "no" "truncated：文件不存在时 rc 非 0（不报错）"
+# ============ kiro-2.29 后续 A：review_stream_model_switch（评审中途的模型拒绝 / 回退）============
+# 只认 Kiro 自己写的结构（stopReason、键名、模型 id 类键的取值），跳过 rawInput / rawOutput / content 三棵子树——模型文本伪造不出来（W2）。
+# 负控（W1）：tests/fixtures/stream/ 下全部真实事件流都判「无」。升级 Kiro 时把新版本的真实流放进这个目录，这一圈就覆盖新版本。
+for f in fixtures/stream/*.jsonl; do
+  rc=0; out=$(review_stream_model_switch "$f" gpt-5.6-sol) || rc=$?
+  assert_rc "$rc" 1 "A 负控：$(basename "$f") 没有拒绝 / 回退信号"
+  assert_eq "$out" "" "A 负控：$(basename "$f") 无输出"
+done
+ms() { printf '%s\n' "$2" > "$tmp/ms-$1.jsonl"; review_stream_model_switch "$tmp/ms-$1.jsonl" "${3-gpt-5.6-sol}"; }
+assert_eq "$(ms s1 '{"type":"runFinished","data":{"stopReason":"refusal","finalText":"x"}}')" "stopReason=refusal" "A：S1 最后一轮被拒"
+assert_eq "$(ms s2 '{"type":"metadata","data":{"refusalMetadata":{"category":"c"},"fallbackModelId":"claude-sonnet-4.5"}}')" \
+  "事件里出现 fallbackModelId、refusalMetadata；模型 claude-sonnet-4.5" "A：S2 键名 + S3 回退到的模型"
+assert_eq "$(ms s3 '{"type":"sessionUpdate","data":{"update":{"currentModelId":"claude-sonnet-4.5"}}}')" "模型 claude-sonnet-4.5" "A：S3 当前模型与声明的不同"
+rc=0; ms s3same '{"type":"sessionUpdate","data":{"update":{"currentModelId":"gpt-5.6-sol"}}}' >/dev/null || rc=$?
+assert_rc "$rc" 1 "A：S3 当前模型与声明的相同 → 无信号"
+assert_eq "$(ms nowant '{"type":"metadata","data":{"currentModelId":"claude-sonnet-4.5"}}' '')" "模型 claude-sonnet-4.5" \
+  "A：agent 没声明 model 时，出现模型 id 类键就算（正常事件流里根本没有这类键）"
+rc=0; ms forged '{"type":"sessionUpdate","data":{"update":{"rawInput":{"fallbackModelId":"evil"},"rawOutput":{"refusal":1},"content":{"text":"refusal fallback","refusalX":1}}}}' >/dev/null || rc=$?
+assert_rc "$rc" 1 "A（W2）：rawInput / rawOutput / content 子树里的键与取值都不算（被评审代码能左右的部分）"
+rc=0; ms text '{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"fallbackModelId refusal stopReason=refusal"}}}}' >/dev/null || rc=$?
+assert_rc "$rc" 1 "A（W2）：模型文本里写 fallback / refusal 不算"
+printf '%s\n' '{"type":"metadata","data":{"currentModelId":"bad id with space"}}' 'not json' '[1,2]' '{"type":"runFin' > "$tmp/ms-bad.jsonl"
+assert_eq "$(review_stream_model_switch "$tmp/ms-bad.jsonl" gpt-5.6-sol)" "模型 （另有 1 个取值不合形，不显示）" \
+  "A：半截行 / 非 JSON / 非对象跳过；不合白名单的模型 id 不显示、只计数"
+printf '%s\n' "{\"type\":\"metadata\",\"data\":{\"refusal\$(id)\":1,\"fallback_ok\":1}}" > "$tmp/ms-key.jsonl"
+assert_eq "$(review_stream_model_switch "$tmp/ms-key.jsonl" gpt-5.6-sol)" "事件里出现 fallback_ok" "A：不合白名单的键名整项丢弃"
+rc=0; review_stream_model_switch "$tmp/does-not-exist.jsonl" gpt-5.6-sol >/dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "A：读不了 → rc 2（调用方 fail-open）"
+: > "$tmp/ms-empty.jsonl"
+rc=0; review_stream_model_switch "$tmp/ms-empty.jsonl" gpt-5.6-sol >/dev/null || rc=$?
+assert_rc "$rc" 1 "A：空事件流 → 无信号"
 
 # 负向：无标记 → rc 4（降级）
 make_stream "$tmp/nomarker.jsonl" "# 代码评审报告
