@@ -137,7 +137,7 @@ assert_eq "$(LC_ALL=C grep -c 'pwned' "$tmp/env.inspector" || true)" "0" "③b �
 common="AWS_REGION CI_COMMIT_REF_NAME CODEUP_BOT_USERNAME CODEUP_REPO_ID ECS_CONTAINER_METADATA_URI_V4 HEAD_SHA LOCK_KEY LOCK_TABLE MR_LOCAL_ID MR_TARGET_BRANCH PATH REVIEWER_WORKDIR REVIEW_RERUN_HINT SCAN_REPO_URL SCAN_RUN_ID YUNXIAO_ORG_ID YUNXIAO_TOKEN"
 # 名单里另几项 scan_run 不设、取决于跑测试的机器（LANG、HOME 之类）：本机设了就应当在
 for n in HOME LANG LC_ALL TZ AWS_DEFAULT_REGION AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_EXECUTION_ENV SCAN_BUCKET \
-         SCAN_BUCKET_OWNER MAX_COMMENT_BYTES FEISHU_NOTIFY; do
+         SCAN_BUCKET_OWNER MAX_COMMENT_BYTES FEISHU_NOTIFY REVIEW_LOG_NAME; do
   [[ -n "${!n+x}" ]] && common+=" $n"
 done
 want_names() { printf '%s\n' $common "$@" | sort | tr '\n' ' '; }
@@ -404,12 +404,16 @@ fin10() {  # <评论文件> [KEY=VAL …] → stdout = 日志（stderr），rc �
 }
 cp fixtures/golden/summary-full.md "$tmp/fin10.md"
 printf '\n末尾一行 tail-marker-10 用了 AKIAIOSFODNN7EXAMPLE 这个 key\n' >> "$tmp/fin10.md"
-out=$(fin10 "$tmp/fin10.md" MAX_COMMENT_BYTES=1882 REVIEW_LOG_NAME='执行器日志（CloudWatch）')
+out=$(fin10 "$tmp/fin10.md" MAX_COMMENT_BYTES=1882 REVIEW_LOG_NAME='扫描任务日志（CloudWatch，流前缀 scan/）' REVIEWER_ID=inspector)
 assert_contains "$out" "rc=0" "⑩b 超长 → 截断后照常可发"
-assert_eq "$(tail -1 "$tmp/fin10.md")" "> ⚠️ 报告超长已截断（上限 1882 字节），完整内容见执行器日志（CloudWatch）。" "⑩b 评论末尾的提示用档位的名字"
+assert_eq "$(tail -1 "$tmp/fin10.md")" "> ⚠️ 报告超长已截断（上限 1882 字节），完整内容见扫描任务日志（CloudWatch，流前缀 scan/）。" "⑩b 评论末尾的提示用档位的名字"
 assert_not_contains "$(cat "$tmp/fin10.md")" "tail-marker-10" "⑩b（准备）末尾那一行确实被截掉了"
 assert_contains "$out" "tail-marker-10" "⑩b 被截掉的内容在日志里（提示所说的「完整内容」成立）"
 assert_not_contains "$out" "AKIAIOSFODNN7EXAMPLE" "⑩b 日志里的全文是掩码之后的"
+# 复审 M-3：两位扫描员并发写同一 stderr——全文每行带评审员前缀、首尾有标记，不留临时副本
+assert_contains "$out" "[inspector] 末尾一行 tail-marker-10" "⑩b 全文每行带评审员前缀（两位扫描员的日志交错时也认得出是谁的）"
+assert_contains "$out" "完整内容结束" "⑩b 全文后有结束标记"
+assert_eq "$(ls "$tmp"/fin10.md.* 2>/dev/null | wc -l | tr -d ' ')" "0" "⑩b 不留临时副本"
 cp fixtures/golden/summary-full.md "$tmp/fin10s.md"
 out=$(fin10 "$tmp/fin10s.md" MAX_COMMENT_BYTES=60000)
 assert_contains "$out" "rc=0" "⑩b（对照）不超长 → 0"

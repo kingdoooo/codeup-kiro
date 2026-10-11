@@ -72,4 +72,4 @@ Kiro CLI 3.0 目前是 early access：随 2.x 稳定版一起安装，需 `--v3`
   不设该开关的正控 3 次里 2 次 canary 出现——第一次没出现是模型偶发）。changelog 里两条行为变化对本 ADR 是**更安全**的方向（未单独实测）：2.27.1 起
   `--agent` 指定的 agent 装不上时非交互以 4 退出、套用失败以 1 退出（原先静默回落默认 agent），脚本对非 0 一律回写失败评论；
   2.24.0 起不再自动加载项目 `.env`。需要留意的一条（同样出自 changelog）：2.27.1 起 v1 / v2 被拒的一轮可在回退模型上重试，事前的 `--list-models` 核对管不到
-  这种中途换模型。证据：`.superpowers/sdd/2026-10-11-kiro-2.29/progress.md`。
+  这种中途换模型。证据是维护者的本地验收账本（不随仓库分发）；探测结论的要点即上文与 `scripts/kiro-review.sh` 里 `KIRO_TESTED_TARGETS` 上方的记录。

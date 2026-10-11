@@ -1338,10 +1338,16 @@ def test_the_log_hint_reaches_the_container_env_and_names_the_real_stream_prefix
 # ── phase2a issue 11：两个任务都设 REVIEW_LOG_NAME（截断提示「完整内容见<名字>」与基础设施类失败文案）────────────
 def test_both_tasks_set_the_log_name_the_engine_reads():
     _, t = _scan_templates(inspector=1)
-    for name in ("review", "scan"):
-        env = {e["Name"]: e["Value"] for e in _td_by_container(t, name)["ContainerDefinitions"][0]["Environment"]}
-        # 字面量（同 F6）：改了措辞这条先红，手册与票面跟着改
-        assert env.get("REVIEW_LOG_NAME") == "执行器日志（CloudWatch）", (name, env.get("REVIEW_LOG_NAME"))
+    # 字面量（同 F6）：改了措辞这条先红，手册与票面跟着改。扫描任务用自己的名字（复审 M-1，Kent 2026-10-11）：扫描员的失败提示与
+    # Security 汇总都说「扫描任务日志」，全文在 scan/ 流里，写成执行器日志会让读者去 executor/ 流里找
+    want = {"review": "执行器日志（CloudWatch）", "scan": "扫描任务日志（CloudWatch，流前缀 scan/）"}
+    for name, value in want.items():
+        c = _td_by_container(t, name)["ContainerDefinitions"][0]
+        env = {e["Name"]: e["Value"] for e in c["Environment"]}
+        assert env.get("REVIEW_LOG_NAME") == value, (name, env.get("REVIEW_LOG_NAME"))
+    scan = _td_by_container(t, "scan")["ContainerDefinitions"][0]
+    prefix = scan["LogConfiguration"]["Options"]["awslogs-stream-prefix"]
+    assert f"流前缀 {prefix}/" in want["scan"], "扫描任务名字里的流前缀要与它真实的 awslogs-stream-prefix 一致"
     render = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "lib" / "review-render.sh").read_text()
     assert 'local raw="${REVIEW_LOG_NAME-}"' in render, "引擎读的环境变量名变了，任务定义里那一项就白设了"
 

@@ -153,6 +153,10 @@ assert_eq "$(sed -n 's#^ *sourceFilePath: "kiro/\([0-9.]*\)/kirocli-x86_64-linux
 # 钉了一个名单外的版本，每次评审都会被版本门拒绝
 targets=$(sed -n 's/^KIRO_TESTED_TARGETS="\(.*\)"$/\1/p' "$ROOT/scripts/kiro-review.sh")
 assert_contains " $targets " " linux/x86_64:${df_ver} " "钉版：Dockerfile 钉的 ${df_ver} 在 KIRO_TESTED_TARGETS 里有 linux/x86_64 元组"
+# AWS 手册里写到版本的两处（复审 M-7）：构建命令的镜像标签、「已探测元组是对 musl 入口文件跑出来的」那一句
+AG="$ROOT/aws/setup-guide.md"
+assert_contains "$(cat "$AG")" "-t codeup-kiro-executor:${df_ver} ." "钉版：AWS 手册构建命令的镜像标签版本 = Dockerfile"
+assert_contains "$(cat "$AG")" "已探测的「平台 + 版本」元组 \`linux/x86_64:${df_ver}\` 是对 musl 入口文件跑出来的" "钉版：AWS 手册的已探测元组版本 = Dockerfile"
 # 钉版档位有自己的一节
 assert_contains "$(cat "$GUIDE")" "钉版档位" "09：setup-guide 有钉版档位这一节"
 # 备包三条硬要求：续传 -C -、核对通过再上传、专用私有同区域桶

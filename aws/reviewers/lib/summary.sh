@@ -96,12 +96,12 @@ summary_finalize() {  # <评论文件>
   review_redact_file "$file" || rrc=$?
   [[ "$rrc" == 0 ]] || { log "错误：评论掩码失败或结构守卫拒绝写回（rc=${rrc}）"; return 1; }
   if [[ "$(wc -c < "$file" | tr -d ' ')" -gt "${MAX_COMMENT_BYTES:-60000}" ]]; then
-    # 截断提示写的是「完整内容见<日志>」（phase2a issue 11）：与 kiro-review.sh 第 7 步一样，截断前把全文（此时已掩码）打进日志，这句话才成立
-    local full="${file}.full"
-    cp "$file" "$full" || { log "错误：评论截断前的副本写不出"; return 1; }
-    review_truncate_comment "$file" "${MAX_COMMENT_BYTES:-60000}" || { rm -f "$full"; log "错误：评论截断失败"; return 1; }
-    log "评论超长已截断；完整内容如下："
-    cat "$full" >&2
-    rm -f "$full"
+    # 截断提示写的是「完整内容见<日志>」（phase2a issue 11）：与 kiro-review.sh 第 7 步一样，截断前把全文（此时已掩码）打进日志，这句话才成立。
+    # 两位扫描员并发写同一个 stderr（复审 M-3）：每行带评审员前缀、首尾加标记，交错时也认得出是谁的；直接在截断前打，不留临时副本
+    log "评论超长，截断前的完整内容如下（每行带 [${REVIEWER_ID:-scan}] 前缀）："
+    sed "s/^/[${REVIEWER_ID:-scan}] /" "$file" >&2
+    log "（完整内容结束）"
+    review_truncate_comment "$file" "${MAX_COMMENT_BYTES:-60000}" || { log "错误：评论截断失败"; return 1; }
+    log "评论超长已截断"
   fi
 }

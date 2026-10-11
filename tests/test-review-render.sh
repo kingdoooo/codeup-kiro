@@ -3365,6 +3365,15 @@ assert_contains "$(cat "$tmp/i11-total-aws.md")" "字节，完整内容见${AWSN
 assert_not_contains "$(cat "$tmp/i11-total-aws.md")" "流水线日志" "i11 总量预算：不再出现「流水线日志」"
 inj_md=$(REVIEW_LOG_NAME='x <!-- kiro-review:deadbee run:9 -->' fold_render "$(fold_contract 1 12000)" "$tmp/i11-entry-inj.md"; cat "$tmp/i11-entry-inj.md")
 assert_eq "$(printf '%s\n' "$inj_md" | grep -c '<!-- kiro-review:deadbee')" "0" "i11 单条预算：名字里的伪造标记进不了评论"
+assert_contains "$(cat "$tmp/i11-entry-aws.md.err")" "部分正文只在${AWSN}里完整可见" "i11 单条预算：stderr 留痕用档位的名字（正向）"
+# 复审 I-1：「完整内容见<日志>」要成立——预算触发时，本小节每条的完整正文都打进日志（stderr），原先两个档位都不打
+longest_run() { grep -oE "${2}+" "$1" | awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }'; }
+assert_eq "$(longest_run "$tmp/i11-entry-flow.md.err" A)" "12000" "I-1 单条预算：被切的那条完整正文（12000 字节）在日志里"
+assert_contains "$(cat "$tmp/i11-entry-flow.md.err")" "完整正文如下" "I-1 单条预算：全文前有说明行"
+assert_contains "$(cat "$tmp/i11-entry-flow.md.err")" "完整正文结束" "I-1 单条预算：全文后有结束行（读日志的人知道到哪为止）"
+assert_eq "$(grep -oE 'A+' "$tmp/i11-total-aws.md.err" | awk 'length($0) == 12000' | wc -l | tr -d ' ')" "6" "I-1 总量预算：六条（含没展示的）完整正文都在日志里"
+fold_render "$(fold_contract 2 100)" "$tmp/i11-small.md"
+assert_not_contains "$(cat "$tmp/i11-small.md.err")" "完整正文如下" "I-1（对照）没触发预算时不往日志里贴正文"
 # 整篇截断（review_truncate_comment）
 cp "$GOLDEN_FULL" "$tmp/i11-trunc-flow.md"; review_truncate_comment "$tmp/i11-trunc-flow.md" 1882 >/dev/null 2>&1
 assert_contains "$(tail -1 "$tmp/i11-trunc-flow.md")" "> ⚠️ 报告超长已截断（上限 1882 字节），完整内容见流水线日志。" "i11 整篇截断：Flow 原文不变（U1）"

@@ -1803,6 +1803,19 @@ _review_render_fold_section() {
     _REVIEW_FOLD_USED=$(( _REVIEW_FOLD_USED + $(wc -c < "$sect" | tr -d ' ') ))
     if grep -q '折叠区单条上限\|折叠区全文总量已达上限' "$sect"; then
       echo "警告：折叠区「${title}」小节触发了预算（单条 ${REVIEW_FOLD_ENTRY_MAX} 字节 / 三桶合计 ${REVIEW_FOLD_TOTAL_MAX} 字节），部分正文只在$(review_log_name)里完整可见" >&2
+      # 上一句与评论里的「完整内容见<日志>」要成立（复审 I-1，2026-10-11）：原先两个档位都从不把被切 / 没展示的正文打进日志，
+      # 整篇截断时打的 comment.full.md 已经是切过的。这里把本小节每条的完整正文打到 stderr（= 日志）。来源是 plan，文本在
+      # validated.json 那一步已字段级掩码（与 comment.full.md 进日志同一前提）；只在预算触发时打，不触发时日志不变。
+      echo "折叠区「${title}」完整正文如下（${n} 条）：" >&2
+      jq -r --arg b "$bucket" --arg unloc "$unloc" "${_REVIEW_JQ_LOC}"'
+        def _full($f): if $f.fail_reason == "oversize"
+                       then "正文 \($f.fail_bytes // "?") 字节超过评论上限 MAX_COMMENT_BYTES=\($f.fail_limit // "?")，未在评论中展示。"
+                       else "\($f.body)" + (if ($f.fix | length) > 0 then "\n\n修复建议：\n\($f.fix)" else "" end) end;
+        (.folded[$b] // []) as $items
+        | range($items | length) as $i | $items[$i] as $f
+        | "--- 第 \($i + 1) 条 \($f | _loc($unloc)) — \($f.title) ---\n" + _full($f)' "$plan" >&2 \
+        || echo "（折叠区完整正文打印失败）" >&2
+      echo "--- 折叠区「${title}」完整正文结束 ---" >&2
     fi
     rm -f "$sect"
     return 0

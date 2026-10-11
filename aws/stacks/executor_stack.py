@@ -29,8 +29,10 @@ RERUN_HINT_PUSH = "向源分支推送新提交可重新评审"
 # 引擎的默认值是「请查看流水线日志（构建号 N）或重跑流水线。」。流前缀要与下面 review 容器日志驱动的 stream_prefix 一致（有测试比对）。
 LOG_HINT = "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。"
 # 「日志在哪」的名词短语（REVIEW_LOG_NAME，phase2a issue 11，scripts/lib/review-render.sh::review_log_name）：截断提示「完整内容见<名字>」
-# 与几条基础设施类失败文案用它。引擎缺省是 Flow 的「流水线日志」。执行器与扫描任务都设（扫描员的汇总也走同一个截断函数）。
+# 与几条基础设施类失败文案用它。引擎缺省是 Flow 的「流水线日志」。执行器与扫描任务都设（扫描员的汇总也走同一个截断函数）；
+# 扫描任务用自己的名字（复审 M-1）：扫描员的失败提示与 Security 汇总都叫它「扫描任务日志」，全文在 scan/ 流里（有测试比对流前缀）。
 LOG_NAME = "执行器日志（CloudWatch）"
+SCAN_LOG_NAME = "扫描任务日志（CloudWatch，流前缀 scan/）"
 
 
 def rerun_hint(cfg):
@@ -331,7 +333,7 @@ class ExecutorStack(cdk.Stack):
                 "SECURITY_BOT_USERNAME": cfg.get("security_bot_username", cfg["bot_username"]),
                 "INSPECTOR_RERUN_HINT": scanner_rerun_hint(cfg, "inspector_command_phrase"),
                 "SECURITY_RERUN_HINT": scanner_rerun_hint(cfg, "security_command_phrase"),
-                "REVIEW_LOG_NAME": LOG_NAME,
+                "REVIEW_LOG_NAME": SCAN_LOG_NAME,
                 "INSPECTOR_MAX_SCAN_CALLS": str(cfg.get("inspector_max_scan_calls", 3)),
                 # 飞书通知的开关（同执行器那一处）：扫描员据此记下本次评论的 id（aws/reviewers/lib/summary.sh）
                 **({"FEISHU_NOTIFY": "1"} if feishu_notify_on(cfg) else {}),
