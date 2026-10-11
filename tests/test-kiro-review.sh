@@ -475,6 +475,13 @@ assert_contains "$OUT" "<!-- kiro-review:" "无契约标记：降级评论仍带
 assert_not_contains "$OUT" "评审未完成" "无契约标记：不是失败评论"
 assert_not_contains "$OUT" "问题统计" "无契约标记：没有伪造的分级统计"
 
+# pinned-install #10（Kent 2026-10-11：关票 + 补守卫）：输出结构认不出（kiro-cli 改了 finalText 的框定之类）时**只调一次** chat、不自动重试——
+# 「换更保守的调用形状再试一次」那条回退路径永远测不到，只会在最糟的时刻第一次执行；降级评论带 Kiro CLI 版本行与原文（见 degkirocli / leaksecret）
+run_case nomarker-onecall MOCK_KIRO_NO_MARKER=1
+assert_rc "$RC" 0 "#10 无契约标记：降级、退出码 0"
+assert_eq "$(call_count "$MD/calls" chat)" "1" "#10 无契约标记：kiro-cli chat 只调用一次（不自动重试）"
+assert_contains "$(posted_comment "$OUT")" $'\nKiro CLI: '"${LISTED_VER}"$'\n' "#10 无契约标记：降级评论带 Kiro CLI 版本行"
+
 # ============ 降级：标记内 JSON 非法 → 同样降级 ============
 run_case badjson MOCK_KIRO_BAD_JSON=1
 assert_rc "$RC" 0 "非法契约 JSON：退出码仍为 0"
