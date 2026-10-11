@@ -325,7 +325,8 @@ review_stream_final_truncated() {
 # modelId / toModel / fallbackModelId 的字符串取值与 agent 声明的模型不同（没声明时出现即算）。判据按 2.29.0 二进制里的字段名推断，
 # **没有真实回退样本**：可能漏报；误报由负控守（正常事件流里没有这些键，tests/fixtures/stream/）。
 # 只看 Kiro 自己写的结构：跳过 rawInput / rawOutput / content 三棵子树（工具入参 / 出参与消息正文，被评审代码能左右），也不看任何
-# 字符串取值里的文字——模型文本伪造不出这条信号。键名与模型 id 只留白名单字符，不合形的整项丢弃（模型 id 只计数）。
+# 字符串取值里的文字——模型文本伪造不出这条信号。键名与模型 id 只留白名单字符（锚在整个字符串上：\A…\z，`$` 会放过结尾的换行），
+# 不合形的不显示、只计数（同一个值只计一次）——信号本身不丢。显示的每一项包反引号（键名 / id 里的 _ 与点号裸写会被 Markdown 当强调或链接）。
 # 用法：review_stream_model_switch <stream.jsonl> [<agent 声明的模型>] → rc 0 + stdout 一行摘要；rc 1 无信号；rc 2 读不了 / 解析失败
 review_stream_model_switch() {
   local f="${1-}" want="${2-}" out
@@ -339,16 +340,19 @@ review_stream_model_switch() {
     [ split("\n")[] | fromjson? | select(type == "object") ] as $ev
     | ([ $ev[] | select(.type == "runFinished") | select((.data | type) == "object")
          | select(.data.stopReason == "refusal") ] | length > 0) as $s1
-    | ([ $ev[] | kv | .[0] | select(type == "string") | select(test("fallback|refusal"; "i"))
-         | select(test("^[A-Za-z0-9_]{1,64}$")) ] | unique | .[0:5]) as $s2
+    | ([ $ev[] | kv | .[0] | select(type == "string") | select(test("fallback|refusal"; "i")) ] | unique) as $k2
+    | ([ $k2[] | select(test("\\A[A-Za-z0-9_]{1,64}\\z")) ] | .[0:5]) as $s2
+    | ([ $k2[] | select(test("\\A[A-Za-z0-9_]{1,64}\\z") | not) ] | length) as $s2bad
     | ([ $ev[] | kv | select(.[0] | IN("currentModelId", "modelId", "toModel", "fallbackModelId")) | .[1]
-         | select(type == "string") | select(. != $want) ]) as $mv
-    | ([ $mv[] | select(test("^[A-Za-z0-9._:-]{1,64}$")) ] | unique | .[0:3]) as $s3
-    | ([ $mv[] | select(test("^[A-Za-z0-9._:-]{1,64}$") | not) ] | length) as $s3bad
-    | [ (if $s1 then "stopReason=refusal" else empty end),
-        (if ($s2 | length) > 0 then "事件里出现 " + ($s2 | join("、")) else empty end),
+         | select(type == "string") | select(. != $want) ] | unique) as $mv
+    | ([ $mv[] | select(test("\\A[A-Za-z0-9._:-]{1,64}\\z")) ] | .[0:3]) as $s3
+    | ([ $mv[] | select(test("\\A[A-Za-z0-9._:-]{1,64}\\z") | not) ] | length) as $s3bad
+    | [ (if $s1 then "`stopReason=refusal`" else empty end),
+        (if ($s2 | length) > 0 or $s2bad > 0
+         then "事件里出现 " + ([($s2[] | "`\(.)`"), (if $s2bad > 0 then "（另有 \($s2bad) 个键名不合形，不显示）" else empty end)] | join("、"))
+         else empty end),
         (if ($s3 | length) > 0 or $s3bad > 0
-         then "模型 " + ([$s3[], (if $s3bad > 0 then "（另有 \($s3bad) 个取值不合形，不显示）" else empty end)] | join("、"))
+         then "模型 " + ([($s3[] | "`\(.)`"), (if $s3bad > 0 then "（另有 \($s3bad) 个取值不合形，不显示）" else empty end)] | join("、"))
          else empty end) ]
     | join("；")' "$f" 2>/dev/null) || return 2
   [[ -n "$out" ]] || return 1

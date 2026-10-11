@@ -12,7 +12,10 @@
    `probe-kiro-headless.sh` 验证 AGENTS.md 继承隔离与敏感路径拒绝，并各带一个正控——
    `PROBE_NO_ISOLATION=1` 故意关掉隔离设置（AGENTS.md canary 应当出现），
    `PROBE_FORCE_READ=1` 让提示词只要求读 canary 文件（把「拒绝生效」与「模型压根没去读」分开）；
-3. **升级 kiro-cli 之后**：核对事件流形态（`runFinished.data.finalText`）与引擎行为是否仍成立。
+3. **升级 kiro-cli 之后**：核对事件流形态（`runFinished.data.finalText`）与引擎行为是否仍成立；并做一次**模型拒绝 / 回退检测的负控**：
+   把新版本 headless 探测的 `out.jsonl`（去掉本机路径与用户名）放进 `tests/fixtures/stream/`，跑 `tests/test-review-render.sh`——
+   那一圈负控对该目录下每份事件流都要求「无信号」。红了说明新版本的正常事件流里多了 fallback / refusal 类字段，
+   上线后每次评审都会挂「本次评审中 Kiro 报告了模型拒绝或回退」的提示（误报），先收紧 `review_stream_model_switch` 的判据再升级。
 
 **提示词的传法：探测与生产都走 stdin、都不给位置参数**（issue 13，2026-09-18；**这条推翻了票 18 ⑬ 的旧决策**）。
 （headless 探测 2026-10 才改成走 stdin——issue 13 当时只改了 `probe-kiro-allowlist.sh`，在那之前这句话只对 allowlist 探测成立；kiro-2.29 后续 B。）

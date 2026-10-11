@@ -1643,10 +1643,11 @@ kiro_rc=0
 # 2.27.1 起 v2 引擎会把被拒的一轮换到回退模型重试（没有关闭开关），事前的模型核对管不到。放在退出码分支**之前**：kiro-cli 失败时
 # 失败评论同样要带上它（MODEL_NOTICE 进成功 / 降级 / 失败三种评论）。口径同 issue 11：挂提示、不拒绝；检测自身出错 fail-open。
 # 追加而不是赋值：MODEL_NOTICE 里可能已经有事前核对的那句。摘要只含白名单字符（见 review_stream_model_switch）。
+# 不自带 ⚠️：渲染器给整条 notice 加「> ⚠️ 」，再带一个单独出现时就是「> ⚠️ ⚠️」。
 MODEL_SWITCH=""; _ms_rc=0
 MODEL_SWITCH=$(review_stream_model_switch "$WORK/stream.jsonl" "$AGENT_MODEL") || _ms_rc=$?
 case "$_ms_rc" in
-  0) MODEL_NOTICE="${MODEL_NOTICE}${MODEL_NOTICE:+ }⚠️ 本次评审中 Kiro 报告了模型拒绝或回退（${MODEL_SWITCH}）——V2 引擎会把被拒的一轮换到回退模型重试，所以这次评审可能部分或全部由另一个模型完成，结论请结合具体问题判断。"
+  0) MODEL_NOTICE="${MODEL_NOTICE}${MODEL_NOTICE:+ }本次评审中 Kiro 报告了模型拒绝或回退（${MODEL_SWITCH}）——V2 引擎会把被拒的一轮换到回退模型重试，所以这次评审可能部分或全部由另一个模型完成，结论请结合具体问题判断。"
      log "警告：Kiro 报告了模型拒绝或回退：${MODEL_SWITCH}——已在评论里挂提示，不拒绝评审" ;;
   1) ;;
   *) MODEL_SWITCH=""; log "警告：模型拒绝 / 回退检测失败，本次跳过（建议性检查，不阻断评审）" ;;
