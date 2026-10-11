@@ -96,7 +96,12 @@ summary_finalize() {  # <评论文件>
   review_redact_file "$file" || rrc=$?
   [[ "$rrc" == 0 ]] || { log "错误：评论掩码失败或结构守卫拒绝写回（rc=${rrc}）"; return 1; }
   if [[ "$(wc -c < "$file" | tr -d ' ')" -gt "${MAX_COMMENT_BYTES:-60000}" ]]; then
-    review_truncate_comment "$file" "${MAX_COMMENT_BYTES:-60000}" || { log "错误：评论截断失败"; return 1; }
-    log "评论超长已截断"
+    # 截断提示写的是「完整内容见<日志>」（phase2a issue 11）：与 kiro-review.sh 第 7 步一样，截断前把全文（此时已掩码）打进日志，这句话才成立
+    local full="${file}.full"
+    cp "$file" "$full" || { log "错误：评论截断前的副本写不出"; return 1; }
+    review_truncate_comment "$file" "${MAX_COMMENT_BYTES:-60000}" || { rm -f "$full"; log "错误：评论截断失败"; return 1; }
+    log "评论超长已截断；完整内容如下："
+    cat "$full" >&2
+    rm -f "$full"
   fi
 }

@@ -28,6 +28,9 @@ RERUN_HINT_PUSH = "向源分支推送新提交可重新评审"
 # 失败评论里那句「去哪看日志」（REVIEW_LOG_HINT，issue 06，scripts/lib/review-render.sh::review_log_hint）同理必须由本档位设置：
 # 引擎的默认值是「请查看流水线日志（构建号 N）或重跑流水线。」。流前缀要与下面 review 容器日志驱动的 stream_prefix 一致（有测试比对）。
 LOG_HINT = "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。"
+# 「日志在哪」的名词短语（REVIEW_LOG_NAME，phase2a issue 11，scripts/lib/review-render.sh::review_log_name）：截断提示「完整内容见<名字>」
+# 与几条基础设施类失败文案用它。引擎缺省是 Flow 的「流水线日志」。执行器与扫描任务都设（扫描员的汇总也走同一个截断函数）。
+LOG_NAME = "执行器日志（CloudWatch）"
 
 
 def rerun_hint(cfg):
@@ -229,6 +232,7 @@ class ExecutorStack(cdk.Stack):
                 # 派生值，不是 config.yaml 的键（见 rerun_hint 的 docstring）
                 "REVIEW_RERUN_HINT": rerun_hint(cfg),
                 "REVIEW_LOG_HINT": LOG_HINT,
+                "REVIEW_LOG_NAME": LOG_NAME,
                 **{var: str(cfg.get(key, default))
                    for key, (var, default) in BEHAVIOUR_VARS.items()},
                 # 飞书通知（Phase 2c issue 20）：只是一个开关——执行器据此记下本次 Kiro 评论的 id（lib/notify-mark.sh）。飞书凭证不进任何任务（N-F1）；
@@ -327,6 +331,7 @@ class ExecutorStack(cdk.Stack):
                 "SECURITY_BOT_USERNAME": cfg.get("security_bot_username", cfg["bot_username"]),
                 "INSPECTOR_RERUN_HINT": scanner_rerun_hint(cfg, "inspector_command_phrase"),
                 "SECURITY_RERUN_HINT": scanner_rerun_hint(cfg, "security_command_phrase"),
+                "REVIEW_LOG_NAME": LOG_NAME,
                 "INSPECTOR_MAX_SCAN_CALLS": str(cfg.get("inspector_max_scan_calls", 3)),
                 # 飞书通知的开关（同执行器那一处）：扫描员据此记下本次评论的 id（aws/reviewers/lib/summary.sh）
                 **({"FEISHU_NOTIFY": "1"} if feishu_notify_on(cfg) else {}),

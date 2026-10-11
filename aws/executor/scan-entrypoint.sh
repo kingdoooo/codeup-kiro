@@ -71,7 +71,7 @@ source "$PKG/scripts/lib/kiro-agent.sh"   # KIRO_ENV_EXEC_SHIM（「恰好一份
 SCAN_CHILD_COMMON=(PATH HOME LANG LC_ALL TZ AWS_REGION AWS_DEFAULT_REGION AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_EXECUTION_ENV
                    ECS_CONTAINER_METADATA_URI_V4 CODEUP_REPO_ID MR_LOCAL_ID HEAD_SHA CI_COMMIT_REF_NAME MR_TARGET_BRANCH LOCK_KEY
                    LOCK_TABLE SCAN_RUN_ID SCAN_REPO_URL YUNXIAO_ORG_ID SCAN_BUCKET SCAN_BUCKET_OWNER MAX_COMMENT_BYTES
-                   FEISHU_NOTIFY)
+                   FEISHU_NOTIFY REVIEW_LOG_NAME)
 pids=""
 # StopTask 时及时停下（issue 15）：任务定义开了 initProcessEnabled，PID 1 是 init（tini），本入口不再是 PID 1，SIGTERM 能到达；
 # 但 init 只把信号转给它的直接子进程（就是本入口），扫描员子进程收不到——它们的租约要在各自的 EXIT 陷阱里释放。所以本入口

@@ -389,4 +389,30 @@ out=$(run9 "$tmp/fx9n")
 assert_eq "$(cid9)" "none" "⑨b 不开飞书通知 → 不记 id"
 assert_eq "$(req_count "$out" POST 'comments/list')" "1" "⑨b 不开飞书通知 → 一次多余的列表请求都没有"
 
+
+# ⑩ phase2a issue 11：扫描员汇总超长时的「完整内容见<日志>」按档位，且那份全文确实在日志里（U6）
+# ⑩a 子进程白名单透传 REVIEW_LOG_NAME（扫描任务定义设它，CDK 断言守）
+assert_eq "$(scan_run REVIEWERS=inspector,security REVIEW_LOG_NAME=logname-x)" "0" "⑩（准备）设了 REVIEW_LOG_NAME 照常跑完"
+for rid in inspector security; do
+  assert_contains $'\n'"$(cat "$tmp/env.$rid")"$'\n' $'\n'"REVIEW_LOG_NAME=logname-x"$'\n' "⑩ ${rid} 子进程拿到 REVIEW_LOG_NAME"
+done
+# ⑩b summary_finalize：先掩码、截断前把掩码后的全文打进日志；评论末尾的提示用档位的名字
+fin10() {  # <评论文件> [KEY=VAL …] → stdout = 日志（stderr），rc 进最后一行
+  local f="$1"; shift
+  /usr/bin/env "$@" /bin/bash --norc --noprofile -c "set -euo pipefail; REVIEW_PROFILE=inspector; source '$ROOT/scripts/lib/review-render.sh'
+    log() { printf '%s\n' \"\$*\" >&2; }; source '$tmp/pkg/reviewers/lib/summary.sh'; summary_finalize '$f'" 2>&1 </dev/null; echo "rc=$?"
+}
+cp fixtures/golden/summary-full.md "$tmp/fin10.md"
+printf '\n末尾一行 tail-marker-10 用了 AKIAIOSFODNN7EXAMPLE 这个 key\n' >> "$tmp/fin10.md"
+out=$(fin10 "$tmp/fin10.md" MAX_COMMENT_BYTES=1882 REVIEW_LOG_NAME='执行器日志（CloudWatch）')
+assert_contains "$out" "rc=0" "⑩b 超长 → 截断后照常可发"
+assert_eq "$(tail -1 "$tmp/fin10.md")" "> ⚠️ 报告超长已截断（上限 1882 字节），完整内容见执行器日志（CloudWatch）。" "⑩b 评论末尾的提示用档位的名字"
+assert_not_contains "$(cat "$tmp/fin10.md")" "tail-marker-10" "⑩b（准备）末尾那一行确实被截掉了"
+assert_contains "$out" "tail-marker-10" "⑩b 被截掉的内容在日志里（提示所说的「完整内容」成立）"
+assert_not_contains "$out" "AKIAIOSFODNN7EXAMPLE" "⑩b 日志里的全文是掩码之后的"
+cp fixtures/golden/summary-full.md "$tmp/fin10s.md"
+out=$(fin10 "$tmp/fin10s.md" MAX_COMMENT_BYTES=60000)
+assert_contains "$out" "rc=0" "⑩b（对照）不超长 → 0"
+assert_not_contains "$out" "完整内容如下" "⑩b（对照）不超长时不往日志里贴全文"
+
 report

@@ -1335,14 +1335,28 @@ def test_the_log_hint_reaches_the_container_env_and_names_the_real_stream_prefix
     assert 'local raw="${REVIEW_LOG_HINT-}"' in render, "引擎读的环境变量名变了，任务定义里那一项就白设了"
 
 
+# ── phase2a issue 11：两个任务都设 REVIEW_LOG_NAME（截断提示「完整内容见<名字>」与基础设施类失败文案）────────────
+def test_both_tasks_set_the_log_name_the_engine_reads():
+    _, t = _scan_templates(inspector=1)
+    for name in ("review", "scan"):
+        env = {e["Name"]: e["Value"] for e in _td_by_container(t, name)["ContainerDefinitions"][0]["Environment"]}
+        # 字面量（同 F6）：改了措辞这条先红，手册与票面跟着改
+        assert env.get("REVIEW_LOG_NAME") == "执行器日志（CloudWatch）", (name, env.get("REVIEW_LOG_NAME"))
+    render = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "lib" / "review-render.sh").read_text()
+    assert 'local raw="${REVIEW_LOG_NAME-}"' in render, "引擎读的环境变量名变了，任务定义里那一项就白设了"
+
+
 def test_the_guide_names_both_hints_that_differ_from_the_engine_default():
     # 手册 §4.3 原先说「唯一一个刻意与引擎缺省值不同的是 REVIEW_RERUN_HINT」；v1.9.1 #06 起 REVIEW_LOG_HINT 也是，表里要有它的那一行
     sec = "\n".join(_guide_section_lines("4."))
     assert "唯一一个刻意与引擎缺省值不同" not in sec, "§4.3 还在说只有一个变量与引擎缺省值不同"
-    assert "**两个刻意与引擎缺省值不同的是 `REVIEW_RERUN_HINT` 与 `REVIEW_LOG_HINT`**" in sec
+    # phase2a issue 11 起是三个（REVIEW_LOG_NAME）
+    assert "**三个刻意与引擎缺省值不同的是 `REVIEW_RERUN_HINT`、`REVIEW_LOG_HINT` 与 `REVIEW_LOG_NAME`**" in sec
     row = next((ln for ln in sec.splitlines() if ln.startswith("| `REVIEW_LOG_HINT` |")), "")
     assert "执行器日志在 CloudWatch（执行器日志组，流前缀 executor/）。" in row and "请查看流水线日志或重跑流水线。" in row, row
     assert "构建号 ?" not in row, "§4.3 还说不设时会出现「构建号 ?」（v1.9.1 起没有构建号时不再打那一段）"
+    row = next((ln for ln in sec.splitlines() if ln.startswith("| `REVIEW_LOG_NAME` |")), "")
+    assert "`执行器日志（CloudWatch）`" in row and "流水线日志" in row, row
 
 
 def test_the_cross_region_inference_note_describes_the_shipped_continuum_not_a_future_milestone(write_cfg, capsys):
