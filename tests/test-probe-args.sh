@@ -133,17 +133,22 @@ assert_contains "$(cat "$YAML")" "业务库" "08：YAML 注明安装包不能留
 assert_eq "$(LC_ALL=C grep -c 'cli.kiro.dev/install' "$YAML")" "0" "08：钉版参考 YAML 不出现 curl 官方安装脚本"
 
 # ============ issue 09：setup-guide 钉版档位使用方手册（静态断言；可读性/完整性靠人工验收判据 1）============
-SPEC="$ROOT/.scratch/kiro-pinned-install/spec.md"
-# 09 验收判据 2：文档里出现的每个摘要值必须与 spec 的「已发布值」一致——跨文件一致，防任一处漂移。
-# spec 是 gitignore 的工作文件；本机在，CI 上没有则跳过这条（其余断言不依赖它）。
-if [[ -r "$SPEC" ]]; then
-  spec_art=$(LC_ALL=C grep -m1 -oE 'bbb0a221[0-9a-f]{56}' "$SPEC")
-  spec_entry=$(LC_ALL=C grep -m1 -oE '940b47e5[0-9a-f]{56}' "$SPEC")
-  assert_eq "$([[ "$(LC_ALL=C grep -c -F "$spec_art" "$GUIDE")" -ge 1 ]] && echo present)" "present" "09：setup-guide 里的安装包摘要与 spec 已发布值一致"
-  assert_eq "$([[ "$(LC_ALL=C grep -c -F "$spec_entry" "$GUIDE")" -ge 1 ]] && echo present)" "present" "09：setup-guide 里的入口文件摘要与 spec 已发布值一致"
-else
-  echo "SKIP: spec.md 不在（gitignore 工作文件），跳过摘要跨文件一致断言" >&2
-fi
+# 09 验收判据 2：文档里出现的每个摘要值、对象键里的版本都与集成包自己的发布值一致——跨文件一致，防任一处漂移。
+# 2026-10-11（钉版升到 2.29.0）起改为**仓库内对拍**：原先对拍的是 gitignore 的 spec.md、且按写死的摘要前缀去找，换版本时这条要么
+# 在 CI 上整条跳过、要么在本机永远去找旧值。发布值的源头是 Dockerfile（安装包摘要、版本）与 config.example.yaml（入口文件摘要）。
+DF="$ROOT/aws/executor/Dockerfile"; CE="$ROOT/aws/config.example.yaml"
+df_ver=$(sed -n 's/^ARG KIRO_CLI_VERSION=\([0-9.]*\)$/\1/p' "$DF")
+df_art=$(sed -n 's/^ARG KIRO_PINNED_ARTIFACT_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$DF")
+ce_entry=$(sed -n 's/^kiro_cli_sha256: "\([0-9a-f]\{64\}\)"$/\1/p' "$CE")
+assert_eq "$([[ "$df_ver" =~ ^[0-9]+(\.[0-9]+)+$ && ${#df_art} == 64 && ${#ce_entry} == 64 ]] && echo ok)" "ok" "09：（准备）取到了 Dockerfile 的版本与安装包摘要、config.example 的入口文件摘要"
+guide_vals=$(LC_ALL=C grep -E '^  值 = `[0-9a-f]{64}`' "$GUIDE" | LC_ALL=C grep -oE '[0-9a-f]{64}' || true)
+assert_eq "$(printf '%s\n' "$guide_vals" | grep -c .)" "2" "09：setup-guide「两个摘要的分工」里恰好两个已发布值"
+assert_eq "$(printf '%s\n' "$guide_vals" | sed -n 1p)" "$df_art" "09：setup-guide 的安装包摘要已发布值 = Dockerfile 构建期核对的那个"
+assert_eq "$(printf '%s\n' "$guide_vals" | sed -n 2p)" "$ce_entry" "09：setup-guide 的入口文件摘要已发布值 = config.example.yaml 的 kiro_cli_sha256"
+assert_eq "$(sed -n 's/^ART_SHA="\([0-9a-f]\{64\}\)".*/\1/p' "$GUIDE")" "$df_art" "09：备包脚本的 ART_SHA = Dockerfile"
+assert_eq "$(sed -n 's#^KEY="kiro/\([0-9.]*\)/kirocli-x86_64-linux-musl.zip"$#\1#p' "$GUIDE")" "$df_ver" "09：备包脚本的对象键版本 = Dockerfile"
+assert_eq "$(sed -n 's#^URL="https://prod.download.cli.kiro.dev/stable/\([0-9.]*\)/kirocli-x86_64-linux-musl.zip"$#\1#p' "$GUIDE")" "$df_ver" "09：备包脚本的下载地址版本 = Dockerfile"
+assert_eq "$(sed -n 's#^ *sourceFilePath: "kiro/\([0-9.]*\)/kirocli-x86_64-linux-musl.zip"$#\1#p' "$YAML")" "$df_ver" "08：参考 YAML 的 sourceFilePath 版本 = Dockerfile"
 # 钉版档位有自己的一节
 assert_contains "$(cat "$GUIDE")" "钉版档位" "09：setup-guide 有钉版档位这一节"
 # 备包三条硬要求：续传 -C -、核对通过再上传、专用私有同区域桶
