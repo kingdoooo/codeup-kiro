@@ -2803,6 +2803,16 @@ def test_without_security_agent_the_dynamodb_endpoint_names_only_the_lock_table_
     assert _exports(on["state"]) == _exports(off["state"]), "开出站限制不给 StateStack 增加导出"
 
 
+
+def test_turning_security_agent_off_never_strands_a_state_export_the_executor_imports():
+    # Codex 第 1 轮 R3：SA 开着时执行器经跨栈导入映射表的 ARN（授权）与名字（SA_MAPPING_TABLE）；关掉时 StateStack 先部署——这两个导出若随之消失，
+    # 执行器栈的旧模板还导入着，CloudFormation 拒绝删除仍被导入的导出、部署卡住。StateStack 一直显式导出它们（与 NAT 回退的 export_value 同一手法）
+    on, off = _app_templates(inspector=1, security_agent=1), _app_templates(inspector=1)
+    imported = {n for n in _imports(on["executor"]) if n.startswith("CodeupKiroState:")}
+    assert any("CodeReviewMapping" in n for n in imported), ("前提：SA 开着时执行器从 State 导入映射表", sorted(imported))
+    assert imported <= _exports(off["state"]), ("关掉 SA 后 State 仍导出执行器旧模板导入的值", sorted(imported - _exports(off["state"])))
+    assert not [n for n in _imports(off["executor"]) if "CodeReviewMapping" in n], "关掉 SA 后执行器不再导入映射表"
+
 def _dns(tpl):
     lists = {k: v["Properties"] for k, v in _resources(tpl, "AWS::Route53Resolver::FirewallDomainList").items()}
     (group,) = [v["Properties"] for v in _resources(tpl, "AWS::Route53Resolver::FirewallRuleGroup").values()]

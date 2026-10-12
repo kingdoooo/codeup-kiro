@@ -19,6 +19,8 @@
   FAKE_SA_JOB_SOURCE_OVERRIDE=<uri>  作业记下的 sourceCode 换成这个（模拟「读到了别人的源」）
   FAKE_SA_JOB_TEMPLATE=<文件>    BatchGetCodeReviewJobs 输出的模板（取其 codeReviewJobs[0] 的 overview）
   FAKE_SA_FINDINGS=<文件>        ListFindings / BatchGetFindings 的数据来源（一个 BatchGetFindings 输出）
+  FAKE_SA_NOTFOUND=<n>           BatchGetFindings 把请求里的前 n 个 id 放进 notFound、不返回它们（Codex 第 1 轮 R2）
+  FAKE_SA_DROP=<n>               BatchGetFindings 悄悄不返回请求里的前 n 个 id（notFound 仍是空）
   FAKE_SA_FAIL_<操作>=<Code>     该操作一律报这个错误码（操作名大写、去掉连字符，例如 FAKE_SA_FAIL_CREATECODEREVIEW）
   FAKE_SA_LIST_STATUS=<status>   ListCodeReviewJobsForCodeReview 里每个作业都报这个状态（作业刚建好时报的初始状态没实测过，终审 I-11）
 """
@@ -189,8 +191,11 @@ def handle(op, req, st):
                 raise ApiError("ResourceNotFoundException", "job not found")
             return {"findingsSummaries": [{"findingId": f["findingId"], "riskLevel": f.get("riskLevel")} for f in data["findings"]]}
         need(req, "findingIds")
-        want = set(req["findingIds"])
-        return {"findings": [f for f in data["findings"] if f["findingId"] in want], "notFound": []}
+        ids = list(req["findingIds"])
+        nf, drop = int(os.environ.get("FAKE_SA_NOTFOUND", "0")), int(os.environ.get("FAKE_SA_DROP", "0"))
+        gone = set(ids[:max(nf, drop)])
+        want = set(ids) - gone
+        return {"findings": [f for f in data["findings"] if f["findingId"] in want], "notFound": ids[:nf]}
     die(f"unhandled {op}")
 
 

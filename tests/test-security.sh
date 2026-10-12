@@ -285,6 +285,31 @@ jq --arg k "$(fake_token akia)" '.findings[0].description += " Hardcoded key \($
 assert_eq "$(drive FAKE_SA_FINDINGS="$tmp/f-secret.json")" "0" "④ M-2 发现里带密钥 → 0"
 assert_contains "$(LC_ALL=C grep '的 report：' "$tmp/out")" "AKIA****MPLE" "④ M-2 日志里的 report 一行经过掩码（正向：掩码形状在）"
 assert_not_contains "$(cat "$tmp/out")" "$(fake_token akia)" "④ M-2 日志与评论里都没有密钥原文"
+# Codex 第 1 轮 R1：截断**之前**逐字段掩码。令牌恰好跨在截断边界上时，截下来的残片（如 ghp_ 后 19 位）已不合掩码规则，
+# 只靠发布前的整篇掩码会漏——名称（200）、位置标签（80）、说明（800）、作业总结（3000）四处各放一个
+fresh
+jq --arg k "$(fake_token ghp)" '
+  .findings[0].name = ("n" * 190) + " " + $k
+  | .findings[0].codeLocations[0].label = ("l" * 70) + $k
+  | .findings[0].description = ("d" * 777) + $k' "$FIX/findings-diff.json" > "$tmp/f-cut.json"
+jq --arg k "$(fake_token ghp)" '.codeReviewJobs[0].overview = ("o" * 2990) + " " + $k' "$FIX/job-diff-completed.json" > "$tmp/job-cut.json"
+assert_eq "$(drive FAKE_SA_FINDINGS="$tmp/f-cut.json" FAKE_SA_JOB_TEMPLATE="$tmp/job-cut.json")" "0" "R1 令牌跨截断边界 → 照常回写"
+body=$(posted_comment "$(cat "$tmp/out")")
+assert_not_contains "$body" "ghp_ABCDE" "R1 截断边界上的令牌残片不进评论（名称 / 标签 / 说明 / 总结）"
+assert_eq "$(grep -o 'ghp_\*\*\*\*' <<< "$body" | wc -l | tr -d ' ')" "4" "R1 四处都是掩码形状（截断之前就掩了）"
+# Codex 第 1 轮 R2：BatchGetFindings 成功不等于每条都取到了（应答另有 notFound）。取不全就是评审未完成，不能报「未发现」或少报
+fresh
+assert_eq "$(drive FAKE_SA_NOTFOUND=2)" "0" "R2 两条都 notFound → 失败评论（终态 0）"
+body=$(posted_comment "$(cat "$tmp/out")")
+assert_contains "$body" "评审未完成" "R2 全部取不到 → 失败评论"
+assert_contains "$body" "Security Agent 有 2 条发现取不到详情" "R2 失败原因点明取不到几条"
+assert_not_contains "$body" "未发现安全问题" "R2 不报「未发现」（假阴性）"
+fresh
+assert_eq "$(drive FAKE_SA_NOTFOUND=1)" "0" "R2 一条 notFound → 失败评论"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "Security Agent 有 1 条发现取不到详情" "R2 部分取不到 → 也是失败，不少报"
+fresh
+assert_eq "$(drive FAKE_SA_DROP=1)" "0" "R2 应答悄悄少一条（notFound 也是空）→ 失败评论"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "Security Agent 有 1 条发现取不到详情" "R2 按请求 id 与返回 id 的集合核对，不只看 notFound"
 assert_eq "$(ops)" "list-code-reviews create-code-review update-code-review start-code-review-job batch-get-code-review-jobs batch-get-code-review-jobs list-findings batch-get-findings " \
   "④ 调用顺序：收编（无）→ 建 → 重指向 → Start → 核对作业的源 → 轮询 → 取发现"
 creq=$(req_of create-code-review)

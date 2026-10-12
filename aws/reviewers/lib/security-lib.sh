@@ -61,6 +61,40 @@ sa_findings_report() {
   return "$rc"
 }
 
+# BatchGetFindings 成功不等于每条都取到了：应答另有 notFound（SDK 模型：「The list of finding identifiers that were not found」），
+# 也可能悄悄少返回——按「请求的 id」与「返回的 findingId」两个集合核对，不只看 notFound（Codex 第 1 轮 R2）。
+# 用法：sa_findings_missing <请求的 id 清单（一行一个）> <BatchGetFindings 输出 JSON 文件…> → stdout 取不到详情的条数；读不了 / 不是 JSON → rc 非 0
+sa_findings_missing() {
+  local ids="$1"; shift
+  jq -n --rawfile want "$ids" '
+    ($want | split("\n") | map(select(length > 0)) | unique) as $w
+    | ([inputs | (.findings // [])[] | .findingId? | strings] | unique) as $got
+    | ($w - $got) | length' "$@"
+}
+
+# 报告里的模型 / 服务文本逐字段掩码（Codex 第 1 轮 R1）：渲染时 name / label / description 按码点截断，令牌恰好跨在截断边界上时，
+# 截下来的残片（例如 ghp_ 后只剩 19 位）已不合掩码规则，发布前的整篇掩码就漏了——所以截断之前、按完整字段先掩。
+# 用法：sa_redact_report <报告 JSON> → stdout 掩码后的报告；任一字段掩码失败 → rc 2（调用方拒绝发布）
+sa_redact_report() {
+  local report="$1" out v k i j n nl
+  out=$(jq -c . "$report") || return 2
+  n=$(jq '.findings | length' <<< "$out") || return 2
+  for ((i = 0; i < n; i++)); do
+    for k in name description; do
+      v=$(jq -r --argjson i "$i" --arg k "$k" '.findings[$i][$k] // ""' <<< "$out") || return 2
+      v=$(printf '%s' "$v" | review_redact_secrets) || return 2
+      out=$(jq -c --argjson i "$i" --arg k "$k" --arg v "$v" '.findings[$i][$k] = $v' <<< "$out") || return 2
+    done
+    nl=$(jq --argjson i "$i" '.findings[$i].locations | length' <<< "$out") || return 2
+    for ((j = 0; j < nl; j++)); do
+      v=$(jq -r --argjson i "$i" --argjson j "$j" '.findings[$i].locations[$j].label // ""' <<< "$out") || return 2
+      v=$(printf '%s' "$v" | review_redact_secrets) || return 2
+      out=$(jq -c --argjson i "$i" --argjson j "$j" --arg v "$v" '.findings[$i].locations[$j].label = $v' <<< "$out") || return 2
+    done
+  done
+  printf '%s\n' "$out"
+}
+
 # 历次表的三个计数槽（档案 security 的表头「高/中/低」）：CRITICAL+HIGH / MEDIUM / LOW 及其它 → stdout 三个数（空格分隔）
 sa_history_counts() {  # <报告 JSON 文件>
   jq -r '.counts | "\(.CRITICAL + .HIGH) \(.MEDIUM) \(.LOW + .INFORMATIONAL + .UNKNOWN)"' "$1"

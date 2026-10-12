@@ -39,5 +39,10 @@ class StateStack(cdk.Stack):
             billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
             removal_policy=cdk.RemovalPolicy.RETAIN,
         )
+        # 执行器开着 SA 时经跨栈导入映射表的 ARN（授权）与名字（SA_MAPPING_TABLE）；关掉 SA 时本栈先部署——这两个导出若随之消失，
+        # 执行器栈的旧模板还导入着，CloudFormation 拒绝删除仍被导入的导出、部署卡住（Codex 第 1 轮 R3）。所以一直显式导出
+        # （名字与自动生成的相同，同 executor_stack 里 NAT 回退保留公有子网导出的手法）；没开过 SA 时只是多两个没人导入的导出
+        self.export_value(self.mapping_table.table_arn)
+        self.export_value(self.mapping_table.table_name)
 
         self.notifier = FeishuNotifier(self, "FeishuNotifier", cfg=cfg, lock_table=self.lock_table) if notify else None
