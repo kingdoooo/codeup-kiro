@@ -72,27 +72,34 @@ sa_findings_missing() {
     | ($w - $got) | length' "$@"
 }
 
-# 报告里的模型 / 服务文本逐字段掩码（Codex 第 1 轮 R1）：渲染时 name / label / description 按码点截断，令牌恰好跨在截断边界上时，
-# 截下来的残片（例如 ghp_ 后只剩 19 位）已不合掩码规则，发布前的整篇掩码就漏了——所以截断之前、按完整字段先掩。
+# 报告里的模型 / 服务文本逐字段掩码（Codex 第 1 轮 R1、第 2 轮 R4）：渲染时 name / label / description / path 按码点截断（path 经
+# _review_meta_cell 裁短），令牌恰好跨在截断边界上时，截下来的残片（例如 ghp_ 后只剩 19 位）已不合掩码规则，发布前的整篇掩码就漏了——
+# 所以截断之前、按完整字段先掩。掩码是按行的：键与值分在两行的赋值（password:\n<值>）第一遍认不出，所以「先掩 → 折行 → 再掩」
+# （与 review_stream_run_error 同一次序；这四个字段渲染时本来就折成一行）。字段值只经文件进出 jq（--rawfile），不进任何进程的 argv。
 # 用法：sa_redact_report <报告 JSON> → stdout 掩码后的报告；任一字段掩码失败 → rc 2（调用方拒绝发布）
+_sa_redact_text() {  # stdin → stdout（单行）
+  local a b
+  a=$(review_redact_secrets) || return 2
+  b=$(printf '%s' "$a" | LC_ALL=C tr '\r\n\t' '   ' | review_redact_secrets) || return 2
+  printf '%s' "$b"
+}
 sa_redact_report() {
-  local report="$1" out v k i j n nl
-  out=$(jq -c . "$report") || return 2
-  n=$(jq '.findings | length' <<< "$out") || return 2
-  for ((i = 0; i < n; i++)); do
-    for k in name description; do
-      v=$(jq -r --argjson i "$i" --arg k "$k" '.findings[$i][$k] // ""' <<< "$out") || return 2
-      v=$(printf '%s' "$v" | review_redact_secrets) || return 2
-      out=$(jq -c --argjson i "$i" --arg k "$k" --arg v "$v" '.findings[$i][$k] = $v' <<< "$out") || return 2
-    done
-    nl=$(jq --argjson i "$i" '.findings[$i].locations | length' <<< "$out") || return 2
-    for ((j = 0; j < nl; j++)); do
-      v=$(jq -r --argjson i "$i" --argjson j "$j" '.findings[$i].locations[$j].label // ""' <<< "$out") || return 2
-      v=$(printf '%s' "$v" | review_redact_secrets) || return 2
-      out=$(jq -c --argjson i "$i" --argjson j "$j" --arg v "$v" '.findings[$i].locations[$j].label = $v' <<< "$out") || return 2
-    done
-  done
-  printf '%s\n' "$out"
+  local report="$1" cur nxt val red p rc=0
+  cur=$(mktemp) && nxt=$(mktemp) && val=$(mktemp) && red=$(mktemp) || return 2
+  jq -c . "$report" > "$cur" || rc=2
+  while (( rc == 0 )) && IFS= read -r p; do
+    jq -j --argjson p "$p" 'getpath($p) // "" | tostring' "$cur" > "$val" \
+      && _sa_redact_text < "$val" > "$red" \
+      && jq -c --argjson p "$p" --rawfile v "$red" 'setpath($p; $v)' "$cur" > "$nxt" \
+      && mv "$nxt" "$cur" || rc=2
+  done < <(jq -c '.findings | to_entries[] | .key as $i
+                  | (["findings", $i, "name"], ["findings", $i, "description"],
+                     (.value.locations // [] | to_entries[] | .key as $j
+                      | (["findings", $i, "locations", $j, "label"], ["findings", $i, "locations", $j, "path"])))' "$cur" 2>/dev/null \
+           || echo '"bad"')
+  (( rc == 0 )) && cat "$cur"
+  rm -f "$cur" "$nxt" "$val" "$red"
+  return "$rc"
 }
 
 # 历次表的三个计数槽（档案 security 的表头「高/中/低」）：CRITICAL+HIGH / MEDIUM / LOW 及其它 → stdout 三个数（空格分隔）

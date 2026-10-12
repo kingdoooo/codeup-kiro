@@ -297,6 +297,22 @@ assert_eq "$(drive FAKE_SA_FINDINGS="$tmp/f-cut.json" FAKE_SA_JOB_TEMPLATE="$tmp
 body=$(posted_comment "$(cat "$tmp/out")")
 assert_not_contains "$body" "ghp_ABCDE" "R1 截断边界上的令牌残片不进评论（名称 / 标签 / 说明 / 总结）"
 assert_eq "$(grep -o 'ghp_\*\*\*\*' <<< "$body" | wc -l | tr -d ' ')" "4" "R1 四处都是掩码形状（截断之前就掩了）"
+# Codex 第 2 轮 R4：掩码是按行的，键与值分在两行的赋值（password:\n<值>）第一遍认不出；渲染折成一行、截断后只剩不到 12 位的片段，
+# 发布前的整篇掩码也救不回来——字段要「先掩 → 折行 → 再掩 → 截断」（同 review_stream_run_error）。位置路径同样要在裁短之前掩；
+# report 日志一行用逐字段处理过的报告（JSON 序列化后 \n 是两个字符，赋值规则连不上键与值）
+fresh
+jq --arg pw "Zq7hunt3rS3cretValue99" --arg k "$(fake_token ghp)" '
+  .findings[0].name = ("n" * 179) + "password:\n" + $pw
+  | .findings[0].description = ("d" * 779) + "password:\n" + $pw
+  | .findings[0].codeLocations[0].label = ("l" * 59) + "password:\n" + $pw
+  | .findings[0].codeLocations[0].filePath = ("p" * 177) + $k' "$FIX/findings-diff.json" > "$tmp/f-split.json"
+assert_eq "$(drive FAKE_SA_FINDINGS="$tmp/f-split.json")" "0" "R4 键值分行的口令 + 带令牌的长路径 → 照常回写"
+out=$(cat "$tmp/out"); body=$(posted_comment "$out")
+assert_not_contains "$body" "Zq7hunt3r" "R4 评论里没有口令片段（名称 / 说明 / 标签）"
+assert_eq "$(grep -o 'Zq7h\*\*\*\*' <<< "$body" | wc -l | tr -d ' ')" "3" "R4 三处都是折行后再掩的形状"
+assert_not_contains "$body" "ghp_ABCDE" "R4 位置路径里的令牌在裁短之前就掩了"
+assert_contains "$body" "ghp_****" "R4 路径里是掩码形状"
+assert_not_contains "$out" "Zq7hunt3rS3cretValue99" "R4 扫描任务日志（report 一行）里也没有口令原文"
 # Codex 第 1 轮 R2：BatchGetFindings 成功不等于每条都取到了（应答另有 notFound）。取不全就是评审未完成，不能报「未发现」或少报
 fresh
 assert_eq "$(drive FAKE_SA_NOTFOUND=2)" "0" "R2 两条都 notFound → 失败评论（终态 0）"

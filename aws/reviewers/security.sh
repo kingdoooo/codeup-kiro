@@ -369,11 +369,12 @@ missing=$(sa_findings_missing "$WORK/finding-ids" "${batches[@]}") || reviewer_f
 [[ "$missing" == 0 ]] || reviewer_fail "Security Agent 有 ${missing} 条发现取不到详情（BatchGetFindings 没有返回它们），本次结果不完整"
 sa_findings_report "$WORK/files.txt" "${batches[@]}" > "$WORK/report.json" || reviewer_fail "归一 Security Agent 的发现失败（代号 report）"
 log "作业 ${SA_JOB_ID} 完成：$(jq -r '"\(.findings | length) 条（服务返回 \(.returned) 条，误报 \(.false_positives) 条，未能对应的位置 \(.unmatched) 个）"' "$WORK/report.json")"
-# 完整的发现列表进扫描任务日志：评论按字节预算折叠时（终审 I-7）折叠行指向这一行。归一后的报告本来就不带 attackScript 之类（F3）；
-# 与评论同一套密钥掩码（针对性复审 M-2：发现会引用业务库里的密钥，日志组保留 30 天）
-log "作业 ${SA_JOB_ID} 的 report：$(jq -c '.findings' "$WORK/report.json" | review_redact_secrets)"
-# 渲染会按码点截断各字段：截断之前先逐字段掩码（Codex 第 1 轮 R1；发布前的整篇掩码照旧保留）。掩码失败就不发这份汇总
+# 渲染会按码点截断各字段：截断之前先逐字段掩码（Codex 第 1 轮 R1 / 第 2 轮 R4；发布前的整篇掩码照旧保留）。掩码失败就不发这份汇总
 sa_redact_report "$WORK/report.json" > "$WORK/report.redacted.json" || reviewer_fail "Security Agent 的发现掩码失败"
+# 完整的发现列表进扫描任务日志：评论按字节预算折叠时（终审 I-7）折叠行指向这一行。归一后的报告本来就不带 attackScript 之类（F3）；
+# 与评论同一套密钥掩码（针对性复审 M-2：发现会引用业务库里的密钥，日志组保留 30 天）。用逐字段处理过的报告（R4：JSON 序列化后
+# 换行成了 \n 两个字符，按行掩码连不上分在两行的键与值），外面再掩一遍
+log "作业 ${SA_JOB_ID} 的 report：$(jq -c '.findings' "$WORK/report.redacted.json" | review_redact_secrets)"
 review_redact_secrets --keep-lines < "$WORK/overview.md" > "$WORK/overview.redacted.md" || reviewer_fail "Security Agent 的作业总结掩码失败"
 security_render_summary "$WORK/report.redacted.json" "$WORK/meta.json" "$SA_JOB_ID" "$WORK/overview.redacted.md" > "$WORK/comment.md" \
   || reviewer_fail "Security Agent 汇总评论渲染失败"
