@@ -375,7 +375,8 @@ sa_redact_report "$WORK/report.json" > "$WORK/report.redacted.json" || reviewer_
 # 与评论同一套密钥掩码（针对性复审 M-2：发现会引用业务库里的密钥，日志组保留 30 天）。用逐字段处理过的报告（R4：JSON 序列化后
 # 换行成了 \n 两个字符，按行掩码连不上分在两行的键与值），外面再掩一遍
 log "作业 ${SA_JOB_ID} 的 report：$(jq -c '.findings' "$WORK/report.redacted.json" | review_redact_secrets)"
-review_redact_secrets --keep-lines < "$WORK/overview.md" > "$WORK/overview.redacted.md" || reviewer_fail "Security Agent 的作业总结掩码失败"
+# 先剔控制字符 / ANSI（与显示端 review_sanitize_md 的 dectl 同一份字符集）再掩（第 3 轮 R5）
+{ review_clean_text < "$WORK/overview.md" | review_redact_secrets --keep-lines > "$WORK/overview.redacted.md"; } || reviewer_fail "Security Agent 的作业总结掩码失败"
 security_render_summary "$WORK/report.redacted.json" "$WORK/meta.json" "$SA_JOB_ID" "$WORK/overview.redacted.md" > "$WORK/comment.md" \
   || reviewer_fail "Security Agent 汇总评论渲染失败"
 reviewer_publish "$WORK/comment.md"

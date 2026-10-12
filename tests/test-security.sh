@@ -313,6 +313,23 @@ assert_eq "$(grep -o 'Zq7h\*\*\*\*' <<< "$body" | wc -l | tr -d ' ')" "3" "R4 �
 assert_not_contains "$body" "ghp_ABCDE" "R4 位置路径里的令牌在裁短之前就掩了"
 assert_contains "$body" "ghp_****" "R4 路径里是掩码形状"
 assert_not_contains "$out" "Zq7hunt3rS3cretValue99" "R4 扫描任务日志（report 一行）里也没有口令原文"
+# Codex 第 3 轮 R5：掩码看见的串要与最终显示的串一致——显示前还会删掉控制字符（_sanitize_md 的 dectl）与路径里的表格 / HTML 危险字符
+# （_review_meta_cell 的 REVIEW_CELL_DENY_CHARS）。夹在键与值、或令牌中间的这类字符被删掉后才拼出可识别的密钥，而那时已经裁短了。
+# 所以掩码之前先按消费者的规则做「只删不截」的归一化（review_clean_text；路径再删 REVIEW_CELL_DENY_CHARS 与控制字符）
+fresh
+t=$(fake_token ghp)
+jq --arg pw "Zq7hunt3rS3cretValue99" --arg k1 "${t:0:7}" --arg k2 "${t:7}" '
+  .findings[0].name = ("n" * 179) + "password:\u0001" + $pw
+  | .findings[0].description = ("d" * 779) + "password:\u0001" + $pw
+  | .findings[0].codeLocations[0].label = ("l" * 59) + "password:\u0001" + $pw
+  | .findings[0].codeLocations[0].filePath = ("p" * 177) + $k1 + "|" + $k2' "$FIX/findings-diff.json" > "$tmp/f-ctrl.json"
+jq --arg pw "Zq7hunt3rS3cretValue99" '.codeReviewJobs[0].overview = ("o" * 2979) + "password:\u0001" + $pw' "$FIX/job-diff-completed.json" > "$tmp/job-ctrl.json"
+assert_eq "$(drive FAKE_SA_FINDINGS="$tmp/f-ctrl.json" FAKE_SA_JOB_TEMPLATE="$tmp/job-ctrl.json")" "0" "R5 夹控制字符的口令 + 夹 | 的路径令牌 → 照常回写"
+out=$(cat "$tmp/out"); body=$(posted_comment "$out")
+assert_not_contains "$body" "Zq7hunt3r" "R5 评论里没有口令片段（名称 / 说明 / 标签 / 总结）"
+assert_eq "$(grep -o 'Zq7h\*\*\*\*' <<< "$body" | wc -l | tr -d ' ')" "4" "R5 四处都是归一化之后再掩的形状"
+assert_not_contains "$body" "ghp_ABCDE" "R5 路径里被 | 隔开的令牌：删掉 | 之后、裁短之前就掩了"
+assert_not_contains "$out" "Zq7hunt3rS3cretValue99" "R5 扫描任务日志（report 一行）里也没有口令原文"
 # Codex 第 1 轮 R2：BatchGetFindings 成功不等于每条都取到了（应答另有 notFound）。取不全就是评审未完成，不能报「未发现」或少报
 fresh
 assert_eq "$(drive FAKE_SA_NOTFOUND=2)" "0" "R2 两条都 notFound → 失败评论（终态 0）"

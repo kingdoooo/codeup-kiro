@@ -76,10 +76,15 @@ sa_findings_missing() {
 # _review_meta_cell 裁短），令牌恰好跨在截断边界上时，截下来的残片（例如 ghp_ 后只剩 19 位）已不合掩码规则，发布前的整篇掩码就漏了——
 # 所以截断之前、按完整字段先掩。掩码是按行的：键与值分在两行的赋值（password:\n<值>）第一遍认不出，所以「先掩 → 折行 → 再掩」
 # （与 review_stream_run_error 同一次序；这四个字段渲染时本来就折成一行）。字段值只经文件进出 jq（--rawfile），不进任何进程的 argv。
+# 掩码看见的串要与最终显示的串一致（第 3 轮 R5）：显示前还会删掉控制字符（_sanitize_md 的 dectl）、路径还会删掉 REVIEW_CELL_DENY_CHARS
+# （_review_meta_cell）——夹在键与值或令牌中间的这类字符删掉后才拼出可识别的密钥，那时已经裁短了。所以先按同一份字符规则做「只删不截」
+# 的归一化（review_clean_text；路径再加 _review_meta_cell 的两步删除）再掩；删得比显示端多只会更严，渲染端再删一遍是空操作。
 # 用法：sa_redact_report <报告 JSON> → stdout 掩码后的报告；任一字段掩码失败 → rc 2（调用方拒绝发布）
-_sa_redact_text() {  # stdin → stdout（单行）
+_sa_redact_text() {  # [--cell] ；stdin → stdout（单行）
   local a b
-  a=$(review_redact_secrets) || return 2
+  a=$(review_clean_text) || return 2
+  if [[ "${1-}" == --cell ]]; then a=${a//["$REVIEW_CELL_DENY_CHARS"]/}; a=${a//[[:cntrl:]]/}; fi
+  a=$(printf '%s' "$a" | review_redact_secrets) || return 2
   b=$(printf '%s' "$a" | LC_ALL=C tr '\r\n\t' '   ' | review_redact_secrets) || return 2
   printf '%s' "$b"
 }
@@ -89,7 +94,7 @@ sa_redact_report() {
   jq -c . "$report" > "$cur" || rc=2
   while (( rc == 0 )) && IFS= read -r p; do
     jq -j --argjson p "$p" 'getpath($p) // "" | tostring' "$cur" > "$val" \
-      && _sa_redact_text < "$val" > "$red" \
+      && _sa_redact_text $([[ "$p" == *'"path"]' ]] && echo --cell) < "$val" > "$red" \
       && jq -c --argjson p "$p" --rawfile v "$red" 'setpath($p; $v)' "$cur" > "$nxt" \
       && mv "$nxt" "$cur" || rc=2
   done < <(jq -c '.findings | to_entries[] | .key as $i
