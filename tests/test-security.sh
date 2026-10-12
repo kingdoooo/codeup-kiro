@@ -485,6 +485,20 @@ assert_eq "$(ops | tr ' ' '\n' | grep -c '^start-code-review-job$')" "1" "④ Q3
 assert_eq "$(jq '.jobs | length' "$tmp/sa.json")" "1" "④ Q3：服务里只有一个作业"
 assert_contains "$(cat "$tmp/out")" "收编了本次的作业" "④ Q3：日志写明收编"
 assert_contains "$(posted_comment "$(cat "$tmp/out")")" "DIFF 扫描发现 2 个安全问题" "④ Q3：收编的作业照常出汇总"
+# Codex 第 4 轮 R6：含糊 Start 之后，收编的查询本身失败 ≠ 确认没有本次的作业——第一次可能已经建出来了，不能再发一次非幂等的 Start
+# （Q3：每次评审至多一个作业）。查询失败只重读；仍查不了就失败、点明无法确认
+fresh
+assert_eq "$(drive FAKE_SA_START_AMBIGUOUS=1 FAKE_SA_FAIL_LISTCODEREVIEWJOBSFORCODEREVIEW=InternalServerException)" "0" "R6 含糊 Start + 收编列表读失败 → 失败评论（终态 0）"
+assert_eq "$(ops | tr ' ' '\n' | grep -c '^start-code-review-job$')" "1" "R6 只 Start 了一次（列表读失败不当成「没有作业」）"
+assert_eq "$(jq '.jobs | length' "$tmp/sa.json")" "1" "R6 服务里只有一个作业"
+assert_contains "$(posted_comment "$(cat "$tmp/out")")" "无法确认是否已建出作业" "R6 失败评论点明启动结果无法确认"
+fresh
+assert_eq "$(drive FAKE_SA_START_AMBIGUOUS=1 FAKE_SA_FAIL_BATCHGETCODEREVIEWJOBS=InternalServerException)" "0" "R6 含糊 Start + 收编时读作业记录失败 → 失败评论"
+assert_eq "$(ops | tr ' ' '\n' | grep -c '^start-code-review-job$')" "1" "R6 只 Start 了一次（读作业记录失败同样不当成「没有作业」）"
+# 对照（R9 已定）：查询成功、确认没有本次的作业 → 允许再 Start 一次（这里两次都没建出来）
+fresh
+assert_eq "$(drive FAKE_SA_FAIL_STARTCODEREVIEWJOB=InternalServerException)" "0" "R6 对照：Start 两次都含糊、收编确认没有 → 失败评论"
+assert_eq "$(ops | tr ' ' '\n' | grep -c '^start-code-review-job$')" "2" "R6 对照：确认没有作业时照旧重试一次（共两次）"
 # 终审 I-11：收编只按「sourceCode = 本次键」（键里有本次的 run_id），不按状态筛——作业列表里报的若不是 IN_PROGRESS（初始状态没实测过）也照样收编
 fresh
 assert_eq "$(drive FAKE_SA_START_AMBIGUOUS=1 FAKE_SA_LIST_STATUS=PENDING)" "0" "④ I-11 列表里的作业状态不是 IN_PROGRESS → 0"

@@ -219,15 +219,17 @@ sa_job_source() {  # <作业 id> → stdout 作业记下的第一个 sourceCode 
   jq -r '.codeReviewJobs[0].sourceCode[0].s3Location // empty' <<< "$out"
 }
 # 含糊失败（5xx、超时、没有错误码）之后：本次的作业可能已经建了。最近的作业里 sourceCode = 本次键的就是它（键里有本次的 run_id）
+# 返回：0 找到（stdout 作业 id）；1 查询都成功、确认没有本次的作业；2 查询失败或应答不合形——启动结果**无法确认**，调用方不能据此
+# 再发非幂等的 Start（Codex 第 4 轮 R6：原先两种都返回 1，读失败被当成「没有作业」，第一次已建出的作业没人管、又起一个）
 sa_adopt_job() {
   local out ids j
   out=$(sa_call list-code-review-jobs-for-code-review "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" --arg c "$SA_CR_ID" \
-          '{agentSpaceId: $s, codeReviewId: $c}')") || return 1
+          '{agentSpaceId: $s, codeReviewId: $c}')") || return 2
   # 不按状态筛（终审 I-11）：本次的键里有 128 位的 run_id，sourceCode 对得上的就是本次的作业，不管它报什么状态（已结束的交给轮询判）
-  ids=$(jq -c '[.codeReviewJobSummaries[]?] | sort_by(.createdAt) | reverse | .[0:20] | map(.codeReviewJobId)' <<< "$out")
+  ids=$(jq -c '[.codeReviewJobSummaries[]?] | sort_by(.createdAt) | reverse | .[0:20] | map(.codeReviewJobId)' <<< "$out") || return 2
   [[ "$ids" != "[]" ]] || return 1
-  out=$(sa_call batch-get-code-review-jobs "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" --argjson j "$ids" '{agentSpaceId: $s, codeReviewJobIds: $j}')") || return 1
-  j=$(jq -r --arg src "$SA_SRC_URI" '[.codeReviewJobs[]? | select(.sourceCode[0].s3Location == $src)][0].codeReviewJobId // empty' <<< "$out")
+  out=$(sa_call batch-get-code-review-jobs "$(jq -cn --arg s "$SA_AGENT_SPACE_ID" --argjson j "$ids" '{agentSpaceId: $s, codeReviewJobIds: $j}')") || return 2
+  j=$(jq -r --arg src "$SA_SRC_URI" '[.codeReviewJobs[]? | select(.sourceCode[0].s3Location == $src)][0].codeReviewJobId // empty' <<< "$out") || return 2
   [[ -n "$j" ]] || return 1
   printf '%s' "$j"
 }
@@ -282,8 +284,18 @@ sa_start_job() {  # → 全局 SA_JOB_ID
           log "Security Agent 并发已满（${code}），${SA_START_RETRY_EVERY} 秒后再试"
           /bin/sleep "$SA_START_RETRY_EVERY"; continue ;;
         InternalServerException|ServiceUnavailableException|RequestTimeout|unknown)
-          # 含糊：作业可能已经建了（没有幂等令牌，Q3）。先收编，收编不到才重试——且只重试一次
-          SA_JOB_ID=$(sa_adopt_job || true)
+          # 含糊：作业可能已经建了（没有幂等令牌，Q3）。先收编，**确认**收编不到才重试——且只重试一次。
+          # 收编的查询自己失败时只重读（只读、幂等）；仍查不了就失败（R6）——SA_START_PID 不清，退出陷阱还会按源键再收编一次、停掉它
+          local arc tries=0
+          while :; do
+            arc=0; SA_JOB_ID=$(sa_adopt_job) || arc=$?
+            [[ "$arc" == 2 && "$tries" -lt 2 ]] || break
+            tries=$((tries + 1)); /bin/sleep 2
+          done
+          if [[ "$arc" == 2 ]]; then
+            sa_repo_lease release
+            reviewer_fail "启动 Security Agent 作业的应答含糊（代号 ${code}），收编查询也失败，无法确认是否已建出作业（代号 sa-start-unknown）"
+          fi
           if [[ -z "$SA_JOB_ID" ]]; then
             sa_repo_lease release
             [[ "$ambiguous" == 0 ]] || reviewer_fail "启动 Security Agent 作业失败（代号 ${code}）"
