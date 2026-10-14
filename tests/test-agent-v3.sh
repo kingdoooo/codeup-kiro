@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# V3 受信 agent（ADR-0008）：kiro/agent-codeup-reviewer.v3.json 的静态契约 + scripts/lib/kiro-agent.sh 的 V3 段
+# （kiro_install_agent_v3 / kiro_agent_selfcheck_v3 / kiro_run_home_prepare / kiro_env_isolate_home）+ scripts/lib/isolation.sh 的 review_copy_to_root。
+# V2 那份定义冻结（tests/test-agent-config.sh 钉 sha256），这里只测 V3。
+set -euo pipefail
+cd "$(dirname "$0")"
+source helpers.sh
+ROOT=$(cd .. && pwd)
+A2="$ROOT/kiro/agent-codeup-reviewer.json"
+A3="$ROOT/kiro/agent-codeup-reviewer.v3.json"
+source "$ROOT/scripts/lib/kiro-agent.sh"
+source "$ROOT/scripts/lib/isolation.sh"
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+
+# ---- 定义的静态契约 ----
+assert_rc "$(jq -e . "$A3" >/dev/null 2>&1 && echo 0 || echo 1)" 0 "v3 定义是合法 JSON"
+assert_eq "$(jq -r .name "$A3")" "codeup-reviewer" "v3 name"
+assert_eq "$(jq -r .model "$A3")" "$(jq -r .model "$A2")" "v3 与 v2 声明同一个模型"
+assert_eq "$(jq -r .prompt "$A3")" "$(jq -r .prompt "$A2")" "v3 与 v2 引用同一份提示词（相对 file://）"
+assert_eq "$(jq -c .tools "$A3")" '["read","grep","glob"]' "v3 tools 恰好 read / grep / glob（V3 把它们当标签）"
+assert_eq "$(jq -r 'has("toolsSettings") or has("allowedTools") or has("hooks") or has("mcpServers") or has("toolAliases")' "$A3")" "false" \
+  "v3 没有 toolsSettings / allowedTools / hooks / mcpServers / toolAliases"
+assert_eq "$(jq -c .resources "$A3")" '[]' "v3 resources 为空"
+assert_eq "$(jq -r '.includeMcpJson == false and .includePowers == false' "$A3")" "true" "v3 includeMcpJson / includePowers 为 false"
+assert_eq "$(jq -r "$_KIRO_V3_RULES_JQ"' v3_shape_error' "$A3")" "" "v3 规则形状合格（与安装器、自检同一份谓词）"
+assert_eq "$(jq -c '[.permissions.rules[] | select(.effect == "allow") | .match] | first' "$A3")" '["{{REVIEW_ROOT}}","{{REVIEW_CHUNKS}}"]' \
+  "v3 唯一的 allow 是两个占位符（安装时结构化写成物理路径）"
+# 拒绝清单与 V2 是同一份（Q24 默认做法：不加 .env / .pem，只用相对形状，V3 按任意位置匹配）
+assert_eq "$(jq -c '[.permissions.rules[] | select(.capability == "fs_read" and .effect == "deny") | .match] | first' "$A3")" \
+  "$(jq -c .toolsSettings.read.deniedPaths "$A2")" "v3 fs_read deny 与 v2 的 deniedPaths 逐项相同"
+for cap in fs_write shell web_fetch web_search; do
+  assert_eq "$(jq -r --arg c "$cap" '[.permissions.rules[] | select(.capability == $c and .effect == "deny" and (has("match") | not))] | length' "$A3")" "1" \
+    "v3 ${cap} 整体 deny"
+done
+# 元测试：规则谓词真能拒——把 v2 定义喂给它必须报错（v2 只有 deny 规则、没有 allow）
+assert_contains "$(jq -r "$_KIRO_V3_RULES_JQ"' v3_shape_error' "$A2")" "allow 规则不是恰好一条" "元测试：v2 形状的定义过不了 v3 规则谓词"
+
+# ---- 安装 + 自检（物理路径：目录名带空格；macOS 的 mktemp 在 /var/folders → /private/var/folders 符号链接下）----
+RD="$tmp/root dir"; CH="$tmp/work/chunks"; KH="$tmp/kiro-home"; RH="$tmp/real home"; mkdir -p "$RD" "$CH" "$KH/.kiro/agents" "$RH"
+RD_P=$(cd "$RD" && pwd -P); CH_P=$(cd "$CH" && pwd -P)
+NAME=codeup-reviewer-0123456789abcdef
+inst=$(kiro_install_agent_v3 "$A3" "$KH/.kiro/agents" --root "$RD" --chunks "$CH" --name "$NAME" --real-home "$RH")
+assert_eq "$inst" "$KH/.kiro/agents/${NAME}.json" "安装路径 = <agent 目录>/<名字>.json"
+assert_eq "$(jq -r .name "$inst")" "$NAME" "安装后 name = --name"
+assert_eq "$(jq -r .prompt "$inst")" "file://prompts/${NAME}.md" "安装后 prompt 是相对 file://prompts/<名字>.md"
+assert_eq "$(cmp -s "$KH/.kiro/agents/prompts/${NAME}.md" "$ROOT/prompts/review-agent-prompt.md" && echo same)" "same" "提示词原样复制到 agent 目录的 prompts/ 下"
+assert_eq "$(jq -c '[.permissions.rules[] | select(.effect == "allow") | .match] | first' "$inst")" "$(jq -nc --arg a "$RD_P" --arg b "$CH_P" '[$a, $b]')" \
+  "allow 写成评审根目录与 chunks 的物理路径"
+n_home=$(jq -r '[.toolsSettings.read.deniedPaths[] | select(startswith("~/"))] | length' "$A2")
+assert_eq "$(jq -r --arg rh "$RH" '[.permissions.rules[] | select(.capability == "fs_read" and .effect == "deny") | .match[] | select(startswith($rh + "/"))] | length' "$inst")" "$n_home" \
+  "每条 ~/ 形状都按真实 HOME 补了一份绝对副本"
+assert_eq "$(jq -r '[.. | strings | select(contains("{{"))] | length' "$inst")" "0" "安装后没有任何占位符残留"
+if kiro_agent_selfcheck_v3 "$inst" "$RD_P" "$CH_P" "$RH"; then TESTS_PASSED=$((TESTS_PASSED + 1)); else echo "FAIL: 自检应通过：${KIRO_AGENT_SELFCHECK_ERROR}" >&2; exit 1; fi
+# 自检的每一条都有一个能触发它的反例（原因文案逐条点名）
+neg() { # <名字> <jq 改写> <原因里应出现的片段>
+  jq "$2" "$inst" > "$tmp/neg-$1.json"
+  if kiro_agent_selfcheck_v3 "$tmp/neg-$1.json" "$RD_P" "$CH_P" "$RH"; then echo "FAIL: 自检反例 $1 竟然通过" >&2; exit 1; fi
+  assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "$3" "自检反例 $1"
+}
+cp "$KH/.kiro/agents/prompts/${NAME}.md" "$tmp/prompts-keep.md"; mkdir -p "$tmp/prompts"; cp "$tmp/prompts-keep.md" "$tmp/prompts/${NAME}.md"
+neg two-allow '.permissions.rules += [{capability: "fs_read", match: ["/"], effect: "allow"}]' "allow 规则不是恰好一条"
+neg allow-shell '.permissions.rules |= map(if .effect == "allow" then .capability = "shell" else . end)' "唯一的 allow 规则不是 fs_read"
+neg allow-exclude '.permissions.rules |= map(if .effect == "allow" then .exclude = ["x"] else . end)' "capability / match / effect 之外的键"
+neg allow-wrong '.permissions.rules |= map(if .effect == "allow" then .match = ["/"] else . end)' "fs_read allow 的 match 写入的是"
+neg ask '.permissions.rules += [{capability: "shell", effect: "ask"}]' "allow / deny 之外的 effect"
+neg no-shell-deny '.permissions.rules |= map(select(.capability != "shell"))' "整体 deny"
+neg shell-match '.permissions.rules |= map(if .capability == "shell" then .match = ["git *"] else . end)' "整体 deny"
+neg extra-cap '.permissions.rules += [{capability: "mcp", effect: "deny"}]' "之外的能力"
+neg no-gitdeny '.permissions.rules |= map(if .capability == "fs_read" and .effect == "deny" then .match -= ["**/.git/**"] else . end)' "必需的拒绝形状"
+neg no-realhome '.permissions.rules |= map(if .capability == "fs_read" and .effect == "deny" then .match |= map(select(startswith("'"$RH"'") | not)) else . end)' "按真实 HOME 展开"
+neg toolssettings '.toolsSettings = {read: {allowedPaths: ["/"]}}' "V3 不该有的键"
+neg allowedtools '.allowedTools = []' "V3 不该有的键"
+neg hooks '.hooks = []' "V3 不该有的键"
+neg tools '.tools = ["read", "grep", "glob", "shell"]' "tools 不是恰好"
+neg resources '.resources = ["file://README.md"]' "resources 不为空"
+neg mcpjson '.includeMcpJson = true' "includeMcpJson"
+neg powers '.includePowers = true' "includePowers"
+neg absprompt '.prompt = "file:///etc/passwd"' "相对 file://prompts/"
+neg noperm 'del(.permissions)' "缺少 permissions 对象"
+jq '.prompt = "file://prompts/missing.md"' "$inst" > "$tmp/neg-missing.json"
+if kiro_agent_selfcheck_v3 "$tmp/neg-missing.json" "$RD_P" "$CH_P" "$RH"; then echo "FAIL: prompt 指向不存在的文件竟然通过" >&2; exit 1; fi
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "不存在" "自检反例：prompt 指向不存在的文件"
+printf '' > "$tmp/empty.json"
+if kiro_agent_selfcheck_v3 "$tmp/empty.json" "$RD_P" "$CH_P" "$RH"; then echo "FAIL: 空文件竟然通过" >&2; exit 1; fi
+assert_contains "$KIRO_AGENT_SELFCHECK_ERROR" "为空" "自检反例：0 字节文件"
+# 安装器的拒绝：不落盘半成品
+rc=0; kiro_install_agent_v3 "$A3" "$KH/.kiro/agents" --root "$RD" --chunks "$CH" --name x1 --real-home rel 2>/dev/null || rc=$?
+assert_eq "$rc" "1" "安装器：--real-home 不是绝对路径 → 拒绝"
+rc=0; kiro_install_agent_v3 "$A3" "$KH/.kiro/agents" --root "$RD" --chunks "$CH" --name x2 2>/dev/null || rc=$?
+assert_eq "$rc" "1" "安装器：缺 --real-home → 拒绝"
+mkdir -p "$tmp/kiro"; jq '.prompt = "file:///abs.md"' "$A3" > "$tmp/kiro/abs.json"
+rc=0; kiro_install_agent_v3 "$tmp/kiro/abs.json" "$KH/.kiro/agents" --root "$RD" --chunks "$CH" --name x3 --real-home "$RH" 2>/dev/null || rc=$?
+assert_eq "$rc" "1" "安装器：绝对 file:// prompt → 拒绝（V3 不接受）"
+rc=0; kiro_install_agent_v3 "$A2" "$KH/.kiro/agents" --root "$RD" --chunks "$CH" --name x4 --real-home "$RH" 2>/dev/null || rc=$?
+assert_eq "$rc" "1" "安装器：v2 形状的定义 → 拒绝（V3 下它会静默什么都读不到，S3 实测）"
+rc=0; kiro_install_agent_v3 "$A3" "$KH/.kiro/agents" --root "$tmp/nope" --chunks "$CH" --name x5 --real-home "$RH" 2>/dev/null || rc=$?
+assert_eq "$rc" "1" "安装器：评审根目录不存在 → 拒绝"
+assert_eq "$(ls "$KH/.kiro/agents" | grep -c '^x[0-9]' || true)" "0" "安装器拒绝时不落盘半成品"
+
+report

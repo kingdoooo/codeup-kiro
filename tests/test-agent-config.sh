@@ -20,6 +20,13 @@ PH_WS='{{REVIEW_WORKSPACE}}'; PH_CH='{{REVIEW_CHUNKS}}'
 # 安装后的定义里不得残留任何占位符（任何字符串值里都不能有 {{ ）
 leftover_count() { jq '[.. | strings | select(contains("{{"))] | length' "$1"; }
 
+# --- ADR-0008：V2 定义冻结——与 v1.10.1 逐字节一致（V3 用另一份 kiro/agent-codeup-reviewer.v3.json，见 tests/test-agent-v3.sh）---
+V2_FROZEN_SHA256=ec81c9e5cbeab8badf05cf2cc8e303a4ac55a8fe5a61ccf2e6eb90c180172715
+assert_eq "$(kiro_cli_sha256 "$A")" "$V2_FROZEN_SHA256" "V2 定义冻结：sha256 与 v1.10.1 相同"
+# 元测试：这条守卫真能红——改一个字节摘要就变
+cp "$A" "$tmp/v2-touched.json"; printf ' ' >> "$tmp/v2-touched.json"
+assert_eq "$([[ "$(kiro_cli_sha256 "$tmp/v2-touched.json")" != "$V2_FROZEN_SHA256" ]] && echo differs)" "differs" "V2 冻结元测试：多一个字节摘要就不同"
+
 # --- 基本形态 ---
 assert_rc "$(jq -e . "$A" >/dev/null 2>&1 && echo 0 || echo 1)" 0 "agent JSON 合法（占位符是合法字符串）"
 assert_eq "$(jq -r .name "$A")" "codeup-reviewer" "name"

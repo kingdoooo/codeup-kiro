@@ -503,3 +503,115 @@ kiro_env_exec() {
   env -i "${BASH:-/bin/bash}" --norc --noprofile -c "$KIRO_ENV_EXEC_SHIM" kiro-env "$@" \
     3< <(printf '%s\0' ${!__kiro_env_ref+"${!__kiro_env_ref}"})
 }
+
+# ── V3 引擎（ADR-0008）────────────────────────────────────────────────────────────────────────
+# V3 不读 toolsSettings / allowedTools：读取边界只由 permissions.rules 表达。规则形状的谓词只有一份（安装器查源定义、自检查安装结果都拼它），
+# 与 V2 那套「deny 谓词各只有一份」同一理由：两份只改一处的后果是静默的（安装器放行而自检拒绝，或反过来）。
+# 形状：恰好一条 allow（fs_read，只有 capability/match/effect 三个键）、恰好一条带非空 match 的 fs_read deny（含 KIRO_AGENT_REQUIRED_DENY_JQ
+# 的全部必需形状）、fs_write / shell / web_fetch / web_search 各恰好一条不带 match 的整体 deny，没有别的能力、没有 allow/deny 之外的 effect。
+_KIRO_V3_RULES_JQ='
+  def v3_caps: ["fs_write", "shell", "web_fetch", "web_search"];
+  def v3_rules: ((.permissions // {}).rules // []);
+  def v3_allow: [v3_rules[] | select(.effect == "allow")];
+  def v3_read_deny: [v3_rules[] | select(.capability == "fs_read" and .effect == "deny")];
+  def v3_shape_error:
+    if ((.permissions // null) | type) != "object" then "缺少 permissions 对象（V3 不读 toolsSettings，没有它就没有读取边界）"
+    elif ((.permissions | keys) != ["rules"]) then "permissions 含 rules 之外的键（\(.permissions | keys | tojson)）"
+    elif (v3_rules | type) != "array" then "permissions.rules 不是数组"
+    elif ([v3_rules[] | select(type != "object")] | length) > 0 then "permissions.rules 里有不是对象的元素"
+    elif ([v3_rules[] | select(.effect != "allow" and .effect != "deny")] | length) > 0 then "permissions.rules 含 allow / deny 之外的 effect"
+    elif (v3_allow | length) != 1 then "permissions.rules 里的 allow 规则不是恰好一条（\(v3_allow | length) 条）"
+    elif v3_allow[0].capability != "fs_read" then "唯一的 allow 规则不是 fs_read（\(v3_allow[0].capability | tojson)）"
+    elif (v3_allow[0].match | type) != "array" then "fs_read allow 规则没有 match 数组"
+    elif ((v3_allow[0] | keys) - ["capability", "effect", "match"]) != [] then "fs_read allow 规则带了 capability / match / effect 之外的键（\((v3_allow[0] | keys) - ["capability", "effect", "match"] | tojson)）"
+    elif (v3_read_deny | length) != 1 then "fs_read deny 规则不是恰好一条（\(v3_read_deny | length) 条）"
+    elif (v3_read_deny[0].match | type) != "array" or (v3_read_deny[0].match | length) == 0 then "fs_read deny 规则的 match 缺失或为空"
+    elif ('"$KIRO_AGENT_REQUIRED_DENY_JQ"' - v3_read_deny[0].match) != [] then "fs_read deny 缺少必需的拒绝形状 \('"$KIRO_AGENT_REQUIRED_DENY_JQ"' - v3_read_deny[0].match | tojson)"
+    elif ([v3_caps[] as $c | [v3_rules[] | select(.capability == $c and .effect == "deny" and (has("match") | not))] | length == 1] | all | not)
+      then "fs_write / shell / web_fetch / web_search 不是各有恰好一条不带 match 的整体 deny"
+    elif ([v3_rules[] | .capability] - (["fs_read"] + v3_caps)) != [] then "permissions.rules 含 fs_read / fs_write / shell / web_fetch / web_search 之外的能力（\([v3_rules[] | .capability] - (["fs_read"] + v3_caps) | unique | tojson)）"
+    else "" end;
+'
+
+# kiro_install_agent_v3 <agent.v3.json> <目标目录> --root <评审根目录> --chunks <chunk 目录> --name <agent 名> --real-home <真实 HOME>
+#   成功：stdout 打印安装后的文件路径，返回 0；prompt 复制到 <目标目录>/prompts/<agent 名>.md，定义里写成相对 file://prompts/<agent 名>.md
+#   失败：stderr 说明原因，返回非零，不落盘半成品
+# 与 V2 的 kiro_install_agent 分开（不加分支）：V2 冻结（ADR-0008），它的安装器一个字节都不该因为 V3 而动。
+kiro_install_agent_v3() {
+  local src="${1-}" dest_dir="${2-}"; shift 2 || { echo "kiro_install_agent_v3: 缺少 <定义> <目标目录>" >&2; return 1; }
+  local root="" ch="" name="" real_home=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --root)      [[ $# -ge 2 ]] || { echo "kiro_install_agent_v3: --root 缺少取值" >&2; return 1; }; root="$2"; shift 2 ;;
+      --chunks)    [[ $# -ge 2 ]] || { echo "kiro_install_agent_v3: --chunks 缺少取值" >&2; return 1; }; ch="$2"; shift 2 ;;
+      --name)      [[ $# -ge 2 ]] || { echo "kiro_install_agent_v3: --name 缺少取值" >&2; return 1; }; name="$2"; shift 2 ;;
+      --real-home) [[ $# -ge 2 ]] || { echo "kiro_install_agent_v3: --real-home 缺少取值" >&2; return 1; }; real_home="$2"; shift 2 ;;
+      *) echo "kiro_install_agent_v3: 未知参数：$1（只接受 --root / --chunks / --name / --real-home）" >&2; return 1 ;;
+    esac
+  done
+  [[ -n "$root" && -n "$ch" && -n "$name" && -n "$real_home" ]] || { echo "kiro_install_agent_v3: --root、--chunks、--name、--real-home 四个参数都要给（有缺）：${src}" >&2; return 1; }
+  [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+    || { echo "kiro_install_agent_v3: --name 只接受字母数字开头、[A-Za-z0-9._-]、不超过 64 字符：${name}" >&2; return 1; }
+  [[ "$real_home" == /* ]] || { echo "kiro_install_agent_v3: --real-home 必须是绝对路径：${real_home}" >&2; return 1; }
+  root=$(_kiro_agent_physical_dir "$root" "--root") || return 1
+  ch=$(_kiro_agent_physical_dir "$ch" "--chunks") || return 1
+  [[ -r "$src" && -s "$src" ]] || { echo "kiro_install_agent_v3: agent 定义不可读或为空：${src}" >&2; return 1; }
+  jq -e --slurp 'length == 1 and (.[0] | type) == "object"' "$src" >/dev/null 2>&1 \
+    || { echo "kiro_install_agent_v3: 定义不是恰好一个 JSON 对象：${src}" >&2; return 1; }
+  local src_dir prompt rel abs dest pdir shape rendered
+  src_dir=$(cd "$(dirname "$src")" && pwd -P) || return 1
+  prompt=$(jq -r '.prompt // empty' "$src")
+  # V3 拒绝绝对 file:// URI（S3 实测：PromptFileError，exit 4），内联文本也不接受——prompt 是只读角色约束的所在，必须来自集成包的文件
+  [[ "$prompt" == file://* && "$prompt" != file:///* ]] \
+    || { echo "kiro_install_agent_v3: prompt 必须是相对 file:// 引用（V3 拒绝绝对 file:// URI）：${prompt}" >&2; return 1; }
+  rel="${prompt#file://}"; abs="${src_dir}/${rel}"
+  [[ -f "$abs" && -r "$abs" ]] || { echo "kiro_install_agent_v3: prompt 引用的文件不可读：${abs}（来自 ${prompt}）" >&2; return 1; }
+  [[ "$(jq -c '.tools' "$src")" == "$(jq -nc "[$KIRO_AGENT_TOOLS_JQ]")" ]] \
+    || { echo "kiro_install_agent_v3: 定义 tools 不是恰好 [read, grep, glob]（$(jq -c '.tools' "$src")），拒绝安装：${src}" >&2; return 1; }
+  shape=$(jq -r "$_KIRO_V3_RULES_JQ"' v3_shape_error' "$src") || { echo "kiro_install_agent_v3: 读规则失败：${src}" >&2; return 1; }
+  [[ -z "$shape" ]] || { echo "kiro_install_agent_v3: 定义的 permissions.rules 不合形：${shape}，拒绝安装：${src}" >&2; return 1; }
+  dest="${dest_dir}/${name}.json"; pdir="${dest_dir}/prompts"
+  mkdir -p "$pdir" || return 1
+  cp "$abs" "$pdir/${name}.md" || return 1
+  # 一次 jq：name / prompt 改写 + allow 的 match 结构化写成两条物理路径（与定义里写了什么无关）+ fs_read deny 里每条 ~/ 形状按真实 HOME 补一份绝对副本
+  # （Kiro 在临时 HOME 下运行，~ 会被解析成临时目录；原相对条目保留）
+  rendered=$(jq --arg nm "$name" --arg p "file://prompts/${name}.md" --arg root "$root" --arg ch "$ch" --arg rh "$real_home" '
+      .name = $nm | .prompt = $p
+      | .permissions.rules |= map(
+          if .effect == "allow" then .match = [$root, $ch]
+          elif .capability == "fs_read" and .effect == "deny" then
+            .match as $m | .match = ($m + [ $m[] | select(type == "string" and startswith("~/")) | $rh + "/" + ltrimstr("~/") ])
+          else . end)' "$src") || { rm -f "$pdir/${name}.md"; echo "kiro_install_agent_v3: 渲染 agent 定义失败：${src}" >&2; return 1; }
+  printf '%s\n' "$rendered" > "$dest" || { rm -f "$dest" "$pdir/${name}.md"; return 1; }
+  printf '%s\n' "$dest"
+}
+
+# kiro_agent_selfcheck_v3 <安装后的定义> <评审根目录物理路径> <chunks 物理路径> <真实 HOME> → rc 0 / rc 1（原因进 KIRO_AGENT_SELFCHECK_ERROR）
+kiro_agent_selfcheck_v3() {
+  local f="${1-}" root="${2-}" ch="${3-}" rh="${4-}" reason prompt pfile
+  KIRO_AGENT_SELFCHECK_ERROR=""
+  [[ -r "$f" ]] || { KIRO_AGENT_SELFCHECK_ERROR="安装后的定义文件不可读：${f}"; return 1; }
+  [[ -s "$f" ]] || { KIRO_AGENT_SELFCHECK_ERROR="安装后的定义文件为空（0 字节）：${f}"; return 1; }
+  reason=$(jq -e -r --slurp --arg root "$root" --arg ch "$ch" --arg rh "$rh" "$_KIRO_V3_RULES_JQ"'
+      if length != 1 then "安装后的定义文件里不是恰好一个 JSON 值（\(length) 个）"
+      elif (.[0] | type) != "object" then "安装后的定义顶层不是 JSON 对象（是 \(.[0] | type)）"
+      else .[0] | . as $o | (v3_shape_error) as $e
+        | ([ "toolsSettings", "allowedTools", "hooks", "mcpServers", "toolAliases" ] | map(select(. as $k | $o | has($k)))) as $extra
+        | if $e != "" then $e
+          elif v3_allow[0].match != [$root, $ch] then "fs_read allow 的 match 写入的是 \(v3_allow[0].match | tojson)，预期 \([$root, $ch] | tojson)（评审根目录 + chunks 物理路径，顺序固定）"
+          elif ([ v3_read_deny[0].match[] | select(type == "string" and startswith("~/")) | $rh + "/" + ltrimstr("~/") ] - v3_read_deny[0].match) != []
+            then "fs_read deny 缺少按真实 HOME 展开的 ~/ 形状 \([ v3_read_deny[0].match[] | select(type == "string" and startswith("~/")) | $rh + "/" + ltrimstr("~/") ] - v3_read_deny[0].match | tojson)（Kiro 在临时 HOME 下把 ~ 解析成临时目录）"
+          elif .tools != ['"$KIRO_AGENT_TOOLS_JQ"'] then "tools 不是恰好 [read, grep, glob]（\(.tools | tojson)）"
+          elif ($extra | length) > 0 then "定义含 V3 不该有的键 \($extra | tojson)（V3 不读 toolsSettings / allowedTools；hooks / mcpServers / toolAliases 不许出现）"
+          elif ((.resources // []) != []) then "resources 不为空（\(.resources | tojson)）——工作区文件会被自动载入"
+          elif .includeMcpJson != false then "includeMcpJson 不是 false"
+          elif .includePowers != false then "includePowers 不是 false"
+          elif ((.prompt // "") | type) != "string" or ((.prompt // "") | startswith("file://prompts/") | not) then "prompt 不是安装器写的相对 file://prompts/<agent 名>.md（\((.prompt // "") | tojson)）——V3 拒绝绝对 file:// URI，相对路径之外的形态说明安装器没跑或被改过"
+          else "" end
+      end' "$f" 2>/dev/null) || { KIRO_AGENT_SELFCHECK_ERROR="定义不是合法 JSON（或 jq 没有产出任何结果）：${f}"; return 1; }
+  [[ -z "$reason" ]] || { KIRO_AGENT_SELFCHECK_ERROR="$reason"; return 1; }
+  prompt=$(jq -r '.prompt' "$f")
+  pfile="$(dirname "$f")/${prompt#file://}"
+  [[ -f "$pfile" && -s "$pfile" ]] || { KIRO_AGENT_SELFCHECK_ERROR="prompt 指向的文件不存在或为空：${pfile}（kiro-cli 会拒绝加载这个 agent）"; return 1; }
+  return 0
+}
