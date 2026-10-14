@@ -23,6 +23,9 @@ unset REVIEW_RERUN_HINT REVIEW_LOG_HINT REVIEW_LOG_NAME BUILD_NUMBER
 # KIRO_INSTALL_PROFILE 没有缺省值（ADR-0006 / I1：缺失即拒绝运行），公共环境给 latest——
 # 既有变异测的都是现装档位下的既有行为。钉版档位那两个变异在自己的用例里显式覆盖成 pinned。
 export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456 KIRO_INSTALL_PROFILE=latest
+# ADR-0008 起脚本默认 v3：既有用例测的都是 v2 路径（冻结、行为与 v1.10.1 相同），所以公共环境显式给 v2；
+# v3 用例逐个传 KIRO_ENGINE=v3（或置空 / unset，测默认值）。
+export KIRO_ENGINE=v2
 export MR_LOCAL_ID=7 MR_TARGET_BRANCH=main CI_COMMIT_REF_NAME=feature/x
 
 # 变异定义（make_mutant / mutate_more）与它们的静态自检（票 18 ⑨）。
@@ -131,7 +134,10 @@ run_case() {
   # MUT_LAUNCH：显式解释器 + 参数（默认走 shebang）。启动环境那组变异要用 `/bin/bash -p` 跑——
   # 不带 `-p` 时导入的函数会被第 0.0 步逮住，测不到「-p 之后 environ 里仍残留 BASH_FUNC_*」那一层。
   # 刻意不加引号（要分词）。
-  RC=0; OUT=$(env "$@" ${MUT_LAUNCH:-} "$pkg/scripts/kiro-review.sh" 2>&1) || RC=$?
+  # TMPDIR 指到用例目录（ADR-0008，与 test-kiro-review.sh 同一约定）：v3 下替身经 $TMPDIR/kiro-mock-dir 找回配置目录。
+  # 放在 "$@" 之后：用例可以传 `-u KIRO_ENGINE`（env 的选项必须在所有 NAME=VALUE 之前）
+  CASE_TMP=$(mock_tmpdir_pointer "$CASE")
+  RC=0; OUT=$(env "$@" TMPDIR="$CASE_TMP" ${MUT_LAUNCH:-} "$pkg/scripts/kiro-review.sh" 2>&1) || RC=$?
   MUT_LAUNCH=""
 }
 
@@ -677,7 +683,7 @@ assert_contains "$(posted_comment "$OUT")" "缺少按 allow 根注入的绝对�
 assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "M5ae：Kiro 未被启动（.git / .ssh 在空 cwd 下没有绝对拒绝形状护着的 agent 不能拿去跑）"
 
 # --- M5m：删掉执行器第 3 步的自检调用（单变异）→ 「受信 agent 自检通过」那行日志消失（端到端断言它必须在）---
-pkg=$(make_mutant m5m-no-selfcheck '/^if kiro_agent_selfcheck "\$INSTALLED_AGENT"/,/^fi$/d')
+pkg=$(make_mutant m5m-no-selfcheck '/^  if kiro_agent_selfcheck "\$INSTALLED_AGENT"/,/^  fi$/d')
 run_case m5m "$pkg"
 assert_rc "$RC" 0 "M5m：没有自检时评审照跑"
 assert_not_contains "$OUT" "受信 agent 自检通过" "M5m：自检留痕消失——端到端「第 3 步自检通过并留痕」断言会失败"
@@ -2315,5 +2321,99 @@ assert_not_contains "$OUT" "KIRO_ACK_UNTESTED_TARGET 不合法" "M-tri-b：两�
 pkg=$(make_mutant m-tri-c-no-hint 's/^  \[\[ " \$KIRO_TESTED_TARGETS_ALL " == \*" \${KIRO_PLATFORM_KEY}:\${KIRO_CLI_VERSION}:\${other} "\* \]\] || return 0$/  return 0/')
 run_case m-tri-c "$pkg" MOCK_KIRO_VERSION=2.29.1 "KIRO_TESTED_TARGETS_EXTRA=${HOST_PLAT}:2.29.1:v3"
 assert_not_contains "$(posted_comment "$OUT")" "该版本在已探测名单里只有" "M-tri-c：跨引擎提示没了——端到端「跨引擎提示：失败评论点明另一个引擎」断言会失败"
+
+
+# ============ V3 引擎（ADR-0008）的变异 ============
+V3=(KIRO_ENGINE=v3 MOCK_KIRO_VERSION=2.29.1 "KIRO_TESTED_TARGETS_EXTRA=${HOST_PLAT}:2.29.1:v3")
+run_case v3baseline "$ROOT" "${V3[@]}"
+assert_rc "$RC" 0 "V3 对照：未变异实现成功"
+assert_eq "$(basename "$(awk -F'\t' '$1 == "chat" {print $2}' "$MD/homes")")" "kiro-home" "V3 对照：chat 的 HOME 是临时 HOME"
+assert_eq "$(basename "$(cat "$MD/chatcwd")")" "review-root" "V3 对照：cwd 是评审根目录"
+assert_eq "$(cat "$MD/kiroignore")" "AGENTS.md" "V3 对照：kiroignore 写了"
+assert_contains "$(cat "$MD/review-root-files")" "./repo/src/app.py" "V3 对照：副本在"
+assert_contains "$(posted_comment "$OUT")" $'\nKiro CLI: 2.29.1（v3 引擎）\n' "V3 对照：版本行注明引擎"
+
+# --- M-v3a：不把临时 HOME 写进 Kiro 进程环境 → kiro-cli 看到执行器的真实 HOME（permissions.yaml、全局设置都回来了）---
+pkg=$(make_mutant m-v3a-no-isolate-home 's/^  kiro_env_isolate_home "\$KIRO_RUN_HOME" || die_review/  : kiro_env_isolate_home "$KIRO_RUN_HOME" || die_review/')
+run_case m-v3a "$pkg" "${V3[@]}"
+assert_eq "$(awk -F'\t' '$1 == "chat" {print $2}' "$MD/homes")" "$CASE/home" "M-v3a：chat 的 HOME 是真实 HOME——端到端「五处调用都指向临时 HOME」断言会失败"
+
+# --- M-v3b：v3 不换到评审根目录 → 仍在 $WORK/cwd 下跑（搜不到业务库）---
+pkg=$(make_mutant m-v3b-no-review-root '/^  KIRO_CWD=\$(cd "\$WORK\/review-root" \&\& pwd -P) || die_review/d')
+run_case m-v3b "$pkg" "${V3[@]}"
+assert_eq "$(basename "$(cat "$MD/chatcwd")")" "cwd" "M-v3b：cwd 退回 \$WORK/cwd——端到端「Kiro 在评审根目录下运行」断言会失败"
+
+# --- M-v3c：不写 kiroignore → 嵌套的 AGENTS.md 会被 V3 加载（S9 c11）---
+pkg=$(make_mutant m-v3c-no-kiroignore '/printf .%s\\n. "\${KIRO_V3_KIROIGNORE\[@\]}" > "\$h\/.kiro\/settings\/kiroignore" || return 1/d' scripts/lib/kiro-agent.sh)
+run_case m-v3c "$pkg" "${V3[@]}"
+assert_eq "$([[ -e "$MD/kiroignore-missing" ]] && echo missing || echo present)" "missing" "M-v3c：临时 HOME 里没有 kiroignore——端到端「kiroignore 排除 AGENTS.md」断言会失败"
+
+# --- M-v3d：默认值改成 v2 → 不设 KIRO_ENGINE 时跑 v2 ---
+pkg=$(make_mutant m-v3d-default-v2 's/^KIRO_ENGINE="\${KIRO_ENGINE:-v3}"$/KIRO_ENGINE="${KIRO_ENGINE:-v2}"/')
+run_case m-v3d "$pkg" -u KIRO_ENGINE
+assert_contains "$(paste -sd' ' "$MD/args")" "--agent-engine v2" "M-v3d：不设 KIRO_ENGINE 时跑了 v2——端到端「未设置 = v3」断言会失败"
+
+# --- M-v3e：校验放过大写 → KIRO_ENGINE=V2 不再在第 1.6 步被拒 ---
+pkg=$(make_mutant m-v3e-loose-validate 's/^  v2|v3) ;;$/  v2|v3|V2) ;;/')
+run_case m-v3e "$pkg" KIRO_ENGINE=V2
+assert_not_contains "$OUT" "KIRO_ENGINE 不合法" "M-v3e：V2 通过了校验——端到端「KIRO_ENGINE=[V2]：日志说明原因」断言会失败"
+# 纵深：V2 这个「引擎」在已探测名单里没有组合，版本门接着拒绝——失败原因变成了版本门，不再点名变量
+assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-v3e：拒绝原因变成版本门（变量写错却被说成版本没探测，排查方向被带偏）"
+
+# --- M-v3f：实际引擎核对不再拒绝 → 事件流说 v2 的运行照样贴出评审 ---
+pkg=$(make_mutant m-v3f-no-engine-check 's/^  0) \[\[ "\$KIRO_ENGINE_SEEN" == "\$KIRO_ENGINE" \]\] \\$/  0) true \\/')
+run_case m-v3f "$pkg" "${V3[@]}" MOCK_KIRO_ENGINE_REPORT=v2
+assert_rc "$RC" 0 "M-v3f：事件流说 v2 的 v3 运行照常完成——端到端「v3 但事件流说 v2：拒绝采用输出」断言会失败"
+
+# --- M-v3g：兜底命中只记日志 → 执行了 hook 的运行照样贴出评审 ---
+pkg=$(make_mutant m-v3g-guard-log 's/^    1) die_review "V3 事件流兜底触发/    1) log "V3 事件流兜底触发/')
+run_case m-v3g "$pkg" "${V3[@]}" MOCK_KIRO_V3_HOOK=1
+assert_rc "$RC" 0 "M-v3g：兜底降成日志——端到端「V3 兜底 hook_update：拒绝采用输出」断言会失败"
+
+# --- M-v3h：兜底不认 hook_update（库函数的谓词）→ 执行了 hook 的运行照样贴出评审 ---
+pkg=$(make_mutant m-v3h-guard-no-hook 's/select(.kind == "hook_update")/select(false)/' scripts/lib/review-render.sh)
+run_case m-v3h "$pkg" "${V3[@]}" MOCK_KIRO_V3_HOOK=1
+assert_rc "$RC" 0 "M-v3h：兜底认不出 hook——端到端与单测「hook_update → 违规」断言会失败"
+
+# --- M-v3i：跳过复制 → 评审根目录是空的（V3 什么都搜不到、读不到）---
+pkg=$(make_mutant m-v3i-no-copy 's/^  REVIEW_COPY_COUNT=\$(review_copy_to_root "\$WS_P" "\$KIRO_CWD") \\$/  REVIEW_COPY_COUNT=0; : \\/')
+run_case m-v3i "$pkg" "${V3[@]}"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "launched" "M-v3i：变异体照样启动了 Kiro（只是评审根目录是空的）"
+assert_not_contains "$(cat "$MD/review-root-files")" "./repo" "M-v3i：评审根目录里没有副本——端到端「业务库副本在 repo/ 下」断言会失败"
+
+# --- M-v3j：v3 装成 v2 那份定义 → 安装器拒绝（v2 形状的 agent 在 V3 下会静默读不到任何东西，S3 实测）---
+pkg=$(make_mutant m-v3j-v2-def-on-v3 's#^AGENT_FILE_V3="\${PKG_ROOT}/kiro/agent-codeup-reviewer.v3.json"$#AGENT_FILE_V3="${PKG_ROOT}/kiro/agent-codeup-reviewer.json"#')
+run_case m-v3j "$pkg" "${V3[@]}"
+assert_nonzero "$RC" "M-v3j：v2 定义装不成 v3 agent"
+assert_contains "$(posted_comment "$OUT")" "受信 agent 安装失败" "M-v3j：失败评论说明安装失败"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "M-v3j：Kiro 未启动"
+
+# --- M-v3l：安装器不再按真实 HOME 补 ~/ 形状 → V3 自检拒绝 ---
+pkg=$(make_mutant m-v3l-no-realhome-deny 's/\.match = (\$m + \[ \$m\[\] | select(type == "string" and startswith("~\/")) | \$rh + "\/" + ltrimstr("~\/") \])/.match = $m/' scripts/lib/kiro-agent.sh)
+run_case m-v3l "$pkg" "${V3[@]}"
+assert_nonzero "$RC" "M-v3l：V3 自检拒绝运行"
+assert_contains "$(posted_comment "$OUT")" "按真实 HOME 展开的 ~/ 形状" "M-v3l：失败评论点名缺的是真实 HOME 副本"
+assert_eq "$([[ -e "$MD/args" ]] && echo launched || echo not-launched)" "not-launched" "M-v3l：Kiro 未启动"
+
+# --- M-v3m：版本行不注明引擎 ---
+pkg=$(make_mutant m-v3m-no-engine-suffix '/^if \[\[ "\$KIRO_ENGINE" == v3 \]\]; then KIRO_VERSION_LINE=/d')
+run_case m-v3m "$pkg" "${V3[@]}"
+assert_contains "$(posted_comment "$OUT")" $'\nKiro CLI: 2.29.1\n' "M-v3m：版本行没有引擎——端到端「版本行注明引擎」断言会失败"
+
+# --- M-v3n：校验改成前缀匹配 → KIRO_ENGINE=v2x 通过第 1.6 步（spec A 列的三种变异之一）---
+pkg=$(make_mutant m-v3n-prefix-validate 's/^  v2|v3) ;;$/  v2*|v3*) ;;/')
+run_case m-v3n "$pkg" KIRO_ENGINE=v2x
+assert_not_contains "$OUT" "KIRO_ENGINE 不合法" "M-v3n：v2x 通过了校验——端到端「非法取值：日志说明原因」断言会失败"
+
+# --- M-v3o：兜底取第一次 config_option_update 的 mode → 默认的 vibe 被当成本次 agent 来核对（spec E「只看第一个事件」）---
+pkg=$(make_mutant m-v3o-guard-first-mode 's/select(.id == "mode") \] | last) as \$mode/select(.id == "mode") ] | first) as $mode/' scripts/lib/review-render.sh)
+run_case m-v3o "$pkg" "${V3[@]}"
+assert_nonzero "$RC" "M-v3o：干净的 V3 运行被兜底拒绝——端到端「V3 对照：成功」断言会失败"
+assert_contains "$(posted_comment "$OUT")" "V3 事件流兜底触发" "M-v3o：失败原因是兜底"
+
+# --- M-v3p：模型取第一次 config_option_update → 默认的 auto 被当成实际模型（spec E 列的变异）---
+pkg=$(make_mutant m-v3p-model-first 's#(last // null) | if \. == null then empty elif type == "string"#(first // null) | if . == null then empty elif type == "string"#' scripts/lib/review-render.sh)
+run_case m-v3p "$pkg" "${V3[@]}"
+assert_contains "$(posted_comment "$OUT")" "实际使用的模型是 \`auto\`" "M-v3p：评论挂上了误报的模型提示——端到端「V3 对照：无模型提示」断言会失败"
 
 report

@@ -3,9 +3,12 @@
 # 安全前提：本脚本必须从受信集成包仓库（流水线独立代码源，固定分支/tag）执行，
 # 绝不从被评审的业务仓库源分支执行（源分支可被 MR 作者任意修改）。
 # 业务仓库 checkout 目录由 REVIEW_REPO_DIR 指定，仅作为被分析数据：它只出现在受信 agent 的 allowedPaths 里，
-# **五处 kiro-cli 调用都在 $WORK/cwd（空目录）下运行**（15-fix4 #1）——kiro-cli 相对 cwd 发现的每一个面（.kiro/agents 顶替
-# 受信 agent、.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、lsp.json…）都落在一个没有文件的目录里；
-# 第 5.5 步对业务库工作树里 AGENTS.md/lsp.json/.kiro/符号链接 的删除保留为**第二道**。Kiro 固定以 v2 引擎运行（ADR-0004）。
+# **五处 kiro-cli 调用都在本脚本新建的目录下运行，业务库从来不是 cwd**（15-fix4 #1）——kiro-cli 相对 cwd 发现的每一个面（.kiro/agents 顶替
+# 受信 agent、.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、hooks、lsp.json…）都落在集成包控制的目录里；
+# 第 5.5 步对业务库工作树里 AGENTS.md/lsp.json/.kiro/符号链接 的删除保留为**第二道**。
+# 引擎（ADR-0008，取代 ADR-0004）：默认 v3，KIRO_ENGINE=v2 显式回退。v2 在 $WORK/cwd（空目录）下运行、业务库只在 allowedPaths 里；
+# v3 的搜索只覆盖工作区根目录，所以在**评审根目录** $WORK/review-root 下运行（里面只有业务库副本 repo/），HOME 指向本次运行的临时目录
+# $WORK/kiro-home（agent、设置、kiroignore 都在里面），事件流再过三条兜底（steering / hook / agent 来源）。
 # 输出契约：Kiro 以 --output-format stream-json 输出事件流，评审报告是 runFinished.data.finalText 里
 # 由 <<<KIRO_REVIEW_JSON>>> 包裹的一段 JSON；汇总评论由 scripts/lib/review-render.sh 渲染。
 # 汇总评论生命周期：每评审员每 MR 至多一条（spec I4）。发评论前先查 MR 的全局评论，按
@@ -142,7 +145,11 @@ KIRO_PINNED_ARTIFACT="${KIRO_PINNED_ARTIFACT:-}"
 # 所以这两个摘要是钉版安装唯一的完整性依据。
 KIRO_PINNED_ARTIFACT_SHA256="${KIRO_PINNED_ARTIFACT_SHA256:-}"
 PROMPT_FILE="${PROMPT_FILE:-${PKG_ROOT}/prompts/review-prompt.md}"
-AGENT_FILE="${PKG_ROOT}/kiro/agent-codeup-reviewer.json"
+# 受信 agent 定义按引擎各一份（ADR-0008）：v2 那份冻结、与 v1.10.1 逐字节一致（tests/test-agent-config.sh 钉 sha256），v3 那份只用 permissions.rules。
+# 第 1.6 步校验完 KIRO_ENGINE 才确定用哪一份；在那之前 AGENT_FILE 指向 v2 那份（第 1 步之前的可读性检查与报错文案用它）。
+AGENT_FILE_V2="${PKG_ROOT}/kiro/agent-codeup-reviewer.json"
+AGENT_FILE_V3="${PKG_ROOT}/kiro/agent-codeup-reviewer.v3.json"
+AGENT_FILE="$AGENT_FILE_V2"
 REVIEW_REPO_DIR="${REVIEW_REPO_DIR:-$PWD}"
 # Kiro 进程环境许可清单之外要额外透传的变量**名**（逗号分隔，只放名字不放值；自建执行器可能需要 LD_LIBRARY_PATH /
 # JAVA_HOME / AWS_PROFILE 这类；凭证形状的名字按规则拒绝，AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 显式放行）。固定名单与校验在 scripts/lib/kiro-agent.sh 的 kiro_env_allowlist；
@@ -197,10 +204,10 @@ KIRO_ACK_UNTESTED_VERSION="${KIRO_ACK_UNTESTED_VERSION:-}"
 # 在这里落地——取值 = 运维构建执行器镜像时记录的 kiro-cli 入口文件 SHA-256（setup-guide 第 7 节），脚本在**第一次执行 kiro-cli 之前**核对，
 # 不一致拒绝评审。空 = 不核对（只留日志）：云托管 curl|bash 路径本就没有固定二进制可钉；生产必配。
 KIRO_CLI_SHA256="${KIRO_CLI_SHA256:-}"
-# Kiro 引擎钉死为 v2，写在脚本里而不是 agent 配置里（ADR-0004）：实测 kiro-cli 2.21 headless 的默认
-# 引擎 v1 与预览版 v3 都不阻断工作区 AGENTS.md 注入，只有 v2 配合 chat.disableInheritingDefaultResources
-# 才阻断。故意不读环境变量——引擎不是可配置项，避免被流水线变量或工作区设置改掉。
-KIRO_ENGINE=v2
+# Kiro 引擎（ADR-0008，取代 ADR-0004 的「钉死 v2」）：默认 v3；只有流水线变量 KIRO_ENGINE **整串等于** v2 才走 v2（演示用；v2 冻结在
+# 已探测名单里的 v2 组合上）。不设或留空 = v3（`:-` 把空串也当未设）；其余取值（V2、带空格、v4 …）在第 1.6 步拒绝运行、不回显。
+# 引擎每次都写在调用行上显式传 --agent-engine，从不写 kiro-cli 的全局设置 chat.agentEngine——执行器上残留的设置改不了它。
+KIRO_ENGINE="${KIRO_ENGINE:-v3}"
 
 log() { echo "[kiro-review] $*" >&2; }
 # 流水线日志也是评论出口（I3）：失败原因 / 降级原因里**不受信**的那一部分（事件流的 runFinished.status、jq 报错回显、去重日志里的
@@ -1156,6 +1163,15 @@ if [[ "$KIRO_INSTALL_PROFILE" == pinned ]]; then
     || die_review "KIRO_PINNED_ARTIFACT 路径不可信：它落在业务仓库之内、或本身是符号链接（业务库内容一律不受信，安装包不能取自业务库；取值不回显，具体形态见$(review_log_name)）。请把它指到业务仓库之外的物理文件路径，或把 KIRO_INSTALL_PROFILE 改成 latest"
 fi
 log "安装档位：${KIRO_INSTALL_PROFILE}"
+# 引擎（ADR-0008 / 不变式 W1）：整串精确匹配，不去空白、不转小写——演示时把 V2 写错，评审会悄悄跑在 v3 上、结果与预期不同却没有任何提示。
+case "$KIRO_ENGINE" in
+  v2|v3) ;;
+  *) die_review "KIRO_ENGINE 不合法：只能是 v2 或 v3（不设或留空 = v3；取值不回显）。请修正该流水线变量（ADR-0008）" ;;
+esac
+if [[ "$KIRO_ENGINE" == v3 ]]; then
+  AGENT_FILE="$AGENT_FILE_V3"
+  [[ -r "$AGENT_FILE" ]] || die_review "custom agent 配置文件不可读：$AGENT_FILE"
+fi
 # KIRO_ENV_PASSTHROUGH 只收变量名：非法名字（写成 NAME=value、带空格/连字符）与凭证形状的名字（规则表 KIRO_ENV_CRED_RULES，
 # AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 显式放行）一律拒绝运行——静默忽略会让运维以为透传生效了。这份拒绝清单是防运维手滑、
 # 不是安全边界（受信 agent 没有 shell / env 工具）。原因文案只有一处（kiro_env_allowlist 的 KIRO_ENV_ALLOW_ERROR：MR 评论按条目序号 +
@@ -1298,36 +1314,73 @@ log "kiro-cli 入口（后续五处调用都用这一个绝对路径）：${KIRO
 #   第 4 步 build_review_input 对已存在的空目录只 mkdir -p、不会另建一个）。
 # 两条路径是安装函数的必填参数，缺了拒绝落盘（allow 为空在 headless 下等于每次读取都被拒，宁可不跑）；
 # 三个工具的 deniedPaths 缺失/为空/不含 **/.git/** 同样拒装（否则结构化写入会凭空造出只有 allow 没有 deny 的工具）。
-# Kiro 运行目录（15-fix4 #1）：五处 kiro-cli 调用（下面的 --help / --list-models、--version、第 5.5 步的 settings、第 6 步的 chat）都在这个**空目录**下运行，
-# 业务库只在 allowedPaths 里、由模型用绝对路径读取（运行时提示词把 $WS_P 穿进去）。kiro-cli 相对 cwd 发现的每一个面——
-# $CWD/.kiro/agents/<同名>.json 顶替受信 agent（工作区优先于全局）、$CWD/.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、
-# lsp.json——都落在一个没有文件的目录里；第 5.5 步的删除从承重措施变成第二道。
+# Kiro 运行目录（15-fix4 #1）：五处 kiro-cli 调用（下面的 --help / --list-models、--version、第 5.5 步的 settings、第 6 步的 chat）都在
+# 本脚本新建的目录下运行，业务库从来不是 cwd。kiro-cli 相对 cwd 发现的每一个面——$CWD/.kiro/agents/<同名>.json 顶替受信 agent
+# （工作区优先于全局）、$CWD/.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、.kiro/hooks、lsp.json——都落在集成包控制的目录里；
+# 第 5.5 步的删除从承重措施变成第二道。
+#   v2：$WORK/cwd **空目录**，业务库只在 allowedPaths 里、由模型用绝对路径读取（运行时提示词把 $WS_P 穿进去）。
+#   v3（ADR-0008 / Q21 H5 布局）：V3 的 grep / 文件搜索只覆盖工作区根目录（cwd），空 cwd 下搜不到任何东西（S9 c02–c04 实测）；
+#      而 cwd 设成业务库时，仓库的 .kiro/hooks 会在执行器上被执行、同名工作区 agent 会顶替受信 agent（S9 c05 实测）。所以 v3 的 cwd 是
+#      **评审根目录** $WORK/review-root：集成包新建，第 5.5 步之后把已隔离的业务库复制进其下的 repo/，根目录本身没有任何仓库内容。
+#      HOME 是本次运行的临时目录 $WORK/kiro-home（V3 不认 KIRO_HOME / KIRO_AGENT_CONFIG_DIR，S6 实测；用户级 permissions.yaml 能打穿
+#      读取边界，S3 实测），agent、设置、kiroignore 都只在里面，跑完随 $WORK 一起删。
 mkdir -p "$WORK/chunks" "$WORK/cwd" || die_review "无法创建工作目录：$WORK/chunks、$WORK/cwd"
 KIRO_CWD=$(cd "$WORK/cwd" && pwd -P) || die_review "无法进入 Kiro 运行目录：$WORK/cwd"   # 物理路径：与日志、替身记录逐字一致
 WS_P=$(pwd -P); CH_P=$(cd "$WORK/chunks" && pwd -P) || die_review "无法进入 diff chunk 目录：$WORK/chunks"
-# --name：本次独占的 agent 名（P1-2），安装文件 = $HOME/.kiro/agents/<AGENT_RUN_NAME>.json，退出 trap 精确删除它
-INSTALLED_AGENT=$(kiro_install_agent "$AGENT_FILE" "$HOME/.kiro/agents" --workspace "$WS_P" --chunks "$WORK/chunks" --name "$AGENT_RUN_NAME") \
-  || die_review "受信 agent 安装失败：$AGENT_FILE"
-# 安装器 stdout 单行只是约定（15-fix4 #15）：将来多一行 debug 就让 AGENT_NAME 拿到多行串、传给 --agent
-[[ "$INSTALLED_AGENT" != *$'\n'* ]] || die_review "内部错误：安装器输出不是单行（集成包缺陷，请报告）"
-AGENT_NAME=$(basename "$INSTALLED_AGENT" .json)
-log "已安装受信 custom agent：${AGENT_NAME}（${INSTALLED_AGENT}）"
-# 安装结果自检 = **值比对 + 安全字段**，不是只看形状：读安装文件本身，三处 allowedPaths 的值必须逐字等于本次的 pwd -P 与
-# $WORK/chunks 物理路径（参数顺序反了、丢了 pwd -P、写成逻辑路径都过不了）、三处 deniedPaths 非空且含 **/.git/**、
-# allowedTools=[]、includeMcpJson/includePowers=false（kiro_agent_selfcheck，一次 jq）。任何一项不符都拒绝运行——某个工具
-# 没有边界的 agent 不能拿去跑。if/else 而不是 `a && log || die`：log 写 stderr 失败时后者会带着空原因走 die 分支（15-fix3 #7）。
-if kiro_agent_selfcheck "$INSTALLED_AGENT" "$WS_P" "$CH_P"; then
-  log "受信 agent 自检通过：allowedPaths 值比对（read/grep/glob 三处 = 业务库 checkout + chunks 物理路径）、allowedTools=[]、includeMcpJson/includePowers=false、deniedPaths 三处含 **/.git/** 且仓库相对形状已按两条 allow 根注入绝对副本（$(jq -r '[.toolsSettings.read.deniedPaths[] | select(startswith("**/"))] | length' "$INSTALLED_AGENT") 条 × 2）"
+# 运行时提示词里给模型的业务库绝对路径（{{REVIEW_WORKSPACE}}）：v2 是 checkout 本身，v3 是评审根目录下的副本
+REVIEW_WS_FOR_MODEL="$WS_P"
+KIRO_RUN_HOME=""
+if [[ "$KIRO_ENGINE" == v3 ]]; then
+  mkdir -p "$WORK/review-root" "$WORK/kiro-home" || die_review "无法创建 V3 评审根目录或临时 HOME：$WORK/review-root、$WORK/kiro-home"
+  KIRO_CWD=$(cd "$WORK/review-root" && pwd -P) || die_review "无法进入 V3 评审根目录：$WORK/review-root"
+  KIRO_RUN_HOME=$(cd "$WORK/kiro-home" && pwd -P) || die_review "无法进入 V3 临时 HOME：$WORK/kiro-home"
+  REVIEW_WS_FOR_MODEL="${KIRO_CWD}/repo"
+  kiro_run_home_prepare "$KIRO_RUN_HOME" "$KIRO_CLI_CMD" || die_review "V3 临时 HOME 准备失败：$KIRO_RUN_HOME"
+  # --name 同 v2（P1-2）；--real-home：deny 清单里的 ~/ 形状按真实 HOME 补一份绝对副本（Kiro 在临时 HOME 下把 ~ 解析成临时目录）
+  INSTALLED_AGENT=$(kiro_install_agent_v3 "$AGENT_FILE" "$KIRO_RUN_HOME/.kiro/agents" --root "$KIRO_CWD" --chunks "$WORK/chunks" --name "$AGENT_RUN_NAME" --real-home "$HOME") \
+    || die_review "受信 agent 安装失败：$AGENT_FILE"
+  [[ "$INSTALLED_AGENT" != *$'\n'* ]] || die_review "内部错误：安装器输出不是单行（集成包缺陷，请报告）"
+  AGENT_NAME=$(basename "$INSTALLED_AGENT" .json)
+  log "已安装受信 custom agent：${AGENT_NAME}（${INSTALLED_AGENT}；V3 临时 HOME）"
+  if kiro_agent_selfcheck_v3 "$INSTALLED_AGENT" "$KIRO_CWD" "$CH_P" "$HOME"; then
+    log "受信 agent 自检通过（V3）：fs_read allow 恰好是评审根目录 + chunks 物理路径、其余规则全是 deny（fs_read 拒绝清单含必需形状与真实 HOME 副本，fs_write / shell / web_fetch / web_search 整体拒绝）、prompt 为相对 file://、没有 toolsSettings / hooks / mcpServers"
+  else
+    die_review "受信 agent 安装结果异常：${KIRO_AGENT_SELFCHECK_ERROR}（集成包缺陷，请报告）"
+  fi
+  log "受信 agent 许可路径：$(jq -r '[.permissions.rules[] | select(.effect == "allow") | .match[]] | join("、")' "$INSTALLED_AGENT")（V3 fs_read allow）"
 else
-  die_review "受信 agent 安装结果异常：${KIRO_AGENT_SELFCHECK_ERROR}（集成包缺陷，请报告）"
+  # --name：本次独占的 agent 名（P1-2），安装文件 = $HOME/.kiro/agents/<AGENT_RUN_NAME>.json，退出 trap 精确删除它
+  INSTALLED_AGENT=$(kiro_install_agent "$AGENT_FILE" "$HOME/.kiro/agents" --workspace "$WS_P" --chunks "$WORK/chunks" --name "$AGENT_RUN_NAME") \
+    || die_review "受信 agent 安装失败：$AGENT_FILE"
+  # 安装器 stdout 单行只是约定（15-fix4 #15）：将来多一行 debug 就让 AGENT_NAME 拿到多行串、传给 --agent
+  [[ "$INSTALLED_AGENT" != *$'\n'* ]] || die_review "内部错误：安装器输出不是单行（集成包缺陷，请报告）"
+  AGENT_NAME=$(basename "$INSTALLED_AGENT" .json)
+  log "已安装受信 custom agent：${AGENT_NAME}（${INSTALLED_AGENT}）"
+  # 安装结果自检 = **值比对 + 安全字段**，不是只看形状：读安装文件本身，三处 allowedPaths 的值必须逐字等于本次的 pwd -P 与
+  # $WORK/chunks 物理路径（参数顺序反了、丢了 pwd -P、写成逻辑路径都过不了）、三处 deniedPaths 非空且含 **/.git/**、
+  # allowedTools=[]、includeMcpJson/includePowers=false（kiro_agent_selfcheck，一次 jq）。任何一项不符都拒绝运行——某个工具
+  # 没有边界的 agent 不能拿去跑。if/else 而不是 `a && log || die`：log 写 stderr 失败时后者会带着空原因走 die 分支（15-fix3 #7）。
+  if kiro_agent_selfcheck "$INSTALLED_AGENT" "$WS_P" "$CH_P"; then
+    log "受信 agent 自检通过：allowedPaths 值比对（read/grep/glob 三处 = 业务库 checkout + chunks 物理路径）、allowedTools=[]、includeMcpJson/includePowers=false、deniedPaths 三处含 **/.git/** 且仓库相对形状已按两条 allow 根注入绝对副本（$(jq -r '[.toolsSettings.read.deniedPaths[] | select(startswith("**/"))] | length' "$INSTALLED_AGENT") 条 × 2）"
+  else
+    die_review "受信 agent 安装结果异常：${KIRO_AGENT_SELFCHECK_ERROR}（集成包缺陷，请报告）"
+  fi
+  # 打出安装文件里**实际**的许可路径（不是打参数）：首次联调按 setup-guide §8 核对它们与本次 checkout 一致
+  log "受信 agent 许可路径：$(jq -r '.toolsSettings.read.allowedPaths | join("、")' "$INSTALLED_AGENT")（read/grep/glob 三处一致）"
 fi
-# 打出安装文件里**实际**的许可路径（不是打参数）：首次联调按 setup-guide §8 核对它们与本次 checkout 一致
-log "受信 agent 许可路径：$(jq -r '.toolsSettings.read.allowedPaths | join("、")' "$INSTALLED_AGENT")（read/grep/glob 三处一致）"
 # 五处 kiro-cli 调用（这里的 --help、--list-models 与 --version、第 5.5 步的 settings、第 6 步的 chat）都经 kiro_env_exec 以许可清单启动（15-fix #8；issue 10）：
 # 第 2 步可能刚把 ~/.local/bin 加进 PATH，所以许可清单在这里重算一次（第 1.6 步那次只为校验 KIRO_ENV_PASSTHROUGH）。
 env_allowlist_or_die
-# 所有 kiro-cli 子命令都在 $KIRO_CWD（空目录）下执行，绝不在业务库工作树里（15-fix4 #1）
-log "Kiro 运行目录：${KIRO_CWD}（空目录；业务库 ${WS_P} 只在 allowedPaths 里，模型按绝对路径读取）"
+# v3：许可清单里的 HOME 与 XDG_* 换成临时 HOME（ADR-0008）——五处调用从这里起看到的都是临时 HOME，真实 HOME 的 ~/.kiro 一个字节都不碰
+if [[ "$KIRO_ENGINE" == v3 ]]; then
+  kiro_env_isolate_home "$KIRO_RUN_HOME" || die_review "V3 临时 HOME 无法写进 Kiro 进程环境：$KIRO_RUN_HOME"
+fi
+# 所有 kiro-cli 子命令都在 $KIRO_CWD 下执行，绝不在业务库工作树里（15-fix4 #1）
+if [[ "$KIRO_ENGINE" == v3 ]]; then
+  log "Kiro 运行目录：${KIRO_CWD}（V3 评审根目录：第 5.5 步之后放入业务库副本 repo/；HOME = 临时目录 ${KIRO_RUN_HOME}）"
+else
+  log "Kiro 运行目录：${KIRO_CWD}（空目录；业务库 ${WS_P} 只在 allowedPaths 里，模型按绝对路径读取）"
+fi
 KIRO_CHAT_HELP=$(cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" 60 "$KIRO_CLI_CMD" chat --help 2>&1 || true)
 # 两种拼法**任一**存在即通过（issue 04）：2.21.4 里 `--agent-engine <v1|v2|v3>` 与 `--v2` / `--v3` 简写并存，`--agent-engine`
 # 仍标 "v2" (default)、没有任何废弃公告——「同一件事出现第二种拼法」是典型的废弃前兆，只认一种拼法的话，官方哪天把帮助文本
@@ -1335,8 +1388,8 @@ KIRO_CHAT_HELP=$(cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" 6
 # 调用侧刻意不动（仍显式传 --agent-engine v2）：`--v2` 与 `--agent-engine v2` 语义是否完全一致未经证实，切过去要先跑一次完整探测。
 # 真的把 --agent-engine 移除的那天，chat 会以 clap 退出码 2 失败——那是一个点名参数的失败面，而不是这道门把还能用的版本一起拦死。
 if ! grep -q -- '--agent-engine' <<<"$KIRO_CHAT_HELP" \
-   && ! grep -qE -- '(^|[^[:alnum:]_-])--v2([^[:alnum:]_-]|$)' <<<"$KIRO_CHAT_HELP"; then
-  die_review "kiro-cli chat 既不支持 --agent-engine 也不支持 --v2，无法钉死 ${KIRO_ENGINE} 引擎（ADR-0004：默认引擎不阻断 AGENTS.md 注入），拒绝运行。请升级 kiro-cli（≥ 2.21）"
+   && ! grep -qE -- "(^|[^[:alnum:]_-])--${KIRO_ENGINE}([^[:alnum:]_-]|\$)" <<<"$KIRO_CHAT_HELP"; then
+  die_review "kiro-cli chat 既不支持 --agent-engine 也不支持 --${KIRO_ENGINE}，无法钉死 ${KIRO_ENGINE} 引擎（ADR-0008：引擎每次显式指定，不依赖 CLI 的默认引擎），拒绝运行。请升级 kiro-cli（≥ 2.21）"
 fi
 grep -qE -- '(^|[[:space:]])--agent([[:space:]]|$)' <<<"$KIRO_CHAT_HELP" \
   || die_review "kiro-cli chat 不支持 --agent，无法套用受信只读 agent（拒绝路径、无 MCP/shell/write/web），拒绝运行。请升级 kiro-cli"
@@ -1560,11 +1613,29 @@ ISOLATION_COUNTS=$(review_isolate_workspace "$WORK/isolation-removed.zlist") \
 read -r _iso_agents _iso_kiro _iso_links _iso_lsp <<<"$ISOLATION_COUNTS"
 log "隔离：已移除业务库工作树中 ${_iso_agents} 个 AGENTS.md、${_iso_kiro} 个 .kiro、${_iso_links} 个符号链接（均任意深度）与根 lsp.json（${_iso_lsp} 个，任何类型）；工作树自己的 .git 不动"
 unset _iso_agents _iso_kiro _iso_links _iso_lsp
-# 执行环境：禁止 Kiro 继承工作区默认资源（AGENTS.md/README.md 等），只对 v2 引擎有效（ADR-0004）。
-# 它依赖上面对 .kiro/ 的删除（见 ①），本身只覆盖「AGENTS.md 没删干净 / 藏在别处」这一种漏网情形。
-# 写入的是执行器 $HOME 的全局设置且刻意不回滚（spec I1）：常驻执行器上它保持为 true 只会更严格。
-( cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" 60 "$KIRO_CLI_CMD" settings chat.disableInheritingDefaultResources true ) || die_review "隔离失败：无法设置 kiro-cli chat.disableInheritingDefaultResources=true"
-log "隔离：已设置 chat.disableInheritingDefaultResources=true"
+# v3 评审根目录（ADR-0008 / Q25）：把**已隔离**的工作树复制到 $KIRO_CWD/repo（不含任意深度的 .git，diff 已从 git 对象算好）。
+# 复制必须排在隔离之后：根目录之下的业务库内容 V3 能搜到，它们必须已经是删过注入面的那一份。
+if [[ "$KIRO_ENGINE" == v3 ]]; then
+  REVIEW_COPY_COUNT=$(review_copy_to_root "$WS_P" "$KIRO_CWD") \
+    || die_review "V3 评审根目录准备失败：无法把业务库完整复制到 ${KIRO_CWD}/repo（磁盘空间、权限或文件名问题；见$(review_log_name)）"
+  log "V3 评审根目录：已把业务库复制到 ${KIRO_CWD}/repo（${REVIEW_COPY_COUNT} 个条目，不含 .git）"
+fi
+if [[ "$KIRO_ENGINE" == v2 ]]; then
+  # 执行环境：禁止 Kiro 继承工作区默认资源（AGENTS.md/README.md 等），只对 v2 引擎有效（ADR-0004）。
+  # 它依赖上面对 .kiro/ 的删除（见 ①），本身只覆盖「AGENTS.md 没删干净 / 藏在别处」这一种漏网情形。
+  # 写入的是执行器 $HOME 的全局设置且刻意不回滚（spec I1）：常驻执行器上它保持为 true 只会更严格。
+  ( cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" 60 "$KIRO_CLI_CMD" settings chat.disableInheritingDefaultResources true ) || die_review "隔离失败：无法设置 kiro-cli chat.disableInheritingDefaultResources=true"
+  log "隔离：已设置 chat.disableInheritingDefaultResources=true"
+else
+  # v3：设置写进**临时 HOME**（KIRO_ENV_ALLOW 的 HOME 已换掉），只在本次运行里有效；disableInheritingDefaultResources 对 v3 无效（S4），不写。
+  # 清单见 scripts/lib/kiro-agent.sh 的 KIRO_V3_SETTINGS（code intelligence / knowledge 关掉，S8 能关的通道也在里面）。
+  for _kv in "${KIRO_V3_SETTINGS[@]}"; do
+    read -r _sk _sv <<<"$_kv"
+    ( cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" 60 "$KIRO_CLI_CMD" settings "$_sk" "$_sv" ) || die_review "隔离失败：无法设置 kiro-cli ${_sk}=${_sv}（V3 临时 HOME）"
+    log "隔离：已设置 ${_sk}=${_sv}（V3 临时 HOME）"
+  done
+  unset _kv _sk _sv
+fi
 
 # --- 5.6 行内评论的版本对预采样（票 17-fix3 ⑥；只在 INLINE_COMMENT=1 时打这一次接口）---
 # 放在这里而不是发布前：滞后的重查只要几秒，挪到模型之前多数滞后在评审开始前就自愈了；
@@ -1598,14 +1669,18 @@ grep -q '{{REVIEW_NONCE}}' "$PROMPT_FILE" \
 grep -q '{{REVIEW_WORKSPACE}}' "$PROMPT_FILE" \
   || die_review "运行时提示词缺少 {{REVIEW_WORKSPACE}} 占位符：模型拿不到业务库的绝对路径，相对路径读取会全部被拒。请同步更新 ${PROMPT_FILE}"
 # 用 jq 做字面替换而不是 sed：路径里的 / & \ 会撞上 sed 的定界符与替换元字符；jq 的 $ws 是已求值的字符串，不再解释
-jq -Rsj --arg ws "$WS_P" --arg nonce "$REVIEW_NONCE" 'gsub("\\{\\{REVIEW_WORKSPACE\\}\\}"; $ws) | gsub("\\{\\{REVIEW_NONCE\\}\\}"; $nonce)' "$PROMPT_FILE" > "$WORK/prompt.txt" \
+jq -Rsj --arg ws "$REVIEW_WS_FOR_MODEL" --arg nonce "$REVIEW_NONCE" 'gsub("\\{\\{REVIEW_WORKSPACE\\}\\}"; $ws) | gsub("\\{\\{REVIEW_NONCE\\}\\}"; $nonce)' "$PROMPT_FILE" > "$WORK/prompt.txt" \
   || die_review "运行时提示词渲染失败"
 grep -qF '{{' "$WORK/prompt.txt" && die_review "运行时提示词渲染后仍有占位符残留（集成包缺陷，请报告）"
 # 只打随机串、不打完整标记：日志里出现标记字面量会干扰「评论/日志里不该有契约标记」这类断言，
 # 排查时有随机串就够了（标记模板是固定的）。
 log "本次契约标记随机串：${REVIEW_NONCE}"
 
-log "Kiro 引擎：${KIRO_ENGINE}（--agent-engine ${KIRO_ENGINE}；ADR-0004：v1/v3 不阻断 AGENTS.md 注入，不得使用）"
+if [[ "$KIRO_ENGINE" == v3 ]]; then
+  log "Kiro 引擎：v3（--agent-engine v3；默认引擎，ADR-0008：评审根目录 + 临时 HOME + kiroignore，跑完再核对事件流的实际引擎与三条兜底）"
+else
+  log "Kiro 引擎：v2（--agent-engine v2；KIRO_ENGINE=v2 显式回退，ADR-0008：v2 冻结在已探测名单里的 v2 组合上）"
+fi
 # 只打变量名、不打取值（KIRO_API_KEY 在清单里）。名字按数组元素取，不按行切：取值含换行时按行 cut 会把半个取值当成名字
 # 放出来（15-fix #7）。
 log "Kiro 进程环境许可清单（只透传这些变量）：$(kiro_env_allowlist_names | paste -sd' ' -)"
@@ -1668,6 +1743,52 @@ if [[ "$kiro_rc" -ne 0 ]]; then
   die_review "Kiro 评审失败（kiro-cli 退出码 ${kiro_rc}）" "$_run_err"
 fi
 [[ -s "$WORK/stream.jsonl" ]] || die_review "Kiro 退出码为 0 但事件流为空"
+
+# --- 6.0b 实际引擎核对（ADR-0008 / 不变式 W2）---
+# 参数传了 --agent-engine 不等于真的跑在那个引擎上：3.x 可能忽略 v2、或把 agent 自动迁移到 v3——演示时你以为是 V2，实际是 V3。
+# 事件流第一个 runStarted 的 data.engine 必须等于 KIRO_ENGINE。v3 上缺这个字段同样拒绝；v2 上缺字段时维持 v1.10.1 的行为（不判失败），
+# 只有取值不一致才拒绝。放在退出码分支之后：kiro-cli 自己失败时那条失败评论更有用（带 runError）。
+_eng_rc=0; KIRO_ENGINE_SEEN=$(review_stream_engine "$WORK/stream.jsonl") || _eng_rc=$?
+case "$_eng_rc" in
+  0) [[ "$KIRO_ENGINE_SEEN" == "$KIRO_ENGINE" ]] \
+       || die_review "Kiro 实际运行的引擎（${KIRO_ENGINE_SEEN}）与 KIRO_ENGINE=${KIRO_ENGINE} 不一致，拒绝采用这次评审的输出（ADR-0008）"
+     log "Kiro 实际引擎：${KIRO_ENGINE_SEEN}（事件流 runStarted.data.engine，与 KIRO_ENGINE 一致）" ;;
+  1) [[ "$KIRO_ENGINE" == v2 ]] \
+       || die_review "事件流里没有可识别的 runStarted.data.engine，无法确认 Kiro 用的是 v3 引擎，拒绝采用这次评审的输出（ADR-0008）"
+     log "警告：事件流里没有可识别的 runStarted.data.engine（v2 下不强制，维持既有行为）" ;;
+  *) die_review "读不到 Kiro 事件流文件，无法核对实际引擎：${WORK}/stream.jsonl" ;;
+esac
+unset _eng_rc
+# --- 6.0c V3 事件流兜底（ADR-0008 / Q26）+ V3 的模型核对 ---
+# 评审根目录布局、第 5.5 步的删除与 kiroignore 已经让这些面不出现；这是第三道：将来 V3 的加载规则变了，评审直接失败，而不是悄悄被仓库接管。
+# 失败评论（不是降级）：被接管的运行产出的任何文本都不能贴到 MR 上。原因只有固定文案、计数与白名单里的来源名，仍按不受信细节传。
+if [[ "$KIRO_ENGINE" == v3 ]]; then
+  _g_rc=0; _g_why=$(review_stream_v3_guard "$WORK/stream.jsonl" "$AGENT_NAME") || _g_rc=$?
+  case "$_g_rc" in
+    0) log "V3 事件流兜底：未见 steering / 上下文文件 / hook，agent 是本次安装的 ${AGENT_NAME}、来自临时 HOME" ;;
+    1) die_review "V3 事件流兜底触发，拒绝采用这次评审的输出（ADR-0008：业务库不得改变 agent 的指令、工具或权限）" "$_g_why" ;;
+    *) die_review "V3 事件流兜底无法完成（事件流读不了或解析失败），拒绝采用这次评审的输出（ADR-0008）" ;;
+  esac
+  unset _g_rc _g_why
+  # V3 不发 metadata、也没有 currentModelId：实际模型在最后一次 config_option_update 里。V3 设不了声明的模型时直接失败、不回退（S5），
+  # 所以这里出现不一致只能是意外——口径同 issue 16：挂提示、不拒绝；取值不合形只说「不合形」，不显示。
+  _m3_rc=0; _m3=$(review_stream_v3_model "$WORK/stream.jsonl") || _m3_rc=$?
+  case "$_m3_rc" in
+    0) if [[ -n "$AGENT_MODEL" && "$_m3" != "$AGENT_MODEL" ]]; then
+         MODEL_NOTICE="${MODEL_NOTICE}${MODEL_NOTICE:+ }本次评审中 Kiro 报告实际使用的模型是 \`${_m3}\`，与受信 agent 声明的 \`$(printf '%s' "$AGENT_MODEL" | review_clean_text)\` 不同——结论请结合具体问题判断。"
+         log "警告：V3 实际模型 ${_m3} 与 agent 声明的 ${AGENT_MODEL} 不同——已在评论里挂提示，不拒绝评审"
+       else
+         log "V3 实际模型：${_m3}"
+       fi ;;
+    3) MODEL_NOTICE="${MODEL_NOTICE}${MODEL_NOTICE:+ }本次评审中 Kiro 报告的模型取值不合形（不显示）——无法确认用的是受信 agent 声明的模型，结论请结合具体问题判断。"
+       log "警告：V3 事件流里的模型取值不合形，已挂提示" ;;
+    *) log "警告：V3 事件流里取不到实际模型（建议性检查，不阻断评审）" ;;
+  esac
+  unset _m3 _m3_rc
+  # 用到的工具只进日志（spec E2）：看得出评审员实际搜过、读过哪些；取值是 Kiro 写的结构，不合形的 id 不显示、只计数。
+  if _t3=$(review_stream_v3_tools "$WORK/stream.jsonl"); then log "V3 用到的工具：${_t3}"; else log "V3 用到的工具：事件流里没有记录"; fi
+  unset _t3
+fi
 
 # --- 6.1 成本与上下文可观测指标写流水线日志（spec §4.1：metadata.meteringUsage 作为成本指标）---
 # 阿里云侧开发者看不到 CloudWatch，用量只能靠流水线日志留痕；取不到时打 - 而不是让评审失败。
@@ -1758,9 +1879,12 @@ REVIEW_TS=$(date '+%Y-%m-%d %H:%M:%S')
 # 就是「哪个版本产出的」。汇总与降级两条路共用 render_args，所以两边都带上。**不带任何限定语**——
 # 元组是仓库常量还是使用方追加名单授权的只写流水线日志（那是运维信息）；「谁都没探测过」才进评论，走 REVIEW_NOTICE。
 # 走到这里 KIRO_CLI_VERSION 一定非空：版本解析不出在版本门那一步就已经拒绝评审了（不会渲染出空的 Kiro CLI: 行）。
+# v3 在版本行后面注明引擎（ADR-0008）；v2 的版本行与 v1.10.1 逐字节相同（不变式 W4：V2 冻结，演示评论与以前一样）。
+KIRO_VERSION_LINE="$KIRO_CLI_VERSION"
+if [[ "$KIRO_ENGINE" == v3 ]]; then KIRO_VERSION_LINE="${KIRO_CLI_VERSION}（v3 引擎）"; fi
 render_args=(--sha "$SHORT_SHA" --src "$SOURCE_BRANCH" --dst "$TARGET_BRANCH"
              --ts "$REVIEW_TS" --diff-note "$DIFF_NOTE" --run "$REVIEW_RUN"
-             --kiro-cli "$KIRO_CLI_VERSION")
+             --kiro-cli "$KIRO_VERSION_LINE")
 # 上一条汇总里读回的历次记录：渲染器会在它后面追加本次那一行
 [[ -n "$PRIOR_HISTORY_FILE" ]] && render_args+=(--history "$PRIOR_HISTORY_FILE")
 

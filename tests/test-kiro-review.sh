@@ -30,6 +30,9 @@ unset REVIEW_RERUN_HINT REVIEW_LOG_HINT REVIEW_LOG_NAME BUILD_NUMBER
 # KIRO_INSTALL_PROFILE 没有缺省值（ADR-0006 / I1：缺失即拒绝运行），所以公共环境里给 latest——
 # 既有用例测的都是现装档位下的既有行为。「变量缺失」那一条用 `KIRO_INSTALL_PROFILE=` 显式覆盖来表达。
 export DRY_RUN=1 KIRO_API_KEY=k YUNXIAO_TOKEN=t YUNXIAO_ORG_ID=org123 CODEUP_REPO_ID=456 KIRO_INSTALL_PROFILE=latest
+# ADR-0008 起脚本默认 v3：既有用例测的都是 v2 路径（冻结、行为与 v1.10.1 相同），所以公共环境显式给 v2；
+# v3 用例逐个传 KIRO_ENGINE=v3（或置空 / unset，测默认值）。
+export KIRO_ENGINE=v2
 export MR_LOCAL_ID=7 MR_TARGET_BRANCH=main CI_COMMIT_REF_NAME=feature/x
 # 本平台在 KIRO_TESTED_TARGETS 里的版本与完整元组（名单是「平台 + 版本」之后，用例不能再硬写 2.21.1）
 LISTED_VER=$(listed_version_for_host)
@@ -61,9 +64,12 @@ run_case() {
   if [[ -z "${NO_MOCK_DIR:-}" ]]; then mock_config_write "$CASE/home" "$@"; fi
   NO_MOCK_DIR=""
   RC=0
+  # TMPDIR 指到用例目录（ADR-0008）：v3 下 kiro-cli 的 HOME 是脚本新建的临时目录，替身经 $TMPDIR/kiro-mock-dir 找回配置目录；
+  # （只用于替身找配置：macOS 的 mktemp -d 不看 TMPDIR，$WORK 仍在系统临时目录下。）
+  CASE_TMP=$(mock_tmpdir_pointer "$CASE")
   # CASE_LAUNCH：显式的解释器 + 参数（默认走 shebang）。启动环境那组用例要用 `/bin/bash -p` 跑同一个夹具——
   # 参考 YAML 用的就是 `-p`，而「载荷跑没跑」这个可观测差异只有换启动方式才看得见。刻意**不加引号**（要分词）。
-  OUT=$(cd "$CASE/work" && env HOME="$CASE/home" REVIEW_REPO_DIR="$CASE/work" \
+  OUT=$(cd "$CASE/work" && env HOME="$CASE/home" TMPDIR="$CASE_TMP" REVIEW_REPO_DIR="$CASE/work" \
         "$@" ${CASE_LAUNCH:-} "$ROOT/scripts/kiro-review.sh" 2>&1) || RC=$?
   CASE_LAUNCH=""
 }
@@ -2562,7 +2568,8 @@ assert_eq "$(LC_ALL=C grep -c '本次评审仍已完成' "$ROOT/scripts/kiro-rev
 # 新增第 5 处 --list-models 后仍成立；将来加第 6 处若漏了 kiro_env_exec / cd，这条先红）。issue 10 起 timeout 排在 kiro_env_exec 之后：
 # 清单取值只经 fd 交给垫片，timeout 的 argv 里不再有 KIRO_API_KEY=<值>。
 _kexec=$(LC_ALL=C grep -nE '"\$KIRO_CLI_CMD" (chat|settings)' "$ROOT/scripts/kiro-review.sh")
-assert_eq "$(printf '%s\n' "$_kexec" | grep -c .)" "4" "R2-3 静态：直接执行 kiro-cli 入口的行恰好 4 处（help/list-models/settings/chat；version 走 helper）"
+# ADR-0008：settings 有 v2 / v3 两行（v2 那行与 v1.10.1 逐字节相同；v3 那行在设置清单的循环里），所以是 5 行、五类调用不变
+assert_eq "$(printf '%s\n' "$_kexec" | grep -c .)" "5" "R2-3 静态：直接执行 kiro-cli 入口的行恰好 5 处（help/list-models/settings v2/settings v3/chat；version 走 helper）"
 assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'kiro_env_exec KIRO_ENV_ALLOW "\$TIMEOUT_BIN" ')" "0" "R2-3 静态：每处执行都走 kiro_env_exec KIRO_ENV_ALLOW，且 timeout 在它之后"
 assert_eq "$(printf '%s\n' "$_kexec" | grep -vc 'cd "\$KIRO_CWD"')" "0" "R2-3 静态：每处执行都在 \$KIRO_CWD 空目录下"
 unset _kexec
@@ -3402,5 +3409,168 @@ assert_contains "$(posted_comment "$OUT")" "要用 v3 引擎请显式设 KIRO_EN
 run_case tri-nohint MOCK_KIRO_VERSION=9.9.9
 assert_nonzero "$RC" "跨引擎提示（反例）：名单外的版本 → 拒绝"
 assert_not_contains "$(posted_comment "$OUT")" "请显式设 KIRO_ENGINE" "跨引擎提示（反例）：名单里没有同版本的另一引擎组合 → 不出提示"
+
+
+# ============ V3 引擎（ADR-0008）：默认 v3、评审根目录 + 临时 HOME、事件流兜底 ============
+# 名单里还没有本平台的 v3 组合时用追加名单放行（用例不依赖名单内容；Linux 上跑套件同样成立）。
+V3=(KIRO_ENGINE=v3 MOCK_KIRO_VERSION=2.29.1 "KIRO_TESTED_TARGETS_EXTRA=${HOST_PLAT}:2.29.1:v3")
+# 本次 $WORK 的位置从替身记下的临时 HOME 推出（macOS 的 mktemp -d 不看 TMPDIR，没法预先把 $WORK 指到用例目录）：
+# 临时 HOME 与评审根目录都在 $WORK 下，$WORK 不在了就说明两者都删干净了
+v3_leftovers() { local h; h=$(awk -F'\t' 'NR == 1 {print $2}' "$MD/homes" 2>/dev/null); [[ -n "$h" && "$(basename "$h")" == kiro-home ]] || { echo "no-record"; return 0; }; [[ -e "$(dirname "$h")" ]] && echo 1 || echo 0; }
+
+run_case v3ok "${V3[@]}"
+assert_rc "$RC" 0 "V3：评审跑完"
+v3_args=$(paste -sd' ' "$MD/args")
+assert_contains "$v3_args" "--agent-engine v3" "V3：显式传 --agent-engine v3"
+assert_eq "$(grep -c -- '^--trust' "$MD/args")" "0" "V3：参数里没有任何 --trust-*（V3 下两者都打穿 allow 边界，S3 实测）"
+assert_contains "$OUT" "Kiro 引擎：v3" "V3：日志记录所用引擎"
+assert_contains "$OUT" "Kiro 实际引擎：v3" "V3：事件流里的实际引擎与 KIRO_ENGINE 一致"
+assert_contains "$OUT" "V3 事件流兜底：未见" "V3：兜底跑过且未触发"
+assert_contains "$OUT" "V3 用到的工具：read_file" "V3：日志记下 usedTools（只进日志）"
+assert_not_contains "$(posted_comment "$OUT")" "V3 用到的工具" "V3：工具清单不进 MR 评论"
+assert_contains "$OUT" "V3 实际模型：gpt-5.6-sol" "V3：实际模型取自最后一次 config_option_update（第一次是默认 auto）"
+assert_not_contains "$(posted_comment "$OUT")" "实际使用的模型是" "V3：实际模型与声明一致时不挂模型提示"
+assert_contains "$OUT" "kiro-cli ${HOST_PLAT}:2.29.1:v3：在 P1-15 探测过的平台 + 版本 + 引擎名单内" "V3：版本门按三元组放行"
+# 五处调用的 HOME / XDG_* / cwd（替身逐次记在 homes：名字、HOME、XDG_CONFIG_HOME、XDG_DATA_HOME、XDG_CACHE_HOME、XDG_STATE_HOME、cwd）
+v3_home=$(awk -F'\t' '$1 == "chat" {print $2}' "$MD/homes")
+assert_eq "$(basename "$v3_home")" "kiro-home" "V3：chat 的 HOME 是本次运行的临时 HOME"
+assert_eq "$(dirname "$v3_home")" "$(dirname "$(cat "$MD/chatcwd")")" "V3：临时 HOME 与评审根目录在同一个 \$WORK 里（随它一起删）"
+assert_eq "$(awk -F'\t' '{print $1}' "$MD/homes" | sort -u | paste -sd, -)" "chat,help,listmodels,settings,version" "V3：五类调用都记到了"
+assert_eq "$(awk -F'\t' -v h="$v3_home" '$2 != h || $3 != h "/.config" || $4 != h "/.local/share" || $5 != h "/.cache" || $6 != h "/.local/state"' "$MD/homes" | grep -c . || true)" "0" \
+  "V3：五处调用的 HOME 与四个 XDG_* 都指向临时 HOME"
+v3_cwd=$(cat "$MD/chatcwd")
+assert_eq "$(basename "$v3_cwd")" "review-root" "V3：Kiro 在评审根目录下运行"
+assert_eq "$(awk -F'\t' -v c="$v3_cwd" '$7 != c' "$MD/homes" | grep -c . || true)" "0" "V3：五处调用都在评审根目录下运行"
+assert_eq "$(grep -c -x 'XDG_RUNTIME_DIR' "$MD/env" || true)" "0" "V3：Kiro 进程环境里没有 XDG_RUNTIME_DIR"
+assert_eq "$([[ -e "$CASE/home/.kiro" ]] && echo touched || echo clean)" "clean" "V3：真实 HOME 下没有创建 ~/.kiro（agent、设置都在临时 HOME 里）"
+assert_eq "$(v3_leftovers)" "0" "V3：退出后临时 HOME 与评审根目录都已删除"
+# 受信 agent（替身在 chat 时拷了一份）
+v3_inst="$MD/agent.json"
+assert_eq "$(jq -c '[.permissions.rules[] | select(.effect == "allow") | .match] | first' "$v3_inst")" \
+  "$(jq -nc --arg a "$v3_cwd" --arg b "$(dirname "$v3_cwd")/chunks" '[$a, $b]')" "V3：唯一的 allow = 评审根目录 + chunks 的物理路径"
+assert_eq "$(jq -r 'has("toolsSettings") or has("allowedTools")' "$v3_inst")" "false" "V3：安装的 agent 没有 toolsSettings / allowedTools"
+assert_eq "$(jq -r .name "$v3_inst")" "codeup-reviewer-$(cat "$MD/nonce")" "V3：agent 名带本次随机串（P1-2）"
+assert_eq "$(jq -r .prompt "$v3_inst")" "file://prompts/codeup-reviewer-$(cat "$MD/nonce").md" "V3：prompt 是相对 file://（V3 拒绝绝对路径）"
+assert_eq "$(jq -r --arg h "$CASE/home" '[.permissions.rules[] | select(.capability == "fs_read" and .effect == "deny") | .match[] | select(startswith($h + "/"))] | length > 0' "$v3_inst")" "true" \
+  "V3：deny 清单里有按真实 HOME 展开的 ~/ 形状"
+# 设置与 kiroignore（都在临时 HOME）
+assert_eq "$(cat "$MD/settings")" $'chat.enableCodeIntelligence false\nchat.enableKnowledge false' "V3：只写这两项设置（不写只对 v2 有效的 disableInheritingDefaultResources）"
+assert_eq "$(cat "$MD/kiroignore")" "AGENTS.md" "V3：临时 HOME 的 kiroignore 排除 AGENTS.md"
+# 评审根目录：只有 repo/，里面是已隔离、不含 .git 的业务库副本
+assert_eq "$(grep -cE '^\./[^/]+$' "$MD/review-root-files")" "1" "V3：评审根目录下只有一个条目"
+assert_contains "$(cat "$MD/review-root-files")" "./repo/src/app.py" "V3：业务库副本在 repo/ 下"
+assert_eq "$(grep -c '/\.git' "$MD/review-root-files" || true)" "0" "V3：副本不含任意深度的 .git"
+assert_eq "$(grep -ci 'agents\.md' "$MD/review-root-files" || true)" "0" "V3：副本里没有 AGENTS.md（第 5.5 步已删，复制在它之后）"
+assert_eq "$(cat "$MD/cwdscan")" "" "V3：评审根目录里没有残留的注入面文件与符号链接"
+assert_contains "$(cat "$MD/stdin-prompt")" "${v3_cwd}/repo/src/app.py" "V3：运行时提示词给模型的是副本的绝对路径"
+assert_not_contains "$(cat "$MD/stdin-prompt")" "$(cd "$CASE/work" && pwd -P)/" "V3：提示词里不出现原 checkout 的路径"
+# 评论与日志
+assert_contains "$(posted_comment "$OUT")" $'\nKiro CLI: 2.29.1（v3 引擎）\n' "V3：评论的版本行注明引擎"
+assert_contains "$OUT" "Kiro 用量：credits=0.2609 context=3.8%" "V3：用量与上下文从 turn_completion / context_usage 取到"
+assert_contains "$OUT" "P0 1 · P1 1 · P2 1" "V3：契约照常解析、按契约渲染"
+
+# 默认值：不设 / 留空都是 v3
+unset KIRO_ENGINE
+run_case v3default MOCK_KIRO_VERSION=2.29.1 "KIRO_TESTED_TARGETS_EXTRA=${HOST_PLAT}:2.29.1:v3"
+export KIRO_ENGINE=v2
+assert_rc "$RC" 0 "KIRO_ENGINE 未设置：评审跑完"
+assert_contains "$(paste -sd' ' "$MD/args")" "--agent-engine v3" "KIRO_ENGINE 未设置 = v3"
+run_case v3empty KIRO_ENGINE= MOCK_KIRO_VERSION=2.29.1 "KIRO_TESTED_TARGETS_EXTRA=${HOST_PLAT}:2.29.1:v3"
+assert_rc "$RC" 0 "KIRO_ENGINE 为空：评审跑完"
+assert_contains "$(paste -sd' ' "$MD/args")" "--agent-engine v3" "KIRO_ENGINE 为空 = v3"
+# 非法取值：整串精确匹配，失败评论、Kiro 不启动、取值不回显
+v3_i=0
+for v3_bad in V2 'v2 ' ' v3' 2 v4 v1 $'v3\n'; do
+  v3_i=$((v3_i + 1))
+  run_case "engbad${v3_i}" "KIRO_ENGINE=${v3_bad}"
+  assert_nonzero "$RC" "KIRO_ENGINE=[${v3_bad}]：拒绝运行"
+  assert_contains "$OUT" "KIRO_ENGINE 不合法" "KIRO_ENGINE=[${v3_bad}]：日志说明原因"
+  assert_contains "$(posted_comment "$OUT")" "评审未完成" "KIRO_ENGINE=[${v3_bad}]：回写失败评论（MR 上可见）"
+  assert_eq "$(call_count "$MD/calls" chat)" "0" "KIRO_ENGINE=[${v3_bad}]：kiro-cli chat 一次都没跑"
+done
+# 版本门与引擎：默认 v3 撞上只验证过 v2 的版本 → 拒绝，并提示显式设 KIRO_ENGINE=v2
+run_case v3gate KIRO_ENGINE=v3 MOCK_KIRO_VERSION="$LISTED_VER"
+assert_nonzero "$RC" "v3 + 只验证过 v2 的版本：拒绝评审"
+assert_contains "$(posted_comment "$OUT")" "${HOST_PLAT}:${LISTED_VER}:v3（平台 + kiro-cli 版本 + 引擎）未经 P1-15 探测" "v3 + 只验证过 v2 的版本：失败评论点名三元组"
+assert_contains "$(posted_comment "$OUT")" "要用 v2 引擎请显式设 KIRO_ENGINE=v2" "v3 + 只验证过 v2 的版本：提示改用 KIRO_ENGINE=v2"
+assert_eq "$(call_count "$MD/calls" chat)" "0" "v3 + 只验证过 v2 的版本：Kiro 未启动"
+run_case v2gatehint MOCK_KIRO_VERSION=2.29.1 "KIRO_TESTED_TARGETS_EXTRA=${HOST_PLAT}:2.29.1:v3"
+assert_nonzero "$RC" "v2 + 只验证过 v3 的版本：拒绝评审"
+assert_contains "$(posted_comment "$OUT")" "要用 v3 引擎请显式设 KIRO_ENGINE=v3" "v2 + 只验证过 v3 的版本：提示反方向"
+run_case v3nohint KIRO_ENGINE=v3 MOCK_KIRO_VERSION=9.9.9
+assert_nonzero "$RC" "v3 + 名单外版本：拒绝评审"
+assert_not_contains "$(posted_comment "$OUT")" "请显式设 KIRO_ENGINE" "名单里没有同版本的另一引擎组合：不出跨引擎提示"
+# 实际引擎核对（W2）
+run_case v3engmis "${V3[@]}" MOCK_KIRO_ENGINE_REPORT=v2
+assert_nonzero "$RC" "v3 但事件流说 v2：拒绝采用输出"
+assert_contains "$OUT" "与 KIRO_ENGINE=v3 不一致" "v3 但事件流说 v2：日志说明不一致"
+assert_not_contains "$(posted_comment "$OUT")" "P0 1 · P1 1 · P2 1" "v3 但事件流说 v2：评审内容没有贴到 MR 上"
+run_case v3engnone "${V3[@]}" MOCK_KIRO_ENGINE_REPORT=none
+assert_nonzero "$RC" "v3 但事件流没有 engine：拒绝采用输出"
+assert_contains "$OUT" "无法确认 Kiro 用的是 v3 引擎" "v3 但事件流没有 engine：日志说明原因"
+run_case v2engmis MOCK_KIRO_ENGINE_REPORT=v3
+assert_nonzero "$RC" "v2 但事件流说 v3：拒绝采用输出（演示以为是 V2，实际是 V3）"
+assert_contains "$OUT" "与 KIRO_ENGINE=v2 不一致" "v2 但事件流说 v3：日志说明不一致"
+run_case v2engnone MOCK_KIRO_ENGINE_REPORT=none
+assert_rc "$RC" 0 "v2 且事件流没有 engine：维持 v1.10.1 的行为（不判失败）"
+assert_contains "$OUT" "v2 下不强制" "v2 且事件流没有 engine：日志留一行警告"
+# V3 事件流兜底（Q26）：任一命中都失败评论，评审内容不上 MR
+for v3_g in STEERING:steering_inclusion HOOK:hook_update CONTEXT_FILES:contextFiles; do
+  run_case "v3guard${v3_g%%:*}" "${V3[@]}" "MOCK_KIRO_V3_${v3_g%%:*}=1"
+  assert_nonzero "$RC" "V3 兜底 ${v3_g#*:}：拒绝采用输出"
+  assert_contains "$(posted_comment "$OUT")" "V3 事件流兜底触发" "V3 兜底 ${v3_g#*:}：失败评论说明原因"
+  assert_contains "$(posted_comment "$OUT")" "${v3_g#*:}" "V3 兜底 ${v3_g#*:}：失败评论点名信号"
+  assert_not_contains "$(posted_comment "$OUT")" "P0 1 · P1 1 · P2 1" "V3 兜底 ${v3_g#*:}：评审内容没有贴到 MR 上"
+done
+run_case v3guardsrc "${V3[@]}" MOCK_KIRO_V3_AGENT_SOURCE=workspace
+assert_nonzero "$RC" "V3 兜底：agent 来自工作区（被同名 agent 顶替）→ 拒绝"
+assert_contains "$(posted_comment "$OUT")" "来源 workspace" "V3 兜底：失败评论点名 agent 来源"
+run_case v3guardmode "${V3[@]}" MOCK_KIRO_V3_MODE=vibe
+assert_nonzero "$RC" "V3 兜底：实际 agent 不是本次安装的 → 拒绝"
+assert_contains "$(posted_comment "$OUT")" "不是本次安装的那一个" "V3 兜底：失败评论说明 agent 不对"
+# V3 的模型核对：不一致挂提示、不拒绝
+run_case v3model "${V3[@]}" MOCK_KIRO_V3_MODEL=claude-sonnet-5
+assert_rc "$RC" 0 "V3 实际模型与声明不同：评审照常完成"
+assert_contains "$(posted_comment "$OUT")" "实际使用的模型是 \`claude-sonnet-5\`" "V3 实际模型与声明不同：评论挂提示"
+# 清理：失败 / 超时 / 3.0 自动迁移留下的 .json.bak 都随 $WORK 一起删（W7）
+run_case v3fail "${V3[@]}" MOCK_KIRO_FAIL=1
+assert_nonzero "$RC" "V3 kiro-cli 失败：非零退出"
+assert_eq "$(v3_leftovers)" "0" "V3 kiro-cli 失败：临时 HOME 与评审根目录已删除"
+run_case v3hang "${V3[@]}" MOCK_KIRO_HANG=1 KIRO_TIMEOUT=3
+assert_nonzero "$RC" "V3 超时：非零退出"
+assert_contains "$OUT" "超时" "V3 超时：按超时处理"
+assert_eq "$(v3_leftovers)" "0" "V3 超时：临时 HOME 与评审根目录已删除"
+run_case v3bak "${V3[@]}" MOCK_KIRO_V3_BAK=1
+assert_rc "$RC" 0 "V3 + 迁移留下 .json.bak：评审照常完成"
+assert_eq "$(v3_leftovers)" "0" "V3 + 迁移留下 .json.bak：临时 HOME 连同 .bak 一起删除"
+# 执行器 HOME 里预先有一份能打穿读取边界的 permissions.yaml（S3 实测）：V3 的 kiro-cli 根本看不到它
+mkdir -p "$tmp/case-v3permyaml/home/.kiro/settings"
+printf 'rules:\n  - capability: fs_read\n    match: ["/"]\n    effect: allow\n' > "$tmp/case-v3permyaml/home/.kiro/settings/permissions.yaml"
+run_case v3permyaml "${V3[@]}"
+assert_rc "$RC" 0 "V3 + 执行器 HOME 有 permissions.yaml：评审跑完"
+assert_not_contains "$(cat "$MD/v3-settings-dir")" "permissions.yaml" "V3：kiro-cli 看到的设置目录里没有执行器 HOME 的 permissions.yaml"
+assert_contains "$(cat "$CASE/home/.kiro/settings/permissions.yaml")" "effect: allow" "V3：执行器 HOME 的那份文件原样未动"
+# 复制失败（磁盘满一类）：失败评论，Kiro 不启动
+mkdir -p "$tmp/badtar"
+cat > "$tmp/badtar/tar" <<BADTAR
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == -cf ]] && { echo "badtar: 模拟打包失败" >&2; exit 1; }; done
+exec "$(command -v tar)" "\$@"
+BADTAR
+chmod +x "$tmp/badtar/tar"
+run_case v3copyfail "${V3[@]}" PATH="$tmp/badtar:$PATH"
+assert_nonzero "$RC" "V3 复制业务库失败：拒绝评审"
+assert_contains "$(posted_comment "$OUT")" "V3 评审根目录准备失败" "V3 复制业务库失败：失败评论说明原因"
+assert_eq "$(call_count "$MD/calls" chat)" "0" "V3 复制业务库失败：Kiro 未启动"
+# 文件名带空格、以 - 开头、非 ASCII：副本条目数与（已隔离的）业务库一致
+tweak_odd_names() { printf 'x\n' > 'a b.py'; printf 'y\n' > ./-dash.py; printf 'z\n' > 'ünï.py'; git add -A && git commit -qm "odd names"; }
+CASE_TWEAK=tweak_odd_names run_case v3odd "${V3[@]}"
+assert_rc "$RC" 0 "V3 + 奇怪的文件名：评审跑完"
+assert_contains "$(cat "$MD/review-root-files")" "./repo/a b.py" "V3：带空格的文件名在副本里"
+assert_contains "$(cat "$MD/review-root-files")" "./repo/-dash.py" "V3：以 - 开头的文件名在副本里"
+assert_eq "$(grep -c '^\./repo/' "$MD/review-root-files")" "$(cd "$CASE/work" && find . -name .git -prune -o -print | grep -c '^\./')" \
+  "V3：副本条目数与已隔离的业务库一致（非 ASCII 名字也在）"
+# 静态守卫：引擎只经调用行显式传，脚本从不写 kiro-cli 的全局 chat.agentEngine
+assert_eq "$(LC_ALL=C grep -v '^[[:space:]]*#' "$ROOT/scripts/kiro-review.sh" | LC_ALL=C grep -c 'chat\.agentEngine' || true)" "0" "V3 静态：脚本代码里不出现 chat.agentEngine"
 
 report
