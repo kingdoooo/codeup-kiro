@@ -158,24 +158,41 @@ mock_config_write() { # <HOME 目录> [MOCK_X=值 ...]（非 MOCK_ 开头的参�
   local dir; dir=$(mock_dir_of_home "$1"); shift
   local a has_ver=0 dflt
   mkdir -p "$dir"; : > "$dir/mock.env"
-  for a in "$@"; do [[ "$a" == MOCK_KIRO_VERSION=* ]] && has_ver=1; done
-  # 调用方没显式给版本时，写一个**本平台名单内**的版本进去（默认「名单内、无 notice」的语义与以前一致，
-  # 但不再依赖跑套件的机器恰好是 darwin/arm64）
-  if [[ "$has_ver" == "0" ]]; then
-    dflt=$(listed_version_for_host)
+  local eng="${KIRO_ENGINE-__unset__}"
+  for a in "$@"; do [[ "$a" == MOCK_KIRO_VERSION=* ]] && has_ver=1; [[ "$a" == KIRO_ENGINE=* ]] && eng="${a#KIRO_ENGINE=}"; done
+  # 调用方没显式给版本时，写一个**本平台、本引擎名单内**的版本进去（默认「名单内、无 notice」的语义与以前一致，
+  # 但不再依赖跑套件的机器恰好是 darwin/arm64）。引擎取本次参数里的 KIRO_ENGINE=，没有就取环境；
+  # 显式置空 = v3（与脚本同一默认）；完全没提到引擎 = v2（ADR-0008 之前写的用例都是这个语义）；
+  # 非法取值（测「KIRO_ENGINE 不合法」的用例）不取默认版本——脚本在版本门之前就拒绝了
+  case "$eng" in __unset__) eng=v2 ;; "") eng=v3 ;; v2|v3) ;; *) eng="" ;; esac
+  if [[ "$has_ver" == "0" && -n "$eng" ]]; then
+    dflt=$(listed_version_for_host "$eng")
     [[ -n "$dflt" ]] && printf 'MOCK_KIRO_VERSION=%s\n' "$dflt" >> "$dir/mock.env"
   fi
   for a in "$@"; do [[ "$a" == MOCK_* ]] && printf '%s\n' "$a" >> "$dir/mock.env"; done
   return 0
 }
 mock_config_load() { # <HOME 目录>：把 .kiro-mock/mock.env 里的 MOCK_X=值 导出到当前 shell（同名后者覆盖前者，与 env 的语义一致）
-  local dir line n v; dir=$(mock_dir_of_home "$1")
+  mock_config_load_dir "$(mock_dir_of_home "$1")"
+}
+mock_config_load_dir() { # <配置目录>：同上，直接给目录（V3 路径上替身的 HOME 是临时目录，配置目录经 $TMPDIR/kiro-mock-dir 找到）
+  local dir="$1" line n v
   [[ -r "$dir/mock.env" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^(MOCK_[A-Z0-9_]+)=(.*)$ ]] || continue
     n="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"
     export "$n=$v"
   done < "$dir/mock.env"
+}
+
+# V3 路径（ADR-0008）下 kiro-cli 的 HOME 是评审脚本每次新建的临时目录，替身在那里找不到 .kiro-mock/。
+# 用法：mock_tmpdir_pointer <用例目录> → 建 <用例目录>/tmp，写一行 <用例目录>/home/.kiro-mock 到 <用例目录>/tmp/kiro-mock-dir，stdout 打出 tmp 路径；
+# 调用方把它当 TMPDIR 传给被测脚本（TMPDIR 在 kiro-cli 许可清单的固定名单里，替身因此按它找到配置目录）。
+mock_tmpdir_pointer() {
+  local c="$1"
+  mkdir -p "$c/tmp" || return 1
+  printf '%s\n' "$c/home/.kiro-mock" > "$c/tmp/kiro-mock-dir" || return 1
+  printf '%s' "$c/tmp"
 }
 
 # ---- 注入面扫描（15-fix2 #23 / 15-fix4 #6）：**转调**生产 scripts/lib/isolation.sh 的单一发射器 review_isolation_scan，谓词只有一份 ----

@@ -74,6 +74,12 @@ MOCK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 先记下**收到的**环境里的变量名（再往下会从配置文件导出 MOCK_*，那些不算 kiro-cli 收到的环境）
 MOCK_RECEIVED_ENV=$(compgen -e | sort)
 M="${HOME:-/nonexistent}/.kiro-mock"
+# V3 路径（ADR-0008）下 HOME 是评审脚本每次新建的临时目录，测试来不及往里放配置：这时按 $TMPDIR/kiro-mock-dir 里写的路径找配置目录
+# （tests/helpers.sh 的 mock_tmpdir_pointer 写它；TMPDIR 在许可清单的固定名单里）。V2 路径上 $HOME/.kiro-mock 总在，这条不生效；
+# 指针指向的目录不存在时仍按下面的 fail-closed 退 97。
+if [[ ! -d "$M" && -n "${TMPDIR:-}" && -r "${TMPDIR%/}/kiro-mock-dir" ]]; then
+  M=$(cat "${TMPDIR%/}/kiro-mock-dir")
+fi
 if [[ -z "${HOME:-}" || ! -d "$M" ]]; then
   echo "mock kiro-cli: 拿不到配置目录 \$HOME/.kiro-mock（HOME='${HOME:-}'）——HOME 没透传、或测试没先 mock_config_write？替身拒绝运行（fail-closed），不会假装成功" >&2
   exit 97
@@ -84,9 +90,11 @@ fi
 source "$MOCK_DIR/../helpers.sh" || { echo "mock kiro-cli: 加载 tests/helpers.sh 失败，替身拒绝运行" >&2; exit 97; }
 declare -F mock_config_load >/dev/null && declare -F injection_surface_scan >/dev/null \
   || { echo "mock kiro-cli: tests/helpers.sh 里缺少 mock_config_load / injection_surface_scan，替身拒绝运行" >&2; exit 97; }
-mock_config_load "$HOME"
+mock_config_load_dir "$M"
+# 每次调用的 HOME / XDG_* / cwd（ADR-0008：v3 的五处调用都必须看到临时 HOME，v2 的必须是真实 HOME）：名字<TAB>HOME<TAB>XDG_CONFIG_HOME<TAB>…<TAB>cwd
+_mock_home_rec() { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "${HOME:-}" "${XDG_CONFIG_HOME:-}" "${XDG_DATA_HOME:-}" "${XDG_CACHE_HOME:-}" "${XDG_STATE_HOME:-}" "$(pwd -P)" >> "$M/homes"; }
 if [[ "${1:-}" == "--version" ]]; then
-  echo "version" >> "$M/calls"
+  echo "version" >> "$M/calls"; _mock_home_rec version
   printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-version"   # --version 调用的环境（15-fix4 #18）
   # MOCK_KIRO_VERSION_RC=<n>：--version 跑不起来（例如 127）——脚本必须按退出码走失败评论，而不是软 notice 后在 chat 上烧掉整个 KIRO_TIMEOUT（15-fix4 #7）
   if [[ "${MOCK_KIRO_VERSION_RC:-0}" != "0" ]]; then echo "mock: kiro-cli --version 模拟失败${MOCK_KIRO_VERSION_ERRTOKEN:+（auth failed for token ${MOCK_KIRO_VERSION_ERRTOKEN}）}" >&2; exit "${MOCK_KIRO_VERSION_RC}"; fi   # ERRTOKEN：stderr 里带一个令牌形状（合并后复审⑦）
@@ -106,9 +114,9 @@ if [[ "${1:-}" == "--version" ]]; then
 fi
 # `--list-models` 必须记成**独立**的调用名（issue 16）：记成 "chat" 会让所有「chat 被调用几次」的断言
 # （call_count … chat、「kiro-cli 一次都没被执行」那类）凭空多一次，把不相关的用例集体带红。
-if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$M/calls"
-elif [[ "${2:-}" == "--list-models" ]]; then echo "listmodels" >> "$M/calls"
-else printf '%s\n' "${1:-}" >> "$M/calls"; fi
+if [[ "${2:-}" == "--help" ]]; then echo "help" >> "$M/calls"; _mock_home_rec help
+elif [[ "${2:-}" == "--list-models" ]]; then echo "listmodels" >> "$M/calls"; _mock_home_rec listmodels
+else printf '%s\n' "${1:-}" >> "$M/calls"; _mock_home_rec "${1:-}"; fi
 case "${1:-}" in
   settings)
     shift
@@ -171,8 +179,10 @@ if [[ "${2:-}" == "--help" ]]; then
   exit 0
 fi
 STREAM_JSON=0
+ENGINE_ARG=""
 prev=""
 for a in "$@"; do
+  [[ "$prev" == "--agent-engine" ]] && ENGINE_ARG="$a"
   # 只认「--output-format stream-json」这一对（或等号形式），不认散落的 stream-json 字面量
   [[ "$prev" == "--output-format" && "$a" == "stream-json" ]] && STREAM_JSON=1
   [[ "$a" == "--output-format=stream-json" ]] && STREAM_JSON=1
@@ -223,21 +233,39 @@ if [[ -n "$AGENT_ARG" ]]; then
   if [[ ! -r "$AGENT_JSON" ]]; then
     echo "mock kiro-cli: agent '${AGENT_ARG}' not found under ${HOME:-<HOME 未设置>}/.kiro/agents" >&2; exit 1
   fi
+  # V3 的真实加载行为（S3 / S6 实测，kiro-cli 2.29.1）：没有 permissions 块的 2.x 形态 → exit 4「needs upgrading」；
+  # 绝对 file:// prompt → exit 4 PromptFileError；相对 prompt 指向不存在的文件同样装不上。替身照做，「v2 形状的 agent 拿去跑 v3」才会在测试里失败。
+  if [[ "$ENGINE_ARG" == v3 ]]; then
+    jq -e 'has("permissions")' "$AGENT_JSON" >/dev/null 2>&1 \
+      || { echo "Agent '${AGENT_ARG}' needs upgrading to the V3 format. Run /upgrade-agent" >&2; exit 4; }
+    _mp=$(jq -r '.prompt // ""' "$AGENT_JSON")
+    [[ "$_mp" != file:///* ]] || { echo "PromptFileError: Absolute file:// URIs are not allowed in agent prompts" >&2; exit 4; }
+    [[ "$_mp" != file://* || -r "$(dirname "$AGENT_JSON")/${_mp#file://}" ]] || { echo "PromptFileError: prompt file not found: ${_mp}" >&2; exit 4; }
+  fi
   # 生产脚本退出时会删掉本次的 agent 文件（P1-2），测试要看安装结果只能看替身在 chat 时拷的这一份
   cp "$AGENT_JSON" "$M/agent.json"; printf '%s\n' "$AGENT_JSON" > "$M/agent-path"
-  # 真实 kiro-cli 2.21.1 加载 agent 时会在旁边写 <文件>.backup 与 <文件>.backup.<UTC 时间戳>（本机实测 2026-09-09）：替身照做，
-  # 端到端「退出后 ~/.kiro/agents 为空」的断言才能证明清理连备份一起删了
-  cp "$AGENT_JSON" "$AGENT_JSON.backup"; cp "$AGENT_JSON" "$AGENT_JSON.backup.2026-09-09T00-00-00Z"
+  if [[ "$ENGINE_ARG" == v3 ]]; then
+    # V3 不写 .backup（S6 实测）；MOCK_KIRO_V3_BAK=1 模拟 3.0 自动迁移在旁边留一份 .json.bak——它在临时 HOME 里，应随 $WORK 一起删掉
+    [[ "${MOCK_KIRO_V3_BAK:-0}" == "1" ]] && cp "$AGENT_JSON" "$AGENT_JSON.bak"
+    # 临时 HOME 里的 kiroignore 与设置目录、评审根目录（cwd）的完整清单：断言 H5 布局与 kiroignore 用
+    if [[ -r "$HOME/.kiro/settings/kiroignore" ]]; then cp "$HOME/.kiro/settings/kiroignore" "$M/kiroignore"; else : > "$M/kiroignore-missing"; fi
+    ls -A "$HOME/.kiro/settings" > "$M/v3-settings-dir"
+    LC_ALL=C find . -print | LC_ALL=C sort > "$M/review-root-files"
+  else
+    # 真实 kiro-cli 2.21.1 加载 agent 时会在旁边写 <文件>.backup 与 <文件>.backup.<UTC 时间戳>（本机实测 2026-09-09）：替身照做，
+    # 端到端「退出后 ~/.kiro/agents 为空」的断言才能证明清理连备份一起删了
+    cp "$AGENT_JSON" "$AGENT_JSON.backup"; cp "$AGENT_JSON" "$AGENT_JSON.backup.2026-09-09T00-00-00Z"
+  fi
   : > "$M/allowscan"
   while IFS= read -r p; do
     if [[ -d "$p" ]]; then printf '%s\tdir\t%s\n' "$p" "$(ls -A "$p" | paste -sd, -)"
     else printf '%s\tMISSING\t\n' "$p"; fi
-  done < <(jq -r '.toolsSettings.read.allowedPaths[]?' "$AGENT_JSON") >> "$M/allowscan"
+  done < <(jq -r '(.toolsSettings.read.allowedPaths // [(.permissions.rules // [])[] | select(.effect == "allow") | .match[]?])[]?' "$AGENT_JSON") >> "$M/allowscan"
 fi
 printf '%s\n' "$MOCK_NONCE" > "$M/nonce"
 # 启动时**业务库**（allowedPaths[0]）里残留的注入面：与生产隔离谓词等价的枚举版（tests/helpers.sh injection_surface_scan，15-fix2 #23）。
 # 生产的 cwd 是 $WORK/cwd 空目录（15-fix4 #1），扫 cwd 会恒空；要扫的是模型能读到的那棵树。没装 agent（变异 M4 删掉 --agent）时退回扫 cwd。
-if [[ -n "$AGENT_ARG" ]] && ws_scan=$(jq -r '.toolsSettings.read.allowedPaths[0] // empty' "$AGENT_JSON") && [[ -n "$ws_scan" && -d "$ws_scan" ]]; then
+if [[ -n "$AGENT_ARG" ]] && ws_scan=$(jq -r '.toolsSettings.read.allowedPaths[0] // ([(.permissions.rules // [])[] | select(.effect == "allow") | .match[0]] | first) // empty' "$AGENT_JSON") && [[ -n "$ws_scan" && -d "$ws_scan" ]]; then
   ( cd "$ws_scan" && injection_surface_scan ) > "$M/cwdscan"
 else
   injection_surface_scan > "$M/cwdscan"
@@ -337,7 +365,34 @@ fi
 
 SID="mock-0000-1111-2222-333344445555"
 emit() { jq -nc "$@"; }
-emit '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1,engine:"v2"}}'
+if [[ "$ENGINE_ARG" == v3 ]]; then
+  # --- V3 形态（kiro-cli 2.29.1 真实事件流，tests/fixtures/stream/v3-*.jsonl）：没有 metadata；用量在 session_info_update 的
+  # turn_completion 里，上下文在 context_usage 里，agent 与模型在 config_option_update 里（第一次是默认值，最后一次才是 agent 的）。
+  # 用量两笔之和与 V2 替身相同（credits=0.2609），上下文峰值 3.7519（context=3.8%）——两种引擎的日志断言可以写成同一句。
+  # MOCK_KIRO_ENGINE_REPORT=<值|none> 改 runStarted.data.engine（none = 不带这个字段）；MOCK_KIRO_V3_MODE / MOCK_KIRO_V3_MODEL / MOCK_KIRO_V3_AGENT_SOURCE
+  # 改最后一次 config_option_update；MOCK_KIRO_V3_STEERING=1 / MOCK_KIRO_V3_HOOK=1 / MOCK_KIRO_V3_CONTEXT_FILES=1 插入对应的 session_info_update。
+  ER="${MOCK_KIRO_ENGINE_REPORT-v3}"
+  if [[ "$ER" == none ]]; then emit '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1}}'
+  else emit --arg e "$ER" '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1,engine:$e}}'; fi
+  v3_cfg() { emit --arg s "$SID" --arg mode "$1" --arg model "$2" --arg a "$AGENT_ARG" --arg src "$3" \
+    '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"config_option_update",configOptions:[
+       {id:"mode",currentValue:$mode,options:[{value:"vibe",_meta:{kiro:{source:"bundled"}}},{value:$a,_meta:{kiro:{source:$src}}}]},
+       {id:"model",currentValue:$model}]}}}'; }
+  v3_info() { emit --arg s "$SID" --argjson k "$1" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"session_info_update",_meta:{kiro:$k}}}}'; }
+  v3_cfg vibe auto global
+  v3_cfg "${MOCK_KIRO_V3_MODE:-$AGENT_ARG}" "${MOCK_KIRO_V3_MODEL:-$(jq -r '.model // "auto"' "$AGENT_JSON")}" "${MOCK_KIRO_V3_AGENT_SOURCE:-global}"
+  [[ "${MOCK_KIRO_V3_STEERING:-0}" == "1" ]] && v3_info '{"kind":"steering_inclusion","steeringDocuments":["file:///mock/AGENTS.md"]}'
+  [[ "${MOCK_KIRO_V3_HOOK:-0}" == "1" ]] && v3_info '{"kind":"hook_update","hook":{"hookId":"/mock/.kiro/hooks/x.json#hook-0","status":"completed","actionType":"runCommand"}}'
+  if [[ "${MOCK_KIRO_V3_CONTEXT_FILES:-0}" == "1" ]]; then v3_info '{"kind":"context_usage","usagePercentage":1.2,"breakdown":{"contextFiles":{"items":[{"name":"AGENTS.md"}]}}}'
+  else v3_info '{"kind":"context_usage","usagePercentage":1.1242647171020508,"breakdown":{"contextFiles":{"items":[]}}}'; fi
+  emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"tool_call",toolCallId:"call_mock_1",title:"Read File",kind:"read",rawInput:{path:"src/app.py"},_meta:{toolOrigin:"default"}}}}'
+  emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"tool_call_update",toolCallId:"call_mock_1",status:"completed",title:"Read File"}}}'
+  emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"agent_message_chunk",content:{type:"text",text:"<<<"}}}}'
+  emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"agent_message_chunk",content:{type:"text",text:"KIRO_REVIEW_JSON>>>"}}}}'
+  v3_info '{"kind":"context_usage","usagePercentage":3.7519}'
+  v3_info '{"kind":"turn_completion","promptTurnSummaries":[{"unit":"credit","unitPlural":"credits","usage":0.0669794503482587,"usedTools":["read_file"]},{"unit":"credit","unitPlural":"credits","usage":0.19391594945273632}],"status":"success"}'
+else
+emit --arg e "${MOCK_KIRO_ENGINE_REPORT:-v2}" '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1,engine:$e}}'
 emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"tool_call",toolCallId:"call_mock_1",title:"Reading app.py:1-2000",kind:"read",locations:[{path:"src/app.py"}],rawInput:{operations:[{mode:"Line",path:"src/app.py",limit:2000}]},_meta:{kiro:{toolName:"read"}}}}}'
 emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"tool_call_update",toolCallId:"call_mock_1",kind:"read",status:"completed",title:"Reading app.py:1-2000",locations:[{path:"src/app.py"}]}}}'
 emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"agent_message_chunk",content:{type:"text",text:"<<<"}}}}'
@@ -345,6 +400,7 @@ emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpd
 if [[ "${MOCK_KIRO_NO_METADATA:-0}" != "1" ]]; then
   emit --arg s "$SID" '{type:"metadata",data:{sessionId:$s,contextUsagePercentage:1.1242647171020508}}'
   emit --arg s "$SID" '{type:"metadata",data:{sessionId:$s,contextUsagePercentage:3.7519,meteringUsage:[{value:0.0669794503482587,unit:"credit",unitPlural:"credits"},{value:0.19391594945273632,unit:"credit",unitPlural:"credits"}],turnDurationMs:10134}}'
+fi
 fi
 if [[ "${MOCK_KIRO_NO_RUNFINISHED:-0}" != "1" ]]; then
   STATUS=success
