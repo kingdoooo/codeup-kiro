@@ -77,6 +77,9 @@ BEHAVIOUR_VARS = {
     "kiro_timeout": ("KIRO_TIMEOUT", 900),
     "diff_size_limit": ("DIFF_SIZE_LIMIT", 307200),
     "max_comment_bytes": ("MAX_COMMENT_BYTES", 60000),
+    # Kiro 引擎（ADR-0008）：缺省 v3，写 v2 显式回退（演示用）。只收 v2 / v3 的校验在评审脚本第 1.6 步（取值不合法时 MR 上看得到失败评论），
+    # 本档位不另做——与上面几项同一约定。换引擎还要换钉版安装包与两个摘要（setup-guide.md「引擎」一节），镜像随之重建。
+    "kiro_engine": ("KIRO_ENGINE", "v3"),
 }
 
 

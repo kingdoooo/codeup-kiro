@@ -65,6 +65,8 @@ security_agent: 0
 # kiro_timeout: 900             # KIRO_TIMEOUT（秒，只收纯数字）
 # diff_size_limit: 307200       # DIFF_SIZE_LIMIT（字节，只收纯数字）
 # max_comment_bytes: 60000      # MAX_COMMENT_BYTES
+# kiro_engine: v3               # KIRO_ENGINE（ADR-0008）：v3（缺省）/ v2（显式回退，演示用）。只认这两个取值，写错时评审回写失败评论。
+#                               # 换引擎要连同钉版安装包与两个摘要一起换（v2 冻结在 2.29.0、v3 从 2.29.1 起），见 setup-guide.md「引擎」一节
 
 # ── 可选：调度器 ────────────────────────────────────────────────────────
 # bot_usernames: [aliyun:kirobot]   # 忽略其评论的机器人账号列表；默认只有 bot_username 一个。

@@ -756,7 +756,7 @@ def test_behaviour_vars_default_to_exactly_what_the_scripts_default_to():
 def test_behaviour_vars_pass_configured_values_through():
     from stacks.executor_stack import BEHAVIOUR_VARS
     over = {"inline_profile": "critical", "max_inline_comments": 3, "kiro_timeout": 1200,
-            "diff_size_limit": 100000, "max_comment_bytes": 30000}
+            "diff_size_limit": 100000, "max_comment_bytes": 30000, "kiro_engine": "v2"}
     assert set(over) == set(BEHAVIOUR_VARS)
     env = _all_envs(_full_cfg(**over))["container"]
     for key, (var, _default) in BEHAVIOUR_VARS.items():
