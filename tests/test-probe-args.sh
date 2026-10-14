@@ -34,6 +34,8 @@ esac
 SH
 chmod +x "$tmp/fakebin/kiro-cli"
 export FAKE_KIRO_CALLS="$tmp/calls"
+# ADR-0008 起探测默认 v3、v3 必须有 KIRO_API_KEY；下面这些既有用例测的是 v2 探测的参数与退出码，显式给 v2
+export KIRO_ENGINE=v2
 
 # --- 未知用例名 → 退出码 2，零调用（15-fix #5：PROBE_CASES=t1 曾零调用却打「全部 PASS」）---
 rc=0; err=$(env PATH="$tmp/fakebin:$PATH" HOME="$tmp/home" PROBE_CASES="t1" PROBE_KEEP_DIR="$tmp/keep1" bash "$PROBE" 2>&1) || rc=$?
@@ -191,7 +193,7 @@ assert_eq "$(LC_ALL=C grep -cE '^CASES=""$|^ *CASES=""$' "$ROOT/scripts/probe/pr
 assert_eq "$(LC_ALL=C grep -c 'kiro_cli_version "\$TIMEOUT_BIN" "\$KIRO_CWD"' "$ROOT/scripts/probe/probe-kiro-allowlist.sh")" "1" \
   "⑫：probe-kiro-allowlist.sh 的 kiro_cli_version 在 \$KIRO_CWD 下跑"
 # ④ run_case / run_case_agent 共用一份实现（_probe_run），拼命令与计时只有一处
-assert_eq "$(LC_ALL=C grep -c 'kiro-cli chat --no-interactive --agent-engine v2' "$ROOT/scripts/probe/probe-kiro-allowlist.sh")" "1" \
+assert_eq "$(LC_ALL=C grep -c 'kiro-cli chat --no-interactive --agent-engine "\$PROBE_ENGINE"' "$ROOT/scripts/probe/probe-kiro-allowlist.sh")" "1" \
   "⑫：探测里拼 kiro-cli 命令只有一处（run_case 与 run_case_agent 都走 _probe_run）"
 # ---- issue 13：探测的调用形状必须与生产一致（提示词走 stdin、不给位置参数）----
 # 为什么要守：kiro-cli 收到位置参数就整个忽略 stdin（ADR-0004 实测），两种传法不是同一条输入路径；
