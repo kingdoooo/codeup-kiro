@@ -148,8 +148,11 @@ REVIEW_REPO_DIR="${REVIEW_REPO_DIR:-$PWD}"
 # JAVA_HOME / AWS_PROFILE 这类；凭证形状的名字按规则拒绝，AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION 显式放行）。固定名单与校验在 scripts/lib/kiro-agent.sh 的 kiro_env_allowlist；
 # 非法名字在第 1.6 步拒绝运行。
 KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
-# 探测 P1-15（T8：符号链接与 ../ 越界都是先解析再比对 allowedPaths）实测过的**平台 + 版本**（空格分隔）。
-# 每个条目形如 `<os>/<arch>:<版本>`，平台键由 kiro_platform_key（scripts/lib/kiro-agent.sh）算出，门禁与探测脚本共用同一份算法。
+# 探测 P1-15（T8：符号链接与 ../ 越界都是先解析再比对 allowedPaths）实测过的**平台 + 版本 + 引擎**（空格分隔；ADR-0008 起是三元组）。
+# 每个条目形如 `<os>/<arch>:<版本>:<引擎>`，平台键由 kiro_platform_key（scripts/lib/kiro-agent.sh）算出，门禁与探测脚本共用同一份算法；
+# 引擎是 v2 或 v3——同一个安装包里两种引擎的读取边界实现完全不同（V2 读 toolsSettings，V3 读 permissions.rules），探测结论只对探测时用的那个引擎成立。
+# 两段的旧格式（`<os>/<arch>:<版本>`）在这里、KIRO_TESTED_TARGETS_EXTRA 与 KIRO_ACK_UNTESTED_TARGET 里一律不再接受：隐式表示 v2 等于在门禁里藏一个默认值，
+# 与「默认 v3」互相矛盾。
 #
 # **为什么带平台**（CodeX 2026-09-13 复审 P1）：读取边界靠 kiro-cli 的路径解析行为，而那是按平台编译的；
 # 上一轮已经把「探测结论只对探测所用的平台 + 版本成立」写进代码注释与 setup-guide，门禁却仍然只比版本号——
@@ -157,31 +160,21 @@ KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 # 真机运行成功（#58）只能证明评审跑得起来，不能替代 T2/T3/T8/T9 这些**负向**权限用例。改成元组后，
 # 同一个版本换平台就要各自探测、各自进名单，这个缺口不会随着「又加了一个只在本机探测的新版本」重新出现。
 #
-# 本次版本 / 平台的组合不在名单里时**拒绝评审**（CodeX 2026-09-09 复审 P1-2，推翻 15-fix2 #24 的「只 notice」），
-# 除非 KIRO_ACK_UNTESTED_TARGET 逐字等于本次的 `<os>/<arch>:<版本>` 元组（见下——2026-09-13 起 break-glass 绑定的单位
+# 本次版本 / 平台 / 引擎的组合不在名单里时**拒绝评审**（CodeX 2026-09-09 复审 P1-2，推翻 15-fix2 #24 的「只 notice」），
+# 除非 KIRO_ACK_UNTESTED_TARGET 逐字等于本次的 `<os>/<arch>:<版本>:<引擎>` 元组（见下——2026-09-13 起 break-glass 绑定的单位
 # 也是元组，只绑版本的旧变量 KIRO_ACK_UNTESTED_VERSION 已废弃、设了就拒绝运行；拒绝信息里会写清缺的是哪个元组）。
 # 升级 kiro-cli 或换执行器平台后：在**那个平台上**跑
-# scripts/probe/probe-kiro-allowlist.sh，通过后把它打印的 `<os>/<arch>:<版本>` 原样加进这里。
+# scripts/probe/probe-kiro-allowlist.sh（KIRO_ENGINE 选引擎），通过后把它打印的 `<os>/<arch>:<版本>:<引擎>` 原样加进这里。
 #
 # 平台键**不含** libc 变体（glibc/musl）与发行版：那一维靠运维固定执行器镜像 digest 控（setup-guide 第 7 节第 6 项）。
 #
-# darwin/arm64:2.21.1  2026-09-06 / 09-07 探测（15-fix2 / 15-fix4），Phase 1 全部真实验收都在这个版本上做。
-#                      它的 Linux 侧读取边界没有同等证据——自建执行器若预装 2.21.1，要在自己的镜像上补跑探测。
-# （2.21.2 刻意不在名单里：它于 2026-09-08 发布过，但从未在任何平台上探测，不是遗漏。）
-# darwin/arm64:2.21.3  2026-09-11 探测，十二个门禁用例 + T5 正控全 PASS（any_fail=false、gate_missing=[]）。
-# linux/x86_64:2.21.3  2026-09-11 在真实 Flow 执行器（alinux3 容器）里跑同一套探测，退出码 0。
-#                      libc 变体 = **musl**（官方安装脚本在 alinux3 上自动选 musl，因为该镜像的 glibc 低于 gnu 版要求的 2.34）。
-# darwin/arm64:2.21.4  2026-09-13 探测，同一套门禁全 PASS。起因是 Kiro 09-12 发了 2.21.4、云托管执行器的
-#                      curl|bash 立刻装到它，摘要门与版本门双双拒绝——按 setup-guide 第 7 节四步恢复。
-# linux/x86_64:2.21.4  2026-09-13 在真实 Flow 执行器（alinux3 容器）里补跑同一套探测：平台键 linux/x86_64、
-#                      入口 /root/.local/bin/kiro-cli（sha256 940b47e5…，该摘要即 **musl** 变体的入口文件）、
-#                      十二个门禁用例全 PASS、退出码 0。
-#                      这一条是 CodeX 2026-09-13 复审 P1 逼出来的——在它之前，2.21.4 只有 darwin 的证据却被门禁当成通用。
-# darwin/arm64:2.29.0  2026-10-11 探测（钉版从 2.21.4 升到 2.29.0），十二个门禁用例 + T5 正控全 PASS、退出码 0。
-# linux/x86_64:2.29.0  2026-10-11 在 sandbox 的一次性 Fargate 任务里跑同一套探测（AWS 执行器同一镜像、同一子网 / 安全组、DNS Firewall BLOCK）：
-#                      入口 /root/.local/bin/kiro-cli（sha256 61e82d58…，**musl** 变体：BUILD_TARGET_TRIPLE=x86_64-unknown-linux-musl）、
-#                      十二个门禁用例 + T5 正控全 PASS、退出码 0。Flow 的钉版档位装的是同一个安装包、同一个入口文件。
-KIRO_TESTED_TARGETS="darwin/arm64:2.21.1 darwin/arm64:2.21.3 linux/x86_64:2.21.3 darwin/arm64:2.21.4 linux/x86_64:2.21.4 darwin/arm64:2.29.0 linux/x86_64:2.29.0"
+# V2 冻结（ADR-0008 / Q6、Q20）：只保留 2.29.0 的两条 v2 组合，以后升级 kiro-cli 只验证 v3、不再新增 v2 组合；2.21.x 的条目已删除
+# （它们是用旧版脚本验证的，这次重构之后只在 2.29.0 上做真实回归；需要更老版本的用 v1.10.1 tag）。2.29.1 起只跑 v3。
+# darwin/arm64:2.29.0:v2  2026-10-11 探测（钉版从 2.21.4 升到 2.29.0），十二个门禁用例 + T5 正控全 PASS、退出码 0。
+# linux/x86_64:2.29.0:v2  2026-10-11 在 sandbox 的一次性 Fargate 任务里跑同一套探测（AWS 执行器同一镜像、同一子网 / 安全组、DNS Firewall BLOCK）：
+#                         入口 /root/.local/bin/kiro-cli（sha256 61e82d58…，**musl** 变体：BUILD_TARGET_TRIPLE=x86_64-unknown-linux-musl）、
+#                         十二个门禁用例 + T5 正控全 PASS、退出码 0。Flow 的钉版档位装的是同一个安装包、同一个入口文件。
+KIRO_TESTED_TARGETS="darwin/arm64:2.29.0:v2 linux/x86_64:2.29.0:v2"
 # 使用方自己探测过的元组（不变式 I8，2026-09-15）：只做**并集**——加得进来，删不掉也覆盖不了上面那个常量里的条目。
 # 为什么需要它：上面的名单写死在集成包源码里，于是升级仪式要求使用方**改集成包的源码**；他们要么 fork（然后永远合不回来），
 # 要么一直用下面的 break-glass 顶着（那等于版本门形同虚设，还多一个手工步骤）。
@@ -191,7 +184,7 @@ KIRO_TESTED_TARGETS="darwin/arm64:2.21.1 darwin/arm64:2.21.3 linux/x86_64:2.21.3
 # 取值是空格分隔的元组列表，每一项按与 KIRO_ACK_UNTESTED_TARGET 相同的形状校验（第 1.6 步，逐项；任一项非法即拒绝、不回显）。
 KIRO_TESTED_TARGETS_EXTRA="${KIRO_TESTED_TARGETS_EXTRA:-}"
 # break-glass（CodeX 2026-09-09 复审 P1-2；2026-09-13 复审 P2 把绑定单位升级为元组）：名单外的组合默认**拒绝评审**；
-# 这个流水线变量的取值必须**逐字等于**本次的 `<os>/<arch>:<版本>` 才放行（汇总带醒目 notice）。
+# 这个流水线变量的取值必须**逐字等于**本次的 `<os>/<arch>:<版本>:<引擎>` 才放行（汇总带醒目 notice）。
 # 刻意不做布尔开关——那种变量会永久留在环境里放行以后所有未知组合。
 # **为什么不是只绑版本**：版本门的信任单位已经是元组，而只绑版本的确认值在执行器换平台之后会继续自动放行同一个版本
 # （2026-09-13 复现：名单里没有 linux/mips64:2.21.4，遗留的 KIRO_ACK_UNTESTED_VERSION=2.21.4 照样放行）——
@@ -1084,14 +1077,14 @@ for _v in KIRO_TIMEOUT DIFF_SIZE_LIMIT; do
     || die_review "${_v}=0 不合法（必须 ≥1；0 会让超时形同不限时、让 diff 阈值变成「全部省略」）。请修正该流水线变量"
 done
 unset _v
-# KIRO_ACK_UNTESTED_TARGET 只收「<os>/<arch>:<版本>」形状（平台键与 kiro_cli_version 取到的字符集一致）：别的形状一律拒绝运行、
+# KIRO_ACK_UNTESTED_TARGET 只收「<os>/<arch>:<版本>:<引擎>」形状（平台键与 kiro_cli_version 取到的字符集一致，引擎 v2 / v3）：别的形状一律拒绝运行、
 # 取值不回显——它会原样进 notice 与失败评论（CodeX 2026-09-09 复审 P1-2；2026-09-13 复审 P2 把单位从版本升级为元组）
 # 旧的只绑版本的确认变量：设了就拒绝，并把该改成的新取值算给运维（本次元组要等版本门那一步才知道，所以这里只给形态说明）
 if [[ -n "$KIRO_ACK_UNTESTED_VERSION" ]]; then
-  die_review "KIRO_ACK_UNTESTED_VERSION 已废弃（2026-09-13 起），拒绝评审：版本门的信任单位是「平台 + 版本」元组，只绑版本的确认值在执行器换平台之后会继续自动放行同一个版本。请删掉它，改用 KIRO_ACK_UNTESTED_TARGET=<os>/<arch>:<版本>（取值必须逐字等于本次组合；失败评论会写出该填什么）"
+  die_review "KIRO_ACK_UNTESTED_VERSION 已废弃（2026-09-13 起），拒绝评审：版本门的信任单位是「平台 + 版本 + 引擎」元组，只绑版本的确认值在执行器换平台之后会继续自动放行同一个版本。请删掉它，改用 KIRO_ACK_UNTESTED_TARGET=<os>/<arch>:<版本>:<引擎>（取值必须逐字等于本次组合；失败评论会写出该填什么）"
 fi
-if [[ -n "$KIRO_ACK_UNTESTED_TARGET" && ! "$KIRO_ACK_UNTESTED_TARGET" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+:[0-9]+(\.[0-9]+)+$ ]]; then
-  die_review "KIRO_ACK_UNTESTED_TARGET 不合法：只能是「<os>/<arch>:<版本>」形状（如 linux/x86_64:2.21.4，全小写），不接受别的形状。请修正或删除该流水线变量"
+if [[ -n "$KIRO_ACK_UNTESTED_TARGET" && ! "$KIRO_ACK_UNTESTED_TARGET" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+:[0-9]+(\.[0-9]+)+:v[23]$ ]]; then
+  die_review "KIRO_ACK_UNTESTED_TARGET 不合法：只能是「<os>/<arch>:<版本>:<引擎>」形状（如 linux/x86_64:2.29.1:v3，全小写；ADR-0008 起两段的旧格式不再接受），不接受别的形状。请修正或删除该流水线变量"
 fi
 # 使用方追加名单（不变式 I8）：空格分隔的元组列表，**逐项**按上面同一个正则校验——「有一项合法」不能让别的项混进来。
 # 用 read -ra 而不是 `for t in $VAR`：后者除了按 IFS 分词还会做**路径展开**，而 cwd 就是业务库，一个 `*` 会展开成业务库的文件名
@@ -1107,8 +1100,8 @@ if [[ -n "$KIRO_TESTED_TARGETS_EXTRA" ]]; then
   # 展开空数组会直接报 unbound variable——那会绕过 die_review，MR 上什么都看不到（违反 I10）
   for ((_i = 0; _i < ${#_extra_targets[@]}; _i++)); do
     _t="${_extra_targets[_i]}"
-    [[ "$_t" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+:[0-9]+(\.[0-9]+)+$ ]] \
-      || die_review "KIRO_TESTED_TARGETS_EXTRA 不合法：只能是空格分隔的「<os>/<arch>:<版本>」元组（如 \"linux/x86_64:2.21.4 linux/aarch64:2.21.4\"，全小写），其中有一项不是这个形状（取值不回显）。它只用于登记**你自己按 scripts/probe/README.md 探测过且全 PASS** 的组合；没探测过而要临时放行的是 KIRO_ACK_UNTESTED_TARGET（汇总会带醒目 notice）。请修正该流水线变量"
+    [[ "$_t" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+:[0-9]+(\.[0-9]+)+:v[23]$ ]] \
+      || die_review "KIRO_TESTED_TARGETS_EXTRA 不合法：只能是空格分隔的「<os>/<arch>:<版本>:<引擎>」元组（如 \"linux/x86_64:2.29.1:v3 linux/aarch64:2.29.1:v3\"，全小写；ADR-0008 起两段的旧格式不再接受），其中有一项不是这个形状（取值不回显）。它只用于登记**你自己按 scripts/probe/README.md 探测过且全 PASS** 的组合；没探测过而要临时放行的是 KIRO_ACK_UNTESTED_TARGET（汇总会带醒目 notice）。请修正该流水线变量"
     _extra_norm+="${_t} "
   done
   # 归一成单空格分隔（只保留校验通过的那些项，原样的空白全部丢掉）：名单判定按「空格 + 元组 + 空格」比对，
@@ -1415,14 +1408,22 @@ kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" || die_review "kiro-cli 无法运行
 # 平台键算不出来（缺 uname / 输出形状不认）与版本号解析不出同一取舍：拒绝，不猜
 KIRO_PLATFORM_KEY=$(kiro_platform_key) \
   || die_review "无法确定执行器平台（uname -s / uname -m 不可用或输出形状不认），拒绝评审：P1-15 的探测结论只对「平台 + 版本」成立，平台未知不放行。请在执行器上安装 coreutils / 核对 uname"
-KIRO_CLI_TARGET="${KIRO_PLATFORM_KEY}:${KIRO_CLI_VERSION}"
+KIRO_CLI_TARGET="${KIRO_PLATFORM_KEY}:${KIRO_CLI_VERSION}:${KIRO_ENGINE}"
+# 同平台、同版本、引擎不同的组合在名单里时追加一句提示（ADR-0008）：默认 v3 撞上只验证过 v2 的版本（或反过来），最常见的原因是
+# 演示 V2 时忘了设 KIRO_ENGINE=v2、或换了引擎却没换对应的安装包。只读名单，不改判定。
+_tgt_other_engine_hint() {
+  local other=v3
+  if [[ "$KIRO_ENGINE" == v3 ]]; then other=v2; fi
+  [[ " $KIRO_TESTED_TARGETS_ALL " == *" ${KIRO_PLATFORM_KEY}:${KIRO_CLI_VERSION}:${other} "* ]] || return 0
+  printf '%s' "该版本在已探测名单里只有 ${other} 引擎的组合（${KIRO_PLATFORM_KEY}:${KIRO_CLI_VERSION}:${other}）：要用 ${other} 引擎请显式设 KIRO_ENGINE=${other}，并换成该引擎对应的安装包与两个摘要（见 pipeline/setup-guide.md「引擎」一节）。"
+}
 # 判定用的是「仓库常量 ∪ 使用方追加名单」（不变式 I8）。**只追加**：拼接的左边是常量，追加名单进不到左边去，
 # 所以它删不掉也覆盖不了集成包已验证的元组。变异 M-extra 把这一行改成「只看追加名单」来守这条不变式。
 # MR 可见的文案里一律写这个并集（那才是本次真正被信任的集合），而**授权来源**（常量 / 追加名单）只进流水线日志（I9）：
 # 读评审的开发者不关心这个元组是谁加进名单的，加一句限定语只会削弱他们对评审本身的信心；「谁都没探测过」才是产品信息（break-glass 的 notice）。
 KIRO_TESTED_TARGETS_ALL="${KIRO_TESTED_TARGETS}${KIRO_TESTED_TARGETS_EXTRA:+ ${KIRO_TESTED_TARGETS_EXTRA}}"
 if [[ -z "$KIRO_CLI_VERSION" ]]; then
-  die_review "kiro-cli 版本号无法解析（--version 输出里没有唯一的一行「kiro-cli X.Y.Z」），拒绝评审：读取边界依赖在已探测平台 + 版本（${KIRO_TESTED_TARGETS_ALL}）上实测的路径解析行为，版本未知不放行，KIRO_ACK_UNTESTED_TARGET 也不能放行未知版本。请在执行器上预装已探测版本（setup-guide 第 7 节）"
+  die_review "kiro-cli 版本号无法解析（--version 输出里没有唯一的一行「kiro-cli X.Y.Z」），拒绝评审：读取边界依赖在已探测平台 + 版本 + 引擎（${KIRO_TESTED_TARGETS_ALL}）上实测的路径解析行为，版本未知不放行，KIRO_ACK_UNTESTED_TARGET 也不能放行未知版本。请在执行器上预装已探测版本（setup-guide 第 7 节）"
 elif [[ " $KIRO_TESTED_TARGETS_ALL " == *" $KIRO_CLI_TARGET "* ]]; then
   # 授权来源只进流水线日志（I9），而且是**三**个分支：写成「在常量里 / 否则就是追加名单」的话，
   # 一旦并集判定被改宽（例如退回只比版本号），「两个名单里其实都没有」会被谎报成「使用方自己探测过的」——
@@ -1434,15 +1435,15 @@ elif [[ " $KIRO_TESTED_TARGETS_ALL " == *" $KIRO_CLI_TARGET "* ]]; then
   else
     _tgt_src="来源不明——既不在仓库常量也不在追加名单里，却通过了名单判定（集成包缺陷，请报告）"
   fi
-  log "kiro-cli ${KIRO_CLI_TARGET}：在 P1-15 探测过的平台 + 版本名单内（授权来源：${_tgt_src}）"
+  log "kiro-cli ${KIRO_CLI_TARGET}：在 P1-15 探测过的平台 + 版本 + 引擎名单内（授权来源：${_tgt_src}）"
   unset _tgt_src
 elif [[ -n "$KIRO_ACK_UNTESTED_TARGET" && "$KIRO_ACK_UNTESTED_TARGET" == "$KIRO_CLI_TARGET" ]]; then
-  REVIEW_NOTICE="注意：本次组合 ${KIRO_CLI_TARGET}（平台 + kiro-cli 版本）未经 P1-15 探测（已探测：${KIRO_TESTED_TARGETS_ALL}），由流水线变量 KIRO_ACK_UNTESTED_TARGET=${KIRO_ACK_UNTESTED_TARGET} 显式放行（break-glass）：读取边界依赖未验证的路径解析行为（符号链接 / ../ 是否先解析再比对 allowedPaths），而该行为按平台编译。请尽快在这个平台上按 scripts/probe/README.md「升级 kiro-cli 之后」跑一次探测、把 ${KIRO_CLI_TARGET} 加进 KIRO_TESTED_TARGETS，然后删掉该变量。"
+  REVIEW_NOTICE="注意：本次组合 ${KIRO_CLI_TARGET}（平台 + kiro-cli 版本 + 引擎）未经 P1-15 探测（已探测：${KIRO_TESTED_TARGETS_ALL}），由流水线变量 KIRO_ACK_UNTESTED_TARGET=${KIRO_ACK_UNTESTED_TARGET} 显式放行（break-glass）：读取边界依赖未验证的路径解析行为（符号链接 / ../ 是否先解析再比对 allowedPaths），而该行为按平台编译。请尽快在这个平台上按 scripts/probe/README.md「升级 kiro-cli 之后」跑一次探测、把 ${KIRO_CLI_TARGET} 加进 KIRO_TESTED_TARGETS，然后删掉该变量。"
   log "警告：${REVIEW_NOTICE}"
 elif [[ -n "$KIRO_ACK_UNTESTED_TARGET" ]]; then
-  die_review "本次组合 ${KIRO_CLI_TARGET} 未经 P1-15 探测（已探测：${KIRO_TESTED_TARGETS_ALL}），且 KIRO_ACK_UNTESTED_TARGET=${KIRO_ACK_UNTESTED_TARGET} 与本次组合不一致，拒绝评审：确认值必须逐字等于「平台:版本」（每个新组合单独确认，不留永久放行的开关——只绑版本的确认值会在换平台后继续放行）。请核对后改成 ${KIRO_CLI_TARGET}，或预装已探测的组合（setup-guide 第 7 节）"
+  die_review "本次组合 ${KIRO_CLI_TARGET} 未经 P1-15 探测（已探测：${KIRO_TESTED_TARGETS_ALL}），且 KIRO_ACK_UNTESTED_TARGET=${KIRO_ACK_UNTESTED_TARGET} 与本次组合不一致，拒绝评审：确认值必须逐字等于「平台:版本:引擎」（每个新组合单独确认，不留永久放行的开关——只绑版本的确认值会在换平台后继续放行）。请核对后改成 ${KIRO_CLI_TARGET}，或预装已探测的组合（setup-guide 第 7 节）。$(_tgt_other_engine_hint)"
 else
-  die_review "本次组合 ${KIRO_CLI_TARGET}（平台 + kiro-cli 版本）未经 P1-15 探测（已探测：${KIRO_TESTED_TARGETS_ALL}），拒绝评审：读取边界（符号链接 / ../ 是否先解析再比对 allowedPaths）依赖在**该平台该版本**上实测的行为——同一个版本换平台不算已验证。请在执行器上预装已探测的组合（setup-guide 第 7 节）；确需在此组合上运行，先在这个平台上按 scripts/probe/README.md「升级 kiro-cli 之后」跑探测、通过后把 ${KIRO_CLI_TARGET} 加进流水线变量 KIRO_TESTED_TARGETS_EXTRA（登记你自己探测过的组合，只追加、删不掉集成包已验证的那些）；**没跑探测**而要临时放行，才是设 KIRO_ACK_UNTESTED_TARGET=${KIRO_CLI_TARGET}（汇总会带醒目 notice）"
+  die_review "本次组合 ${KIRO_CLI_TARGET}（平台 + kiro-cli 版本 + 引擎）未经 P1-15 探测（已探测：${KIRO_TESTED_TARGETS_ALL}），拒绝评审：读取边界（符号链接 / ../ 是否先解析再比对 allowedPaths）依赖在**该平台该版本**上实测的行为——同一个版本换平台不算已验证。请在执行器上预装已探测的组合（setup-guide 第 7 节）；确需在此组合上运行，先在这个平台上按 scripts/probe/README.md「升级 kiro-cli 之后」跑探测、通过后把 ${KIRO_CLI_TARGET} 加进流水线变量 KIRO_TESTED_TARGETS_EXTRA（登记你自己探测过的组合，只追加、删不掉集成包已验证的那些）；**没跑探测**而要临时放行，才是设 KIRO_ACK_UNTESTED_TARGET=${KIRO_CLI_TARGET}（汇总会带醒目 notice）。$(_tgt_other_engine_hint)"
 fi
 # 行内评论标记里的指纹要 sha1：标记是把「本评审员发的」与人工评论区分开的依据，没有它下一次评审
 # 认不出自己的评论、重跑会在同一行上堆重复评论（违反 I6 幂等）。与 timeout 同理列为硬依赖。

@@ -147,12 +147,13 @@ mock_dir_of_home() { printf '%s/.kiro-mock' "$1"; }
 # 本机平台在 KIRO_TESTED_TARGETS 里对应的第一个版本（CodeX 2026-09-13 复审 P1 之后名单是「平台 + 版本」元组）。
 # 用例里「名单内版本」不能再硬写 2.21.1——那个元组只对 darwin/arm64 成立，在 Linux 上跑套件会整片变成「名单外」。
 # 从 kiro-review.sh 的常量里现取，名单一变测试跟着变；取不到就留空（调用方会看到版本门拒绝，症状明确）。
+# ADR-0008 起名单是「平台 + 版本 + 引擎」三元组：$1 = 引擎（默认 v2——既有用例都显式跑 v2），只取该引擎的条目、返回版本号。
 listed_version_for_host() {
-  local plat lib="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/lib/kiro-agent.sh"
+  local eng="${1:-v2}" plat lib="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/lib/kiro-agent.sh"
   plat=$(bash -c 'source "$1"; kiro_platform_key' _ "$lib" 2>/dev/null) || return 0
   [[ -n "$plat" ]] || return 0
   sed -n 's/^KIRO_TESTED_TARGETS="\(.*\)"$/\1/p' "${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/kiro-review.sh" \
-    | tr ' ' '\n' | grep "^${plat}:" | head -1 | sed "s#^${plat}:##"
+    | tr ' ' '\n' | { grep "^${plat}:[0-9.]*:${eng}$" || true; } | LC_ALL=C awk 'NR == 1' | sed "s#^${plat}:##; s#:${eng}\$##"
 }
 mock_config_write() { # <HOME 目录> [MOCK_X=值 ...]（非 MOCK_ 开头的参数忽略，便于把 run_case 的 "$@" 原样传进来）
   local dir; dir=$(mock_dir_of_home "$1"); shift

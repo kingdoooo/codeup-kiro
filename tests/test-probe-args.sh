@@ -152,7 +152,8 @@ assert_eq "$(sed -n 's#^ *sourceFilePath: "kiro/\([0-9.]*\)/kirocli-x86_64-linux
 # 钉的版本必须在名单里有 linux/x86_64 那一条（两个档位的执行器都是 linux/x86_64 + musl）：顺序是探测 → 名单 → 发布，
 # 钉了一个名单外的版本，每次评审都会被版本门拒绝
 targets=$(sed -n 's/^KIRO_TESTED_TARGETS="\(.*\)"$/\1/p' "$ROOT/scripts/kiro-review.sh")
-assert_contains " $targets " " linux/x86_64:${df_ver} " "钉版：Dockerfile 钉的 ${df_ver} 在 KIRO_TESTED_TARGETS 里有 linux/x86_64 元组"
+# ADR-0008 起名单是三元组：钉的版本此刻是 v2 冻结的 2.29.0；钉版换到 2.29.1 时（真实环境验证那一步）这里改成 :v3（AWS 档位默认 v3）
+assert_contains " $targets " " linux/x86_64:${df_ver}:v2 " "钉版：Dockerfile 钉的 ${df_ver} 在 KIRO_TESTED_TARGETS 里有 linux/x86_64 元组"
 # AWS 手册里写到版本的两处（复审 M-7）：构建命令的镜像标签、「已探测元组是对 musl 入口文件跑出来的」那一句
 AG="$ROOT/aws/setup-guide.md"
 assert_contains "$(cat "$AG")" "-t codeup-kiro-executor:${df_ver} ." "钉版：AWS 手册构建命令的镜像标签版本 = Dockerfile"

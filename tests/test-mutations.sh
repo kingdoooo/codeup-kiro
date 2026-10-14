@@ -199,7 +199,7 @@ assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-n
 # 平台维度没法靠打桩 uname 来测（kiro_platform_key 走 command -p，不看调用者 PATH——那是本轮 P1 的修复），
 # 所以反过来：把名单改成**只含别的平台**的同一个版本，看门禁是否还拒绝。
 # 基线（未变异，只改名单）：本机元组不在名单里 → 必须拒绝。
-pkg=$(make_mutant m-cx-plat-list 's#^KIRO_TESTED_TARGETS=".*"$#KIRO_TESTED_TARGETS="otheros/otherarch:9.9.9"#')
+pkg=$(make_mutant m-cx-plat-list 's#^KIRO_TESTED_TARGETS=".*"$#KIRO_TESTED_TARGETS="otheros/otherarch:9.9.9:v2"#')
 run_case m-cx-plat-base "$pkg" MOCK_KIRO_VERSION=9.9.9
 assert_nonzero "$RC" "M-cx-plat 基线：名单里只有别的平台的同一个版本 → 拒绝"
 assert_contains "$(posted_comment "$OUT")" "同一个版本换平台不算已验证" "M-cx-plat 基线：失败评论解释平台维度"
@@ -208,42 +208,43 @@ assert_not_contains "$OUT" "开始 Kiro 评审" "M-cx-plat 基线：Kiro 不启�
 # 锚在**判定用的那个并集变量**（KIRO_TESTED_TARGETS_ALL）上：issue 07 之后「同一个形状」在源码里出现两次，
 # 另一处是判定通过之后算「授权来源是仓库常量还是追加名单」的那行日志判断。改错那一处的话门禁根本没动，
 # 变异体仍然拒绝、`assert_rc 0` 会响——但排查方向会被带偏，所以这里显式绑住 _ALL。
-mutate_more "$pkg" 's#\[\[ " \$KIRO_TESTED_TARGETS_ALL " == \*" \$KIRO_CLI_TARGET "\* \]\]#[[ " $KIRO_TESTED_TARGETS_ALL " == *":$KIRO_CLI_VERSION "* ]]#'
+# ADR-0008 起元组带引擎段：「只比版本」的变异体比的是「:版本:引擎」这一截，不比平台
+mutate_more "$pkg" 's#\[\[ " \$KIRO_TESTED_TARGETS_ALL " == \*" \$KIRO_CLI_TARGET "\* \]\]#[[ " $KIRO_TESTED_TARGETS_ALL " == *":$KIRO_CLI_VERSION:$KIRO_ENGINE "* ]]#'
 run_case m-cx-plat "$pkg" MOCK_KIRO_VERSION=9.9.9
 assert_rc "$RC" 0 "M-cx-plat：门禁只比版本 → 别的平台的证据被当成本平台的，评审照跑"
-assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "M-cx-plat：日志声称在名单内"
+assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本 + 引擎名单内" "M-cx-plat：日志声称在名单内"
 assert_contains "$OUT" "开始 Kiro 评审" "M-cx-plat：Kiro 在未验证的平台上被启动了"
 
 # --- M-extra（issue 07 / 不变式 I8）：判定名单从「常量 ∪ 追加」改成「只看追加名单」→ 使用方一设追加名单，
 # 集成包已验证的元组就被挤出名单。这是「只追加、不覆盖」这条不变式唯一的承重实现，必须有变异守着 ---
 pkg=$(make_mutant m-extra-override 's#^KIRO_TESTED_TARGETS_ALL=.*#KIRO_TESTED_TARGETS_ALL="$KIRO_TESTED_TARGETS_EXTRA"#')
-run_case m-extra-override "$pkg" MOCK_KIRO_VERSION="$(listed_version_for_host)" KIRO_TESTED_TARGETS_EXTRA="linux/mips64:1.2.3"
+run_case m-extra-override "$pkg" MOCK_KIRO_VERSION="$(listed_version_for_host)" KIRO_TESTED_TARGETS_EXTRA="linux/mips64:1.2.3:v2"
 assert_nonzero "$RC" "M-extra：追加名单覆盖常量 → 常量里的元组被判名单外而拒绝"
 assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-extra：失败评论说本次组合未经探测——端到端「追加名单删不掉常量里的元组」断言会失败"
-run_case m-extra-override-control "$ROOT" MOCK_KIRO_VERSION="$(listed_version_for_host)" KIRO_TESTED_TARGETS_EXTRA="linux/mips64:1.2.3"
+run_case m-extra-override-control "$ROOT" MOCK_KIRO_VERSION="$(listed_version_for_host)" KIRO_TESTED_TARGETS_EXTRA="linux/mips64:1.2.3:v2"
 assert_rc "$RC" 0 "M-extra 对照：原实现取并集，常量里的元组照常放行"
 assert_contains "$OUT" "仓库常量" "M-extra 对照：日志说明授权来源是仓库常量"
 
 # --- M-extra-norm（issue 07）：追加名单不再归一成单空格 → 逐项校验按 IFS 分词（制表符也算）过得去，
 # 名单判定按「空格 + 元组 + 空格」比对却一项都匹配不上，表现是「变量配了但不生效」然后被版本门拒绝 ---
 pkg=$(make_mutant m-extra-norm 's#^  KIRO_TESTED_TARGETS_EXTRA="\${_extra_norm% }"$#  :#')
-run_case m-extra-norm "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'otheros/otherarch:1.2.3\t'"${HOST_PLAT}:9.9.9"
+run_case m-extra-norm "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'otheros/otherarch:1.2.3:v2\t'"${HOST_PLAT}:9.9.9:v2"
 assert_nonzero "$RC" "M-extra-norm：制表符分隔的追加名单静默不生效 → 被版本门拒绝"
 assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-extra-norm：失败评论说未经探测——端到端「制表符分隔照常放行」断言会失败"
-run_case m-extra-norm-control "$ROOT" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'otheros/otherarch:1.2.3\t'"${HOST_PLAT}:9.9.9"
+run_case m-extra-norm-control "$ROOT" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'otheros/otherarch:1.2.3:v2\t'"${HOST_PLAT}:9.9.9:v2"
 assert_rc "$RC" 0 "M-extra-norm 对照：原实现归一后照常放行"
 
 # --- M-extra-multiline（CodeX 2026-09-16 复审 R4）：`read -ra` 少了 `-d ''` → 只读到第一个换行，
 # 第二行起的项被**静默丢掉**：合法元组不生效（被版本门拒绝），非法项也不再触发「任一项非法即拒绝」。
 # sed 里用 `..` 匹配那对单引号（单引号的 sed 表达式里写不进单引号）---
 pkg=$(make_mutant m-extra-multiline 's#read -ra _extra_targets -d .. <<<#read -ra _extra_targets <<<#')
-run_case m-extra-multiline "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'linux/mips64:1.2.3\n'"${HOST_PLAT}:9.9.9"
+run_case m-extra-multiline "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA=$'linux/mips64:1.2.3:v2\n'"${HOST_PLAT}:9.9.9:v2"
 assert_nonzero "$RC" "M-extra-multiline：多行追加名单第一行之后被静默丢掉 → 本次元组判名单外而拒绝"
 assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-extra-multiline：失败评论说未经探测——端到端「换行分隔照常放行」断言会失败"
-run_case m-extra-multiline-bad "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA="${HOST_PLAT}:9.9.9"$'\nNOT-A-TARGET'
+run_case m-extra-multiline-bad "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA="${HOST_PLAT}:9.9.9:v2"$'\nNOT-A-TARGET'
 assert_rc "$RC" 0 "M-extra-multiline：第二行的非法项被静默丢掉 → 照常放行（形状校验根本没看见它）"
 assert_contains "$OUT" "开始 Kiro 评审" "M-extra-multiline：非法项没触发拒绝——端到端「第二行非法 → 拒绝」断言会失败"
-run_case m-extra-multiline-control "$ROOT" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA="${HOST_PLAT}:9.9.9"$'\nNOT-A-TARGET'
+run_case m-extra-multiline-control "$ROOT" MOCK_KIRO_VERSION=9.9.9 KIRO_TESTED_TARGETS_EXTRA="${HOST_PLAT}:9.9.9:v2"$'\nNOT-A-TARGET'
 assert_nonzero "$RC" "M-extra-multiline 对照：原实现读完整份取值，第二行的非法项照样拒绝"
 
 # --- M-cx-path（CodeX 2026-09-13 第三轮复审 P0）：第 0 步的 PATH 门被拆掉 → 业务库里的假 git 真的会被执行 ---
@@ -260,13 +261,13 @@ tweak_evil_path_m() {
   /usr/bin/git add -A && /usr/bin/git commit -qm "add relbin"
 }
 : > "$FAKE_GIT_LOG_M"
-MUT_TWEAK=tweak_evil_path_m run_case m-cx-path "$pkg" PATH="relbin:$PATH" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="otheros/otherarch:9.9.9"
+MUT_TWEAK=tweak_evil_path_m run_case m-cx-path "$pkg" PATH="relbin:$PATH" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="otheros/otherarch:9.9.9:v2"
 assert_rc "$RC" 0 "M-cx-path：两道防线都杀掉后评审照跑（假 uname 决定了平台键，用 ACK 放行以证明它真的被当成 otheros/otherarch）"
-assert_contains "$(posted_comment "$OUT")" "otheros/otherarch:9.9.9" "M-cx-path：伪造的平台进了评论"
+assert_contains "$(posted_comment "$OUT")" "otheros/otherarch:9.9.9:v2" "M-cx-path：伪造的平台进了评论"
 assert_eq "$([[ "$(grep -c FAKE_GIT "$FAKE_GIT_LOG_M" 2>/dev/null || true)" -gt 0 ]] && echo executed || echo never)" "executed" \
   "M-cx-path：业务库里的假 git 真的被执行了——端到端「假 git 一次都没跑」断言会失败"
 : > "$FAKE_GIT_LOG_M"
-MUT_TWEAK=tweak_evil_path_m run_case m-cx-path-control "$ROOT" PATH="relbin:$PATH" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="otheros/otherarch:9.9.9"
+MUT_TWEAK=tweak_evil_path_m run_case m-cx-path-control "$ROOT" PATH="relbin:$PATH" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="otheros/otherarch:9.9.9:v2"
 assert_nonzero "$RC" "M-cx-path 对照：原实现在第 0 步就拒绝了"
 assert_contains "$OUT" "PATH 不可信" "M-cx-path 对照：报错说的是 PATH"
 assert_eq "$(grep -c FAKE_GIT "$FAKE_GIT_LOG_M" 2>/dev/null || true)" "0" "M-cx-path 对照：原实现下假 git 一次都没跑"
@@ -470,7 +471,7 @@ assert_contains "$(posted_comment "$OUT")" "没有被本次评审覆盖" "M-cx-d
 pkg=$(make_mutant m-cx-ver-prefix 's|\^\[\[:space:\]\]\*kiro-cli\[\[:space:\]\]+(\[0-9\]+(\\\.\[0-9\]+)+)\[\[:space:\]\]\*\$|kiro-cli[[:space:]]+([0-9]+(\\.[0-9]+)+)|' scripts/lib/kiro-agent.sh)
 run_case m-cx-ver "$pkg" MOCK_KIRO_VERSION="$(listed_version_for_host)-rc.1"
 assert_rc "$RC" 0 "M-cx-ver：<名单内版本>-rc.1 被截成名单内版本放行——端到端「未知形态一律拒绝」断言会失败"
-assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本名单内" "M-cx-ver：日志把未探测的预发布版本当成已探测版本"
+assert_contains "$OUT" "在 P1-15 探测过的平台 + 版本 + 引擎名单内" "M-cx-ver：日志把未探测的预发布版本当成已探测版本"
 assert_contains "$OUT" "开始 Kiro 评审" "M-cx-ver：Kiro 在未探测的预发布版本上被启动了"
 run_case m-cx-ver-control "$ROOT" MOCK_KIRO_VERSION="$(listed_version_for_host)-rc.1"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M-cx-ver 对照：原实现按「版本号无法解析」拒绝"
@@ -716,7 +717,7 @@ assert_contains "$OUT" "liveSecret123" "M5r：像令牌的 token 原文进了输
 
 # --- M5s：去掉 kiro-cli 版本 notice → 版本不在名单也没有任何提示（15-fix2 #24）---
 pkg=$(make_mutant m5s-version-notice '/REVIEW_NOTICE="注意：本次组合/d')
-run_case m5s "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"   # P1-2 之后名单外要 break-glass 放行才走到 notice
+run_case m5s "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9:v2"   # P1-2 之后名单外要 break-glass 放行才走到 notice
 assert_rc "$RC" 0 "M5s：变异体仍能跑完"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5s：汇总评论没有版本 notice——端到端「版本不在名单：汇总评论带 notice」断言会失败"
 
@@ -739,20 +740,20 @@ assert_eq "$([[ -d "$CASE/work/src/.Kiro" ]] && echo kept || echo gone)" "gone" 
 
 # --- M5v：降级评论不再接 --notice → 版本 notice 只在日志、评论里没有（15-fix3 #3）---
 pkg=$(make_mutant m5v-degraded-notice '/review_render_degraded --text/s/ --notice "\$(degrade_notice)"//')
-run_case m5v "$pkg" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"
+run_case m5v "$pkg" MOCK_KIRO_NO_MARKER=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9:v2"
 assert_rc "$RC" 0 "M5v：变异体仍能跑完"
 assert_contains "$OUT" "未经 P1-15 探测" "M5v：日志仍有警告"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5v：降级评论丢了 notice——端到端「降级评论也带版本 notice」断言会失败"
 
 # --- M5ad：die_review 不再给失败评论传 --notice → kiro-cli 非零退出 + 未探测版本时失败评论没有版本告警（15-fix4 #3）---
 pkg=$(make_mutant m5ad-failure-notice '/^      --notice "\$(degrade_notice)" \\$/d')
-run_case m5ad "$pkg" MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"
+run_case m5ad "$pkg" MOCK_KIRO_FAIL=1 MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9:v2"
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5ad：仍是失败"
 assert_contains "$OUT" "未经 P1-15 探测" "M5ad：日志仍有警告"
 assert_not_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M5ad：失败评论丢了版本告警——端到端「失败评论带版本告警引用块」断言会失败"
 
 # --- M-cx-p12（CodeX 2026-09-09 复审 P1-2）：版本门的拒绝换成 log → 名单外版本不确认也照跑，安全边界跑在未验证的 kiro-cli 上 ---
-pkg=$(make_mutant m-cx-p12-version-gate 's/^  die_review "本次组合 \${KIRO_CLI_TARGET}（平台 + kiro-cli 版本）未经 P1-15 探测/  log "本次组合 ${KIRO_CLI_TARGET}（平台 + kiro-cli 版本）未经 P1-15 探测/')
+pkg=$(make_mutant m-cx-p12-version-gate 's/^  die_review "本次组合 \${KIRO_CLI_TARGET}（平台 + kiro-cli 版本 + 引擎）未经 P1-15 探测/  log "本次组合 ${KIRO_CLI_TARGET}（平台 + kiro-cli 版本 + 引擎）未经 P1-15 探测/')
 run_case m-cx-p12 "$pkg" MOCK_KIRO_VERSION=9.9.9
 assert_rc "$RC" 0 "M-cx-p12：变异体不拒绝、评审照跑——端到端「版本不在名单且未确认 → 拒绝评审」断言会失败"
 assert_contains "$OUT" "开始 Kiro 评审" "M-cx-p12：Kiro 真的在未验证版本上被启动了（额度烧在未验证的读取边界上）"
@@ -904,12 +905,12 @@ assert_not_contains "$(posted_comment "$OUT")" "不在本账号" "M-model-failop
 # 版本门 break-glass 的覆盖赋值把它冲掉。配 break-glass（版本 9.9.9 + ACK）+ 模型不在清单：变异体评论里只剩版本 notice、
 # 没有模型 notice——即旧缺陷。 ---
 pkg=$(make_mutant m-model-notice-overwrite 's/    MODEL_NOTICE="⚠️ 受信 agent 声明的模型/    REVIEW_NOTICE="⚠️ 受信 agent 声明的模型/')
-run_case m-model-notice-overwrite "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9" MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
+run_case m-model-notice-overwrite "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9:v2" MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
 assert_rc "$RC" 0 "M-model-notice-overwrite：评审仍完成"
 assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-model-notice-overwrite：版本 break-glass notice 在"
 assert_not_contains "$(posted_comment "$OUT")" "不在本账号" \
   "M-model-notice-overwrite：模型 notice 被 break-glass 覆盖冲掉——端到端 R2-2① 断言会失败"
-run_case m-model-notice-overwrite-control "$ROOT" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9" MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
+run_case m-model-notice-overwrite-control "$ROOT" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9:v2" MOCK_LIST_MODELS_WITHOUT=gpt-5.6-sol
 assert_contains "$(posted_comment "$OUT")" "不在本账号" "M-model-notice-overwrite 对照：原实现两条 notice 都在"
 assert_contains "$(posted_comment "$OUT")" "未经 P1-15 探测" "M-model-notice-overwrite 对照：版本 notice 也在"
 
@@ -930,7 +931,7 @@ pkg=$(make_mutant m5x2-version-merged 's|^kiro_cli_version "\$TIMEOUT_BIN" "\$KI
 run_case m5x2 "$pkg" MOCK_KIRO_VERSION_WARN=1
 # P1-2 之后名单外拒绝：把 2.30.0 当成本次版本的变异体在装着 2.21.1 的机器上被版本门拒绝（端到端「取到的是已装版本 2.21.1、评审照常完成」断言会失败）
 assert_eq "$([[ $RC -ne 0 ]] && echo nonzero)" "nonzero" "M5x2：升级提示里的 2.30.0 被当成本次版本 → 名单外、被拒绝"
-assert_contains "$OUT" ":2.30.0（平台 + kiro-cli 版本）未经 P1-15 探测" "M5x2：拒绝原因点名的是 2.30.0 而不是已装版本"
+assert_contains "$OUT" ":2.30.0:v2（平台 + kiro-cli 版本 + 引擎）未经 P1-15 探测" "M5x2：拒绝原因点名的是 2.30.0 而不是已装版本"
 # --- M5x3：--version 退出码不再判 → 跑不起来的 CLI 只留软 notice、继续去 chat（15-fix4 #7）---
 pkg=$(make_mutant m5x3-version-rc 's|^kiro_cli_version "\$TIMEOUT_BIN" "\$KIRO_CWD" \|\| die_review .*$|kiro_cli_version "$TIMEOUT_BIN" "$KIRO_CWD" \|\| true|')
 run_case m5x3 "$pkg" MOCK_KIRO_VERSION_RC=127
@@ -2299,5 +2300,20 @@ assert_eq "$(MUT_POST_FIXTURE=post-lost-stale mut_post "$pkg")" "3" "M-cx-p13a�
 mutate_more "$pkg" 's/ and (\$ls | index(\$pn) != null)))/ and true))/' scripts/lib/codeup-api.sh
 assert_eq "$(MUT_POST_FIXTURE=post-lost-stale mut_post "$pkg")" "1" "M-cx-p13b：两道都拆 → 旧评论被当成本次已创建、只发一次 POST——单测「三次尝试都发了 POST」断言会失败"
 assert_eq "$(MUT_POST_FIXTURE=post-lost-created mut_post "$pkg")" "1" "M-cx-p13 正控：随机串一致的 fixture 在变异体上同样只发一次（变异只放宽、没弄坏探针）"
+
+
+# ============ ADR-0008：三元组版本门的变异 ============
+# --- M-tri-a：版本门的元组丢掉引擎段 → 名单里的三元组一条都匹配不上（v2 的名单内运行被拒）---
+pkg=$(make_mutant m-tri-a-target-no-engine 's/^KIRO_CLI_TARGET="\${KIRO_PLATFORM_KEY}:\${KIRO_CLI_VERSION}:\${KIRO_ENGINE}"$/KIRO_CLI_TARGET="${KIRO_PLATFORM_KEY}:${KIRO_CLI_VERSION}"/')
+run_case m-tri-a "$pkg"
+assert_nonzero "$RC" "M-tri-a：名单内的 v2 运行被拒——端到端「名单内」断言会失败"
+# --- M-tri-b：逃生口的形状校验退回两段 → 两段的确认值通过了校验（之后与三元组比对失配，换成另一句失败原因）---
+pkg=$(make_mutant m-tri-b-ack-2part 's/^if \[\[ -n "\$KIRO_ACK_UNTESTED_TARGET" \&\& ! "\$KIRO_ACK_UNTESTED_TARGET" =~ \^\[a-z0-9_.-\]+\/\[a-z0-9_.-\]+:\[0-9\]+(\\.\[0-9\]+)+:v\[23\]\$ \]\]; then$/if [[ -n "$KIRO_ACK_UNTESTED_TARGET" \&\& ! "$KIRO_ACK_UNTESTED_TARGET" =~ ^[a-z0-9_.-]+\/[a-z0-9_.-]+:[0-9]+(\\.[0-9]+)+$ ]]; then/')
+run_case m-tri-b "$pkg" MOCK_KIRO_VERSION=9.9.9 KIRO_ACK_UNTESTED_TARGET="${HOST_PLAT}:9.9.9"
+assert_not_contains "$OUT" "KIRO_ACK_UNTESTED_TARGET 不合法" "M-tri-b：两段的确认值通过了形状校验——端到端「两段的 KIRO_ACK_UNTESTED_TARGET → 日志点名变量」断言会失败"
+# --- M-tri-c：跨引擎提示消失 ---
+pkg=$(make_mutant m-tri-c-no-hint 's/^  \[\[ " \$KIRO_TESTED_TARGETS_ALL " == \*" \${KIRO_PLATFORM_KEY}:\${KIRO_CLI_VERSION}:\${other} "\* \]\] || return 0$/  return 0/')
+run_case m-tri-c "$pkg" MOCK_KIRO_VERSION=2.29.1 "KIRO_TESTED_TARGETS_EXTRA=${HOST_PLAT}:2.29.1:v3"
+assert_not_contains "$(posted_comment "$OUT")" "该版本在已探测名单里只有" "M-tri-c：跨引擎提示没了——端到端「跨引擎提示：失败评论点明另一个引擎」断言会失败"
 
 report
