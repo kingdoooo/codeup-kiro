@@ -61,3 +61,36 @@ review_isolate_workspace() {
   done < "$out"
   printf '%d %d %d %d\n' "$n_agents" "$n_kiro" "$n_links" "$n_lsp"
 }
+
+
+# ── review_copy_to_root（V3 评审根目录，ADR-0008 / Q21 H5 布局）────────────────────────────────
+# 把业务库工作树复制到 <评审根目录>/repo（不含任意深度的 .git），再核对两边的条目清单逐字节相同。
+# 必须在 review_isolate_workspace（第 5.5 步）之后调用：复制的是**已隔离**的工作树（AGENTS.md / .kiro / 符号链接已删）。
+# Kiro 的 cwd 是评审根目录（集成包新建、里面只有 repo/），所以 V3 能搜索整个业务库，而工作区根目录上那些会被自动加载的面
+# （根 AGENTS.md、.kiro/steering、.kiro/hooks、.kiro/agents）都不在业务库手里（S9 实测）。
+# 用法：review_copy_to_root <业务库目录> <评审根目录> → stdout 条目数；rc 0 = 复制并核对通过；rc 1 = 失败（原因进 stderr）
+_review_copy_list() {   # <目录> → stdout：相对路径清单（NUL 分隔、排序），跳过任意深度名为 .git 的条目
+  ( cd "$1" && LC_ALL=C find . -name .git -prune -o -print0 | LC_ALL=C sort -z )
+}
+review_copy_to_root() {
+  local src="${1-}" root="${2-}" dst n
+  [[ -d "$src" ]] || { echo "review_copy_to_root: 业务库目录不存在：${src}" >&2; return 1; }
+  [[ -d "$root" ]] || { echo "review_copy_to_root: 评审根目录不存在：${root}" >&2; return 1; }
+  dst="$root/repo"
+  [[ ! -e "$dst" && ! -L "$dst" ]] || { echo "review_copy_to_root: ${dst} 已存在（评审根目录必须是本次新建的空目录）" >&2; return 1; }
+  mkdir "$dst" || { echo "review_copy_to_root: 无法创建 ${dst}" >&2; return 1; }
+  # 子 shell 里自己开 pipefail：打包与解包任一端失败都算失败，不依赖调用方的 shell 选项。
+  # --exclude=.git 在 GNU tar 与 bsdtar 下都按任意一段路径名匹配（子模块的 .git 文件也排除）。
+  ( set -o pipefail; ( cd "$src" && LC_ALL=C tar --exclude=.git -cf - . ) | ( cd "$dst" && LC_ALL=C tar -xf - ) ) \
+    || { echo "review_copy_to_root: tar 复制失败（打包或解包出错；磁盘满、权限或文件名问题？）" >&2; return 1; }
+  # 核对：业务库里的每个条目在副本里都在，且两边条目数相同。不逐字节比较两份清单：macOS 上 bsdtar 解包会把非 ASCII 文件名
+  # 换成另一种 Unicode 规范形式（APFS 查找时不区分，字节却不同，本机实测），逐字节比较会把正常的副本判成不一致。
+  local e n_src=0 n_dst
+  while IFS= read -r -d '' e; do
+    [[ -e "$dst/$e" || -L "$dst/$e" ]] || { echo "review_copy_to_root: 副本里缺少业务库的条目（磁盘满、权限或文件名问题？）" >&2; return 1; }
+    n_src=$((n_src + 1))
+  done < <(_review_copy_list "$src")
+  n_dst=$(_review_copy_list "$dst" | tr -dc '\0' | wc -c | tr -d ' ')
+  [[ "$n_src" == "$n_dst" ]] || { echo "review_copy_to_root: 副本条目数（${n_dst}）与业务库（${n_src}）不一致" >&2; return 1; }
+  printf '%s' "$n_dst"
+}

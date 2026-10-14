@@ -615,3 +615,40 @@ kiro_agent_selfcheck_v3() {
   [[ -f "$pfile" && -s "$pfile" ]] || { KIRO_AGENT_SELFCHECK_ERROR="prompt 指向的文件不存在或为空：${pfile}（kiro-cli 会拒绝加载这个 agent）"; return 1; }
   return 0
 }
+
+# V3 运行环境（ADR-0008 / Q22）：每次运行一个临时 HOME，agent、设置、kiroignore 都只在本次运行里有效，跑完随 $WORK 一起删。
+# kiroignore 写 AGENTS.md（gitignore 语法）：V3 加载根目录之下嵌套的 AGENTS.md 时按它排除（S9 c10 / c11 实测：不写就会加载）。
+KIRO_V3_KIROIGNORE=("AGENTS.md")
+# V3 的设置（每行「键 值」，经 `kiro-cli settings 键 值` 写进临时 HOME）。code intelligence 默认开（S4：`code` 工具），knowledge 一并关掉；
+# S8 结论里「能关且关后确认停了」的条目追加在这里（ADR-0008）。
+KIRO_V3_SETTINGS=("chat.enableCodeIntelligence false" "chat.enableKnowledge false")
+
+# kiro_run_home_prepare <临时 HOME（绝对路径、已存在）> <kiro-cli 入口（KIRO_CLI_CMD）>
+#   建 agent / 设置 / XDG 目录；把入口同目录下的 kiro-cli、kiro-cli-chat、kiro-cli-term 等符号链接进 <临时 HOME>/.local/bin
+#   （spike 实测 macOS 上 kiro-cli 按 $HOME/.local/bin 找这几个兄弟程序）；写 kiroignore。rc 0 / 1。
+kiro_run_home_prepare() {
+  local h="${1-}" cmd="${2-}" bindir s
+  [[ "$h" == /* && -d "$h" ]] || { echo "kiro_run_home_prepare: 临时 HOME 不是已存在的绝对路径目录：${h}" >&2; return 1; }
+  [[ "$cmd" == /* && -x "$cmd" ]] || { echo "kiro_run_home_prepare: kiro-cli 入口不是可执行的绝对路径：${cmd}" >&2; return 1; }
+  mkdir -p "$h/.kiro/agents" "$h/.kiro/settings" "$h/.local/bin" "$h/.config" "$h/.local/share" "$h/.cache" "$h/.local/state" || return 1
+  bindir=$(dirname "$cmd")
+  for s in "$bindir"/kiro-cli*; do
+    [[ -e "$s" ]] || continue
+    [[ "$(basename "$s")" =~ ^kiro-cli(-[a-z]+)?$ ]] || continue
+    ln -sf "$s" "$h/.local/bin/$(basename "$s")" || return 1
+  done
+  printf '%s\n' "${KIRO_V3_KIROIGNORE[@]}" > "$h/.kiro/settings/kiroignore" || return 1
+}
+
+# kiro_env_isolate_home <临时 HOME> → 改写 KIRO_ENV_ALLOW：去掉 HOME 与 XDG_*（含 XDG_RUNTIME_DIR），换成指向临时 HOME 的一组。
+# 必须在 kiro_env_allowlist 之后调用（后者会整份重建 KIRO_ENV_ALLOW）。其余条目（PATH、KIRO_API_KEY、代理、证书…）原样保留。
+kiro_env_isolate_home() {
+  local h="${1-}" kv; local -a out=()
+  [[ "$h" == /* && -d "$h" ]] || { echo "kiro_env_isolate_home: 临时 HOME 不是已存在的绝对路径目录：${h}" >&2; return 1; }
+  for kv in ${KIRO_ENV_ALLOW[@]+"${KIRO_ENV_ALLOW[@]}"}; do
+    case "${kv%%=*}" in HOME|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|XDG_STATE_HOME|XDG_RUNTIME_DIR) continue ;; esac
+    out+=("$kv")
+  done
+  out+=("HOME=$h" "XDG_CONFIG_HOME=$h/.config" "XDG_DATA_HOME=$h/.local/share" "XDG_CACHE_HOME=$h/.cache" "XDG_STATE_HOME=$h/.local/state")
+  KIRO_ENV_ALLOW=("${out[@]}")
+}

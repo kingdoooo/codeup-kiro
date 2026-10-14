@@ -97,4 +97,53 @@ rc=0; kiro_install_agent_v3 "$A3" "$KH/.kiro/agents" --root "$tmp/nope" --chunks
 assert_eq "$rc" "1" "安装器：评审根目录不存在 → 拒绝"
 assert_eq "$(ls "$KH/.kiro/agents" | grep -c '^x[0-9]' || true)" "0" "安装器拒绝时不落盘半成品"
 
+# ---- 临时 HOME + 许可清单 ----
+mkdir -p "$tmp/bin"; for b in kiro-cli kiro-cli-chat kiro-cli-term 'bash (kiro-cli-term)'; do printf '#!/bin/sh\n' > "$tmp/bin/$b"; chmod +x "$tmp/bin/$b"; done
+KH2="$tmp/kh2"; mkdir "$KH2"
+kiro_run_home_prepare "$KH2" "$tmp/bin/kiro-cli"
+assert_eq "$(ls "$KH2/.local/bin" | paste -sd, -)" "kiro-cli,kiro-cli-chat,kiro-cli-term" "兄弟程序都链接进临时 HOME（名字带空格的不算）"
+assert_eq "$(readlink "$KH2/.local/bin/kiro-cli-chat")" "$tmp/bin/kiro-cli-chat" "链接指向入口同目录的那个文件"
+assert_eq "$(cat "$KH2/.kiro/settings/kiroignore")" "AGENTS.md" "kiroignore 排除 AGENTS.md"
+for d in .kiro/agents .config .local/share .cache .local/state; do
+  assert_eq "$([[ -d "$KH2/$d" ]] && echo y)" "y" "临时 HOME 里建好了 $d"
+done
+rc=0; kiro_run_home_prepare "relative" "$tmp/bin/kiro-cli" 2>/dev/null || rc=$?; assert_eq "$rc" "1" "临时 HOME 不是绝对路径 → 拒绝"
+rc=0; kiro_run_home_prepare "$KH2" "kiro-cli" 2>/dev/null || rc=$?; assert_eq "$rc" "1" "入口不是绝对路径 → 拒绝"
+(
+  export HOME="$RH" XDG_RUNTIME_DIR=/run/x XDG_CONFIG_HOME=/c TMPDIR="${TMPDIR:-/tmp}"
+  kiro_env_allowlist
+  kiro_env_isolate_home "$KH2"
+  assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep -c '^HOME=')" "1" "许可清单里只有一个 HOME"
+  assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep '^HOME=')" "HOME=$KH2" "HOME 换成临时 HOME"
+  for kv in "XDG_CONFIG_HOME=$KH2/.config" "XDG_DATA_HOME=$KH2/.local/share" "XDG_CACHE_HOME=$KH2/.cache" "XDG_STATE_HOME=$KH2/.local/state"; do
+    assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep -c -x -F -- "$kv")" "1" "许可清单：$kv"
+  done
+  assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep -c '^XDG_RUNTIME_DIR=' || true)" "0" "许可清单：去掉 XDG_RUNTIME_DIR"
+  assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep -c -x 'KIRO_LOG_NO_COLOR=1')" "1" "许可清单：其余条目原样保留"
+  # 经 kiro_env_exec 真正启动的子进程看到的就是这份（不经替身，真 env）
+  seen=$(cd "$tmp" && kiro_env_exec KIRO_ENV_ALLOW env)
+  assert_contains "$seen" "HOME=$KH2" "子进程的 HOME 是临时 HOME"
+  assert_not_contains "$seen" "XDG_RUNTIME_DIR=" "子进程没有 XDG_RUNTIME_DIR"
+  rc=0; kiro_env_isolate_home "$tmp/nope" 2>/dev/null || rc=$?; assert_eq "$rc" "1" "临时 HOME 不存在 → 拒绝、不改清单"
+  report >/dev/null
+)
+
+# ---- 评审根目录：复制已隔离的业务库 ----
+SRC="$tmp/biz"; mkdir -p "$SRC/src/sub" "$SRC/.git/objects" "$SRC/vendor/x/.git"
+printf 'a\n' > "$SRC/src/app.py"; printf 'b\n' > "$SRC/a b.py"; printf 'c\n' > "$SRC/-dash.py"; printf 'd\n' > "$SRC/ünï.py"; printf 'e\n' > "$SRC/src/sub/x.txt"
+printf 'gitfile\n' > "$SRC/vendor/x/.git/HEAD"; printf 'gitdir: ../.git\n' > "$SRC/src/.git"
+P="$tmp/review-root"; mkdir "$P"
+n=$(review_copy_to_root "$SRC" "$P")
+assert_eq "$([[ -f "$P/repo/a b.py" && -f "$P/repo/-dash.py" && -f "$P/repo/ünï.py" && -f "$P/repo/src/sub/x.txt" ]] && echo y)" "y" "带空格 / 以 - 开头 / 非 ASCII 的文件名都复制了"
+assert_eq "$([[ -e "$P/repo/.git" || -e "$P/repo/vendor/x/.git" || -e "$P/repo/src/.git" ]] && echo has-git || echo no-git)" "no-git" "任意深度的 .git（目录与文件）都不复制"
+assert_eq "$n" "$(cd "$P/repo" && find . -print | wc -l | tr -d ' ')" "stdout 是副本条目数"
+assert_eq "$(ls -A "$P")" "repo" "评审根目录下只有 repo/"
+rc=0; review_copy_to_root "$SRC" "$P" >/dev/null 2>&1 || rc=$?; assert_eq "$rc" "1" "repo/ 已存在 → 拒绝（评审根目录必须是新建的）"
+rc=0; review_copy_to_root "$tmp/nope" "$tmp" >/dev/null 2>&1 || rc=$?; assert_eq "$rc" "1" "业务库目录不存在 → 拒绝"
+# 复制失败（假 tar 打包时报错）→ 返回 1
+mkdir -p "$tmp/badtar"; printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" == -cf ]] && exit 1; done\nexec %q "$@"\n' "$(command -v tar)" > "$tmp/badtar/tar"; chmod +x "$tmp/badtar/tar"
+P2="$tmp/review-root2"; mkdir "$P2"
+rc=0; ( PATH="$tmp/badtar:$PATH"; review_copy_to_root "$SRC" "$P2" ) >/dev/null 2>&1 || rc=$?
+assert_eq "$rc" "1" "tar 打包失败 → 返回 1（不依赖调用方的 pipefail）"
+
 report
