@@ -288,20 +288,30 @@ review_stream_final_text() {
   printf '%s' "$rf" | jq -r '.data.finalText // ""'
 }
 
-# --- 成本与上下文可观测指标（写流水线日志；spec §4.1「metadata.meteringUsage 写入日志」）---
+# --- 成本与上下文可观测指标（V2 与 V3 两种事件形态都认；ADR-0008）---
 # 用法：review_stream_usage <jsonl 文件> → stdout "credits=0.2609 context=3.8%"
-# credits 累加所有 metadata 事件里 unit=credit 的 value（实测一次评审会分多笔计量）；
-# context 取**峰值**而不是最后一个：实测事件流里这个值不单调（real-shape.jsonl 是 12.02 → 1.30，
-# 取最后一个会把「上下文最高用到 12%」记成 1.3%，这个指标本来就是为了看离上限还有多远）。
+# credits = V2 metadata.meteringUsage 里 unit=credit 的 value 之和 + V3 session_info_update（_meta.kiro.kind=turn_completion）的
+# promptTurnSummaries[] 里 unit=credit 的 usage 之和。两种形态互不重叠（V2 没有 session_info_update，V3 没有 metadata，tests/fixtures/stream/ 实测），
+# 所以加在一起不会重复计数。context 取**峰值**：V2 的 metadata.contextUsagePercentage 与 V3 context_usage 的 usagePercentage。
 # 缺数据时对应字段为 -，永不失败（日志不该拖垮评审）。
 review_stream_usage() {
   local jsonl="$1" credits ctx
   if [[ ! -r "$jsonl" ]]; then printf 'credits=- context=-\n'; return 0; fi
-  credits=$(jq -R 'fromjson? | select(type == "object" and .type == "metadata")
-                   | .data.meteringUsage // empty | .[] | select(.unit == "credit") | .value' \
+  credits=$(jq -R 'fromjson? | select(type == "object")
+                   | if .type == "metadata" then (.data.meteringUsage // empty | .[] | select(.unit == "credit") | .value)
+                     elif .type == "sessionUpdate" then (.data | objects | .update | objects | select(.sessionUpdate == "session_info_update")
+                          | ._meta | objects | .kiro | objects | select(.kind == "turn_completion")
+                          | .promptTurnSummaries | arrays | .[] | objects | select(.unit == "credit") | .usage)
+                     else empty end
+                   | numbers' \
               "$jsonl" 2>/dev/null | LC_ALL=C awk '{s += $1; n++} END {if (n) printf "%.4f", s; else printf "-"}')
-  ctx=$(jq -r -R 'fromjson? | select(type == "object" and .type == "metadata")
-                  | .data.contextUsagePercentage // empty' "$jsonl" 2>/dev/null \
+  ctx=$(jq -r -R 'fromjson? | select(type == "object")
+                  | if .type == "metadata" then (.data.contextUsagePercentage // empty)
+                    elif .type == "sessionUpdate" then (.data | objects | .update | objects | select(.sessionUpdate == "session_info_update")
+                         | ._meta | objects | .kiro | objects | select(.kind == "context_usage")
+                         | (.usagePercentage // .contextUsage.usagePercentage // empty))
+                    else empty end
+                  | numbers' "$jsonl" 2>/dev/null \
         | LC_ALL=C awk 'NF { if (!f || $1 > m) m = $1; f = 1 } END {if (f) printf "%.1f%%", m; else printf "-"}')
   printf 'credits=%s context=%s\n' "${credits:--}" "${ctx:--}"
 }
@@ -357,6 +367,97 @@ review_stream_model_switch() {
     | join("；")' "$f" 2>/dev/null) || return 2
   [[ -n "$out" ]] || return 1
   printf '%s' "$out"
+}
+
+# --- 实际运行的引擎（ADR-0008 / W2）---
+# 用法：review_stream_engine <stream.jsonl> → stdout 第一个 runStarted 事件的 data.engine（形如 v2 / v3）
+#   rc 0 = 取到；rc 1 = 没有 runStarted、或它的 engine 不是 v<数字> 形状的字符串；rc 2 = 文件读不了 / 解析失败
+# 只看第一个 runStarted：kiro-cli 每次运行只发一个；取第一个是为了不让后面混进来的行改写结论。
+review_stream_engine() {
+  local f="${1-}" e
+  [[ -r "$f" ]] || return 2
+  e=$(jq -R -n -r '[inputs | fromjson? | select(type == "object" and .type == "runStarted") | (.data | objects | .engine) // null]
+                   | (first // null) | strings' "$f" 2>/dev/null) || return 2
+  [[ "$e" =~ ^v[0-9]{1,2}$ ]] || return 1
+  printf '%s' "$e"
+}
+
+# --- V3 实际使用的模型（ADR-0008）---
+# V3 不发 metadata、也没有 currentModelId 这类字段；它在 session/config_option_update 里报当前选项，第一次是默认值（auto），
+# 加载 agent 之后才是 agent 声明的模型——所以取**最后一次**的 id=="model" 的 currentValue。
+# 用法：review_stream_v3_model <stream.jsonl> → stdout 模型 id；rc 0 = 取到；rc 1 = 没有；rc 3 = 有但取值不合形（不显示）；rc 2 = 读不了
+review_stream_v3_model() {
+  local f="${1-}" m
+  [[ -r "$f" ]] || return 2
+  m=$(jq -R -n -r '[inputs | fromjson? | select(type == "object" and .type == "sessionUpdate")
+                    | .data | objects | .update | objects | select(.sessionUpdate == "config_option_update")
+                    | .configOptions | arrays | .[] | objects | select(.id == "model") | .currentValue]
+                   | (last // null) | if . == null then empty elif type == "string" then . else "<不是字符串>" end' "$f" 2>/dev/null) || return 2
+  [[ -n "$m" ]] || return 1
+  [[ "$m" =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || return 3
+  printf '%s' "$m"
+}
+
+# --- V3 用到的工具（ADR-0008；只进日志）---
+# 取自 turn_completion 的 promptTurnSummaries[].usedTools（Kiro 写的结构，不看模型文本），去重排序、逗号分隔。
+# 只收 [A-Za-z0-9_.-]{1,64} 形状的 id；不合形的不显示、只计数（与模型 id 同一口径）。
+# 用法：review_stream_v3_tools <stream.jsonl> → stdout 形如「grep_search,read_file」或「grep_search,read_file（另有 2 个不合形，不显示）」；
+#   rc 0 = 至少一个合形的 id，或至少一个不合形的；rc 1 = 没有 usedTools；rc 2 = 读不了 / 解析失败
+review_stream_v3_tools() {
+  local f="${1-}" all ok bad
+  [[ -r "$f" ]] || return 2
+  all=$(jq -R -n -r '[inputs | fromjson? | select(type == "object" and .type == "sessionUpdate")
+                      | .data | objects | .update | objects | select(.sessionUpdate == "session_info_update")
+                      | ._meta | objects | .kiro | objects | select(.kind == "turn_completion")
+                      | .promptTurnSummaries | arrays | .[] | objects | .usedTools | arrays | .[]
+                      | if type == "string" then . else "<不是字符串>" end] | unique | .[]' "$f" 2>/dev/null) || return 2
+  [[ -n "$all" ]] || return 1
+  ok=$(printf '%s\n' "$all" | LC_ALL=C grep -E '^[A-Za-z0-9_.-]{1,64}$' | paste -sd, - || true)
+  bad=$(printf '%s\n' "$all" | LC_ALL=C grep -cvE '^[A-Za-z0-9_.-]{1,64}$' || true)
+  printf '%s' "${ok:-（无合形的 id）}"
+  if [[ "$bad" != 0 ]]; then printf '（另有 %s 个不合形，不显示）' "$bad"; fi
+}
+
+# --- V3 事件流兜底（ADR-0008 / Q26）：业务库不得改变 agent 的指令、工具或权限 ---
+# 评审根目录布局 + 第 5.5 步的删除 + kiroignore 已经让这些面不出现；这里是第三道：将来 V3 的加载规则变了（kiroignore 不再管用、
+# 嵌套目录的 hook 也开始加载…），评审直接失败，而不是悄悄被仓库接管。只认 Kiro 自己写的结构（固定路径上的键），不看任何文本——
+# 模型文本在 agent_message_chunk 的 content 里，伪造不出 session_info_update / config_option_update。
+#   ① session_info_update 的 _meta.kiro.kind == "steering_inclusion"（加载了 AGENTS.md / steering 文档）
+#   ② session_info_update 的 _meta.kiro.kind == "context_usage" 且 breakdown.contextFiles.items 非空（上下文里有文件）
+#   ③ session_info_update 的 _meta.kiro.kind == "hook_update"（执行了 hook）
+#   ④ 最后一次 config_option_update 里 id=="mode" 的 currentValue 必须是本次安装的 agent 名，且它在 options 里的每个同名条目
+#      _meta.kiro.source 都是 "global"（= 从临时 HOME 的 ~/.kiro/agents 加载；workspace 表示被业务库里的同名 agent 顶替）；没有这条信息也算违规
+# 用法：review_stream_v3_guard <stream.jsonl> <本次 agent 名> → rc 0 = 未见违规；rc 1 = 违规，stdout 一行原因；rc 2 = 读不了 / 参数缺失
+review_stream_v3_guard() {
+  local f="${1-}" agent="${2-}" out
+  [[ -r "$f" && -n "$agent" ]] || return 2
+  out=$(jq -R -n -r --arg agent "$agent" '
+    [inputs | fromjson? | select(type == "object" and .type == "sessionUpdate") | .data | objects | .update | objects] as $u
+    | [ $u[] | select(.sessionUpdate == "session_info_update") | ._meta | objects | .kiro | objects ] as $k
+    | ([ $k[] | select(.kind == "steering_inclusion") ] | length) as $steer
+    | ([ $k[] | select(.kind == "context_usage") | .breakdown | objects | .contextFiles | objects | .items | arrays | length ] | add // 0) as $ctxf
+    | ([ $k[] | select(.kind == "hook_update") ] | length) as $hook
+    | ([ $u[] | select(.sessionUpdate == "config_option_update") | .configOptions | arrays | .[] | objects | select(.id == "mode") ] | last) as $mode
+    | ( if $mode == null then "unknown"
+        else ($mode.currentValue) as $cv
+          | [ ($mode.options // [])[]? | objects | select(.value == $cv) | (._meta | objects | .kiro | objects | .source) // "?" ] as $srcs
+          | if $cv != $agent then "mismatch"
+            elif ($srcs | length) == 0 then "src:?"
+            elif ($srcs | all(. == "global")) then "ok"
+            else "src:" + ([ $srcs[] | select(. != "global") | if type == "string" and test("\\A[a-z_-]{1,32}\\z") then . else "?" end ] | first)
+            end
+        end ) as $src
+    | [ (if $steer > 0 then "加载了 steering 文档（steering_inclusion × \($steer)）" else empty end),
+        (if $ctxf > 0 then "上下文里出现了文件（contextFiles × \($ctxf)）" else empty end),
+        (if $hook > 0 then "执行了 hook（hook_update × \($hook)）" else empty end),
+        (if $src == "unknown" then "事件流里没有 agent（mode）信息，无法确认用的是本次安装的 agent"
+         elif $src == "mismatch" then "实际使用的 agent 不是本次安装的那一个"
+         elif ($src | startswith("src:")) then "agent 不是从临时 HOME 加载的（来源 \($src[4:])）"
+         else empty end) ]
+    | join("；")' "$f" 2>/dev/null) || return 2
+  [[ -n "$out" ]] || return 0
+  printf '%s' "$out"
+  return 1
 }
 
 # --- 本次运行的标记随机串（R4）---
