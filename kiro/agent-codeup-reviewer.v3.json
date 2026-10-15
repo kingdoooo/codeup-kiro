@@ -1,6 +1,6 @@
 {
   "name": "codeup-reviewer",
-  "description": "Codeup MR 自动评审专用只读 agent（V3 引擎，ADR-0008）：读取边界只由 permissions.rules 表达——恰好一条 fs_read allow（match 是两个占位符，安装时由 kiro_install_agent_v3 --root/--chunks 结构化写成评审根目录与 diff chunk 目录的物理路径），恰好一条 fs_read deny（与 V2 定义的 deniedPaths 同一份；V3 把 **/ 形状按任意位置匹配，不需要绝对副本；~/ 形状由安装器按真实 HOME 各补一份，因为 Kiro 在临时 HOME 下运行），fs_write / shell / web_fetch / web_search 各一条整体 deny。没有 toolsSettings / allowedTools（V3 不读它们）；prompt 是相对 file://（V3 拒绝绝对 file:// URI），安装时复制到 agent 目录的 prompts/ 下。调用方不得传 --trust-tools / --trust-all-tools（V3 下两者都会打穿 allow 边界，S3 实测）。",
+  "description": "Codeup MR 自动评审专用只读 agent（V3 引擎，ADR-0008）：读取边界只由 permissions.rules 表达——恰好一条 fs_read allow（match 是两个占位符，安装时由 kiro_install_agent_v3 --root/--chunks 结构化写成评审根目录与 diff chunk 目录的物理路径），恰好一条 fs_read deny（与 V2 定义的 deniedPaths 同一份；V3 把 **/ 形状按任意位置匹配，不需要绝对副本；~/ 形状由安装器按真实 HOME 各补一份，因为 Kiro 在临时 HOME 下运行），fs_write / shell / web_fetch / web_search 与其余能力（subagent / skill / power / context / diagnostics / mcp / sandbox_network：skill 类工具 disclose_context 不看 tools、引擎总是加进工具集）各一条整体 deny。没有 toolsSettings / allowedTools（V3 不读它们）；prompt 是相对 file://（V3 拒绝绝对 file:// URI），安装时复制到 agent 目录的 prompts/ 下。调用方不得传 --trust-tools / --trust-all-tools（V3 下两者都会打穿 allow 边界，S3 实测）。",
   "model": "gpt-5.6-sol",
   "prompt": "file://../prompts/review-agent-prompt.md",
   "tools": [
@@ -70,6 +70,34 @@
       },
       {
         "capability": "web_search",
+        "effect": "deny"
+      },
+      {
+        "capability": "subagent",
+        "effect": "deny"
+      },
+      {
+        "capability": "skill",
+        "effect": "deny"
+      },
+      {
+        "capability": "power",
+        "effect": "deny"
+      },
+      {
+        "capability": "context",
+        "effect": "deny"
+      },
+      {
+        "capability": "diagnostics",
+        "effect": "deny"
+      },
+      {
+        "capability": "mcp",
+        "effect": "deny"
+      },
+      {
+        "capability": "sandbox_network",
         "effect": "deny"
       }
     ]

@@ -510,7 +510,9 @@ kiro_env_exec() {
 # 形状：恰好一条 allow（fs_read，只有 capability/match/effect 三个键）、恰好一条带非空 match 的 fs_read deny（含 KIRO_AGENT_REQUIRED_DENY_JQ
 # 的全部必需形状）、fs_write / shell / web_fetch / web_search 各恰好一条不带 match 的整体 deny，没有别的能力、没有 allow/deny 之外的 effect。
 _KIRO_V3_RULES_JQ='
-  def v3_caps: ["fs_write", "shell", "web_fetch", "web_search"];
+  # fs_read 之外每一种能力都要恰好一条整体 deny（复审 M-3）：名字取自 2.31.1 引擎（KAS 0.66.34）认得的全集；引擎对认不出的能力名
+  # 只是跳过那条规则、记一行 [PolicyParser] 警告（不报错），所以跑完还要读 Kiro 日志核对没有规则被跳过（kiro-review.sh 6.0c）
+  def v3_caps: ["fs_write", "shell", "web_fetch", "web_search", "subagent", "skill", "power", "context", "diagnostics", "mcp", "sandbox_network"];
   def v3_rules: ((.permissions // {}).rules // []);
   def v3_allow: [v3_rules[] | select(.effect == "allow")];
   def v3_read_deny: [v3_rules[] | select(.capability == "fs_read" and .effect == "deny")];
@@ -528,8 +530,8 @@ _KIRO_V3_RULES_JQ='
     elif (v3_read_deny[0].match | type) != "array" or (v3_read_deny[0].match | length) == 0 then "fs_read deny 规则的 match 缺失或为空"
     elif ('"$KIRO_AGENT_REQUIRED_DENY_JQ"' - v3_read_deny[0].match) != [] then "fs_read deny 缺少必需的拒绝形状 \('"$KIRO_AGENT_REQUIRED_DENY_JQ"' - v3_read_deny[0].match | tojson)"
     elif ([v3_caps[] as $c | [v3_rules[] | select(.capability == $c and .effect == "deny" and (has("match") | not))] | length == 1] | all | not)
-      then "fs_write / shell / web_fetch / web_search 不是各有恰好一条不带 match 的整体 deny"
-    elif ([v3_rules[] | .capability] - (["fs_read"] + v3_caps)) != [] then "permissions.rules 含 fs_read / fs_write / shell / web_fetch / web_search 之外的能力（\([v3_rules[] | .capability] - (["fs_read"] + v3_caps) | unique | tojson)）"
+      then "fs_read 之外的能力（\(v3_caps | join(" / "))）不是各有恰好一条不带 match 的整体 deny"
+    elif ([v3_rules[] | .capability] - (["fs_read"] + v3_caps)) != [] then "permissions.rules 含 fs_read 与上述整体 deny 之外的能力（\([v3_rules[] | .capability] - (["fs_read"] + v3_caps) | unique | tojson)）"
     else "" end;
 '
 

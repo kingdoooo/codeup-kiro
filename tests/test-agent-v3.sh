@@ -28,10 +28,13 @@ assert_eq "$(jq -c '[.permissions.rules[] | select(.effect == "allow") | .match]
 # 拒绝清单与 V2 是同一份（Q24 默认做法：不加 .env / .pem，只用相对形状，V3 按任意位置匹配）
 assert_eq "$(jq -c '[.permissions.rules[] | select(.capability == "fs_read" and .effect == "deny") | .match] | first' "$A3")" \
   "$(jq -c .toolsSettings.read.deniedPaths "$A2")" "v3 fs_read deny 与 v2 的 deniedPaths 逐项相同"
-for cap in fs_write shell web_fetch web_search; do
+# 除 fs_read 之外的每一种能力都整体 deny（复审 M-3）：能力名取自 2.31.1 引擎（KAS 0.66.34）认得的全集——skill 那一类工具
+# （disclose_context）不看 tools、引擎总是加进工具集，subagent / context / power / mcp / diagnostics / sandbox_network 也都不该用到
+for cap in fs_write shell web_fetch web_search subagent skill power context diagnostics mcp sandbox_network; do
   assert_eq "$(jq -r --arg c "$cap" '[.permissions.rules[] | select(.capability == $c and .effect == "deny" and (has("match") | not))] | length' "$A3")" "1" \
     "v3 ${cap} 整体 deny"
 done
+assert_eq "$(jq -r '[.permissions.rules[] | .capability] | length' "$A3")" "13" "v3 规则恰好 13 条：fs_read 的 allow 与 deny 各一条 + 11 种能力各一条整体 deny"
 # 元测试：规则谓词真能拒——把 v2 定义喂给它必须报错（v2 只有 deny 规则、没有 allow）
 assert_contains "$(jq -r "$_KIRO_V3_RULES_JQ"' v3_shape_error' "$A2")" "allow 规则不是恰好一条" "元测试：v2 形状的定义过不了 v3 规则谓词"
 
@@ -65,12 +68,18 @@ neg allow-wrong '.permissions.rules |= map(if .effect == "allow" then .match = [
 neg ask '.permissions.rules += [{capability: "shell", effect: "ask"}]' "allow / deny 之外的 effect"
 neg no-shell-deny '.permissions.rules |= map(select(.capability != "shell"))' "整体 deny"
 neg shell-match '.permissions.rules |= map(if .capability == "shell" then .match = ["git *"] else . end)' "整体 deny"
-neg extra-cap '.permissions.rules += [{capability: "mcp", effect: "deny"}]' "之外的能力"
+neg extra-cap '.permissions.rules += [{capability: "codeup_unknown_cap", effect: "deny"}]' "之外的能力"
+neg group-cap '.permissions.rules += [{capability: "all", effect: "deny"}]' "之外的能力"
+neg dup-skill '.permissions.rules += [{capability: "skill", effect: "deny"}]' "整体 deny"
+neg no-skill-deny '.permissions.rules |= map(select(.capability != "skill"))' "整体 deny"
+neg subagent-match '.permissions.rules |= map(if .capability == "subagent" then .match = ["x"] else . end)' "整体 deny"
 neg no-gitdeny '.permissions.rules |= map(if .capability == "fs_read" and .effect == "deny" then .match -= ["**/.git/**"] else . end)' "必需的拒绝形状"
 neg no-realhome '.permissions.rules |= map(if .capability == "fs_read" and .effect == "deny" then .match |= map(select(startswith("'"$RH"'") | not)) else . end)' "按真实 HOME 展开"
 neg toolssettings '.toolsSettings = {read: {allowedPaths: ["/"]}}' "V3 不该有的键"
 neg allowedtools '.allowedTools = []' "V3 不该有的键"
 neg hooks '.hooks = []' "V3 不该有的键"
+neg mcpservers '.mcpServers = {}' "V3 不该有的键"
+neg toolaliases '.toolAliases = {}' "V3 不该有的键"
 neg tools '.tools = ["read", "grep", "glob", "shell"]' "tools 不是恰好"
 neg resources '.resources = ["file://README.md"]' "resources 不为空"
 neg mcpjson '.includeMcpJson = true' "includeMcpJson"
