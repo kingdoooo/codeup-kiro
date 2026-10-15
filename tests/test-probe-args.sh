@@ -154,12 +154,12 @@ assert_eq "$(sed -n 's#^ *sourceFilePath: "kiro/\([0-9.]*\)/kirocli-x86_64-linux
 # 钉的版本必须在名单里有 linux/x86_64 那一条（两个档位的执行器都是 linux/x86_64 + musl）：顺序是探测 → 名单 → 发布，
 # 钉了一个名单外的版本，每次评审都会被版本门拒绝
 targets=$(sed -n 's/^KIRO_TESTED_TARGETS="\(.*\)"$/\1/p' "$ROOT/scripts/kiro-review.sh")
-# ADR-0008 起名单是三元组：钉的版本此刻是 v2 冻结的 2.29.0；钉版换到 2.29.1 时（真实环境验证那一步）这里改成 :v3（AWS 档位默认 v3）
-assert_contains " $targets " " linux/x86_64:${df_ver}:v2 " "钉版：Dockerfile 钉的 ${df_ver} 在 KIRO_TESTED_TARGETS 里有 linux/x86_64 元组"
+# ADR-0008 起名单是三元组，钉版的默认引擎是 v3（AWS 档位与 Flow 参考配置都不设 KIRO_ENGINE）：钉的版本要有 linux/x86_64 的 v3 组合
+assert_contains " $targets " " linux/x86_64:${df_ver}:v3 " "钉版：Dockerfile 钉的 ${df_ver} 在 KIRO_TESTED_TARGETS 里有 linux/x86_64 的 v3 元组"
 # AWS 手册里写到版本的两处（复审 M-7）：构建命令的镜像标签、「已探测元组是对 musl 入口文件跑出来的」那一句
 AG="$ROOT/aws/setup-guide.md"
 assert_contains "$(cat "$AG")" "-t codeup-kiro-executor:${df_ver} ." "钉版：AWS 手册构建命令的镜像标签版本 = Dockerfile"
-assert_contains "$(cat "$AG")" "已探测的「平台 + 版本」元组 \`linux/x86_64:${df_ver}\` 是对 musl 入口文件跑出来的" "钉版：AWS 手册的已探测元组版本 = Dockerfile"
+assert_contains "$(cat "$AG")" "已探测的「平台 + 版本 + 引擎」元组 \`linux/x86_64:${df_ver}:v3\` 是对 musl 入口文件跑出来的" "钉版：AWS 手册的已探测元组版本 = Dockerfile"
 # 钉版档位有自己的一节
 assert_contains "$(cat "$GUIDE")" "钉版档位" "09：setup-guide 有钉版档位这一节"
 # 备包三条硬要求：续传 -C -、核对通过再上传、专用私有同区域桶

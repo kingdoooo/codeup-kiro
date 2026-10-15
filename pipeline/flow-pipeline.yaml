@@ -71,7 +71,7 @@ stages:
               region: "<与执行器同区域，如 cn-hangzhou>"
               bucket: "<你的私有 bucket，如 codeup-kiro-cli-0916>"
               # 桶内对象键：按 kiro/<版本>/<平台变体>.zip 组织，便于多版本并存（升级只加新对象，不动旧的）。
-              sourceFilePath: "kiro/2.29.0/kirocli-x86_64-linux-musl.zip"
+              sourceFilePath: "kiro/2.31.1/kirocli-x86_64-linux-musl.zip"
               # ★ OSSDownload 的真实路径语义（2026-09-16 真实流水线实测，OSSDownload v1.0.27 + ossutil 1.7.19）：
               #   targetFilePath 被当作【相对 PROJECT_DIR（业务库 checkout）的目录】，用 `ossutil cp -r` 把对象按原名下进该目录。
               #   → 填绝对路径会被剥掉前导 / 拼进业务库；填带文件名会多套一层同名目录。所以这里填【目录名】，

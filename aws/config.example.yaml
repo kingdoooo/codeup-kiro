@@ -19,8 +19,8 @@ bot_username: aliyun:kirobot
 # 必须加引号：全是数字的值不加引号会被 YAML 解析成整数。
 kiro_image_digests: "0000000000000000000000000000000000000000000000000000000000000000"
 # 两个 kiro-cli 摘要（安装包 zip / 装好后的入口文件），当前集成包的发布值，见 pipeline/setup-guide.md。
-kiro_pinned_artifact_sha256: "8bfc894611c9f941e57e5b6a80c9bdbd4415ac477d71dbf6fc055c8479e1c663"
-kiro_cli_sha256: "61e82d585b47c12c5c8f7e43c8b66b36575b82f9e709b73bc4bf854d8a5c05c0"
+kiro_pinned_artifact_sha256: "80503acef06c84b9967d477e9f8fc195ebdd7240170b493a5fec451cf5e08135"
+kiro_cli_sha256: "d474072c1260e741e2ee39987592fae5583d0a4fb7e1a387fb742abd3a214455"
 
 # ── 开关：缺省即关闭；非空值必须严格是 0 或 1，写错会直接报错而不是静默生效/失效 ──
 # 每个开关上方一个注释块：功能区别 = 各个取值下 MR 上看到什么不同；配置区别 = 打开时还要配什么、新增哪些资源、
@@ -66,7 +66,7 @@ security_agent: 0
 # diff_size_limit: 307200       # DIFF_SIZE_LIMIT（字节，只收纯数字）
 # max_comment_bytes: 60000      # MAX_COMMENT_BYTES
 # kiro_engine: v3               # KIRO_ENGINE（ADR-0008）：v3（缺省）/ v2（显式回退，演示用）。只认这两个取值，写错时评审回写失败评论。
-#                               # 换引擎要连同钉版安装包与两个摘要一起换（v2 冻结在 2.29.0、v3 从 2.29.1 起），见 setup-guide.md「引擎」一节
+#                               # 换引擎要连同钉版安装包与两个摘要一起换（v2 冻结在 2.29.0、v3 从 2.31.1 起），见 setup-guide.md「引擎」一节
 
 # ── 可选：调度器 ────────────────────────────────────────────────────────
 # bot_usernames: [aliyun:kirobot]   # 忽略其评论的机器人账号列表；默认只有 bot_username 一个。

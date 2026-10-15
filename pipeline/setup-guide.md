@@ -237,15 +237,15 @@ BUCKET=codeup-kiro-cli-CHANGEME    # 全局唯一、3-63 位小写字母/数字/
 # ========================
 set -euo pipefail
 EP="oss-${REGION}.aliyuncs.com"
-KEY="kiro/2.29.0/kirocli-x86_64-linux-musl.zip"
-URL="https://prod.download.cli.kiro.dev/stable/2.29.0/kirocli-x86_64-linux-musl.zip"
-ART_SHA="8bfc894611c9f941e57e5b6a80c9bdbd4415ac477d71dbf6fc055c8479e1c663"   # 安装包摘要（集成包发布值）
+KEY="kiro/2.31.1/kirocli-x86_64-linux-musl.zip"
+URL="https://prod.download.cli.kiro.dev/stable/2.31.1/kirocli-x86_64-linux-musl.zip"
+ART_SHA="80503acef06c84b9967d477e9f8fc195ebdd7240170b493a5fec451cf5e08135"   # 安装包摘要（集成包发布值）
 
 aliyun oss mb "oss://${BUCKET}" -e "$EP" --acl private        # 私有桶（默认 ACL 即 private）
 curl -fL -C - -o kirocli.zip "$URL"                          # -C - 续传：连接会断，不是可选的
 echo "${ART_SHA}  kirocli.zip" | sha256sum -c -              # 核对通过再上传（失败即 set -e 退出）
 aliyun oss cp kirocli.zip "oss://${BUCKET}/${KEY}" -e "$EP" -f
-aliyun oss stat "oss://${BUCKET}/${KEY}" -e "$EP"            # 确认 Content-Length = 166435365
+aliyun oss stat "oss://${BUCKET}/${KEY}" -e "$EP"            # 确认 Content-Length = 166643012
 ```
 
 三点必须照做:① `-C -` 续传**不是可选的**;② **核对通过再上传**,绝不传完再核对(错的字节进了桶,摘要门只会在评审时才拒、白跑一趟);
@@ -261,9 +261,9 @@ aliyun oss stat "oss://${BUCKET}/${KEY}" -e "$EP"            # 确认 Content-Le
 #### 两个摘要的分工(最容易混)
 
 - `KIRO_PINNED_ARTIFACT_SHA256` 核对**安装包本身**——「拉到的字节对不对」,在**解压之前**核对。
-  值 = `8bfc894611c9f941e57e5b6a80c9bdbd4415ac477d71dbf6fc055c8479e1c663`。
+  值 = `80503acef06c84b9967d477e9f8fc195ebdd7240170b493a5fec451cf5e08135`。
 - `KIRO_CLI_SHA256` 核对**装完之后真正被执行的那个入口文件**——「解压 / `install -m 755` / PATH 解析之后跑的是不是那个文件」。
-  值 = `61e82d585b47c12c5c8f7e43c8b66b36575b82f9e709b73bc4bf854d8a5c05c0`。它同时承担 **libc 变体那一维**:平台键取自 `uname`,
+  值 = `d474072c1260e741e2ee39987592fae5583d0a4fb7e1a387fb742abd3a214455`。它同时承担 **libc 变体那一维**:平台键取自 `uname`,
   区分不出 glibc 与 musl,靠这个入口文件摘要兜住。
 
 **不是同一个数,两个都必填。** 官方按版本直链不发布校验和(`stable/<版本>/manifest.json` 返回 403),所以入口文件摘要是这条链上

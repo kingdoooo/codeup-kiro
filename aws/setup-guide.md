@@ -294,7 +294,7 @@ bot_usernames: []          # 机器人与人同号：名单留空，断环交给
 `Dockerfile` 需要 `COPY scripts/ prompts/ kiro/` 这些仓库根下的目录）：
 
 ```bash
-docker build --platform linux/amd64 -f aws/executor/Dockerfile -t codeup-kiro-executor:2.29.0 .
+docker build --platform linux/amd64 -f aws/executor/Dockerfile -t codeup-kiro-executor:2.31.1 .
 ```
 
 `--platform linux/amd64` 不能省：`docker build` 的缺省是构建机当前平台，在 Apple Silicon 上会构建出
@@ -308,7 +308,7 @@ descriptor matching platform 'linux/amd64'`；烤进镜像的 `kirocli-x86_64-li
 构建期会用 `sha256sum --strict -c` 核对这个安装包的摘要——摘要写死在 `Dockerfile` 里的
 `ARG KIRO_PINNED_ARTIFACT_SHA256`（完整 64 位十六进制值，不是截断值：截断摘要会让
 `sha256sum -c` 只发警告就 `exit 0`，门形同虚设）。**Linux 必须用 musl 变体**，不是 glibc——
-已探测的「平台 + 版本」元组 `linux/x86_64:2.29.0` 是对 musl 入口文件跑出来的，换成 glibc
+已探测的「平台 + 版本 + 引擎」元组 `linux/x86_64:2.31.1:v3` 是对 musl 入口文件跑出来的，换成 glibc
 变体等于换了一个从未探测过的组合，要重新走一遍 `scripts/probe/README.md` 的探测流程。
 
 ### 5.2 摘要登记（KIRO_IMAGE_DIGESTS）

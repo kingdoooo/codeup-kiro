@@ -185,7 +185,10 @@ KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 #                         T13（cwd = 业务库）里 AGENTS.md / steering 被加载、agent 被同名工作区 agent 顶替——评审根目录布局在 2.31.1 上仍是承重的。
 #                         headless 探测 P1-08 / P1-10 / P1-11 全 PASS；去掉 kiroignore 的正控也 PASS：2.31.1 本来就不加载嵌套的 AGENTS.md，
 #                         kiroignore 在这个版本上只是纵深（第 5.5 步的删除与事件流兜底仍在）。
-KIRO_TESTED_TARGETS="darwin/arm64:2.29.0:v2 linux/x86_64:2.29.0:v2 darwin/arm64:2.31.1:v3"
+# linux/x86_64:2.31.1:v3  2026-10-15 在 sandbox 的一次性 Fargate 任务里跑同一套 v3 探测（AWS 执行器同一镜像、NAT 私有子网 / 安全组、DNS Firewall BLOCK）：
+#                         入口 /root/.local/bin/kiro-cli（sha256 d474072c…，musl 变体），门禁十五个用例 + T5 / T13 正控全 PASS、退出码 0；
+#                         临时 HOME 下 kiro-cli 兄弟程序的布局与 darwin 相同。Flow 的钉版档位装的是同一个安装包、同一个入口文件。
+KIRO_TESTED_TARGETS="darwin/arm64:2.29.0:v2 linux/x86_64:2.29.0:v2 darwin/arm64:2.31.1:v3 linux/x86_64:2.31.1:v3"
 # 使用方自己探测过的元组（不变式 I8，2026-09-15）：只做**并集**——加得进来，删不掉也覆盖不了上面那个常量里的条目。
 # 为什么需要它：上面的名单写死在集成包源码里，于是升级仪式要求使用方**改集成包的源码**；他们要么 fork（然后永远合不回来），
 # 要么一直用下面的 break-glass 顶着（那等于版本门形同虚设，还多一个手工步骤）。
