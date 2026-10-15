@@ -3593,6 +3593,20 @@ run_case v3copyfail "${V3[@]}" PATH="$tmp/badtar:$PATH"
 assert_nonzero "$RC" "V3 复制业务库失败：拒绝评审"
 assert_contains "$(posted_comment "$OUT")" "V3 评审根目录准备失败" "V3 复制业务库失败：失败评论说明原因"
 assert_eq "$(call_count "$MD/calls" chat)" "0" "V3 复制业务库失败：Kiro 未启动"
+assert_eq "$(v3_leftovers)" "0" "V3 复制业务库失败：临时 HOME 与评审根目录已删除（复审 M-4）"
+# 解包端写了一部分再失败（真正的磁盘满；复审 I-4 的端到端形态）：同样失败评论、Kiro 不启动、什么都不留
+mkdir -p "$tmp/halftar"
+cat > "$tmp/halftar/tar" <<HALFTAR
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == -xf ]] && { cat >/dev/null; printf 'partial\n' > half-written.txt; echo "halftar: No space left on device" >&2; exit 1; }; done
+exec "$(command -v tar)" "\$@"
+HALFTAR
+chmod +x "$tmp/halftar/tar"
+run_case v3copyhalf "${V3[@]}" PATH="$tmp/halftar:$PATH"
+assert_nonzero "$RC" "V3 解包到一半失败：拒绝评审"
+assert_contains "$(posted_comment "$OUT")" "V3 评审根目录准备失败" "V3 解包到一半失败：失败评论说明原因"
+assert_eq "$(call_count "$MD/calls" chat)" "0" "V3 解包到一半失败：Kiro 未启动"
+assert_eq "$(v3_leftovers)" "0" "V3 解包到一半失败：临时 HOME 与评审根目录（连同半个副本）已删除"
 # 文件名带空格、以 - 开头、非 ASCII：副本条目数与（已隔离的）业务库一致
 tweak_odd_names() { printf 'x\n' > 'a b.py'; printf 'y\n' > ./-dash.py; printf 'z\n' > 'ünï.py'; git add -A && git commit -qm "odd names"; }
 CASE_TWEAK=tweak_odd_names run_case v3odd "${V3[@]}"

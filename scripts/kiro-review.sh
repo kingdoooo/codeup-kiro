@@ -5,7 +5,7 @@
 # 业务仓库 checkout 目录由 REVIEW_REPO_DIR 指定，仅作为被分析数据：它只出现在受信 agent 的 allowedPaths 里，
 # **五处 kiro-cli 调用都在本脚本新建的目录下运行，业务库从来不是 cwd**（15-fix4 #1）——kiro-cli 相对 cwd 发现的每一个面（.kiro/agents 顶替
 # 受信 agent、.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、hooks、lsp.json…）都落在集成包控制的目录里；
-# 第 5.5 步对业务库工作树里 AGENTS.md/lsp.json/.kiro/符号链接 的删除保留为**第二道**。
+# 第 5.5 步对业务库工作树里 AGENTS.md/lsp.json/.kiro/符号链接 的删除对这些根目录层面的面是**第二道**（v3 副本里嵌套的 AGENTS.md 靠的是它）。
 # 引擎（ADR-0008，取代 ADR-0004）：默认 v3，KIRO_ENGINE=v2 显式回退。v2 在 $WORK/cwd（空目录）下运行、业务库只在 allowedPaths 里；
 # v3 的搜索只覆盖工作区根目录，所以在**评审根目录** $WORK/review-root 下运行（里面只有业务库副本 repo/），HOME 指向本次运行的临时目录
 # $WORK/kiro-home（agent、设置、kiroignore 都在里面），事件流再过三条兜底（steering / hook / agent 来源）。
@@ -1298,7 +1298,7 @@ fi
 
 # --- 2.2 把「核对过的那个入口」绑定到后面五处真正的执行（CodeX 2026-09-11 复审 P2）---
 # 摘要门核对的是 `command -v kiro-cli` 在**当前 cwd（业务库）**下解析出来的入口，而后面五处调用写的都是裸命令
-# `kiro-cli`、且都在 `$KIRO_CWD`（空目录）里跑——PATH 里只要有一个相对目录，两次解析就可能落到不同文件上：
+# `kiro-cli`、且都在 `$KIRO_CWD`（v2 空目录 / v3 评审根目录）里跑——PATH 里只要有一个相对目录，两次解析就可能落到不同文件上：
 # 核对了 `relative-bin/kiro-cli`、执行的是另一个目录下摘要不同的那份，日志照样打「摘要核对通过」（2026-09-11 复现）。
 # 当前 Flow 执行器的 PATH 是绝对路径，不受影响；但「校验 A、执行 B」本身就让 KIRO_CLI_SHA256 的绑定不成立。
 # 固定成一次解析：取 `command -v` 的**绝对路径**（不解引用符号链接——macOS 装的是指向 Kiro CLI.app 内部的链接，
@@ -1326,7 +1326,8 @@ log "kiro-cli 入口（后续五处调用都用这一个绝对路径）：${KIRO
 # Kiro 运行目录（15-fix4 #1）：五处 kiro-cli 调用（下面的 --help / --list-models、--version、第 5.5 步的 settings、第 6 步的 chat）都在
 # 本脚本新建的目录下运行，业务库从来不是 cwd。kiro-cli 相对 cwd 发现的每一个面——$CWD/.kiro/agents/<同名>.json 顶替受信 agent
 # （工作区优先于全局）、$CWD/.kiro/settings/cli.json 顶掉全局设置、AGENTS.md steering、.kiro/hooks、lsp.json——都落在集成包控制的目录里；
-# 第 5.5 步的删除从承重措施变成第二道。
+# 对这些根目录层面的面，第 5.5 步的删除从承重措施变成第二道；v3 的副本里**嵌套**的 AGENTS.md 不在运行目录的根上，
+# 挡它的是第 5.5 步的删除本身（副本取自删过的工作树），kiroignore 是第二道（2.29.1 上承重、2.31.1 上纵深）。
 #   v2：$WORK/cwd **空目录**，业务库只在 allowedPaths 里、由模型用绝对路径读取（运行时提示词把 $WS_P 穿进去）。
 #   v3（ADR-0008 / Q21 H5 布局）：V3 的 grep / 文件搜索只覆盖工作区根目录（cwd），空 cwd 下搜不到任何东西（S9 c02–c04 实测）；
 #      而 cwd 设成业务库时，仓库的 .kiro/hooks 会在执行器上被执行、同名工作区 agent 会顶替受信 agent（S9 c05 实测）。所以 v3 的 cwd 是
@@ -1608,10 +1609,11 @@ fi
 # --- 5.5 工作区隔离：必须在 diff 生成之后、Kiro 启动之前 ---
 # 业务库内容一律不受信。删什么、为什么、怎么一次遍历删干净，见 scripts/lib/isolation.sh（review_isolate_workspace）：
 # 任意深度的 AGENTS.md / .kiro（任何类型、不分大小写）/ 符号链接，以及根 lsp.json；任意深度的 .git 目录内部不动。
-# 这一步是**第二道**（15-fix4 #1）：kiro-cli 相对 cwd 发现的面——`.kiro/settings/cli.json` 覆盖全局设置、`$CWD/.kiro/agents/`
+# 对 cwd 根上的面这一步是**第二道**（15-fix4 #1）：kiro-cli 相对 cwd 发现的面——`.kiro/settings/cli.json` 覆盖全局设置、`$CWD/.kiro/agents/`
 # 顶替同名受信 agent（工作区优先于全局，kiro-cli 2.21 实测）、AGENTS.md steering、lsp.json——第一道是五处 kiro-cli 调用都在
-# $KIRO_CWD（空目录）下运行，业务库从来不是 cwd。删除仍做：业务库在 allowedPaths 里，AGENTS.md 之类若被 kiro-cli 按别的途径
-# 发现（未来版本、v3 的子目录 steering）仍不该在；且这份清单永远关不上，第一道才是承重的。
+# $KIRO_CWD（v2 空目录 / v3 评审根目录）下运行，业务库从来不是 cwd。删除仍做：v2 的业务库在 allowedPaths 里，AGENTS.md 之类若被 kiro-cli
+# 按别的途径发现（未来版本）仍不该在；v3 的副本取自这一步之后的工作树，副本里**嵌套**的 AGENTS.md（V3 读到子目录时会加载，
+# S9 c11）靠的正是这一步，kiroignore 是它的第二道。这份清单永远关不上，所以根目录那一层仍以运行目录为承重。
 # 符号链接（15-fix #1）：`payload -> /root/.aws/credentials` 的请求路径字面上在 allowedPaths 之内，kiro-cli 是否先解析再比对
 # 是它的实现细节（探测 P1-15 T8 记录事实，见上面的 KIRO_TESTED_TARGETS）；删掉是确定性、零依赖的兜底。
 # diff 已从 git 对象算好并写入 $WORK，删工作树文件不影响评审输入。**这一步会改动业务库工作树**：本流水线只有评审一个任务，
@@ -1674,7 +1676,8 @@ inline_presample
 # REVIEW_NONCE 已在第 1 步建 $WORK 时生成（P1-2：与 agent 名同源）
 grep -q '{{REVIEW_NONCE}}' "$PROMPT_FILE" \
   || die_review "运行时提示词缺少 {{REVIEW_NONCE}} 占位符：模型拿不到本次标记，每次评审都会降级。请同步更新 ${PROMPT_FILE}"
-# 业务库**绝对路径**穿进运行时提示词（15-fix4 #1）：kiro-cli 在空目录下运行，模型写相对路径会落在 cwd 之外被拒、静默降低评审质量。
+# 业务库**绝对路径**穿进运行时提示词（15-fix4 #1）：kiro-cli 不在业务库里运行（v2 空目录 / v3 评审根目录，v3 的路径是副本 repo/），
+# 模型写相对路径会落在 cwd 之外被拒、或指错地方，静默降低评审质量。
 grep -q '{{REVIEW_WORKSPACE}}' "$PROMPT_FILE" \
   || die_review "运行时提示词缺少 {{REVIEW_WORKSPACE}} 占位符：模型拿不到业务库的绝对路径，相对路径读取会全部被拒。请同步更新 ${PROMPT_FILE}"
 # 用 jq 做字面替换而不是 sed：路径里的 / & \ 会撞上 sed 的定界符与替换元字符；jq 的 $ws 是已求值的字符串，不再解释
@@ -1718,7 +1721,7 @@ LC_ALL=C grep -qF -- "<<<KIRO_REVIEW_JSON:${REVIEW_NONCE}>>>" "$WORK/kiro-stdin.
   || die_review "Kiro 输入自检失败：评审输入里 DIFF 节标题不是恰好一处（评审输入没组装出来）"
 unset _p _i _s _n
 kiro_rc=0
-# 在 $KIRO_CWD（空目录）下运行（15-fix4 #1）；业务库路径只在 allowedPaths 与提示词里
+# 在 $KIRO_CWD 下运行（15-fix4 #1；v2 空目录、业务库路径只在 allowedPaths 与提示词里；v3 评审根目录、HOME 是临时目录）
 ( cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" -k 30 "$KIRO_TIMEOUT" "$KIRO_CLI_CMD" chat --no-interactive \
   --agent-engine "$KIRO_ENGINE" --output-format stream-json \
   --agent "$AGENT_NAME" ) \

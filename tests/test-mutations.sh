@@ -2438,4 +2438,24 @@ pkg=$(make_mutant m-v3t-bad-engine-as-missing '/=~ ^=v\[0-9\]/s/|| return 3$/|| 
 run_case m-v3t "$pkg" MOCK_KIRO_ENGINE_REPORT=v3.1
 assert_rc "$RC" 0 "M-v3t：v2 下 engine=v3.1 的运行照常完成——端到端「v2engbad：不合形 → 拒绝采用输出」断言会失败"
 
+# --- M-v3u：退出清理不再删 $WORK → 端到端的 v3_leftovers 断言确实看得见残留（复审 M-4：它的正控）---
+# 用解包到一半失败的那条路径：副本、临时 HOME 都在 $WORK 下，清理一失效就全留下
+mkdir -p "$tmp/halftar"
+cat > "$tmp/halftar/tar" <<HALFTAR
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == -xf ]] && { cat >/dev/null; printf 'partial\n' > half-written.txt; echo "halftar: No space left on device" >&2; exit 1; }; done
+exec "$(command -v tar)" "\$@"
+HALFTAR
+chmod +x "$tmp/halftar/tar"
+pkg=$(make_mutant m-v3u-keep-work 's/^  rm -rf "\$WORK"$/  :/')
+run_case m-v3u "$pkg" "${V3[@]}" PATH="$tmp/halftar:$PATH"
+m_v3u_home=$(awk -F'\t' 'NR == 1 {print $2}' "$MD/homes" 2>/dev/null)
+assert_eq "$([[ -n "$m_v3u_home" && -d "$m_v3u_home" ]] && echo left || echo gone)" "left" \
+  "M-v3u：清理失效时临时 HOME 留在 \$WORK 里——端到端「V3 解包到一半失败：…已删除」（v3_leftovers）断言会失败"
+# 半个副本本身由 review_copy_to_root 当场删（复审 I-4），不靠退出清理
+assert_eq "$([[ -n "$m_v3u_home" && -e "$(dirname "$m_v3u_home")/review-root/repo/half-written.txt" ]] && echo left || echo gone)" "gone" \
+  "M-v3u：退出清理失效时半个副本仍已被 review_copy_to_root 删掉"
+[[ -n "$m_v3u_home" ]] && rm -rf "$(dirname "$m_v3u_home")"
+unset m_v3u_home
+
 report
