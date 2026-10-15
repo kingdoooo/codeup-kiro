@@ -3462,7 +3462,7 @@ assert_eq "$(grep -c '⚠️ 本次评审中 Kiro 报告了模型拒绝或回退
   "引擎：提示原文不自带 ⚠️（渲染器已加「> ⚠️ 」，否则单独出现时是「> ⚠️ ⚠️」；复审 M-7）"
 assert_contains "$(cat "$ROOT/scripts/probe/README.md")" "模型拒绝 / 回退检测的负控" "探测 README：「升级 kiro-cli 之后」写明 A 的负控（复审 M-2）"
 assert_contains "$(grep '模型拒绝或回退' "$ROOT/pipeline/setup-guide.md" | grep '^|' || true)" "刚升级过 kiro-cli" "Flow 手册排错表：升级后每次都出现 = 多半误报（复审 M-2）"
-assert_contains "$(cat "$ROOT/pipeline/setup-guide.md")" "在已验证的版本上（2.29.0 / 2.29.1）" "Flow 手册：伪造面 / 误报的说法限定在已验证的版本上（复审 M-8）"
+assert_contains "$(cat "$ROOT/pipeline/setup-guide.md")" "在已验证的版本上（2.29.0 / 2.29.1 / 2.31.1）" "Flow 手册：伪造面 / 误报的说法限定在已验证的版本上（复审 M-8；2.31.1 的负控是 fixtures/stream/v3-2.31.1-headless.jsonl）"
 assert_contains "$(cat "$ROOT/pipeline/setup-guide.md")" "$eng_line" "Flow 手册：写明这条提示的原文"
 assert_contains "$(cat "$ROOT/pipeline/setup-guide.md")" "评审中途的模型回退" "Flow 手册：第 8 节有「评审中途的模型回退」一条"
 assert_contains "$(cat "$ROOT/docs/adr/0004-pin-kiro-cli-v2-engine.md")" "v1.10.1 起在 Kiro 跑完后扫事件流" "ADR-0004：备注改成现状"

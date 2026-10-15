@@ -275,6 +275,7 @@ bot_usernames: []          # 机器人与人同号：名单留空，断环交给
 | `INLINE_COMMENT` | `inline_comment` | 是否发行内评论，只收 `0`/`1`（`config.py` 在 synth 时就拒绝别的取值，包括 YAML 里未加引号的 `yes`/`true`） |
 | `INLINE_PROFILE` | `inline_profile` | 行内档位：`quiet`（默认）/ `balanced` / `critical`，**不是** 0/1 布尔值 |
 | `MAX_INLINE_COMMENTS` | `max_inline_comments` | 单次行内评论上限，非负整数，默认 `10` |
+| `KIRO_ENGINE` | `kiro_engine` | Kiro 引擎：`v3`（默认）/ `v2`（显式回退，演示用），只认这两个取值（校验在评审脚本里，写错时 MR 上回写失败评论）。换引擎要连同镜像里的安装包（`aws/executor/kirocli-x86_64-linux-musl.zip`：v2 冻结在 2.29.0、v3 从 2.31.1 起）、`Dockerfile` 的 `ARG KIRO_CLI_VERSION` 与 `ARG KIRO_PINNED_ARTIFACT_SHA256`、`config.yaml` 的两个摘要一起换，重新构建后按第 5.2 节登记新镜像摘要；见 `pipeline/setup-guide.md` 第 6.2 节 |
 | `KIRO_TIMEOUT` | `kiro_timeout` | Kiro 超时秒数，默认 `900`，只收纯数字 |
 | `DIFF_SIZE_LIMIT` | `diff_size_limit` | diff 直传阈值字节数，默认 `307200`，只收纯数字 |
 | `MAX_COMMENT_BYTES` | `max_comment_bytes` | 单条评论字节上限，默认 `60000` |
@@ -352,7 +353,7 @@ entrypoint 核对前会剥掉它，所以名单里存的**必须是裸十六进�
    `config.yaml` 不在镜像构建上下文里，改它不会触发重新构建，镜像与摘要保持不变（有测试守着这一条）。
 
 升级 kiro-cli 版本时要重新走一遍：重新探测（新平台/版本要在 `scripts/probe/README.md` 走一遍
-「升级 kiro-cli 之后」流程）→ 改 `Dockerfile` 的 `ARG KIRO_CLI_VERSION` 与 `KIRO_PINNED_ARTIFACT_SHA256`
+「升级 kiro-cli 之后」流程；新版本只验证 v3，ADR-0008）→ 改 `Dockerfile` 的 `ARG KIRO_CLI_VERSION` 与 `KIRO_PINNED_ARTIFACT_SHA256`
 → 重新构建 → 把新摘要**追加**进 `KIRO_IMAGE_DIGESTS`（先追加新的、确认新任务都已切到新摘要后再
 从名单里删旧的，避免切换窗口内正在跑的旧任务被自己的摘要门拒绝）。
 
@@ -595,7 +596,8 @@ Lambda 一律不发、日志里是 `reason=no-email`。
    `prod.us-east-1.telemetry-v2.kiro.dev`（Kiro CLI 的遥测，前一个是给它取凭证的）与 `desktop-release.q.us-east-1.amazonaws.com`（Kiro CLI 的更新检查；版本是钉死的）——
    sandbox 实测（2026-10-10，Kiro CLI 2.21.4）它们在 ALERT 一轮里出现，BLOCK 下照常评审、耗时不变。另外 `<名字>.<区域>.compute.internal` 这类搜索域展开被拦也无害（NXDOMAIN 本来就是对的答案）。
 4. 改 `egress_dns_action: block` 再部署，再跑一轮；查询日志里本次评审没有 `BLOCK` 的合法域名，就算完成。
-5. **Kiro CLI 换版本后**（新的已探测镜像摘要），回到第 1 步取一次名单：新版本可能连新的主机。
+5. **Kiro CLI 换版本后**（新的已探测镜像摘要），回到第 1 步取一次名单：新版本可能连新的主机。**换引擎**（`kiro_engine`）同样回到第 1 步：
+   V3 与 V2 连的主机不一定相同（V3 的数据与网络通道见 ADR-0008）。
 
 **可选：NAT 网关形态（`egress_mode: nat`）**：任务放进两个私有子网、不分配公网 IP，经一个 NAT 网关出站（约 $32/月 + $0.045/GB）。
 VPC Block Public Access（BPA）打开后，公有子网经 IGW 的出站会被拦下（「仅入站」模式也拦），NAT 网关是 BPA 下最便宜的合规出站

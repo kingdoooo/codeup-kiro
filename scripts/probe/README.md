@@ -43,9 +43,9 @@ T5/T6 传 `--trust-tools`、T7 传 `--trust-all-tools`，那是正控与 INFO �
 - `probe-flow-run.sh` **会真实触发一次评审运行**，那次运行会照常在指定 MR 上发评论；
   它**没有**测试 MR 门禁、也不清理评论。只在测试 MR 上用它，提交前核对 `MR_LOCAL_ID`
   与 `FLOW_PIPELINE_ID`。
-- `probe-kiro-headless.sh` 不写 Codeup，但会消耗 Kiro credit，并临时改动真实 `$HOME`
-  下的设置与 agent 目录（退出时恢复，见下文）。canary 放在临时业务库的 `.git/` 下（allow 内、被 `**/.git/**` 拒绝）。
-- `probe-kiro-allowlist.sh` 不写 Codeup、不改任何全局设置；在真实 `$HOME/.kiro/agents/` 下装两个**独立名字**的
+- `probe-kiro-headless.sh` 不写 Codeup，但会消耗 Kiro credit；v2 下临时改动真实 `$HOME`
+  下的设置与 agent 目录（退出时恢复，见下文），v3 下全部落在本次探测的临时 HOME 里、不碰真实 `$HOME`。canary 放在临时业务库的 `.git/` 下（allow 内、被 `**/.git/**` 拒绝）。
+- `probe-kiro-allowlist.sh` 不写 Codeup、不改任何全局设置；v2 在真实 `$HOME/.kiro/agents/`（v3 在临时 HOME）下装两个**独立名字**的
   探测 agent（`codeup-reviewer-probe-allowlist`、`codeup-reviewer-probe-noallow`，不碰生产 agent），
   在 `$HOME` 下放一个 canary 文件（T8 另在临时目录里放一个越界 canary 与一个指向它的符号链接），退出时全部删除。
 
@@ -53,8 +53,8 @@ T5/T6 传 `--trust-tools`、T7 传 `--trust-all-tools`，那是正控与 INFO �
 |---|---|---|
 | `probe-codeup-inline.sh` | P1-00 身份/MR · P1-01 版本列表 · P1-02 行号侧向 · P1-03 必填字段 · P1-04 草稿一次提交 · P1-05 原地更新 · P1-06 评论列表 · P1-09 `<details>` 渲染 | 令牌：代码只读 + 合并请求读写；一个打开的测试 MR |
 | `probe-flow-run.sh` | P1-07 `CreatePipelineRun` 的 `envs` / `runningBranchs` 覆写 | 令牌：流水线读写；已配置的评审流水线 |
-| `probe-kiro-headless.sh` | P1-08 `stream-json` 事件形态 · P1-10 AGENTS.md 继承隔离 · P1-11 禁止路径 · P1-12 `--engine v3` 对照 | 装有 kiro-cli 的机器 + `KIRO_API_KEY`（或本机已 `kiro-cli login`） |
-| `probe-kiro-allowlist.sh` | P1-15 读取**许可清单**（`allowedPaths`）在 headless 下是不是边界。门禁用例：T1 allow 内 read 可读 · T1b/T1c allow 内 grep/glob 可用（不带 `--trust-tools`）· T2 allow 外/deny 外的 canary 被**拒绝**（不是等确认到超时）· T3 deny 先于 allow（`.git/logs/HEAD`）· T4 `env -i` 许可清单下能启动 · T8a 业务库内指向 `$HOME` 的符号链接被拒 · T8b `<业务库>/../` 越界路径被拒 · T9a–T9d 业务库里提交的 `.ssh/config`、`.aws/config`、`keys/id_rsa.pub`、`keys/id_ed25519.pub` 各自被拒（allow 内的仓库相对 deny 形状，四条各一；**每个 canary 一次调用**，拒绝痕迹按运行归因而不是按文件名回扫）。装好的探测 agent 先过生产同一个 `kiro_agent_selfcheck`，不通过记 INCONCLUSIVE。非门禁：T5 正控（无 allowedPaths 的旧形态 + `--trust-tools` 读出 canary；默认跑）· T6/T7 INFO（`--trust-tools` 不覆盖 allow；`--trust-all-tools` **绕过** allow；要跑得显式 `PROBE_CASES`） | 同上；每用例一次调用（约 0.3 credit，默认 13 次） |
+| `probe-kiro-headless.sh` | P1-08 `stream-json` 事件形态 · P1-10 AGENTS.md 继承隔离 · P1-11 禁止路径。引擎：`KIRO_ENGINE=v2|v3`（默认 v3；v3 必须用 `KIRO_API_KEY`，按生产形态跑：评审根目录 + 临时 HOME + kiroignore，正控 `PROBE_NO_ISOLATION=1` 是不写 kiroignore；2.31.1 上正控也 PASS——它本来就不加载嵌套的 AGENTS.md，这时 AGENTS.md 一项的放行依据是 allowlist 探测的 T11 与 T13） | 装有 kiro-cli 的机器 + `KIRO_API_KEY`（或本机已 `kiro-cli login`） |
+| `probe-kiro-allowlist.sh` | P1-15 读取**许可清单**（`allowedPaths`）在 headless 下是不是边界。门禁用例：T1 allow 内 read 可读 · T1b/T1c allow 内 grep/glob 可用（不带 `--trust-tools`）· T2 allow 外/deny 外的 canary 被**拒绝**（不是等确认到超时）· T3 deny 先于 allow（`.git/logs/HEAD`）· T4 `env -i` 许可清单下能启动 · T8a 业务库内指向 `$HOME` 的符号链接被拒 · T8b `<业务库>/../` 越界路径被拒 · T9a–T9d 业务库里提交的 `.ssh/config`、`.aws/config`、`keys/id_rsa.pub`、`keys/id_ed25519.pub` 各自被拒（allow 内的仓库相对 deny 形状，四条各一；**每个 canary 一次调用**，拒绝痕迹按运行归因而不是按文件名回扫）。装好的探测 agent 先过生产同一个 `kiro_agent_selfcheck`，不通过记 INCONCLUSIVE。非门禁：T5 正控（无 allowedPaths 的旧形态 + `--trust-tools` 读出 canary；默认跑）· T6/T7 INFO（`--trust-tools` 不覆盖 allow；`--trust-all-tools` **绕过** allow；要跑得显式 `PROBE_CASES`）。**v3（`KIRO_ENGINE` 默认）**另有门禁 T10 业务库的 `.kiro/hooks` 不执行 · T11 `AGENTS.md`（根与嵌套）与 `.kiro/steering` 不加载 · T12 同名工作区 agent 顶替不了受信 agent，非门禁 T13 正控（cwd = 业务库时这些信号确实出现）；T5 在 v3 下是「同一 agent + `--trust-all-tools`」，T7 不适用；v3 在临时 HOME 里装 agent，必须用 `KIRO_API_KEY` | 同上；每用例一次调用（约 0.3 credit，v2 默认 13 次、v3 默认 17 次） |
 
 ## 用法
 
@@ -72,7 +72,7 @@ export SOURCE_BRANCH=feature/x MR_LOCAL_ID=7 MR_TARGET_BRANCH=master
 bash -p scripts/probe/probe-flow-run.sh
 # 然后到 Flow 运行日志核对 checkout 分支与「使用环境变量指定的 MR：#7」
 
-# 3) kiro-cli headless（生产用的 v2 引擎；不传 KIRO_ENGINE 则用 CLI 默认引擎，实测表现为 v1）
+# 3) kiro-cli headless（v2 引擎；KIRO_ENGINE 不设 = v3，与评审脚本同一口径，见 4)）
 export KIRO_API_KEY=...                              # 或本机已 kiro-cli login
 KIRO_ENGINE=v2 bash -p scripts/probe/probe-kiro-headless.sh
 # 3b) 正控：故意不设置 chat.disableInheritingDefaultResources，AGENTS.md canary 应当出现（P1-10 FAIL）
@@ -80,18 +80,20 @@ KIRO_ENGINE=v2 PROBE_NO_ISOLATION=1 bash -p scripts/probe/probe-kiro-headless.sh
 # 3c) 拒绝路径的确定性验证：提示词只要求读 ~/.kiro 下的 canary 文件、不做评审
 #     （默认模式下模型可能压根没去读，那时「canary 未出现」什么都证明不了）
 KIRO_ENGINE=v2 PROBE_FORCE_READ=1 bash -p scripts/probe/probe-kiro-headless.sh
-# 4) 对照 V3（时间盒）
-KIRO_ENGINE=v3 bash -p scripts/probe/probe-kiro-headless.sh
+# 4) v3（默认引擎；必须用 KIRO_API_KEY）。正控：PROBE_NO_ISOLATION=1 不写 kiroignore，P1-10 应当 FAIL
+KIRO_API_KEY=… bash -p scripts/probe/probe-kiro-headless.sh
+KIRO_API_KEY=… PROBE_NO_ISOLATION=1 bash -p scripts/probe/probe-kiro-headless.sh
 # 原始输出默认留在 /tmp/kiro-probe-<时间>，可用 PROBE_KEEP_DIR 指定目录
 
 # 5) 读取许可清单边界（P1-15；票 15 主方案的前提，改动 agent 定义 / kiro_install_agent / 许可清单函数后重跑）
 bash -p scripts/probe/probe-kiro-allowlist.sh
-# 默认 = 十二个门禁用例 + T5 正控（13 次调用，每个用例一次、约 0.3 credit / 15–55 s）；T6/T7 是 INFO，要跑得显式列出
+# 默认引擎 v3（必须用 KIRO_API_KEY）= 十五个门禁用例 + T5 / T13 正控（17 次调用）；KIRO_ENGINE=v2 = 十二个门禁用例 + T5 正控（13 次）。
+# 每个用例一次、约 0.3 credit / 15–55 s；T6/T7 是 INFO，要跑得显式列出
 # 只跑子集省额度：PROBE_CASES="T1 T2 T4" bash -p scripts/probe/probe-kiro-allowlist.sh
-#   用例名逐个校验（写错 → 退出码 2、零调用）；子集运行时结论打「不作发布判定」并以 4 退出，只有十二个门禁用例全跑才打「走主方案」
-# 升级 kiro-cli 之后：跑**完整**一次（子集以 4 退出、不作发布判定，所以不能只跑 T8a T8b）→ 全 PASS 后把 summary.json 里的
-#   `target` 字段（`<os>/<arch>:<版本>` 元组，**不是** `kiro_cli` 那个纯版本号）加进 scripts/kiro-review.sh 的 KIRO_TESTED_TARGETS，
-#   否则评审会被版本门**拒绝**（名单外默认拒绝，2026-09-10 起；临时放行只能设流水线变量 KIRO_ACK_UNTESTED_TARGET=<os>/<arch>:<版本>，汇总带醒目 notice）
+#   用例名逐个校验（写错 → 退出码 2、零调用）；子集运行时结论打「不作发布判定」并以 4 退出，只有该引擎的门禁用例全跑才打「走主方案」
+# 升级 kiro-cli 之后：新版本只验证 v3（ADR-0008）。跑**完整**一次（子集以 4 退出、不作发布判定，所以不能只跑 T8a T8b）→ 全 PASS 后把 summary.json 里的
+#   `target` 字段（`<os>/<arch>:<版本>:<引擎>` 三元组，**不是** `kiro_cli` 那个纯版本号）加进 scripts/kiro-review.sh 的 KIRO_TESTED_TARGETS，
+#   否则评审会被版本门**拒绝**（名单外默认拒绝，2026-09-10 起；临时放行只能设流水线变量 KIRO_ACK_UNTESTED_TARGET=<os>/<arch>:<版本>:<引擎>，汇总带醒目 notice）
 # 原始输出默认留在 /tmp/kiro-probe-allowlist-<时间>（每用例 .jsonl/.err、agent-installed.json、
 # env-allowlist-names.txt、summary.json）
 ```

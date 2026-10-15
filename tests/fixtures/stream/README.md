@@ -11,5 +11,6 @@ kiro-cli `--output-format stream-json` 的真实输出（裁剪过的只有 `rea
 | `v3-2.29.1-h5-search.jsonl` | v3 | 评审根目录布局 + kiroignore，grep 与读文件，干净（spike S9 c10） |
 | `v3-2.29.1-hostile-cwd.jsonl` | v3 | cwd = 业务库：加载 AGENTS.md 与 steering、执行 hook、被同名工作区 agent 顶替（spike S9 c05） |
 | `v3-2.29.1-nested-agentsmd.jsonl` | v3 | 评审根目录布局但没写 kiroignore：嵌套 AGENTS.md 被加载（spike S9 c11） |
+| `v3-2.31.1-headless.jsonl` | v3 | kiro-cli 2.31.1 本机 headless 探测默认模式（评审根目录 + 临时 HOME + kiroignore，API key），钉版升到 2.31.1 时放进来做负控；真实 HOME 路径换成 `/Users/me` |
 
 V3 的几份来自本机 darwin 运行，路径是 `/private/tmp/…` 下的一次性目录，不含账号信息（复制前已扫描）。

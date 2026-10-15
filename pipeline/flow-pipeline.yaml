@@ -158,17 +158,19 @@ stages:
 #                      官方按版本直链不发布校验和（`stable/<版本>/manifest.json` 返回 403），这两个摘要是钉版安装唯一的完整性依据。
 #                      集成包随每个已探测元组一起发布这两个值
 #   KIRO_TIMEOUT       可选，默认 900（秒）
+#   KIRO_ENGINE        可选，默认 v3（ADR-0008）。只认整串 v2 / v3：v2 = 冻结的 V2 引擎（演示用），要同时把 oss_download 的
+#                      sourceFilePath 换成 2.29.0 的安装包、两个摘要换成 2.29.0 的值（setup-guide 第 6.2 节）；其余取值拒绝运行
 #   KIRO_CLI_SHA256    可选，默认空；**生产必配**。kiro-cli 入口文件（command -v kiro-cli 解析符号链接后）的 64 位 SHA-256，
 #                      取值在构建执行器镜像时记录（setup-guide 第 7 节）。脚本在第一次执行 kiro-cli 之前核对，不一致拒绝评审。
 #                      版本门只挡版本语义漂移，这一项才是 ADR-0004 要求的二进制完整性钉死；未配置时只留日志、不核对
-#   KIRO_ACK_UNTESTED_TARGET 可选，默认空。执行器上的「<os>/<arch>:<kiro-cli 版本>」不在脚本 KIRO_TESTED_TARGETS
+#   KIRO_ACK_UNTESTED_TARGET 可选，默认空。执行器上的「<os>/<arch>:<kiro-cli 版本>:<引擎>」不在脚本 KIRO_TESTED_TARGETS
 #                      名单内时脚本**拒绝评审**并回写「评审未完成」（读取边界依赖在该平台该版本上实测的行为；
 #                      云托管执行器 curl|bash 装的是 latest，Kiro 升级后就会这样）。确需在该组合上运行，把它设成与
-#                      本次组合逐字相同的元组（如 linux/x86_64:2.22.0）临时放行，汇总评论带醒目 notice；
+#                      本次组合逐字相同的元组（如 linux/x86_64:2.31.2:v3）临时放行，汇总评论带醒目 notice；
 #                      探测通过、组合进名单后删掉。不是布尔开关，不匹配仍拒绝。
 #                      旧的 KIRO_ACK_UNTESTED_VERSION（只绑版本）**已废弃**：设了会直接拒绝运行——它设过一次就会在
 #                      执行器换平台后继续放行同一个版本
-#   KIRO_TESTED_TARGETS_EXTRA 可选，默认空。空格分隔的「<os>/<arch>:<版本>」元组，登记**你自己探测过**的组合，
+#   KIRO_TESTED_TARGETS_EXTRA 可选，默认空。空格分隔的「<os>/<arch>:<版本>:<引擎>」元组，登记**你自己探测过**的组合，
 #                      与脚本里的 KIRO_TESTED_TARGETS 取**并集**：加得进来，但删不掉、也覆盖不了集成包已验证的那些。
 #                      它让升级仪式不必再改集成包源码（否则只能 fork 或长期靠 break-glass 顶着）。
 #                      **与 KIRO_ACK_UNTESTED_TARGET 的区别就是语义**：本变量 = 「这个组合我按 scripts/probe/README.md

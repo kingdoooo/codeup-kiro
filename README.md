@@ -29,19 +29,22 @@
          includeMcpJson/includePowers=false、deniedPaths 含 **/.git/**）不符即拒绝运行；敏感路径、.git 与仓库相对形状
          （**/.ssh/**、**/.aws/**、**/id_rsa*、**/id_ed25519*）的拒绝清单是第二道）
          + 二进制摘要钉死（配置 KIRO_CLI_SHA256 时在第一次执行 kiro-cli 之前核对入口文件 sha256，不一致拒绝；生产必配）
-         + 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行）+ kiro-cli「平台 + 版本」核对（`<os>/<arch>:<版本>` 不在 P1-15
-         探测过的 KIRO_TESTED_TARGETS 名单里就**拒绝评审**——同一个版本换平台不算已验证，只有流水线变量 KIRO_ACK_UNTESTED_TARGET 逐字等于本次「平台:版本」才放行并带醒目 notice）；这几次 kiro-cli 调用同样以 env -i 固定名单启动
+         + 能力检查（--agent-engine / --agent / --output-format 缺一即拒绝运行）+ kiro-cli「平台 + 版本 + 引擎」核对（`<os>/<arch>:<版本>:<引擎>` 不在 P1-15
+         探测过的 KIRO_TESTED_TARGETS 名单里就**拒绝评审**——同一个版本换平台不算已验证，只有流水线变量 KIRO_ACK_UNTESTED_TARGET 逐字等于本次「平台:版本:引擎」才放行并带醒目 notice）；这几次 kiro-cli 调用同样以 env -i 固定名单启动
       4. merge-base 三点 diff；>300KB 按优先级压缩，省略文件以 diff 片段索引供 Kiro 自读；
          开启行内评论时同时算出「本次变更行集合」（零上下文 diff，与评审输入同源）
       5. 隔离（必须在 diff 算完之后、启动 Kiro 之前）：一次遍历移除业务库工作树中任意深度的
          AGENTS.md、.kiro/、**全部符号链接**及根 lsp.json（任意深度的 .git 目录内部不动），
-         设置 chat.disableInheritingDefaultResources=true
+         设置 chat.disableInheritingDefaultResources=true（v2）；v3 随后把隔离后的工作树（不含 .git）复制进评审根目录的 repo/
       6. timeout 强制限时、`env -i` **固定名单**环境（PATH/HOME/USER/TERM/TMPDIR/LANG/LANGUAGE/LC_ALL/LC_CTYPE/LC_MESSAGES/
          KIRO_API_KEY/KIRO_LOG_NO_COLOR/代理十个/证书三个/XDG 五个，外加 KIRO_ENV_PASSTHROUGH 点名的变量——凭证形状的名字拒绝；
          云效令牌与 Flow 变量不进 Kiro 进程）执行
-         kiro-cli chat --no-interactive --agent-engine v2 --output-format stream-json
+         kiro-cli chat --no-interactive --agent-engine v3 --output-format stream-json
                        --agent codeup-reviewer
-         不传 --trust-tools（免确认只来自 allowedPaths），绝不传会绕过 allowedPaths 的 --trust-all-tools；
+         （KIRO_ENGINE=v2 时是 --agent-engine v2、cwd 是空目录 $WORK/cwd；v3 的 cwd 是评审根目录 $WORK/review-root、
+         HOME 是临时目录 $WORK/kiro-home，见 ADR-0008）
+         不传任何 --trust-*（免确认只来自 v2 的 allowedPaths / v3 的 permissions.rules allow），绝不传会绕过它们的 --trust-all-tools；
+         跑完先核对事件流的 runStarted.data.engine 等于 KIRO_ENGINE，v3 再过三条兜底（steering / hook / agent 来源），任一不符即失败评论；
          报告取自 runFinished.data.finalText 里带本次随机串标记包裹的契约 JSON
       7. 由脚本渲染评论并回写 OpenAPI：
          · 汇总评论每个 MR 一条；配了 CODEUP_BOT_USERNAME 时重跑原地更新
@@ -75,9 +78,12 @@
   业务库里的符号链接在启动前全部删除，免得 `payload -> /root/.aws/credentials` 借 allow 内的路径名读到 allow 外），
   `~/.ssh`、`~/.aws`、`~/.kiro`、`/proc`、`/var/run/secrets`、`**/.git/**` 等拒绝清单是第二道；
   Kiro 进程的五处 kiro-cli 调用（`chat --help`、`--list-models`、`--version`、`settings`、`chat`）都以固定名单的空环境启动（取值经 fd 交给垫片，不进任何进程的命令行参数），看不到云效令牌与 Flow 注入的其它变量。
-- Kiro 固定以 `--agent-engine v2` 运行：实测 headless 的默认引擎（v1）与预览版 v3 都不阻断
-  工作区 `AGENTS.md` 注入，只有 v2 配合 `chat.disableInheritingDefaultResources` 才阻断
-  （见 [docs/adr/0004-pin-kiro-cli-v2-engine.md](docs/adr/0004-pin-kiro-cli-v2-engine.md)）。
+- Kiro 默认以 `--agent-engine v3` 运行，流水线变量 `KIRO_ENGINE=v2` 显式回退到冻结的 V2（演示用；只在 2.29.0 上验证过）。
+  V3 不读 `toolsSettings`，读取边界由 `kiro/agent-codeup-reviewer.v3.json` 的 `permissions.rules` 表达；它的搜索只覆盖运行目录，
+  所以 V3 在集成包新建的**评审根目录**里运行（业务库副本在其下 `repo/`），HOME 是本次运行的临时目录——业务库里的 `AGENTS.md`、
+  `.kiro/hooks`、同名 agent 都改变不了受信 agent（cwd 设成业务库时它们会，实测）。跑完先核对事件流里的实际引擎，V3 再过三条兜底
+  （steering / hook / agent 来源），任一命中就失败评论
+  （见 [docs/adr/0008-default-v3-engine.md](docs/adr/0008-default-v3-engine.md)，取代 ADR-0004）。
 - 评审员输出必须带受信 agent 提示词才要求的契约标识，缺失即判定「受信 agent 未生效」，
   拒绝把该输出贴到 MR 上。
 - 哪些数据会离开客户网络（diff、评审员读取的上下文文件、MR 元信息）、哪些不会（令牌），
@@ -133,6 +139,7 @@ Flow 档位只做 Kiro 代码评审。
 | `prompts/review-agent-prompt.md` | agent 提示词（稳定部分）：只读角色、不受信输入、P0/P1/P2 判定、掩码规则、输出契约 |
 | `prompts/review-prompt.md` | 运行时提示词（每次不同）：MR 元信息与本次契约标记随机串 `{{REVIEW_NONCE}}` |
 | `kiro/agent-codeup-reviewer.json` | 只读 custom agent 定义：工具仅 read/grep/glob，`allowedPaths` 许可清单（两个运行时路径占位符，安装时注入），拒绝清单 V2/V3 双写，不加载工作区 MCP/Powers |
+| `kiro/agent-codeup-reviewer.v3.json` | V3 受信 agent 定义：只有 `permissions.rules`（一条 `fs_read` allow、一条与 V2 同一份的 `fs_read` deny、写 / shell / 网络整体 deny），prompt 用相对 `file://`；上一行那份 V2 定义冻结（ADR-0008） |
 | `pipeline/flow-pipeline.yaml` | 云效 Flow 流水线参考配置：双代码源 + MR 触发事件 + 评审任务 + 变量清单 |
 | `pipeline/setup-guide.md` | 部署指南：前提、流水线搭建、开关矩阵、验收清单、故障排查、安全隔离说明 |
 | `tests/` | 测试套件：DRY_RUN + mock kiro-cli + golden file + 变异测试，全程无网络依赖 |
@@ -181,7 +188,7 @@ Flow 档位只做 Kiro 代码评审。
 | 脚本 | 覆盖 | 需要 |
 |---|---|---|
 | `probe-codeup-inline.sh` | 身份与 MR 字段、版本列表、行号侧向、必填字段、草稿一次提交、评论原地更新、评论列表过滤、`<details>` 渲染 | 令牌（代码只读 + MR 读写）+ 一个打开的**测试 MR** |
-| `probe-kiro-headless.sh` | `stream-json` 事件形态、AGENTS.md 继承隔离（含正控）、敏感路径拒绝、v3 引擎对照 | 装有 kiro-cli 的机器 + `KIRO_API_KEY` 或已登录（**会消耗 credit**） |
+| `probe-kiro-headless.sh` | `stream-json` 事件形态、AGENTS.md 继承隔离（含正控）、敏感路径拒绝；`KIRO_ENGINE=v2|v3`（默认 v3，v3 需 `KIRO_API_KEY`） | 装有 kiro-cli 的机器 + `KIRO_API_KEY` 或已登录（**会消耗 credit**） |
 | `probe-flow-run.sh` | `CreatePipelineRun` 的 `envs` / `runningBranchs` 是否覆写脚本读到的变量 | 令牌（流水线读写）+ 已配置的评审流水线 |
 
 用法、逐项判定标准与常见问题见 [scripts/probe/README.md](scripts/probe/README.md)。所有脚本都不输出令牌。
