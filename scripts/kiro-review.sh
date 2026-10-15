@@ -176,12 +176,16 @@ KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 # 平台键**不含** libc 变体（glibc/musl）与发行版：那一维靠运维固定执行器镜像 digest 控（setup-guide 第 7 节第 6 项）。
 #
 # V2 冻结（ADR-0008 / Q6、Q20）：只保留 2.29.0 的两条 v2 组合，以后升级 kiro-cli 只验证 v3、不再新增 v2 组合；2.21.x 的条目已删除
-# （它们是用旧版脚本验证的，这次重构之后只在 2.29.0 上做真实回归；需要更老版本的用 v1.10.1 tag）。2.29.1 起只跑 v3。
+# （它们是用旧版脚本验证的，这次重构之后只在 2.29.0 上做真实回归；需要更老版本的用 v1.10.1 tag）。v3 的组合从 2.31.1 起。
 # darwin/arm64:2.29.0:v2  2026-10-11 探测（钉版从 2.21.4 升到 2.29.0），十二个门禁用例 + T5 正控全 PASS、退出码 0。
 # linux/x86_64:2.29.0:v2  2026-10-11 在 sandbox 的一次性 Fargate 任务里跑同一套探测（AWS 执行器同一镜像、同一子网 / 安全组、DNS Firewall BLOCK）：
 #                         入口 /root/.local/bin/kiro-cli（sha256 61e82d58…，**musl** 变体：BUILD_TARGET_TRIPLE=x86_64-unknown-linux-musl）、
 #                         十二个门禁用例 + T5 正控全 PASS、退出码 0。Flow 的钉版档位装的是同一个安装包、同一个入口文件。
-KIRO_TESTED_TARGETS="darwin/arm64:2.29.0:v2 linux/x86_64:2.29.0:v2"
+# darwin/arm64:2.31.1:v3  2026-10-15 本机探测（ADR-0008，API key、临时 HOME、评审根目录布局）：门禁十五个用例 + T5 / T13 正控全 PASS、退出码 0；
+#                         T13（cwd = 业务库）里 AGENTS.md / steering 被加载、agent 被同名工作区 agent 顶替——评审根目录布局在 2.31.1 上仍是承重的。
+#                         headless 探测 P1-08 / P1-10 / P1-11 全 PASS；去掉 kiroignore 的正控也 PASS：2.31.1 本来就不加载嵌套的 AGENTS.md，
+#                         kiroignore 在这个版本上只是纵深（第 5.5 步的删除与事件流兜底仍在）。
+KIRO_TESTED_TARGETS="darwin/arm64:2.29.0:v2 linux/x86_64:2.29.0:v2 darwin/arm64:2.31.1:v3"
 # 使用方自己探测过的元组（不变式 I8，2026-09-15）：只做**并集**——加得进来，删不掉也覆盖不了上面那个常量里的条目。
 # 为什么需要它：上面的名单写死在集成包源码里，于是升级仪式要求使用方**改集成包的源码**；他们要么 fork（然后永远合不回来），
 # 要么一直用下面的 break-glass 顶着（那等于版本门形同虚设，还多一个手工步骤）。
