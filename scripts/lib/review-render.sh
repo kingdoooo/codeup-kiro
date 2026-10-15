@@ -418,6 +418,38 @@ review_stream_v3_tools() {
   if [[ "$bad" != 0 ]]; then printf '（另有 %s 个不合形，不显示）' "$bad"; fi
 }
 
+# --- V3 的某个会话选项（ADR-0008；S8 关掉的通道的回归守卫）---
+# 用法：review_stream_v3_option <stream.jsonl> <选项 id> → stdout 最后一次 config_option_update 里该 id 的 currentValue
+#   rc 0 = 取到；rc 1 = 没有；rc 3 = 有但取值不合形（不显示）；rc 2 = 读不了。只认 Kiro 写的 config_option_update，模型文本伪造不出。
+review_stream_v3_option() {
+  local f="${1-}" id="${2-}" v
+  [[ -r "$f" && -n "$id" ]] || return 2
+  v=$(jq -R -n -r --arg id "$id" '[inputs | fromjson? | select(type == "object" and .type == "sessionUpdate")
+                    | .data | objects | .update | objects | select(.sessionUpdate == "config_option_update")
+                    | .configOptions | arrays | .[] | objects | select(.id == $id) | .currentValue]
+                   | (last // null) | if . == null then empty elif type == "string" then . else "<不是字符串>" end' "$f" 2>/dev/null) || return 2
+  [[ -n "$v" ]] || return 1
+  [[ "$v" =~ ^[A-Za-z0-9._:-]{1,64}$ ]] || return 3
+  printf '%s' "$v"
+}
+
+# --- V3 加载的 hook 数（ADR-0008；spec E3-2「hook 注册数大于 0」）---
+# V3 把 hook 的加载结果写进 HOME 下的 ~/.kiro/logs/<时间>/kiro.log：一行 JSON，message 形如 `hooks.reload.loaded {"read":N,"registered":N}`。
+# 这是 Kiro 自己的文件（在临时 HOME 里；模型没有写文件的工具），比事件流里的 hook_update 早一步：hook 注册了但还没触发也能看到。
+# 用法：review_v3_hook_registrations <日志目录> → stdout 所有这类行里 registered 的最大值；
+#   rc 0 = 取到；rc 1 = 没有这类行；rc 3 = 有但取值不是非负整数（不显示）；rc 2 = 目录读不了
+review_v3_hook_registrations() {
+  local d="${1-}" v
+  [[ -d "$d" && -r "$d" ]] || return 2
+  v=$(LC_ALL=C find "$d" -type f -name kiro.log -exec cat {} + 2>/dev/null \
+      | jq -R -n -r '[inputs | fromjson? | objects | .message | strings | select(startswith("hooks.reload.loaded "))
+                      | ltrimstr("hooks.reload.loaded ") | (fromjson? // {}) | .registered]
+                     | if length == 0 then empty elif all(type == "number" and . >= 0 and . == floor) then (max | tostring) else "<不合形>" end' 2>/dev/null) || return 2
+  [[ -n "$v" ]] || return 1
+  [[ "$v" =~ ^[0-9]+$ ]] || return 3
+  printf '%s' "$v"
+}
+
 # --- V3 事件流兜底（ADR-0008 / Q26）：业务库不得改变 agent 的指令、工具或权限 ---
 # 评审根目录布局 + 第 5.5 步的删除 + kiroignore 已经让这些面不出现；这里是第三道：将来 V3 的加载规则变了（kiroignore 不再管用、
 # 嵌套目录的 hook 也开始加载…），评审直接失败，而不是悄悄被仓库接管。只认 Kiro 自己写的结构（固定路径上的键），不看任何文本——

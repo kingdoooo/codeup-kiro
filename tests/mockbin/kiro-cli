@@ -374,13 +374,20 @@ if [[ "$ENGINE_ARG" == v3 ]]; then
   ER="${MOCK_KIRO_ENGINE_REPORT-v3}"
   if [[ "$ER" == none ]]; then emit '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1}}'
   else emit --arg e "$ER" '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1,engine:$e}}'; fi
-  v3_cfg() { emit --arg s "$SID" --arg mode "$1" --arg model "$2" --arg a "$AGENT_ARG" --arg src "$3" \
+  # 真实 2.31.1 一样：HOME 下 ~/.kiro/logs/<时间>/kiro.log 里有一行 hooks.reload.loaded（MOCK_KIRO_V3_HOOKS_REGISTERED 改注册数，
+  # MOCK_KIRO_V3_NO_LOGS=1 不写日志）；config_option_update 里带 contentCollection（MOCK_KIRO_V3_CONTENT_COLLECTION 改最后一次的值）。
+  if [[ "${MOCK_KIRO_V3_NO_LOGS:-0}" != "1" ]]; then
+    mkdir -p "$HOME/.kiro/logs/20261015T000000000"
+    jq -nc --argjson n "${MOCK_KIRO_V3_HOOKS_REGISTERED:-0}" '{timestamp:"2026-10-15T00:00:00.000Z",level:"info",message:("hooks.reload.loaded " + ({read:$n,registered:$n}|tojson))}' \
+      >> "$HOME/.kiro/logs/20261015T000000000/kiro.log"
+  fi
+  v3_cfg() { emit --arg s "$SID" --arg mode "$1" --arg model "$2" --arg a "$AGENT_ARG" --arg src "$3" --arg cc "$4" \
     '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"config_option_update",configOptions:[
        {id:"mode",currentValue:$mode,options:[{value:"vibe",_meta:{kiro:{source:"bundled"}}},{value:$a,_meta:{kiro:{source:$src}}}]},
-       {id:"model",currentValue:$model}]}}}'; }
+       {id:"model",currentValue:$model},{id:"contentCollection",currentValue:$cc}]}}}'; }
   v3_info() { emit --arg s "$SID" --argjson k "$1" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"session_info_update",_meta:{kiro:$k}}}}'; }
-  v3_cfg vibe auto global
-  v3_cfg "${MOCK_KIRO_V3_MODE:-$AGENT_ARG}" "${MOCK_KIRO_V3_MODEL:-$(jq -r '.model // "auto"' "$AGENT_JSON")}" "${MOCK_KIRO_V3_AGENT_SOURCE:-global}"
+  v3_cfg vibe auto global enabled
+  v3_cfg "${MOCK_KIRO_V3_MODE:-$AGENT_ARG}" "${MOCK_KIRO_V3_MODEL:-$(jq -r '.model // "auto"' "$AGENT_JSON")}" "${MOCK_KIRO_V3_AGENT_SOURCE:-global}" "${MOCK_KIRO_V3_CONTENT_COLLECTION:-disabled}"
   [[ "${MOCK_KIRO_V3_STEERING:-0}" == "1" ]] && v3_info '{"kind":"steering_inclusion","steeringDocuments":["file:///mock/AGENTS.md"]}'
   [[ "${MOCK_KIRO_V3_HOOK:-0}" == "1" ]] && v3_info '{"kind":"hook_update","hook":{"hookId":"/mock/.kiro/hooks/x.json#hook-0","status":"completed","actionType":"runCommand"}}'
   if [[ "${MOCK_KIRO_V3_CONTEXT_FILES:-0}" == "1" ]]; then v3_info '{"kind":"context_usage","usagePercentage":1.2,"breakdown":{"contextFiles":{"items":[{"name":"AGENTS.md"}]}}}'

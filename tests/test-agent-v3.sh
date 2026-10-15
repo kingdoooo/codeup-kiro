@@ -148,5 +148,12 @@ mkdir -p "$tmp/badtar"; printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" =
 P2="$tmp/review-root2"; mkdir "$P2"
 rc=0; ( PATH="$tmp/badtar:$PATH"; review_copy_to_root "$SRC" "$P2" ) >/dev/null 2>&1 || rc=$?
 assert_eq "$rc" "1" "tar 打包失败 → 返回 1（不依赖调用方的 pipefail）"
+# 复制到一半失败（假 tar 解包端先写出一个文件再报错，模拟磁盘写满）→ 返回 1，且不留半个副本：
+# 真实磁盘满时失败评论也渲染在同一个 TMPDIR 里，半个副本占着空间，评论可能写不出来（复审 I-4）
+mkdir -p "$tmp/halftar"; printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" == -xf ]] && { cat > /dev/null; mkdir -p a; echo x > a/f1; echo "tar: write error: No space left on device" >&2; exit 1; }; done\nexec %q "$@"\n' "$(command -v tar)" > "$tmp/halftar/tar"; chmod +x "$tmp/halftar/tar"
+P3="$tmp/review-root3"; mkdir "$P3"
+rc=0; ( PATH="$tmp/halftar:$PATH"; review_copy_to_root "$SRC" "$P3" ) >/dev/null 2>&1 || rc=$?
+assert_eq "$rc" "1" "解包到一半失败 → 返回 1"
+assert_eq "$([[ -e "$P3/repo" ]] && echo left || echo removed)" "removed" "解包到一半失败 → 半个副本已删（不占着 TMPDIR 的空间）"
 
 report

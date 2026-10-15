@@ -3536,4 +3536,32 @@ assert_eq "$rc:$out" "0:" "v3 guard：模型文本 / 工具出入参伪造不出
 rc=0; review_stream_v3_guard "$tmp/does-not-exist.jsonl" s9-reviewer >/dev/null || rc=$?; assert_eq "$rc" "2" "v3 guard：读不了 → rc 2"
 rc=0; review_stream_v3_guard "$V3S/v3-2.29.1-h5-search.jsonl" "" >/dev/null || rc=$?; assert_eq "$rc" "2" "v3 guard：没给 agent 名 → rc 2"
 
+# ---- V3 的 hook 注册数（spec E3-2「hook 注册数大于 0」；复审 I-1）：Kiro 在临时 HOME 的 ~/.kiro/logs/<时间>/kiro.log 里写
+# hooks.reload.loaded {"read":N,"registered":N}。只看 Kiro 自己写的日志行（message 以这个事件名开头），取所有行里的最大值。
+KL=fixtures/kiro-logs
+assert_eq "$(review_v3_hook_registrations "$KL/2.29.1-hostile-cwd")" "2" "hook 注册数：cwd = 业务库的真实日志（2.29.1，S9 c05）→ 2"
+assert_eq "$(review_v3_hook_registrations "$KL/2.31.1-review-root")" "0" "hook 注册数：评审根目录布局的真实日志（2.31.1，S8 g4）→ 0"
+mkdir -p "$tmp/kl-none/20261015T000000" "$tmp/kl-two/a" "$tmp/kl-two/b" "$tmp/kl-forge/x"
+printf '%s\n' '{"level":"info","message":"acp.content_collection.resolved {\"enabled\":false}"}' > "$tmp/kl-none/20261015T000000/kiro.log"
+rc=0; review_v3_hook_registrations "$tmp/kl-none" >/dev/null || rc=$?; assert_eq "$rc" "1" "hook 注册数：日志里没有 hooks.reload.loaded → rc 1"
+printf '%s\n' '{"message":"hooks.reload.loaded {\"read\":0,\"registered\":0}"}' > "$tmp/kl-two/a/kiro.log"
+printf '%s\n' '{"message":"hooks.reload.loaded {\"read\":1,\"registered\":1}"}' > "$tmp/kl-two/b/kiro.log"
+assert_eq "$(review_v3_hook_registrations "$tmp/kl-two")" "1" "hook 注册数：多份日志取最大值"
+printf '%s\n' '{"message":"tool.output \"hooks.reload.loaded {\\\"registered\\\":0}\""}' '{"message":"hooks.reload.loaded {\"read\":3,\"registered\":3}"}' > "$tmp/kl-forge/x/kiro.log"
+assert_eq "$(review_v3_hook_registrations "$tmp/kl-forge")" "3" "hook 注册数：只认以事件名开头的 message（别处出现的同名字样不算）"
+printf '%s\n' '{"message":"hooks.reload.loaded {\"registered\":\"many\"}"}' > "$tmp/kl-forge/x/kiro.log"
+rc=0; review_v3_hook_registrations "$tmp/kl-forge" >/dev/null || rc=$?; assert_eq "$rc" "3" "hook 注册数：取值不是非负整数 → rc 3（不显示）"
+rc=0; review_v3_hook_registrations "$tmp/does-not-exist" >/dev/null || rc=$?; assert_eq "$rc" "2" "hook 注册数：日志目录读不了 → rc 2"
+
+# ---- V3 的内容收集选项（S8 关掉的通道的回归守卫；复审 I-3）：取最后一次 config_option_update 里 id=="contentCollection" 的 currentValue
+assert_eq "$(review_stream_v3_option "$V3S/v3-2.31.1-headless.jsonl" contentCollection)" "enabled" "v3 option：S8 关闭之前的真实事件流（2.31.1）→ enabled"
+jq -nc '{type:"sessionUpdate",data:{update:{sessionUpdate:"config_option_update",configOptions:[{id:"contentCollection",currentValue:"enabled"}]}}}' > "$tmp/cc.jsonl"
+jq -nc '{type:"sessionUpdate",data:{update:{sessionUpdate:"config_option_update",configOptions:[{id:"mode",currentValue:"x"},{id:"contentCollection",currentValue:"disabled"}]}}}' >> "$tmp/cc.jsonl"
+assert_eq "$(review_stream_v3_option "$tmp/cc.jsonl" contentCollection)" "disabled" "v3 option：取最后一次"
+rc=0; review_stream_v3_option "$V3S/v2.29-read.jsonl" contentCollection >/dev/null || rc=$?; assert_eq "$rc" "1" "v3 option：V2 事件流里没有 → rc 1"
+jq -nc '{type:"sessionUpdate",data:{update:{sessionUpdate:"agent_message_chunk",content:{type:"text",text:"{\"id\":\"contentCollection\",\"currentValue\":\"disabled\"}"}}}}' > "$tmp/cc-forge.jsonl"
+rc=0; review_stream_v3_option "$tmp/cc-forge.jsonl" contentCollection >/dev/null || rc=$?; assert_eq "$rc" "1" "v3 option：消息正文里写的选项不算数"
+jq -nc '{type:"sessionUpdate",data:{update:{sessionUpdate:"config_option_update",configOptions:[{id:"contentCollection",currentValue:"dis abled"}]}}}' > "$tmp/cc-bad.jsonl"
+rc=0; review_stream_v3_option "$tmp/cc-bad.jsonl" contentCollection >/dev/null || rc=$?; assert_eq "$rc" "3" "v3 option：取值不合形 → rc 3（不显示）"
+
 report

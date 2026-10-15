@@ -2412,7 +2412,8 @@ assert_nonzero "$RC" "M-v3o：干净的 V3 运行被兜底拒绝——端到端�
 assert_contains "$(posted_comment "$OUT")" "V3 事件流兜底触发" "M-v3o：失败原因是兜底"
 
 # --- M-v3p：模型取第一次 config_option_update → 默认的 auto 被当成实际模型（spec E 列的变异）---
-pkg=$(make_mutant m-v3p-model-first 's#(last // null) | if \. == null then empty elif type == "string"#(first // null) | if . == null then empty elif type == "string"#' scripts/lib/review-render.sh)
+# 只改 review_stream_v3_model 这一个函数（review_stream_v3_option 用的是同一句 jq，一起改的话内容收集的核对先拒绝，观测的就不是模型这一条了）
+pkg=$(make_mutant m-v3p-model-first '/^review_stream_v3_model() {$/,/^}$/s#(last // null) | if \. == null then empty elif type == "string"#(first // null) | if . == null then empty elif type == "string"#' scripts/lib/review-render.sh)
 run_case m-v3p "$pkg" "${V3[@]}"
 assert_contains "$(posted_comment "$OUT")" "实际使用的模型是 \`auto\`" "M-v3p：评论挂上了误报的模型提示——端到端「V3 对照：无模型提示」断言会失败"
 
@@ -2421,5 +2422,15 @@ pkg=$(make_mutant m-v3q-no-v3-env '/^  out+=("\${KIRO_V3_ENV\[@\]}")$/d' scripts
 run_case m-v3q "$pkg" "${V3[@]}"
 assert_rc "$RC" 0 "M-v3q：评审照常完成（这类通道不影响评审结果，所以只有环境断言看得住它）"
 assert_eq "$(grep -c -x 'KIRO_DISABLE_EXPERIMENT_CONFIG' "$MD/env" || true)" "0" "M-v3q：Kiro 进程环境里没有 KIRO_DISABLE_EXPERIMENT_CONFIG——端到端「V3：Kiro 进程环境里有…（S8）」断言会失败"
+
+# --- M-v3r：hook 注册数的核对不再拒绝 → Kiro 日志里注册了 hook 的运行照样贴出评审（复审 I-1）---
+pkg=$(make_mutant m-v3r-no-hook-reg '/^    0) \[\[ "\$_hr" == 0 \]\] || die_review/s/\[\[ "\$_hr" == 0 \]\]/true/')
+run_case m-v3r "$pkg" "${V3[@]}" MOCK_KIRO_V3_HOOKS_REGISTERED=1
+assert_rc "$RC" 0 "M-v3r：注册了 hook 的运行照常完成——端到端「V3 兜底 hook 注册数：…→ 拒绝」断言会失败"
+
+# --- M-v3s：内容收集的核对不再拒绝 → S8 的设置没生效也照样评审（复审 I-3）---
+pkg=$(make_mutant m-v3s-no-cc-check '/^    0) \[\[ "\$_cc" == disabled \]\] || die_review/s/\[\[ "\$_cc" == disabled \]\]/true/')
+run_case m-v3s "$pkg" "${V3[@]}" MOCK_KIRO_V3_CONTENT_COLLECTION=enabled
+assert_rc "$RC" 0 "M-v3s：内容收集没关的运行照常完成——端到端「V3：内容收集没关掉 → 拒绝」断言会失败"
 
 report

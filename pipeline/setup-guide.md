@@ -475,7 +475,7 @@ V3 的运行方式与 V2 不同（第 12 节）：Kiro 在本次工作目录下�
    业务库 checkout 里——第一段路径必须与第 1 项第二条许可路径（`…/chunks`）同一个父目录，第二段必须等于第 1 项的第一条许可路径。
    v3（默认）下这一行是「Kiro 运行目录：<路径>/review-root（V3 评审根目录：…；HOME = 临时目录 <路径>/kiro-home）」，两段路径与 `…/chunks` 同一个父目录。
 4. 引擎：日志出现「Kiro 引擎：v3（--agent-engine v3；…）」（`KIRO_ENGINE=v2` 时是「Kiro 引擎：v2（--agent-engine v2；…）」），
-   评审跑完还有一行「Kiro 实际引擎：<同一个引擎>」；v3 另有「V3 评审根目录：已把业务库复制到 …」与「V3 事件流兜底：未见 …」。原因见第 12 节。
+   评审跑完还有一行「Kiro 实际引擎：<同一个引擎>」；v3 另有「V3 评审根目录：已把业务库复制到 …」「V3 事件流兜底：未见 …」「V3 hook 注册数：0」与「V3 内容收集：disabled」。原因见第 12 节。
 5. 调用行**没有** `--trust-tools`、更没有 `--trust-all-tools`（第 12 节）：免确认只来自受信 agent 的
    `allowedPaths`。核对方式：日志「Kiro 进程环境许可清单（只透传这些变量）：…」那一行列出的变量名必须是**固定名单**
    （完整名字列表只写在第 12 节「Kiro 进程环境只含固定名单变量」那一行，与代码 `KIRO_ENV_FIXED_NAMES` 由测试比对）的子集——
@@ -731,7 +731,8 @@ V3 的运行方式与 V2 不同（第 12 节）：Kiro 在本次工作目录下�
 | 评论说「KIRO_ENGINE 不合法」 | 流水线变量 `KIRO_ENGINE` 只认整串 `v2` / `v3`（不设 = v3）；大小写、首尾空白都算不合法。改正后重跑（第 6.2 节） |
 | 评论说「该版本在已探测名单里只有 v2（或 v3）引擎的组合」 | 引擎与安装包没配套：v2 只在 2.29.0 上验证过，v3 从 2.31.1 起。按第 6.2 节的表同时改 `KIRO_ENGINE`、OSS 对象与两个摘要 |
 | 评论说「Kiro 实际运行的引擎（…）与 KIRO_ENGINE=… 不一致」或「无法确认 Kiro 用的是 v3 引擎」 | kiro-cli 没按 `--agent-engine` 运行（新版本改了行为）。不要放行：回到已探测的组合，并在新版本上重跑探测（`scripts/probe/README.md`） |
-| 评论说「V3 事件流兜底触发」 | V3 加载了 steering / 上下文文件、执行了 hook，或用的不是本次安装的 agent——业务库或执行器环境在改变受信 agent，评审内容没有贴出。查执行器 HOME 与 kiro-cli 版本；确认是 Kiro 的新行为后先切 `KIRO_ENGINE=v2` 并报告，不要放宽兜底 |
+| 评论说「V3 的内容收集没有关闭」 | 临时 HOME 里写的 `codeWhisperer.shareCodeWhispererContentWithAWS false` 没生效（kiro-cli 改了设置键、或这次写设置失败）。评审内容没有贴出。不要放行：回到已探测的组合，在新版本上重跑 S8 与探测（ADR-0008） |
+| 评论说「V3 事件流兜底触发」 | V3 加载了 steering / 上下文文件、执行了或注册了 hook，或用的不是本次安装的 agent——业务库或执行器环境在改变受信 agent，评审内容没有贴出。查执行器 HOME 与 kiro-cli 版本；确认是 Kiro 的新行为后先切 `KIRO_ENGINE=v2` 并报告，不要放宽兜底 |
 | 评论说「V3 评审根目录准备失败」 | 把业务库复制到评审根目录失败（多为磁盘空间不足，复制量约等于业务库工作树大小）。扩容执行器临时空间，或先用 `KIRO_ENGINE=v2` |
 | 评论/日志说「钉版档位缺少 KIRO_PINNED_ARTIFACT」或**安装包取不到**（run 块打「钉版安装包不在预期位置」） | 安装包没到执行器本地。**注意 `OSSDownload` 对不存在的对象不报错、只建空目录**（2026-09-16 实测），所以 step 绿了不代表下到了——真正兜底的是 run 块的 `[ -f ]` 守卫,它红了/评审脚本的钉版必填校验拒了都对。排查:`sourceFilePath` 的对象键在桶里是否存在、服务连接是否有该桶只读、`targetFilePath` 落地目录与 run 块 `mv` 源路径是否一致。**钉版档位不回退现装**——取不到就红,绝不偷偷 `curl \| bash` 装最新版(负向用例已实测) |
 | 评论说「安装包摘要不一致」（`KIRO_PINNED_ARTIFACT_SHA256`） | **拉到的字节**与集成包发布的安装包摘要对不上，在**解压之前**就停。成因：桶里对象被换过（升级时漏了「换 bucket 里的安装包对象」这一步）、`KIRO_PINNED_ARTIFACT_SHA256` 填错、或下载损坏。对照本节「已发布值」重新核对，或在 Cloud Shell 里重跑备包脚本（`sha256sum -c` 通过再上传） |
@@ -927,7 +928,7 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   `--agent-engine <KIRO_ENGINE>`，也从不写 kiro-cli 的全局设置 `chat.agentEngine`。跑完再核对事件流里 `runStarted.data.engine`
   与 `KIRO_ENGINE` 一致（v3 缺这个字段也拒绝）。默认 v3、`KIRO_ENGINE=v2` 显式回退，见 `docs/adr/0008-default-v3-engine.md`。
 - **V3 在评审根目录里运行。** V3 的 grep / 文件搜索只覆盖运行目录；而运行目录若是业务库，仓库里的 `.kiro/hooks` 会在执行器上被执行、
-  同名的工作区 agent 会顶替受信 agent（kiro-cli 2.29.1 实测，2.31.1 上探测 T13 复现）。所以 V3 的运行目录是本次工作目录下新建的 `review-root/`，第 5.5 步之后
+  同名的工作区 agent 会顶替受信 agent（kiro-cli 2.29.1 实测；2.31.1 上探测 T13 复现了 steering、同名 agent 顶替与 hook 注册——2.31.1 注册了业务库的 hook 却不发 hook_update，只有 Kiro 日志里的注册数看得到）。所以 V3 的运行目录是本次工作目录下新建的 `review-root/`，第 5.5 步之后
   才把**已隔离**的业务库复制到其下 `repo/`（不含 `.git`）——能搜整个业务库，而运行目录本身没有任何仓库内容。HOME 是同一工作目录下的
   临时目录 `kiro-home/`（agent、设置、kiroignore 都在里面，跑完一起删）：V3 不认 `KIRO_HOME`，而执行账号 HOME 里的
   `~/.kiro/settings/permissions.yaml` 能打穿读取边界（实测）。kiroignore 写 `AGENTS.md`：2.29.1 上 V3 会加载复制进来的嵌套 `AGENTS.md`，
@@ -938,7 +939,10 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   （ADR-0008）：远程会话（`app.kiro.dev`，一次性运行里没有观察到流量）、云端配置拉取（API key 身份下 401）、API key 的区域探测
   （`management.<区域>.kiro.dev`，AWS 档位 BLOCK 下 gov 两个被拦也无害）、远程工具清单（`web_search` 已整体 deny）。
 - **V3 的事件流兜底（第三道）。** 出现 `steering_inclusion`、非空的 `contextFiles`、`hook_update`，或最后一次 `config_option_update`
-  里用的 agent 不是本次安装的、来源不是 `global`，任一命中就回写失败评论、不贴评审内容。只认 Kiro 写的结构，模型文本伪造不出。
+  里用的 agent 不是本次安装的、来源不是 `global`，或临时 HOME 里 Kiro 自己的日志（`~/.kiro/logs/*/kiro.log`）报 `hooks.reload.loaded` 注册了 hook
+  （注册了就拦，不等它触发），任一命中就回写失败评论、不贴评审内容。只认 Kiro 写的结构，模型文本伪造不出。
+  同一处还核对 S8 关掉的内容收集：`config_option_update` 里的 `contentCollection` 不是 `disabled` 就回写失败评论（设置没生效时，数据通道比 ADR-0008 接受的多）。
+  日志里没有 `hooks.reload.loaded`、事件流里没有 `contentCollection`（以后的版本改了形态）只留一行警告。
 - **`chat.disableInheritingDefaultResources=true` 的作用与局限**：让 Kiro 不继承工作区的默认资源
   （实测验证过的是工作区 `AGENTS.md`）。局限有三点：① **只对 v2 引擎有效**（v3 不写它：v3 的对应措施是上面的评审根目录、临时 HOME 与 kiroignore）；② 它写在执行账号
   `$HOME` 的**全局**设置里且不回滚（常驻执行器注意事项见第 7 节第 5 条）；

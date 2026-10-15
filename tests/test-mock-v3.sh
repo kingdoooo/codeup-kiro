@@ -32,6 +32,14 @@ rc=0; review_stream_model_switch "$out" gpt-5.6-sol >/dev/null || rc=$?
 assert_eq "$rc" "1" "替身 V3：V2 的模型回退检测在 V3 形态上不误报"
 assert_eq "$(review_extract_json "$out" 0123456789abcdef | jq -r .contract)" "codeup-reviewer/1" "替身 V3：契约照样能取出"
 assert_eq "$(cat "$C/home/.kiro-mock/kiroignore")" "AGENTS.md" "替身 V3：按 TMPDIR 指针找到配置目录，并记下临时 HOME 的 kiroignore"
+# S8 的回归守卫与 hook 注册数（复审 I-1 / I-3）：替身与真实 2.31.1 一样报 contentCollection 选项、在 HOME 的 ~/.kiro/logs 里写 hooks.reload.loaded
+assert_eq "$(review_stream_v3_option "$out" contentCollection)" "disabled" "替身 V3：contentCollection 缺省是 disabled（S8 的设置生效后的样子）"
+assert_eq "$(review_v3_hook_registrations "$H/.kiro/logs")" "0" "替身 V3：临时 HOME 的 Kiro 日志里 hook 注册数 0"
+rm -rf "$H/.kiro/logs"; v3_run MOCK_KIRO_V3_CONTENT_COLLECTION=enabled MOCK_KIRO_V3_HOOKS_REGISTERED=2 > "$tmp/g.jsonl"
+assert_eq "$(review_stream_v3_option "$tmp/g.jsonl" contentCollection)" "enabled" "替身 V3：MOCK_KIRO_V3_CONTENT_COLLECTION 可改"
+assert_eq "$(review_v3_hook_registrations "$H/.kiro/logs")" "2" "替身 V3：MOCK_KIRO_V3_HOOKS_REGISTERED 可改"
+rm -rf "$H/.kiro/logs"; v3_run MOCK_KIRO_V3_NO_LOGS=1 > "$tmp/g.jsonl"
+assert_eq "$([[ -e "$H/.kiro/logs" ]] && echo has || echo none)" "none" "替身 V3：MOCK_KIRO_V3_NO_LOGS=1 → 不写 Kiro 日志"
 for sw in STEERING HOOK CONTEXT_FILES; do
   v3_run "MOCK_KIRO_V3_${sw}=1" > "$tmp/g.jsonl"
   rc=0; review_stream_v3_guard "$tmp/g.jsonl" codeup-reviewer-0123456789abcdef >/dev/null || rc=$?

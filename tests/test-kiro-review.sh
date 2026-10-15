@@ -3426,6 +3426,8 @@ assert_eq "$(grep -c -- '^--trust' "$MD/args")" "0" "V3：参数里没有任何 
 assert_contains "$OUT" "Kiro 引擎：v3" "V3：日志记录所用引擎"
 assert_contains "$OUT" "Kiro 实际引擎：v3" "V3：事件流里的实际引擎与 KIRO_ENGINE 一致"
 assert_contains "$OUT" "V3 事件流兜底：未见" "V3：兜底跑过且未触发"
+assert_contains "$OUT" "V3 hook 注册数：0" "V3：从 Kiro 日志核对了 hook 注册数"
+assert_contains "$OUT" "V3 内容收集：disabled" "V3：核对了内容收集已关（S8）"
 assert_contains "$OUT" "V3 用到的工具：read_file" "V3：日志记下 usedTools（只进日志）"
 assert_not_contains "$(posted_comment "$OUT")" "V3 用到的工具" "V3：工具清单不进 MR 评论"
 assert_contains "$OUT" "V3 实际模型：gpt-5.6-sol" "V3：实际模型取自最后一次 config_option_update（第一次是默认 auto）"
@@ -3533,6 +3535,20 @@ assert_contains "$(posted_comment "$OUT")" "来源 workspace" "V3 兜底：失�
 run_case v3guardmode "${V3[@]}" MOCK_KIRO_V3_MODE=vibe
 assert_nonzero "$RC" "V3 兜底：实际 agent 不是本次安装的 → 拒绝"
 assert_contains "$(posted_comment "$OUT")" "不是本次安装的那一个" "V3 兜底：失败评论说明 agent 不对"
+# hook 注册数（spec E3-2；复审 I-1）：Kiro 日志里 hooks.reload.loaded 的 registered > 0 也算兜底命中——hook 注册了但还没触发（没有 hook_update）也拦
+run_case v3hookreg "${V3[@]}" MOCK_KIRO_V3_HOOKS_REGISTERED=1
+assert_nonzero "$RC" "V3 兜底 hook 注册数：Kiro 日志里注册了 hook → 拒绝采用输出"
+assert_contains "$(posted_comment "$OUT")" "V3 事件流兜底触发" "V3 兜底 hook 注册数：失败评论说明原因"
+assert_contains "$(posted_comment "$OUT")" "hooks.reload.loaded" "V3 兜底 hook 注册数：失败评论点名信号"
+assert_not_contains "$(posted_comment "$OUT")" "P0 1 · P1 1 · P2 1" "V3 兜底 hook 注册数：评审内容没有贴到 MR 上"
+run_case v3nologs "${V3[@]}" MOCK_KIRO_V3_NO_LOGS=1
+assert_rc "$RC" 0 "V3：Kiro 日志里没有 hooks.reload.loaded → 只警告、照常评审（事件流兜底已通过）"
+assert_contains "$OUT" "警告：Kiro 日志里没有 hooks.reload.loaded" "V3：缺日志时留一行警告"
+# 内容收集（S8 关掉的通道的回归守卫；复审 I-3）：设置没生效（contentCollection 仍是 enabled）就 fail closed
+run_case v3cc "${V3[@]}" MOCK_KIRO_V3_CONTENT_COLLECTION=enabled
+assert_nonzero "$RC" "V3：内容收集没关掉 → 拒绝采用输出"
+assert_contains "$(posted_comment "$OUT")" "内容收集没有关闭" "V3：失败评论说明内容收集没关掉"
+assert_not_contains "$(posted_comment "$OUT")" "P0 1 · P1 1 · P2 1" "V3：内容收集没关掉时评审内容没有贴到 MR 上"
 # V3 的模型核对：不一致挂提示、不拒绝
 run_case v3model "${V3[@]}" MOCK_KIRO_V3_MODEL=claude-sonnet-5
 assert_rc "$RC" 0 "V3 实际模型与声明不同：评审照常完成"

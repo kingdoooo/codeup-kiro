@@ -73,12 +73,17 @@ _review_copy_list() {   # <目录> → stdout：相对路径清单（NUL 分隔�
   ( cd "$1" && LC_ALL=C find . -name .git -prune -o -print0 | LC_ALL=C sort -z )
 }
 review_copy_to_root() {
-  local src="${1-}" root="${2-}" dst n
+  local src="${1-}" root="${2-}" dst
   [[ -d "$src" ]] || { echo "review_copy_to_root: 业务库目录不存在：${src}" >&2; return 1; }
   [[ -d "$root" ]] || { echo "review_copy_to_root: 评审根目录不存在：${root}" >&2; return 1; }
   dst="$root/repo"
   [[ ! -e "$dst" && ! -L "$dst" ]] || { echo "review_copy_to_root: ${dst} 已存在（评审根目录必须是本次新建的空目录）" >&2; return 1; }
   mkdir "$dst" || { echo "review_copy_to_root: 无法创建 ${dst}" >&2; return 1; }
+  # 失败时当场删掉半个副本，不等退出 trap：磁盘写满时失败评论也渲染在同一个 TMPDIR 里，半个副本占着空间，评论可能写不出来（复审 I-4）
+  _review_copy_fill "$src" "$dst" || { rm -rf "$dst"; return 1; }
+}
+_review_copy_fill() {   # <业务库目录> <副本目录（已建好的空目录）> → stdout 条目数；rc 1 = 失败（原因进 stderr）
+  local src="$1" dst="$2"
   # 子 shell 里自己开 pipefail：打包与解包任一端失败都算失败，不依赖调用方的 shell 选项。
   # --exclude=.git 在 GNU tar 与 bsdtar 下都按任意一段路径名匹配（子模块的 .git 文件也排除）。
   ( set -o pipefail; ( cd "$src" && LC_ALL=C tar --exclude=.git -cf - . ) | ( cd "$dst" && LC_ALL=C tar -xf - ) ) \

@@ -185,6 +185,8 @@ KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 #                         T13（cwd = 业务库）里 AGENTS.md / steering 被加载、agent 被同名工作区 agent 顶替——评审根目录布局在 2.31.1 上仍是承重的。
 #                         headless 探测 P1-08 / P1-10 / P1-11 全 PASS；去掉 kiroignore 的正控也 PASS：2.31.1 本来就不加载嵌套的 AGENTS.md，
 #                         kiroignore 在这个版本上只是纵深（第 5.5 步的删除与事件流兜底仍在）。
+#                         2026-10-16 按生产配置（S8 设置与环境变量、hook 注册数核对）重跑：门禁 + T5 / T13 全 PASS；T13 三条判定都有信号——
+#                         业务库的 hook 在 2.31.1 上被注册（Kiro 日志 hooks.reload.loaded registered=1）却不发 hook_update，评审根目录布局下注册数 0。
 # linux/x86_64:2.31.1:v3  2026-10-15 在 sandbox 的一次性 Fargate 任务里跑同一套 v3 探测（AWS 执行器同一镜像、NAT 私有子网 / 安全组、DNS Firewall BLOCK）：
 #                         入口 /root/.local/bin/kiro-cli（sha256 d474072c…，musl 变体），门禁十五个用例 + T5 / T13 正控全 PASS、退出码 0；
 #                         临时 HOME 下 kiro-cli 兄弟程序的布局与 darwin 相同。Flow 的钉版档位装的是同一个安装包、同一个入口文件。
@@ -1777,6 +1779,30 @@ if [[ "$KIRO_ENGINE" == v3 ]]; then
     *) die_review "V3 事件流兜底无法完成（事件流读不了或解析失败），拒绝采用这次评审的输出（ADR-0008）" ;;
   esac
   unset _g_rc _g_why
+  # hook 注册数（spec E3-2；复审 I-1）：事件流里的 hook_update 要等 hook 触发才出现；Kiro 在临时 HOME 的 ~/.kiro/logs 里另写
+  # hooks.reload.loaded {"registered":N}——注册了就拦，不等触发。这是 Kiro 自己的文件（模型没有写文件的工具）。
+  # 日志里没有这一行（以后的版本改了日志）只警告：事件流兜底已经通过；取值不合形按命中处理（看不清就不放行）。
+  _hr_rc=0; _hr=$(review_v3_hook_registrations "$KIRO_RUN_HOME/.kiro/logs") || _hr_rc=$?
+  case "$_hr_rc" in
+    0) [[ "$_hr" == 0 ]] || die_review "V3 事件流兜底触发，拒绝采用这次评审的输出（ADR-0008：业务库不得改变 agent 的指令、工具或权限）" \
+         "Kiro 日志里加载了 ${_hr} 个 hook（hooks.reload.loaded registered=${_hr}）"
+       log "V3 hook 注册数：0（Kiro 日志 hooks.reload.loaded）" ;;
+    3) die_review "V3 事件流兜底触发，拒绝采用这次评审的输出（ADR-0008：业务库不得改变 agent 的指令、工具或权限）" \
+         "Kiro 日志里 hooks.reload.loaded 的注册数不合形，确认不了没有 hook" ;;
+    *) log "警告：Kiro 日志里没有 hooks.reload.loaded（${KIRO_RUN_HOME}/.kiro/logs；无法从日志确认 hook 注册数，事件流兜底已通过）" ;;
+  esac
+  unset _hr _hr_rc
+  # 内容收集（S8 关掉的通道的回归守卫；复审 I-3）：临时 HOME 里写了 codeWhisperer.shareCodeWhispererContentWithAWS false，
+  # Kiro 在 config_option_update 里报 contentCollection 的当前值。不是 disabled 就 fail closed——设置没生效时数据通道比 Kent 接受的多（W9）。
+  # 事件流里没有这个选项（以后的版本改了形态）只警告。
+  _cc_rc=0; _cc=$(review_stream_v3_option "$WORK/stream.jsonl" contentCollection) || _cc_rc=$?
+  case "$_cc_rc" in
+    0) [[ "$_cc" == disabled ]] || die_review "V3 的内容收集没有关闭（contentCollection=${_cc}），拒绝采用这次评审的输出（ADR-0008 / S8：临时 HOME 里写的 codeWhisperer.shareCodeWhispererContentWithAWS false 没有生效）"
+       log "V3 内容收集：disabled（S8）" ;;
+    3) die_review "V3 的内容收集状态不合形，确认不了已关闭，拒绝采用这次评审的输出（ADR-0008 / S8）" ;;
+    *) log "警告：V3 事件流里没有 contentCollection 选项（无法确认内容收集已关；S8）" ;;
+  esac
+  unset _cc _cc_rc
   # V3 不发 metadata、也没有 currentModelId：实际模型在最后一次 config_option_update 里。V3 设不了声明的模型时直接失败、不回退（S5），
   # 所以这里出现不一致只能是意外——口径同 issue 16：挂提示、不拒绝；取值不合形只说「不合形」，不显示。
   _m3_rc=0; _m3=$(review_stream_v3_model "$WORK/stream.jsonl") || _m3_rc=$?
