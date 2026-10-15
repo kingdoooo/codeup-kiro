@@ -617,11 +617,19 @@ kiro_agent_selfcheck_v3() {
 }
 
 # V3 运行环境（ADR-0008 / Q22）：每次运行一个临时 HOME，agent、设置、kiroignore 都只在本次运行里有效，跑完随 $WORK 一起删。
-# kiroignore 写 AGENTS.md（gitignore 语法）：V3 加载根目录之下嵌套的 AGENTS.md 时按它排除（S9 c10 / c11 实测：不写就会加载）。
+# kiroignore 写 AGENTS.md（gitignore 语法）：V3 加载根目录之下嵌套的 AGENTS.md 时按它排除（2.29.1 的 S9 c10 / c11 实测：不写就会加载；
+# 2.31.1 不写也不加载，它在这个版本上是纵深——第 5.5 步的删除与事件流兜底仍在）。
 KIRO_V3_KIROIGNORE=("AGENTS.md")
 # V3 的设置（每行「键 值」，经 `kiro-cli settings 键 值` 写进临时 HOME）。code intelligence 默认开（S4：`code` 工具），knowledge 一并关掉；
-# S8 结论里「能关且关后确认停了」的条目追加在这里（ADR-0008）。
-KIRO_V3_SETTINGS=("chat.enableCodeIntelligence false" "chat.enableKnowledge false")
+# 后两项是 S8 里「能关且关后确认停了」的通道（ADR-0008；2.31.1，spike/runs/s8-g3-v3-off、s8-g4-v3-cc）：
+#   telemetry.enabled false                                 遥测（OTLP 到 telemetry.us-east-1.kiro.dev）——日志「Telemetry disabled by user preference」
+#   codeWhisperer.shareCodeWhispererContentWithAWS false    内容收集——`acp.content_collection.resolved {"enabled":false}`、请求带 optout 头
+KIRO_V3_SETTINGS=("chat.enableCodeIntelligence false" "chat.enableKnowledge false" "telemetry.enabled false" "codeWhisperer.shareCodeWhispererContentWithAWS false")
+# V3 的 Kiro 进程环境里固定带上的取值（S8：这两个通道只有环境变量能关，kiro-cli 不认对应的设置；取值是常量，不是凭证）：
+#   KIRO_DISABLE_EXPERIMENT_CONFIG=true    服务端实验配置拉取（能下发行为开关）——s8-g3 里不再出现 ExperimentConfigService
+#   KIRO_DISABLE_SESSION_TITLE_LLM=true    生成会话标题的那次模型调用（带会话内容、计 credit；2.29.1 的 S5 / S9 出现过）
+# kiro_env_isolate_home 把它们追加进 KIRO_ENV_ALLOW，所以只在 v3 路径上有；v2 的进程环境与 v1.10.1 相同（W4）。
+KIRO_V3_ENV=("KIRO_DISABLE_EXPERIMENT_CONFIG=true" "KIRO_DISABLE_SESSION_TITLE_LLM=true")
 
 # kiro_run_home_prepare <临时 HOME（绝对路径、已存在）> <kiro-cli 入口（KIRO_CLI_CMD）>
 #   建 agent / 设置 / XDG 目录；把入口同目录下的 kiro-cli、kiro-cli-chat、kiro-cli-term 等符号链接进 <临时 HOME>/.local/bin
@@ -640,15 +648,18 @@ kiro_run_home_prepare() {
   printf '%s\n' "${KIRO_V3_KIROIGNORE[@]}" > "$h/.kiro/settings/kiroignore" || return 1
 }
 
-# kiro_env_isolate_home <临时 HOME> → 改写 KIRO_ENV_ALLOW：去掉 HOME 与 XDG_*（含 XDG_RUNTIME_DIR），换成指向临时 HOME 的一组。
+# kiro_env_isolate_home <临时 HOME> → 改写 KIRO_ENV_ALLOW：去掉 HOME 与 XDG_*（含 XDG_RUNTIME_DIR），换成指向临时 HOME 的一组，
+# 再追加 KIRO_V3_ENV（S8 的固定取值；同名的条目先去掉，透传进来的同名变量改不了它们）。
 # 必须在 kiro_env_allowlist 之后调用（后者会整份重建 KIRO_ENV_ALLOW）。其余条目（PATH、KIRO_API_KEY、代理、证书…）原样保留。
 kiro_env_isolate_home() {
   local h="${1-}" kv; local -a out=()
   [[ "$h" == /* && -d "$h" ]] || { echo "kiro_env_isolate_home: 临时 HOME 不是已存在的绝对路径目录：${h}" >&2; return 1; }
   for kv in ${KIRO_ENV_ALLOW[@]+"${KIRO_ENV_ALLOW[@]}"}; do
     case "${kv%%=*}" in HOME|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|XDG_STATE_HOME|XDG_RUNTIME_DIR) continue ;; esac
+    case " ${KIRO_V3_ENV[*]%%=*} " in *" ${kv%%=*} "*) continue ;; esac
     out+=("$kv")
   done
   out+=("HOME=$h" "XDG_CONFIG_HOME=$h/.config" "XDG_DATA_HOME=$h/.local/share" "XDG_CACHE_HOME=$h/.cache" "XDG_STATE_HOME=$h/.local/state")
+  out+=("${KIRO_V3_ENV[@]}")
   KIRO_ENV_ALLOW=("${out[@]}")
 }

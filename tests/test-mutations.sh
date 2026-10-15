@@ -2416,4 +2416,10 @@ pkg=$(make_mutant m-v3p-model-first 's#(last // null) | if \. == null then empty
 run_case m-v3p "$pkg" "${V3[@]}"
 assert_contains "$(posted_comment "$OUT")" "实际使用的模型是 \`auto\`" "M-v3p：评论挂上了误报的模型提示——端到端「V3 对照：无模型提示」断言会失败"
 
+# --- M-v3q：S8 的固定环境变量不再追加 → 实验配置拉取与会话标题的模型调用又回来了（ADR-0008 / S8）---
+pkg=$(make_mutant m-v3q-no-v3-env '/^  out+=("\${KIRO_V3_ENV\[@\]}")$/d' scripts/lib/kiro-agent.sh)
+run_case m-v3q "$pkg" "${V3[@]}"
+assert_rc "$RC" 0 "M-v3q：评审照常完成（这类通道不影响评审结果，所以只有环境断言看得住它）"
+assert_eq "$(grep -c -x 'KIRO_DISABLE_EXPERIMENT_CONFIG' "$MD/env" || true)" "0" "M-v3q：Kiro 进程环境里没有 KIRO_DISABLE_EXPERIMENT_CONFIG——端到端「V3：Kiro 进程环境里有…（S8）」断言会失败"
+
 report

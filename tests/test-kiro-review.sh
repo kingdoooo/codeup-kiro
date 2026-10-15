@@ -3454,7 +3454,12 @@ assert_eq "$(jq -r .prompt "$v3_inst")" "file://prompts/codeup-reviewer-$(cat "$
 assert_eq "$(jq -r --arg h "$CASE/home" '[.permissions.rules[] | select(.capability == "fs_read" and .effect == "deny") | .match[] | select(startswith($h + "/"))] | length > 0' "$v3_inst")" "true" \
   "V3：deny 清单里有按真实 HOME 展开的 ~/ 形状"
 # 设置与 kiroignore（都在临时 HOME）
-assert_eq "$(cat "$MD/settings")" $'chat.enableCodeIntelligence false\nchat.enableKnowledge false' "V3：只写这两项设置（不写只对 v2 有效的 disableInheritingDefaultResources）"
+assert_eq "$(cat "$MD/settings")" $'chat.enableCodeIntelligence false\nchat.enableKnowledge false\ntelemetry.enabled false\ncodeWhisperer.shareCodeWhispererContentWithAWS false' \
+  "V3：写 KIRO_V3_SETTINGS 里的全部设置（S8：遥测、内容收集关掉；不写只对 v2 有效的 disableInheritingDefaultResources）"
+# S8：实验配置拉取与会话标题的模型调用只有环境变量能关（kiro-cli 不认对应的设置），V3 的 Kiro 进程环境里固定带上
+for v3_e in KIRO_DISABLE_EXPERIMENT_CONFIG KIRO_DISABLE_SESSION_TITLE_LLM; do
+  assert_eq "$(grep -c -x "$v3_e" "$MD/env" || true)" "1" "V3：Kiro 进程环境里有 ${v3_e}（S8）"
+done
 assert_eq "$(cat "$MD/kiroignore")" "AGENTS.md" "V3：临时 HOME 的 kiroignore 排除 AGENTS.md"
 # 评审根目录：只有 repo/，里面是已隔离、不含 .git 的业务库副本
 assert_eq "$(grep -cE '^\./[^/]+$' "$MD/review-root-files")" "1" "V3：评审根目录下只有一个条目"

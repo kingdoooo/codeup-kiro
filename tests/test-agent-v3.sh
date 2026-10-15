@@ -120,6 +120,9 @@ rc=0; kiro_run_home_prepare "$KH2" "kiro-cli" 2>/dev/null || rc=$?; assert_eq "$
   done
   assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep -c '^XDG_RUNTIME_DIR=' || true)" "0" "许可清单：去掉 XDG_RUNTIME_DIR"
   assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep -c -x 'KIRO_LOG_NO_COLOR=1')" "1" "许可清单：其余条目原样保留"
+  for kv in KIRO_DISABLE_EXPERIMENT_CONFIG=true KIRO_DISABLE_SESSION_TITLE_LLM=true; do
+    assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep -c -x -F -- "$kv")" "1" "许可清单：V3 固定带上 ${kv}（S8：只有环境变量能关的通道）"
+  done
   # 经 kiro_env_exec 真正启动的子进程看到的就是这份（不经替身，真 env）
   seen=$(cd "$tmp" && kiro_env_exec KIRO_ENV_ALLOW env)
   assert_contains "$seen" "HOME=$KH2" "子进程的 HOME 是临时 HOME"
