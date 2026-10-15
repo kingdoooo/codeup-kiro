@@ -2433,4 +2433,9 @@ pkg=$(make_mutant m-v3s-no-cc-check '/^    0) \[\[ "\$_cc" == disabled \]\] || d
 run_case m-v3s "$pkg" "${V3[@]}" MOCK_KIRO_V3_CONTENT_COLLECTION=enabled
 assert_rc "$RC" 0 "M-v3s：内容收集没关的运行照常完成——端到端「V3：内容收集没关掉 → 拒绝」断言会失败"
 
+# --- M-v3t：「有 engine 但不合形」又并回「缺」→ v2 下 3.x 换了引擎名（"v3.1"）的运行照样贴出评审（复审 M-1）---
+pkg=$(make_mutant m-v3t-bad-engine-as-missing '/=~ ^=v\[0-9\]/s/|| return 3$/|| return 1/' scripts/lib/review-render.sh)
+run_case m-v3t "$pkg" MOCK_KIRO_ENGINE_REPORT=v3.1
+assert_rc "$RC" 0 "M-v3t：v2 下 engine=v3.1 的运行照常完成——端到端「v2engbad：不合形 → 拒绝采用输出」断言会失败"
+
 report

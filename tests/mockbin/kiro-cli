@@ -399,7 +399,9 @@ if [[ "$ENGINE_ARG" == v3 ]]; then
   v3_info '{"kind":"context_usage","usagePercentage":3.7519}'
   v3_info '{"kind":"turn_completion","promptTurnSummaries":[{"unit":"credit","unitPlural":"credits","usage":0.0669794503482587,"usedTools":["read_file"]},{"unit":"credit","unitPlural":"credits","usage":0.19391594945273632}],"status":"success"}'
 else
-emit --arg e "${MOCK_KIRO_ENGINE_REPORT:-v2}" '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1,engine:$e}}'
+# MOCK_KIRO_ENGINE_REPORT 与 V3 分支同义：none = 不带 engine 字段，其余取值原样写进 engine
+if [[ "${MOCK_KIRO_ENGINE_REPORT:-v2}" == none ]]; then emit '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1}}'
+else emit --arg e "${MOCK_KIRO_ENGINE_REPORT:-v2}" '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1,engine:$e}}'; fi
 emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"tool_call",toolCallId:"call_mock_1",title:"Reading app.py:1-2000",kind:"read",locations:[{path:"src/app.py"}],rawInput:{operations:[{mode:"Line",path:"src/app.py",limit:2000}]},_meta:{kiro:{toolName:"read"}}}}}'
 emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"tool_call_update",toolCallId:"call_mock_1",kind:"read",status:"completed",title:"Reading app.py:1-2000",locations:[{path:"src/app.py"}]}}}'
 emit --arg s "$SID" '{type:"sessionUpdate",data:{sessionId:$s,update:{sessionUpdate:"agent_message_chunk",content:{type:"text",text:"<<<"}}}}'

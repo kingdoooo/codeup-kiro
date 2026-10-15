@@ -730,7 +730,7 @@ V3 的运行方式与 V2 不同（第 12 节）：Kiro 在本次工作目录下�
 | 评论说「kiro-cli 版本 X 未经 P1-15 探测…拒绝评审」或「版本号无法解析」 | 版本门（2026-09-10 起）：执行器上的 kiro-cli 不在 `KIRO_TESTED_TARGETS` 名单内，或 `--version` 解析不出版本号。云托管执行器 `curl \| bash` 装的是 latest，Kiro 发新版后就会这样；读取边界（符号链接 / `../` 是否先解析再比对 allowedPaths）只在名单内版本上实测过，不放行未验证版本。处置：生产执行器预装名单内版本（第 7 节）；确需在新版本上跑，先按 `scripts/probe/README.md`「升级 kiro-cli 之后」探测，通过后把元组加进流水线变量 `KIRO_TESTED_TARGETS_EXTRA`（只追加，不必改集成包源码）；**没跑探测**的临时放行才用 `KIRO_ACK_UNTESTED_TARGET=<与本次「平台:版本:引擎」逐字相同>`（汇总带醒目 notice，探测通过后删掉）。确认值与本次组合不一致、或版本 / 平台确定不了，一律拒绝。旧的 `KIRO_ACK_UNTESTED_VERSION` 已废弃，设了会直接拒绝运行 |
 | 评论说「KIRO_ENGINE 不合法」 | 流水线变量 `KIRO_ENGINE` 只认整串 `v2` / `v3`（不设 = v3）；大小写、首尾空白都算不合法。改正后重跑（第 6.2 节） |
 | 评论说「该版本在已探测名单里只有 v2（或 v3）引擎的组合」 | 引擎与安装包没配套：v2 只在 2.29.0 上验证过，v3 从 2.31.1 起。按第 6.2 节的表同时改 `KIRO_ENGINE`、OSS 对象与两个摘要 |
-| 评论说「Kiro 实际运行的引擎（…）与 KIRO_ENGINE=… 不一致」或「无法确认 Kiro 用的是 v3 引擎」 | kiro-cli 没按 `--agent-engine` 运行（新版本改了行为）。不要放行：回到已探测的组合，并在新版本上重跑探测（`scripts/probe/README.md`） |
+| 评论说「Kiro 实际运行的引擎（…）与 KIRO_ENGINE=… 不一致」「无法确认 Kiro 用的是 v3 引擎」或「runStarted.data.engine 的取值不合形」 | kiro-cli 没按 `--agent-engine` 运行（新版本改了行为）。不要放行：回到已探测的组合，并在新版本上重跑探测（`scripts/probe/README.md`） |
 | 评论说「V3 的内容收集没有关闭」 | 临时 HOME 里写的 `codeWhisperer.shareCodeWhispererContentWithAWS false` 没生效（kiro-cli 改了设置键、或这次写设置失败）。评审内容没有贴出。不要放行：回到已探测的组合，在新版本上重跑 S8 与探测（ADR-0008） |
 | 评论说「V3 事件流兜底触发」 | V3 加载了 steering / 上下文文件、执行了或注册了 hook，或用的不是本次安装的 agent——业务库或执行器环境在改变受信 agent，评审内容没有贴出。查执行器 HOME 与 kiro-cli 版本；确认是 Kiro 的新行为后先切 `KIRO_ENGINE=v2` 并报告，不要放宽兜底 |
 | 评论说「V3 评审根目录准备失败」 | 把业务库复制到评审根目录失败（多为磁盘空间不足，复制量约等于业务库工作树大小）。扩容执行器临时空间，或先用 `KIRO_ENGINE=v2` |

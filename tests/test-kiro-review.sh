@@ -3521,6 +3521,16 @@ assert_contains "$OUT" "与 KIRO_ENGINE=v2 不一致" "v2 但事件流说 v3：�
 run_case v2engnone MOCK_KIRO_ENGINE_REPORT=none
 assert_rc "$RC" 0 "v2 且事件流没有 engine：维持 v1.10.1 的行为（不判失败）"
 assert_contains "$OUT" "v2 下不强制" "v2 且事件流没有 engine：日志留一行警告"
+# 有 engine 但不合形（复审 M-1：3.x 换了引擎名）——v2 只豁免「缺」，这里两种引擎都拒绝，取值不回显
+for eng_case in v2engbad=v3.1 v2engcls=classic v3engbad=v3.1; do
+  eng_n="${eng_case%%=*}" eng_v="${eng_case#*=}"
+  if [[ "$eng_n" == v3* ]]; then run_case "$eng_n" "${V3[@]}" "MOCK_KIRO_ENGINE_REPORT=${eng_v}"
+  else run_case "$eng_n" "MOCK_KIRO_ENGINE_REPORT=${eng_v}"; fi
+  assert_nonzero "$RC" "${eng_n}：runStarted.engine「${eng_v}」不合形 → 拒绝采用输出"
+  assert_contains "$(posted_comment "$OUT")" "runStarted.data.engine 的取值不合形" "${eng_n}：失败评论说明原因"
+  assert_not_contains "$(posted_comment "$OUT")" "$eng_v" "${eng_n}：失败评论不回显取值"
+  assert_not_contains "$(posted_comment "$OUT")" "P0 1 · P1 1 · P2 1" "${eng_n}：评审内容没有贴到 MR 上"
+done
 # V3 事件流兜底（Q26）：任一命中都失败评论，评审内容不上 MR
 for v3_g in STEERING:steering_inclusion HOOK:hook_update CONTEXT_FILES:contextFiles; do
   run_case "v3guard${v3_g%%:*}" "${V3[@]}" "MOCK_KIRO_V3_${v3_g%%:*}=1"

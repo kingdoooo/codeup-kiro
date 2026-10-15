@@ -50,6 +50,20 @@ assert_contains "$(review_stream_v3_guard "$tmp/g.jsonl" codeup-reviewer-0123456
 v3_run MOCK_KIRO_ENGINE_REPORT=none > "$tmp/g.jsonl"
 rc=0; review_stream_engine "$tmp/g.jsonl" >/dev/null || rc=$?
 assert_eq "$rc" "1" "替身 V3：MOCK_KIRO_ENGINE_REPORT=none → runStarted 不带 engine"
+# V2 模式同一个开关同一个意思（复审 M-1 之前 V2 分支把 none 当成取值写进 engine："none" 是「不合形」，不是「缺字段」）
+v2_run() { # [MOCK_X=值…] → stdout 事件流
+  mock_config_write "$C/home" MOCK_KIRO_VERSION=2.29.0 "$@"
+  printf '提示 <<<KIRO_REVIEW_JSON:0123456789abcdef>>>\n' \
+    | ( cd "$tmp" && env -i PATH="$PATH" HOME="$H" TMPDIR="$CT" "$MOCK" chat --no-interactive --agent-engine v2 --output-format stream-json --agent codeup-reviewer-0123456789abcdef )
+}
+v2_run > "$tmp/g.jsonl"
+assert_eq "$(review_stream_engine "$tmp/g.jsonl")" "v2" "替身 V2：runStarted.engine = v2"
+v2_run MOCK_KIRO_ENGINE_REPORT=none > "$tmp/g.jsonl"
+rc=0; review_stream_engine "$tmp/g.jsonl" >/dev/null || rc=$?
+assert_eq "$rc" "1" "替身 V2：MOCK_KIRO_ENGINE_REPORT=none → runStarted 不带 engine"
+v2_run MOCK_KIRO_ENGINE_REPORT=v3.1 > "$tmp/g.jsonl"
+rc=0; review_stream_engine "$tmp/g.jsonl" >/dev/null || rc=$?
+assert_eq "$rc" "3" "替身 V2：MOCK_KIRO_ENGINE_REPORT=v3.1 → 取值原样写进 engine（不合形）"
 # 真实 V3 的加载行为：v2 形状（没有 permissions）→ exit 4；绝对 file:// prompt → exit 4
 jq 'del(.permissions)' "$H/.kiro/agents/codeup-reviewer-0123456789abcdef.json" > "$H/.kiro/agents/old.json"; jq '.name = "old"' "$H/.kiro/agents/old.json" > "$H/.kiro/agents/old2.json"; mv "$H/.kiro/agents/old2.json" "$H/.kiro/agents/old.json"
 rc=0; printf 'x\n' | ( cd "$tmp" && env -i PATH="$PATH" HOME="$H" TMPDIR="$CT" "$MOCK" chat --no-interactive --agent-engine v3 --output-format stream-json --agent old ) >/dev/null 2>&1 || rc=$?

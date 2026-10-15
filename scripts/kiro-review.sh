@@ -1756,7 +1756,8 @@ fi
 # --- 6.0b 实际引擎核对（ADR-0008 / 不变式 W2）---
 # 参数传了 --agent-engine 不等于真的跑在那个引擎上：3.x 可能忽略 v2、或把 agent 自动迁移到 v3——演示时你以为是 V2，实际是 V3。
 # 事件流第一个 runStarted 的 data.engine 必须等于 KIRO_ENGINE。v3 上缺这个字段同样拒绝；v2 上缺字段时维持 v1.10.1 的行为（不判失败），
-# 只有取值不一致才拒绝。放在退出码分支之后：kiro-cli 自己失败时那条失败评论更有用（带 runError）。
+# 只有取值不一致才拒绝；有 engine 但不合形（3.x 换了引擎名，如 "v3.1"）两种引擎都拒绝（复审 M-1：v2 只豁免「缺」）。
+# 放在退出码分支之后（spec E1 写的是之前；偏离已登记）：kiro-cli 自己失败时那条失败评论更有用（带 runError），而非零退出一律失败评论，W2 绕不过去。
 _eng_rc=0; KIRO_ENGINE_SEEN=$(review_stream_engine "$WORK/stream.jsonl") || _eng_rc=$?
 case "$_eng_rc" in
   0) [[ "$KIRO_ENGINE_SEEN" == "$KIRO_ENGINE" ]] \
@@ -1765,6 +1766,7 @@ case "$_eng_rc" in
   1) [[ "$KIRO_ENGINE" == v2 ]] \
        || die_review "事件流里没有可识别的 runStarted.data.engine，无法确认 Kiro 用的是 v3 引擎，拒绝采用这次评审的输出（ADR-0008）"
      log "警告：事件流里没有可识别的 runStarted.data.engine（v2 下不强制，维持既有行为）" ;;
+  3) die_review "事件流里 runStarted.data.engine 的取值不合形（不显示），无法确认 Kiro 用的是 KIRO_ENGINE=${KIRO_ENGINE} 的引擎，拒绝采用这次评审的输出（ADR-0008）" ;;
   *) die_review "读不到 Kiro 事件流文件，无法核对实际引擎：${WORK}/stream.jsonl" ;;
 esac
 unset _eng_rc

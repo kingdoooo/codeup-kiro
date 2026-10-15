@@ -371,15 +371,18 @@ review_stream_model_switch() {
 
 # --- 实际运行的引擎（ADR-0008 / W2）---
 # 用法：review_stream_engine <stream.jsonl> → stdout 第一个 runStarted 事件的 data.engine（形如 v2 / v3）
-#   rc 0 = 取到；rc 1 = 没有 runStarted、或它的 engine 不是 v<数字> 形状的字符串；rc 2 = 文件读不了 / 解析失败
+#   rc 0 = 取到；rc 1 = 没有 runStarted、或它没有 engine 字段（null 同）；rc 3 = 有 engine 但不是 v<数字> 形状的字符串（不输出）；
+#   rc 2 = 文件读不了 / 解析失败
 # 只看第一个 runStarted：kiro-cli 每次运行只发一个；取第一个是为了不让后面混进来的行改写结论。
+# 「缺」与「有但不合形」分开（复审 M-1）：v2 只豁免前者；3.x 换了引擎名（"v3.1"、"classic"）时两种引擎都要拒绝。
 review_stream_engine() {
   local f="${1-}" e
   [[ -r "$f" ]] || return 2
   e=$(jq -R -n -r '[inputs | fromjson? | select(type == "object" and .type == "runStarted") | (.data | objects | .engine) // null]
-                   | (first // null) | strings' "$f" 2>/dev/null) || return 2
-  [[ "$e" =~ ^v[0-9]{1,2}$ ]] || return 1
-  printf '%s' "$e"
+                   | (first // null) | if . == null then "-" elif type == "string" then "=" + . else "?" end' "$f" 2>/dev/null) || return 2
+  [[ "$e" != "-" ]] || return 1
+  [[ "$e" =~ ^=v[0-9]{1,2}$ ]] || return 3
+  printf '%s' "${e#=}"
 }
 
 # --- V3 实际使用的模型（ADR-0008）---
