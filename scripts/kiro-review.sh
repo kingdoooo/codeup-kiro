@@ -1809,13 +1809,15 @@ if [[ "$KIRO_ENGINE" == v3 ]]; then
   esac
   unset _hr _hr_rc
   # 权限规则有没有被 Kiro 跳过（复审 M-3）：Kiro 对认不出的能力名、不合规的路径只是跳过那条规则、在临时 HOME 的 kiro.log 里记一行
-  # `[PolicySession] Policy reload warning|error …` / `[PolicyParser] …`，不报错——受信 agent 少了一条 deny，评审照样跑。临时 HOME 里
+  # （认不出的能力名记 `[PolicyParser] Skipping rule …`，2.31.1 真实 T14；其它加载问题记 `[PolicySession] Policy reload warning|error …`），
+  # 不报错——受信 agent 少了一条 deny，评审照样跑。每次都有的 `[PolicySession] rebuild() complete …` 是 info，不算。临时 HOME 里
   # 除了受信 agent 没有别的规则来源，出现任何一条都 fail closed；原文含路径，不进评论，只给条数。日志里没有 kiro.log 只警告（同 hook 那条）。
   _pw_rc=0; _pw=$(review_v3_policy_warnings "$KIRO_RUN_HOME/.kiro/logs") || _pw_rc=$?
   case "$_pw_rc" in
     0) [[ "$_pw" == 0 ]] || die_review "受信 agent 的权限规则没有原样生效，拒绝采用这次评审的输出（ADR-0008：Kiro 日志里有 ${_pw} 条「跳过规则 / 规则加载出错」的记录）"
        log "V3 权限规则：Kiro 日志里没有被跳过的规则" ;;
-    *) log "警告：Kiro 日志里没有 kiro.log（${KIRO_RUN_HOME}/.kiro/logs；无法从日志确认权限规则原样生效）" ;;
+    1) log "警告：Kiro 日志里没有 kiro.log（${KIRO_RUN_HOME}/.kiro/logs；无法从日志确认权限规则原样生效）" ;;
+    *) log "警告：Kiro 日志目录不存在或读不了（${KIRO_RUN_HOME}/.kiro/logs；无法从日志确认权限规则原样生效）" ;;
   esac
   unset _pw _pw_rc
   # 内容收集（S8 关掉的通道的回归守卫；复审 I-3）：临时 HOME 里写了 codeWhisperer.shareCodeWhispererContentWithAWS false，

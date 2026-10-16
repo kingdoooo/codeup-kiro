@@ -490,8 +490,10 @@ review_v3_hook_registrations() {
 
 # --- V3 有没有跳过权限规则（ADR-0008；复审 M-3）---
 # Kiro 加载 agent 的 permissions.rules 时，认不出的能力名、不合规的路径都只是**跳过那条规则**、记一行警告，不报错——受信 agent 的
-# 某条 deny 没了，评审照样跑。所有来源的规则加载问题都经 `[PolicySession] Policy reload warning|error (<scope>): …` 写进
-# HOME 下的 ~/.kiro/logs/<时间>/kiro.log，解析器另记 `[PolicyParser] …`（2.31.1 / KAS 0.66.34 源码）。临时 HOME 里除了受信 agent
+# 某条 deny 没了，评审照样跑。两种写法都进 HOME 下的 ~/.kiro/logs/<时间>/kiro.log（2.31.1 / KAS 0.66.34）：认不出的能力名由解析器记
+# `[PolicyParser] Skipping rule N in agent-profile: unknown capability "…"`（真实 T14 只有这一行）；其它规则加载问题（例如被工作区同名 agent
+# 顶替后不合规的路径，真实 T13）记 `[PolicySession] Policy reload warning|error (<scope>): …`。每次都有的 `[PolicySession] rebuild() complete …`
+# 是 info，不能算——所以前缀要写全。临时 HOME 里除了受信 agent
 # 没有别的规则来源，所以出现任何一条都说明受信 agent 的规则没有原样生效。只认 message 以这两个前缀开头的行（Kiro 自己的文件，模型写不了）。
 # 用法：review_v3_policy_warnings <日志目录> → stdout 这类行的条数；rc 0 = 数出来了（可以是 0）；rc 1 = 目录里没有 kiro.log；rc 2 = 目录读不了
 review_v3_policy_warnings() {

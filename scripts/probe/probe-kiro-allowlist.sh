@@ -520,7 +520,7 @@ v3_clean() { # <用例名> <canary 词…> → rc 0 干净；rc 1 违规（原�
   # 规则被跳过 / 用到名单外的工具（复审 M-3）：与生产 6.0c 同一份函数
   pw=$(review_v3_policy_warnings "$KEEP/$name.kiro-logs") || pwrc=$?
   [[ "$pwrc" == 0 && "$pw" != 0 ]] && { echo "          Kiro 日志：${pw} 条「规则被跳过 / 加载出错」的警告——受信 agent 的权限规则没有原样生效" >&2; return 1; }
-  [[ "$pwrc" == 0 || "$pwrc" == 1 ]] || return 2
+  [[ "$pwrc" == 0 || "$pwrc" == 1 ]] || { echo "          Kiro 日志目录读不了（$KEEP/$name.kiro-logs）——规则跳过无法核对" >&2; return 2; }
   tw=$(review_stream_v3_tools_outside "$KEEP/$name.jsonl") || twrc=$?
   [[ "$twrc" == 1 ]] && { echo "          用到了只读名单之外的工具：${tw}" >&2; return 1; }
   [[ "$twrc" == 0 ]] || return 2

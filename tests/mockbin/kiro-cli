@@ -381,15 +381,18 @@ if [[ "$ENGINE_ARG" == v3 ]]; then
   if [[ "$ER" == none ]]; then emit '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1}}'
   else emit --arg e "$ER" '{type:"runStarted",data:{payloadSchema:"acp",acpProtocolVersion:1,engine:$e}}'; fi
   # 真实 2.31.1 一样：HOME 下 ~/.kiro/logs/<时间>/kiro.log 里有一行 hooks.reload.loaded（MOCK_KIRO_V3_HOOKS_REGISTERED 改注册数，
-  # MOCK_KIRO_V3_NO_LOGS=1 不写日志；MOCK_KIRO_V3_POLICY_WARN=1 再追加一行 Kiro 跳过权限规则的警告，文案同 2.31.1 引擎的模板）；
+  # MOCK_KIRO_V3_NO_LOGS=1 不写日志；每次都写一行 2.31.1 真实日志里每次都有的 `[PolicySession] rebuild() complete …`（info 级，不是警告）；
+  # MOCK_KIRO_V3_POLICY_WARN=1 再追加一行真实 T14 里认不出能力名时的 `[PolicyParser] Skipping rule …`）；
   # config_option_update 里带 contentCollection（MOCK_KIRO_V3_CONTENT_COLLECTION 改最后一次的值）；
   # MOCK_KIRO_V3_USED_TOOLS=<逗号分隔|none> 改 turn_completion 第一笔的 usedTools（none = 不带这个字段）。
   if [[ "${MOCK_KIRO_V3_NO_LOGS:-0}" != "1" ]]; then
     mkdir -p "$HOME/.kiro/logs/20261015T000000000"
     jq -nc --argjson n "${MOCK_KIRO_V3_HOOKS_REGISTERED:-0}" '{timestamp:"2026-10-15T00:00:00.000Z",level:"info",message:("hooks.reload.loaded " + ({read:$n,registered:$n}|tojson))}' \
       >> "$HOME/.kiro/logs/20261015T000000000/kiro.log"
+    jq -nc '{timestamp:"2026-10-15T00:00:00.001Z",level:"info",message:"[PolicySession] rebuild() complete: 16 rules parsed, engineActive=true, fatal=false"}' \
+      >> "$HOME/.kiro/logs/20261015T000000000/kiro.log"
     [[ "${MOCK_KIRO_V3_POLICY_WARN:-0}" == "1" ]] \
-      && jq -nc '{timestamp:"2026-10-15T00:00:00.001Z",level:"warn",message:"[PolicySession] Policy reload warning (agent): Skipping rule 13 in agent-profile: unknown capability \"codeup_unknown_cap\""}' \
+      && jq -nc '{timestamp:"2026-10-15T00:00:00.002Z",level:"warn",message:"[PolicyParser] Skipping rule 13 in agent-profile: unknown capability \"codeup_unknown_cap\""}' \
            >> "$HOME/.kiro/logs/20261015T000000000/kiro.log"
   fi
   v3_cfg() { emit --arg s "$SID" --arg mode "$1" --arg model "$2" --arg a "$AGENT_ARG" --arg src "$3" --arg cc "$4" \

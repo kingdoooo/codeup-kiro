@@ -508,7 +508,7 @@ kiro_env_exec() {
 # V3 不读 toolsSettings / allowedTools：读取边界只由 permissions.rules 表达。规则形状的谓词只有一份（安装器查源定义、自检查安装结果都拼它），
 # 与 V2 那套「deny 谓词各只有一份」同一理由：两份只改一处的后果是静默的（安装器放行而自检拒绝，或反过来）。
 # 形状：恰好一条 allow（fs_read，只有 capability/match/effect 三个键）、恰好一条带非空 match 的 fs_read deny（含 KIRO_AGENT_REQUIRED_DENY_JQ
-# 的全部必需形状）、fs_write / shell / web_fetch / web_search 各恰好一条不带 match 的整体 deny，没有别的能力、没有 allow/deny 之外的 effect。
+# 的全部必需形状）、fs_read 之外的 11 种能力（v3_caps）各恰好一条不带 match 的整体 deny，没有别的能力、没有 allow/deny 之外的 effect。
 _KIRO_V3_RULES_JQ='
   # fs_read 之外每一种能力都要恰好一条整体 deny（复审 M-3）：名字取自 2.31.1 引擎（KAS 0.66.34）认得的全集；引擎对认不出的能力名
   # 只是跳过那条规则、记一行 [PolicyParser] 警告（不报错），所以跑完还要读 Kiro 日志核对没有规则被跳过（kiro-review.sh 6.0c）

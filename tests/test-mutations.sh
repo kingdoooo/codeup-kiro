@@ -2488,4 +2488,9 @@ mkdir -p "$tmp/m-v3z-sentinel"; printf 'keep\n' > "$tmp/m-v3z-sentinel/keep.txt"
 run_case m-v3z "$pkg" KIRO_INSTALL_PROFILE= "KIRO_RUN_TMP=$tmp/m-v3z-sentinel"
 assert_eq "$(cat "$tmp/m-v3z-sentinel/keep.txt" 2>/dev/null || echo gone)" "gone" "M-v3z：继承来的 KIRO_RUN_TMP 指的目录被删了——端到端「i1early：…原样还在」断言会失败"
 
+# --- M-v3w2：规则跳过的核对把前缀放宽成 [PolicySession] → 每次真实运行都有的 rebuild() complete 那一行让每次 V3 评审都被误拒（复审 2 M-4）---
+pkg=$(make_mutant m-v3w2-wide-prefix 's/select(startswith("\[PolicySession\] Policy reload ") or startswith("\[PolicyParser\] "))/select(startswith("[PolicySession]") or startswith("[PolicyParser] "))/' scripts/lib/review-render.sh)
+run_case m-v3w2 "$pkg" "${V3[@]}"
+assert_nonzero "$RC" "M-v3w2：干净的 V3 运行被拒——端到端「V3：评审跑完」断言会失败（前缀放宽在测试里看得出来）"
+
 report

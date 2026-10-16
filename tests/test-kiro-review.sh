@@ -3569,6 +3569,7 @@ assert_not_contains "$(posted_comment "$OUT")" "P0 1 · P1 1 · P2 1" "V3 兜底
 run_case v3nologs "${V3[@]}" MOCK_KIRO_V3_NO_LOGS=1
 assert_rc "$RC" 0 "V3：Kiro 日志里没有 hooks.reload.loaded → 只警告、照常评审（事件流兜底已通过）"
 assert_contains "$OUT" "警告：Kiro 日志里没有 hooks.reload.loaded" "V3：缺日志时留一行警告"
+assert_contains "$OUT" "警告：Kiro 日志目录不存在或读不了" "V3：缺日志目录时，规则跳过那条核对说对原因（复审 2 M-5：原先说「没有 kiro.log」）"
 # 权限规则被 Kiro 跳过（复审 M-3）：认不出的能力名 / 不合规的路径只记警告、不报错——受信 agent 少了一条 deny，必须拒绝
 run_case v3policy "${V3[@]}" MOCK_KIRO_V3_POLICY_WARN=1
 assert_nonzero "$RC" "V3：Kiro 日志说跳过了权限规则 → 拒绝采用输出"

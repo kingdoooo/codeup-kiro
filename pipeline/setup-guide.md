@@ -473,7 +473,8 @@ V3 的运行方式与 V2 不同（第 12 节）：Kiro 在本次工作目录下�
    同样硬失败；版本号解析不出来同样拒绝评审（版本门的信任单位是「平台 + 版本 + 引擎」元组，版本未知不放行）。**紧接着的「Kiro 运行目录：<路径>/cwd（空目录；业务库 <路径> 只在 allowedPaths 里…）」**：
    五处 kiro-cli 调用（`chat --help`、`--list-models`、`--version`、`settings`、`chat`）都在本次 `mktemp` 工作目录下的空目录 `cwd` 里运行，**绝不在**
    业务库 checkout 里——第一段路径必须与第 1 项第二条许可路径（`…/chunks`）同一个父目录，第二段必须等于第 1 项的第一条许可路径。
-   v3（默认）下这一行是「Kiro 运行目录：<路径>/review-root（V3 评审根目录：…；HOME = 临时目录 <路径>/kiro-home）」，两段路径与 `…/chunks` 同一个父目录。
+   v3（默认）下这一行是「Kiro 运行目录：<路径>/review-root（V3 评审根目录：…；HOME = 临时目录 <路径>/kiro-home；TMPDIR = 本次运行专用的 <执行器 TMPDIR>/kiro-tmp.<随机>）」，
+   前两段路径与 `…/chunks` 同一个父目录；TMPDIR 那一段在执行器的 `TMPDIR` 下（没设就是 `/tmp`），不在这个父目录里。
 4. 引擎：日志出现「Kiro 引擎：v3（--agent-engine v3；…）」（`KIRO_ENGINE=v2` 时是「Kiro 引擎：v2（--agent-engine v2；…）」），
    评审跑完还有一行「Kiro 实际引擎：<同一个引擎>」；v3 另有「V3 评审根目录：已把业务库复制到 …」「V3 事件流兜底：未见 …」「V3 hook 注册数：0」「V3 内容收集：disabled」「V3 权限规则：Kiro 日志里没有被跳过的规则」与「V3 工具名单：用到的工具都在只读名单内（…）」。原因见第 12 节。
 5. 调用行**没有** `--trust-tools`、更没有 `--trust-all-tools`（第 12 节）：免确认只来自受信 agent 的
@@ -946,7 +947,8 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   里用的 agent 不是本次安装的、来源不是 `global`，或临时 HOME 里 Kiro 自己的日志（`~/.kiro/logs/*/kiro.log`）报 `hooks.reload.loaded` 注册了 hook
   （注册了就拦，不等它触发），任一命中就回写失败评论、不贴评审内容。只认 Kiro 写的结构，模型文本伪造不出。
   同一处还有三项核对，不符同样回写失败评论：S8 关掉的内容收集——`config_option_update` 里的 `contentCollection` 不是 `disabled`（设置没生效时，数据通道比 ADR-0008 接受的多）；
-  权限规则被跳过——Kiro 对认不出的能力名、不合规的路径只跳过那条规则、在同一份日志里记 `[PolicySession] Policy reload warning`，不报错，受信 agent 就少了一条 deny；
+  权限规则被跳过——Kiro 对认不出的能力名、不合规的路径只跳过那条规则、不报错，受信 agent 就少了一条 deny；同一份日志里认不出的能力名记
+  `[PolicyParser] Skipping rule …`，其它加载问题记 `[PolicySession] Policy reload warning`（每次都有的 `rebuild() complete` 那一行不算）；
   用到的工具不在只读名单内——事件流 `usedTools` 只许 `read_file` / `read_files` / `list_directory` / `file_search` / `grep_search`。
   受信 agent 对 fs_read 之外的全部能力（写、shell、网络，以及 subagent / skill / power / context / diagnostics / mcp / sandbox_network）都是整体 deny：
   skill 类工具 `disclose_context`（按需加载 skill 与 `inclusion: auto` 的 steering）不看 `tools`、Kiro 总是把它加进工具集。

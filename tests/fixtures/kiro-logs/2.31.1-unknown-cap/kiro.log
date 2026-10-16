@@ -1,0 +1,3 @@
+{"timestamp":"2026-10-16T14:02:10.285Z","level":"info","message":"hooks.reload.loaded {\"read\":0,\"registered\":0}"}
+{"timestamp":"2026-10-16T14:02:10.411Z","level":"warn","message":"[PolicyParser] Skipping rule 13 in agent-profile: unknown capability \"codeup_unknown_cap\""}
+{"timestamp":"2026-10-16T14:02:10.412Z","level":"info","message":"[PolicySession] rebuild() complete: 16 rules parsed, engineActive=true, fatal=false"}

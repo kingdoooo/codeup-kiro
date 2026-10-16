@@ -3597,7 +3597,8 @@ rc=0; review_v3_hook_registrations "$tmp/does-not-exist" >/dev/null || rc=$?; as
 # ---- V3 权限规则有没有被 Kiro 跳过（复审 M-3）：Kiro 对认不出的能力名、不合规的路径只是跳过那条规则、记一行警告，不报错——
 # 受信 agent 的 deny 少了一条，评审照样跑。Kiro 在临时 HOME 的 kiro.log 里写 `[PolicySession] Policy reload warning|error (<scope>): …`
 # （所有来源的规则加载问题都经它），解析器自己另记 `[PolicyParser] …`。只认以这两个前缀开头的 message，返回条数。
-assert_eq "$(review_v3_policy_warnings "$KL/2.31.1-review-root-warns")" "0" "规则跳过：评审根目录布局的真实日志（2.31.1，含 warn / error 级的其它行）→ 0"
+assert_eq "$(review_v3_policy_warnings "$KL/2.31.1-review-root-warns")" "0" "规则跳过：评审根目录布局的真实日志（2.31.1，含 warn / error 级的其它行与每次都有的 [PolicySession] rebuild() complete）→ 0"
+assert_eq "$(review_v3_policy_warnings "$KL/2.31.1-unknown-cap")" "1" "规则跳过：真实 T14 日志（2.31.1，认不出的能力名只记一行 [PolicyParser]）→ 1"
 assert_eq "$(review_v3_policy_warnings "$KL/2.31.1-hostile-cwd")" "2" "规则跳过：cwd = 业务库的真实日志（2.31.1，agent 被工作区同名定义顶替，两条规则被跳过）→ 2"
 mkdir -p "$tmp/pw-parser/a" "$tmp/pw-err/a" "$tmp/pw-forge/a" "$tmp/pw-none/a"
 # 下面两行的文案取自 2.31.1 引擎（KAS 0.66.34）源码里的模板（静态；真实的那一行由探测 T14 取得）
