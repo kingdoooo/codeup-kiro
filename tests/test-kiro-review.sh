@@ -3417,6 +3417,8 @@ V3=(KIRO_ENGINE=v3 MOCK_KIRO_VERSION=2.29.1 "KIRO_TESTED_TARGETS_EXTRA=${HOST_PL
 # 本次 $WORK 的位置从替身记下的临时 HOME 推出（macOS 的 mktemp -d 不看 TMPDIR，没法预先把 $WORK 指到用例目录）：
 # 临时 HOME 与评审根目录都在 $WORK 下，$WORK 不在了就说明两者都删干净了
 v3_leftovers() { local h; h=$(awk -F'\t' 'NR == 1 {print $2}' "$MD/homes" 2>/dev/null); [[ -n "$h" && "$(basename "$h")" == kiro-home ]] || { echo "no-record"; return 0; }; [[ -e "$(dirname "$h")" ]] && echo 1 || echo 0; }
+# 本次运行专用的 TMPDIR（W7）在 $WORK 之外（执行器 TMPDIR 下），另查一次：0 = 已删，1 = 还在，no-record = 替身没记下
+v3_tmp_leftovers() { local t; t=$(awk -F'\t' 'NR == 1 {print $8}' "$MD/homes" 2>/dev/null); [[ "$(basename "$t")" == kiro-tmp.* ]] || { echo "no-record"; return 0; }; [[ -e "$t" ]] && echo 1 || echo 0; }
 
 run_case v3ok "${V3[@]}"
 assert_rc "$RC" 0 "V3：评审跑完"
@@ -3448,6 +3450,14 @@ assert_eq "$(awk -F'\t' -v c="$v3_cwd" '$7 != c' "$MD/homes" | grep -c . || true
 assert_eq "$(grep -c -x 'XDG_RUNTIME_DIR' "$MD/env" || true)" "0" "V3：Kiro 进程环境里没有 XDG_RUNTIME_DIR"
 assert_eq "$([[ -e "$CASE/home/.kiro" ]] && echo touched || echo clean)" "clean" "V3：真实 HOME 下没有创建 ~/.kiro（agent、设置都在临时 HOME 里）"
 assert_eq "$(v3_leftovers)" "0" "V3：退出后临时 HOME 与评审根目录都已删除"
+# TMPDIR（W7，Kent 2026-10-16 方案 2）：五处调用都看到同一个本次运行专用的目录，建在执行器的 TMPDIR 下；kiro-cli 写进去的日志随它一起删
+v3_tmpd=$(awk -F'\t' 'NR == 1 {print $8}' "$MD/homes")
+assert_contains "$(basename "$v3_tmpd")" "kiro-tmp." "V3：Kiro 的 TMPDIR 是本次运行专用的 kiro-tmp.<随机>"
+assert_eq "$(dirname "$v3_tmpd")" "$(cd "$CASE/tmp" && pwd -P)" "V3：它建在执行器的 TMPDIR 下"
+assert_eq "$(awk -F'\t' -v t="$v3_tmpd" '$8 != t' "$MD/homes" | grep -c . || true)" "0" "V3：五处调用的 TMPDIR 都是它"
+assert_eq "$([[ -e "$v3_tmpd" ]] && echo left || echo gone)" "gone" "V3：退出后本次运行专用的 TMPDIR 已删除"
+assert_eq "$([[ -e "$CASE/tmp/kiro-log" ]] && echo leaked || echo clean)" "clean" "V3：kiro-cli 写的运行日志没有落进执行器的 TMPDIR"
+assert_contains "$OUT" "TMPDIR = 本次运行专用的 ${v3_tmpd}" "V3：日志写明 Kiro 的 TMPDIR"
 # 受信 agent（替身在 chat 时拷了一份）
 v3_inst="$MD/agent.json"
 assert_eq "$(jq -c '[.permissions.rules[] | select(.effect == "allow") | .match] | first' "$v3_inst")" \
@@ -3523,6 +3533,9 @@ assert_contains "$OUT" "与 KIRO_ENGINE=v2 不一致" "v2 但事件流说 v3：�
 run_case v2engnone MOCK_KIRO_ENGINE_REPORT=none
 assert_rc "$RC" 0 "v2 且事件流没有 engine：维持 v1.10.1 的行为（不判失败）"
 assert_contains "$OUT" "v2 下不强制" "v2 且事件流没有 engine：日志留一行警告"
+# v2 冻结（W4）：Kiro 的 TMPDIR 仍是执行器的 TMPDIR，kiro-cli 的运行日志照旧写在那里（v1.10.1 起就这样）
+assert_eq "$(awk -F'\t' -v t="$CASE/tmp" '$8 != t' "$MD/homes" | grep -c . || true)" "0" "v2：五处调用的 TMPDIR 都是执行器的 TMPDIR（W4）"
+assert_eq "$([[ -s "$CASE/tmp/kiro-log/kiro-chat.log" ]] && echo there)" "there" "v2：kiro-cli 的运行日志照旧在执行器的 TMPDIR 里（W4）"
 # 有 engine 但不合形（复审 M-1：3.x 换了引擎名）——v2 只豁免「缺」，这里两种引擎都拒绝，取值不回显
 for eng_case in v2engbad=v3.1 v2engcls=classic v3engbad=v3.1; do
   eng_n="${eng_case%%=*}" eng_v="${eng_case#*=}"
@@ -3587,10 +3600,12 @@ assert_contains "$(posted_comment "$OUT")" "实际使用的模型是 \`claude-so
 run_case v3fail "${V3[@]}" MOCK_KIRO_FAIL=1
 assert_nonzero "$RC" "V3 kiro-cli 失败：非零退出"
 assert_eq "$(v3_leftovers)" "0" "V3 kiro-cli 失败：临时 HOME 与评审根目录已删除"
+assert_eq "$(v3_tmp_leftovers)" "0" "V3 kiro-cli 失败：本次运行专用的 TMPDIR 已删除"
 run_case v3hang "${V3[@]}" MOCK_KIRO_HANG=1 KIRO_TIMEOUT=3
 assert_nonzero "$RC" "V3 超时：非零退出"
 assert_contains "$OUT" "超时" "V3 超时：按超时处理"
 assert_eq "$(v3_leftovers)" "0" "V3 超时：临时 HOME 与评审根目录已删除"
+assert_eq "$(v3_tmp_leftovers)" "0" "V3 超时：本次运行专用的 TMPDIR 已删除"
 run_case v3bak "${V3[@]}" MOCK_KIRO_V3_BAK=1
 assert_rc "$RC" 0 "V3 + 迁移留下 .json.bak：评审照常完成"
 assert_eq "$(v3_leftovers)" "0" "V3 + 迁移留下 .json.bak：临时 HOME 连同 .bak 一起删除"
@@ -3627,6 +3642,7 @@ assert_nonzero "$RC" "V3 解包到一半失败：拒绝评审"
 assert_contains "$(posted_comment "$OUT")" "V3 评审根目录准备失败" "V3 解包到一半失败：失败评论说明原因"
 assert_eq "$(call_count "$MD/calls" chat)" "0" "V3 解包到一半失败：Kiro 未启动"
 assert_eq "$(v3_leftovers)" "0" "V3 解包到一半失败：临时 HOME 与评审根目录（连同半个副本）已删除"
+assert_eq "$(v3_tmp_leftovers)" "0" "V3 解包到一半失败：本次运行专用的 TMPDIR 已删除"
 # 文件名带空格、以 - 开头、非 ASCII：副本条目数与（已隔离的）业务库一致
 tweak_odd_names() { printf 'x\n' > 'a b.py'; printf 'y\n' > ./-dash.py; printf 'z\n' > 'ünï.py'; git add -A && git commit -qm "odd names"; }
 CASE_TWEAK=tweak_odd_names run_case v3odd "${V3[@]}"

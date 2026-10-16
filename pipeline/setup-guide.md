@@ -933,7 +933,9 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
   同名的工作区 agent 会顶替受信 agent（kiro-cli 2.29.1 实测；2.31.1 上探测 T13 复现了 steering、同名 agent 顶替与 hook 注册——2.31.1 注册了业务库的 hook 却不发 hook_update，只有 Kiro 日志里的注册数看得到）。所以 V3 的运行目录是本次工作目录下新建的 `review-root/`，第 5.5 步之后
   才把**已隔离**的业务库复制到其下 `repo/`（不含 `.git`）——能搜整个业务库，而运行目录本身没有任何仓库内容。HOME 是同一工作目录下的
   临时目录 `kiro-home/`（agent、设置、kiroignore 都在里面，跑完一起删）：V3 不认 `KIRO_HOME`，而执行账号 HOME 里的
-  `~/.kiro/settings/permissions.yaml` 能打穿读取边界（实测）。kiroignore 写 `AGENTS.md`：2.29.1 上 V3 会加载复制进来的嵌套 `AGENTS.md`，
+  `~/.kiro/settings/permissions.yaml` 能打穿读取边界（实测）。Kiro 进程的 `TMPDIR` 同样换成本次运行专用的 `kiro-tmp.<随机>`
+  （建在执行器的 `TMPDIR` 下，跑完删）：kiro-cli 往 `$TMPDIR` 写自己的运行日志（`kiro-log/`）与更新暂存目录，常驻执行器上不会累积。
+  v2 引擎不换（冻结），这些文件照旧写在执行器的 `$TMPDIR`。kiroignore 写 `AGENTS.md`：2.29.1 上 V3 会加载复制进来的嵌套 `AGENTS.md`，
   kiroignore 挡住它；2.31.1 不写也不加载，kiroignore 留作纵深（第 5.5 步本来就删过）。
 - **V3 的数据与网络通道（S8）。** 临时 HOME 里另写 `telemetry.enabled false`（遥测）与 `codeWhisperer.shareCodeWhispererContentWithAWS false`
   （内容收集），Kiro 进程环境固定带 `KIRO_DISABLE_EXPERIMENT_CONFIG=true`（服务端实验配置）与 `KIRO_DISABLE_SESSION_TITLE_LLM=true`

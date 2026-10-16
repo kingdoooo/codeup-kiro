@@ -650,18 +650,34 @@ kiro_run_home_prepare() {
   printf '%s\n' "${KIRO_V3_KIROIGNORE[@]}" > "$h/.kiro/settings/kiroignore" || return 1
 }
 
-# kiro_env_isolate_home <临时 HOME> → 改写 KIRO_ENV_ALLOW：去掉 HOME 与 XDG_*（含 XDG_RUNTIME_DIR），换成指向临时 HOME 的一组，
-# 再追加 KIRO_V3_ENV（S8 的固定取值；同名的条目先去掉，透传进来的同名变量改不了它们）。
+# kiro_run_tmp_create → stdout 本次运行专用的 Kiro 临时目录（物理路径）：建在执行器的 TMPDIR（没设就是 /tmp）下，mktemp -d，0700。
+# 为什么要它（W7，Kent 2026-10-16）：kiro-cli 在 HOME 之外还往 $TMPDIR 写自己的运行日志（kiro-log/kiro-chat.log、lsp.log、mcp.log）
+# 与更新暂存目录（kiro-cli-updates-<uid>，要求只有本用户可进）——sandbox 容器里前后快照实测。v3 的 Kiro 进程只看得见这个目录，
+# 调用方在退出清理里删掉它；建在执行器 TMPDIR 下而不是 $WORK 里：尊重运维给的临时盘位置。rc 0 / 1。
+kiro_run_tmp_create() {
+  local base="${TMPDIR:-/tmp}" d
+  base="${base%/}"; [[ -n "$base" ]] || base=/
+  [[ -d "$base" ]] || { echo "kiro_run_tmp_create: TMPDIR 不是已存在的目录：${base}" >&2; return 1; }
+  d=$(mktemp -d "${base}/kiro-tmp.XXXXXX") || { echo "kiro_run_tmp_create: 无法在 ${base} 下建临时目录" >&2; return 1; }
+  chmod 700 "$d" || { rm -rf "$d"; return 1; }
+  (cd "$d" && pwd -P) || { rm -rf "$d"; return 1; }
+}
+
+# kiro_env_isolate_home <临时 HOME> <Kiro 临时目录> → 改写 KIRO_ENV_ALLOW：去掉 HOME、XDG_*（含 XDG_RUNTIME_DIR）与 TMPDIR，换成指向临时 HOME
+# 的一组与本次运行专用的 TMPDIR（kiro_run_tmp_create），再追加 KIRO_V3_ENV（S8 的固定取值；同名的条目先去掉，透传进来的同名变量改不了它们）。
 # 必须在 kiro_env_allowlist 之后调用（后者会整份重建 KIRO_ENV_ALLOW）。其余条目（PATH、KIRO_API_KEY、代理、证书…）原样保留。
+# 两个参数都必须是已存在的绝对路径目录，否则 rc 1、不改清单。
 kiro_env_isolate_home() {
-  local h="${1-}" kv; local -a out=()
+  local h="${1-}" t="${2-}" kv; local -a out=()
   [[ "$h" == /* && -d "$h" ]] || { echo "kiro_env_isolate_home: 临时 HOME 不是已存在的绝对路径目录：${h}" >&2; return 1; }
+  [[ "$t" == /* && -d "$t" ]] || { echo "kiro_env_isolate_home: Kiro 临时目录不是已存在的绝对路径目录：${t}" >&2; return 1; }
   for kv in ${KIRO_ENV_ALLOW[@]+"${KIRO_ENV_ALLOW[@]}"}; do
-    case "${kv%%=*}" in HOME|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|XDG_STATE_HOME|XDG_RUNTIME_DIR) continue ;; esac
+    case "${kv%%=*}" in HOME|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|XDG_STATE_HOME|XDG_RUNTIME_DIR|TMPDIR) continue ;; esac
     case " ${KIRO_V3_ENV[*]%%=*} " in *" ${kv%%=*} "*) continue ;; esac
     out+=("$kv")
   done
   out+=("HOME=$h" "XDG_CONFIG_HOME=$h/.config" "XDG_DATA_HOME=$h/.local/share" "XDG_CACHE_HOME=$h/.cache" "XDG_STATE_HOME=$h/.local/state")
+  out+=("TMPDIR=$t")
   out+=("${KIRO_V3_ENV[@]}")
   KIRO_ENV_ALLOW=("${out[@]}")
 }

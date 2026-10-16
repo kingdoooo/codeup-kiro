@@ -76,9 +76,12 @@ MOCK_RECEIVED_ENV=$(compgen -e | sort)
 M="${HOME:-/nonexistent}/.kiro-mock"
 # V3 路径（ADR-0008）下 HOME 是评审脚本每次新建的临时目录，测试来不及往里放配置：这时按 $TMPDIR/kiro-mock-dir 里写的路径找配置目录
 # （tests/helpers.sh 的 mock_tmpdir_pointer 写它；TMPDIR 在许可清单的固定名单里）。V2 路径上 $HOME/.kiro-mock 总在，这条不生效；
-# 指针指向的目录不存在时仍按下面的 fail-closed 退 97。
+# 指针指向的目录不存在时仍按下面的 fail-closed 退 97。v3 的 TMPDIR 是评审脚本在执行器 TMPDIR 下新建的 kiro-tmp.<随机>（W7），
+# 所以 $TMPDIR 里没有指针时再看上一级。
 if [[ ! -d "$M" && -n "${TMPDIR:-}" && -r "${TMPDIR%/}/kiro-mock-dir" ]]; then
   M=$(cat "${TMPDIR%/}/kiro-mock-dir")
+elif [[ ! -d "$M" && -n "${TMPDIR:-}" && -r "$(dirname "${TMPDIR%/}")/kiro-mock-dir" ]]; then
+  M=$(cat "$(dirname "${TMPDIR%/}")/kiro-mock-dir")
 fi
 if [[ -z "${HOME:-}" || ! -d "$M" ]]; then
   echo "mock kiro-cli: 拿不到配置目录 \$HOME/.kiro-mock（HOME='${HOME:-}'）——HOME 没透传、或测试没先 mock_config_write？替身拒绝运行（fail-closed），不会假装成功" >&2
@@ -91,8 +94,9 @@ source "$MOCK_DIR/../helpers.sh" || { echo "mock kiro-cli: 加载 tests/helpers.
 declare -F mock_config_load >/dev/null && declare -F injection_surface_scan >/dev/null \
   || { echo "mock kiro-cli: tests/helpers.sh 里缺少 mock_config_load / injection_surface_scan，替身拒绝运行" >&2; exit 97; }
 mock_config_load_dir "$M"
-# 每次调用的 HOME / XDG_* / cwd（ADR-0008：v3 的五处调用都必须看到临时 HOME，v2 的必须是真实 HOME）：名字<TAB>HOME<TAB>XDG_CONFIG_HOME<TAB>…<TAB>cwd
-_mock_home_rec() { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "${HOME:-}" "${XDG_CONFIG_HOME:-}" "${XDG_DATA_HOME:-}" "${XDG_CACHE_HOME:-}" "${XDG_STATE_HOME:-}" "$(pwd -P)" >> "$M/homes"; }
+# 每次调用的 HOME / XDG_* / cwd / TMPDIR（ADR-0008：v3 的五处调用都必须看到临时 HOME 与本次运行专用的 TMPDIR，v2 的必须是真实 HOME、执行器的 TMPDIR）：
+# 名字<TAB>HOME<TAB>XDG_CONFIG_HOME<TAB>…<TAB>cwd<TAB>TMPDIR
+_mock_home_rec() { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "${HOME:-}" "${XDG_CONFIG_HOME:-}" "${XDG_DATA_HOME:-}" "${XDG_CACHE_HOME:-}" "${XDG_STATE_HOME:-}" "$(pwd -P)" "${TMPDIR:-}" >> "$M/homes"; }
 if [[ "${1:-}" == "--version" ]]; then
   echo "version" >> "$M/calls"; _mock_home_rec version
   printf '%s\n' "$MOCK_RECEIVED_ENV" > "$M/env-version"   # --version 调用的环境（15-fix4 #18）
@@ -365,6 +369,8 @@ fi
 
 SID="mock-0000-1111-2222-333344445555"
 emit() { jq -nc "$@"; }
+# 真实的 kiro-cli 在 chat 时往 $TMPDIR/kiro-log/ 写自己的运行日志（两种引擎同一个客户端；sandbox 容器里前后快照实测，W7）
+if [[ -n "${TMPDIR:-}" ]]; then mkdir -p "${TMPDIR%/}/kiro-log" && printf 'mock chat log\n' >> "${TMPDIR%/}/kiro-log/kiro-chat.log"; fi
 if [[ "$ENGINE_ARG" == v3 ]]; then
   # --- V3 形态（kiro-cli 2.29.1 真实事件流，tests/fixtures/stream/v3-*.jsonl）：没有 metadata；用量在 session_info_update 的
   # turn_completion 里，上下文在 context_usage 里，agent 与模型在 config_option_update 里（第一次是默认值，最后一次才是 agent 的）。

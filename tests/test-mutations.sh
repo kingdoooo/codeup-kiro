@@ -2334,7 +2334,7 @@ assert_contains "$(cat "$MD/review-root-files")" "./repo/src/app.py" "V3 对照�
 assert_contains "$(posted_comment "$OUT")" $'\nKiro CLI: 2.29.1（v3 引擎）\n' "V3 对照：版本行注明引擎"
 
 # --- M-v3a：不把临时 HOME 写进 Kiro 进程环境 → kiro-cli 看到执行器的真实 HOME（permissions.yaml、全局设置都回来了）---
-pkg=$(make_mutant m-v3a-no-isolate-home 's/^  kiro_env_isolate_home "\$KIRO_RUN_HOME" || die_review/  : kiro_env_isolate_home "$KIRO_RUN_HOME" || die_review/')
+pkg=$(make_mutant m-v3a-no-isolate-home 's/^  kiro_env_isolate_home "\$KIRO_RUN_HOME" "\$KIRO_RUN_TMP" || die_review/  : kiro_env_isolate_home "$KIRO_RUN_HOME" "$KIRO_RUN_TMP" || die_review/')
 run_case m-v3a "$pkg" "${V3[@]}"
 assert_eq "$(awk -F'\t' '$1 == "chat" {print $2}' "$MD/homes")" "$CASE/home" "M-v3a：chat 的 HOME 是真实 HOME——端到端「五处调用都指向临时 HOME」断言会失败"
 
@@ -2467,5 +2467,19 @@ assert_rc "$RC" 0 "M-v3v：规则被跳过的运行照常完成——端到端�
 pkg=$(make_mutant m-v3w-tools-log 's/^    1) die_review "V3 用到了只读名单之外的工具/    1) log "V3 用到了只读名单之外的工具/')
 run_case m-v3w "$pkg" "${V3[@]}" MOCK_KIRO_V3_USED_TOOLS=read_file,disclose_context
 assert_rc "$RC" 0 "M-v3w：用到名单外工具的运行照常完成——端到端「V3：用到了名单外的工具 → 拒绝」断言会失败"
+
+# --- M-v3x：许可清单不再换 TMPDIR → kiro-cli 的运行日志落进执行器的 TMPDIR（W7 方案 2）---
+pkg=$(make_mutant m-v3x-keep-tmpdir 's/|XDG_RUNTIME_DIR|TMPDIR) continue ;; esac/|XDG_RUNTIME_DIR) continue ;; esac/' scripts/lib/kiro-agent.sh)
+mutate_more "$pkg" '/^  out+=("TMPDIR=\$t")$/d' scripts/lib/kiro-agent.sh
+run_case m-v3x "$pkg" "${V3[@]}"
+assert_eq "$([[ -s "$CASE/tmp/kiro-log/kiro-chat.log" ]] && echo leaked)" "leaked" "M-v3x：kiro-cli 的运行日志落进了执行器的 TMPDIR——端到端「V3：…没有落进执行器的 TMPDIR」断言会失败"
+
+# --- M-v3y：退出清理不删本次运行专用的 TMPDIR → 它留在执行器的 TMPDIR 下（W7 方案 2）---
+pkg=$(make_mutant m-v3y-keep-run-tmp '/^  if \[\[ -n "\${KIRO_RUN_TMP:-}" \]\]; then rm -rf "\$KIRO_RUN_TMP"; fi$/d')
+run_case m-v3y "$pkg" "${V3[@]}"
+m_v3y_t=$(awk -F'\t' 'NR == 1 {print $8}' "$MD/homes" 2>/dev/null)
+assert_eq "$([[ "$(basename "$m_v3y_t")" == kiro-tmp.* && -d "$m_v3y_t" ]] && echo left)" "left" "M-v3y：本次运行专用的 TMPDIR 留下了——端到端「V3：退出后…TMPDIR 已删除」断言会失败"
+[[ "$(basename "$m_v3y_t")" == kiro-tmp.* ]] && rm -rf "$m_v3y_t"
+unset m_v3y_t
 
 report

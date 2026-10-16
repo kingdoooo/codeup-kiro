@@ -57,15 +57,17 @@ CANARY_FILE="CANARY-KIROHOME-9c1d"
 PROBE_FAIL=0; PROBE_INCONCLUSIVE=0
 source "$PKG_ROOT/scripts/lib/kiro-agent.sh"
 WORK=$(mktemp -d)
-RUN_HOME=""
+RUN_HOME=""; RUN_TMP=""
 if [[ "$KIRO_ENGINE" == v3 ]]; then
   RUN_HOME="$WORK/kiro-home"; mkdir -p "$RUN_HOME"
+  # Kiro 的 TMPDIR 与生产同一个函数（W7）：执行器 TMPDIR 下本次专用的 kiro-tmp.<随机>，cleanup 里删
+  RUN_TMP=$(kiro_run_tmp_create) || { echo "v3 的 Kiro 临时目录建不出来" >&2; rm -rf "$WORK"; exit 1; }
   kiro_run_home_prepare "$RUN_HOME" "$(command -v kiro-cli)" || { echo "v3 临时 HOME 准备失败" >&2; exit 1; }
 fi
 # 版本取法与执行器同一函数（kiro_cli_version：stdout / stderr 分开、按程序名锚定，15-fix4 #7）；它要求先填好 env -i 许可清单——
 # v2 只有这一次 --version 调用走 env -i，下面的 run_kiro 仍刻意用完整环境（见 run_kiro 注释）；v3 一律走许可清单（临时 HOME 只在那里面）
 kiro_env_allowlist || { echo "KIRO_ENV_PASSTHROUGH 不合法：${KIRO_ENV_ALLOW_ERROR}" >&2; exit 1; }
-if [[ "$KIRO_ENGINE" == v3 ]]; then kiro_env_isolate_home "$RUN_HOME" || { echo "v3 临时 HOME 写不进许可清单" >&2; exit 1; }; fi
+if [[ "$KIRO_ENGINE" == v3 ]]; then kiro_env_isolate_home "$RUN_HOME" "$RUN_TMP" || { echo "v3 临时 HOME 写不进许可清单" >&2; exit 1; }; fi
 kiro_cli_version "$TIMEOUT_BIN" "$KEEP" || { echo "${KIRO_CLI_VERSION_ERROR}" >&2; exit 1; }
 echo "[probe] kiro-cli ${KIRO_CLI_VERSION:-未知} engine=${KIRO_ENGINE} force_read=${FORCE_READ} 输出目录 $KEEP" >&2
 
@@ -104,6 +106,8 @@ cleanup() {
     kiro-cli settings "$SETTING_KEY" "$ORIG_SETTING" >/dev/null 2>&1 || true
   fi
   rm -rf "$WORK"
+  [[ -n "${RUN_TMP:-}" ]] && rm -rf "$RUN_TMP"
+  return 0
 }
 trap cleanup EXIT
 if [[ "$KIRO_ENGINE" == v3 ]]; then

@@ -118,10 +118,22 @@ for d in .kiro/agents .config .local/share .cache .local/state; do
 done
 rc=0; kiro_run_home_prepare "relative" "$tmp/bin/kiro-cli" 2>/dev/null || rc=$?; assert_eq "$rc" "1" "临时 HOME 不是绝对路径 → 拒绝"
 rc=0; kiro_run_home_prepare "$KH2" "kiro-cli" 2>/dev/null || rc=$?; assert_eq "$rc" "1" "入口不是绝对路径 → 拒绝"
+# ---- 本次运行专用的 Kiro 临时目录（W7，方案 2）：建在执行器的 TMPDIR 下（运维指定的临时盘），0700，返回物理路径；调用方在退出清理里删 ----
+mkdir -p "$tmp/exec tmp"
+KT1=$(TMPDIR="$tmp/exec tmp/" kiro_run_tmp_create)
+assert_eq "$([[ -d "$KT1" ]] && echo dir)" "dir" "kiro_run_tmp_create：建出了目录"
+assert_eq "$(dirname "$KT1")" "$(cd "$tmp/exec tmp" && pwd -P)" "kiro_run_tmp_create：建在 TMPDIR 下（物理路径，TMPDIR 带不带结尾的 / 都行）"
+assert_contains "$(basename "$KT1")" "kiro-tmp." "kiro_run_tmp_create：目录名 kiro-tmp.<随机>"
+assert_eq "$(LC_ALL=C ls -ld "$KT1" | cut -c1-10)" "drwx------" "kiro_run_tmp_create：只有本用户能进（kiro-cli 的更新暂存目录要求私有）"
+KT2=$(TMPDIR="$tmp/exec tmp" kiro_run_tmp_create)
+assert_eq "$([[ "$KT1" != "$KT2" ]] && echo distinct)" "distinct" "kiro_run_tmp_create：每次一个新目录"
+rc=0; TMPDIR="$tmp/no-such-tmp" kiro_run_tmp_create >/dev/null 2>&1 || rc=$?; assert_eq "$rc" "1" "kiro_run_tmp_create：TMPDIR 不存在 → rc 1"
+mkdir -p "$tmp/exec tmp"
 (
   export HOME="$RH" XDG_RUNTIME_DIR=/run/x XDG_CONFIG_HOME=/c TMPDIR="${TMPDIR:-/tmp}"
   kiro_env_allowlist
-  kiro_env_isolate_home "$KH2"
+  KT=$(TMPDIR="$tmp/exec tmp/" kiro_run_tmp_create)
+  kiro_env_isolate_home "$KH2" "$KT"
   assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep -c '^HOME=')" "1" "许可清单里只有一个 HOME"
   assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep '^HOME=')" "HOME=$KH2" "HOME 换成临时 HOME"
   for kv in "XDG_CONFIG_HOME=$KH2/.config" "XDG_DATA_HOME=$KH2/.local/share" "XDG_CACHE_HOME=$KH2/.cache" "XDG_STATE_HOME=$KH2/.local/state"; do
@@ -136,7 +148,17 @@ rc=0; kiro_run_home_prepare "$KH2" "kiro-cli" 2>/dev/null || rc=$?; assert_eq "$
   seen=$(cd "$tmp" && kiro_env_exec KIRO_ENV_ALLOW env)
   assert_contains "$seen" "HOME=$KH2" "子进程的 HOME 是临时 HOME"
   assert_not_contains "$seen" "XDG_RUNTIME_DIR=" "子进程没有 XDG_RUNTIME_DIR"
-  rc=0; kiro_env_isolate_home "$tmp/nope" 2>/dev/null || rc=$?; assert_eq "$rc" "1" "临时 HOME 不存在 → 拒绝、不改清单"
+  rc=0; kiro_env_isolate_home "$tmp/nope" "$KT" 2>/dev/null || rc=$?; assert_eq "$rc" "1" "临时 HOME 不存在 → 拒绝、不改清单"
+  # TMPDIR（W7，Kent 2026-10-16 方案 2）：kiro-cli 在临时 HOME 之外还往 $TMPDIR 写 kiro-log/ 与 kiro-cli-updates-<uid>（sandbox 实测）——
+  # v3 换成本次运行专用的那个目录，跟 HOME / XDG_* 一样只此一份
+  assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep -c '^TMPDIR=')" "1" "许可清单里只有一个 TMPDIR"
+  assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}" | grep '^TMPDIR=')" "TMPDIR=$KT" "TMPDIR 换成本次运行专用的临时目录"
+  assert_contains "$seen" "TMPDIR=$KT" "子进程的 TMPDIR 是本次运行专用的临时目录"
+  saved=("${KIRO_ENV_ALLOW[@]}")
+  for bad in "" "relative/dir" "$tmp/nope-tmp"; do
+    rc=0; kiro_env_isolate_home "$KH2" "$bad" 2>/dev/null || rc=$?; assert_eq "$rc" "1" "Kiro 临时目录「${bad}」不是已存在的绝对路径目录 → 拒绝"
+  done
+  assert_eq "$(printf '%s\n' "${KIRO_ENV_ALLOW[@]}")" "$(printf '%s\n' "${saved[@]}")" "拒绝时不改清单"
   report >/dev/null
 )
 

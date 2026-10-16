@@ -1007,6 +1007,8 @@ INSTALLED_AGENT=""
 # 文件名前缀（含随机串），不会碰到别的运行的文件。
 _review_cleanup() {
   rm -rf "$WORK"
+  # v3 的 Kiro 临时目录在 $WORK 之外（执行器 TMPDIR 下，W7）；只删本次建的那一个
+  if [[ -n "${KIRO_RUN_TMP:-}" ]]; then rm -rf "$KIRO_RUN_TMP"; fi
   if [[ -n "${INSTALLED_AGENT:-}" ]]; then rm -f "$INSTALLED_AGENT" "$INSTALLED_AGENT".backup "$INSTALLED_AGENT".backup.*; fi
   return 0
 }
@@ -1340,11 +1342,14 @@ KIRO_CWD=$(cd "$WORK/cwd" && pwd -P) || die_review "无法进入 Kiro 运行目�
 WS_P=$(pwd -P); CH_P=$(cd "$WORK/chunks" && pwd -P) || die_review "无法进入 diff chunk 目录：$WORK/chunks"
 # 运行时提示词里给模型的业务库绝对路径（{{REVIEW_WORKSPACE}}）：v2 是 checkout 本身，v3 是评审根目录下的副本
 REVIEW_WS_FOR_MODEL="$WS_P"
-KIRO_RUN_HOME=""
+KIRO_RUN_HOME=""; KIRO_RUN_TMP=""
 if [[ "$KIRO_ENGINE" == v3 ]]; then
   mkdir -p "$WORK/review-root" "$WORK/kiro-home" || die_review "无法创建 V3 评审根目录或临时 HOME：$WORK/review-root、$WORK/kiro-home"
   KIRO_CWD=$(cd "$WORK/review-root" && pwd -P) || die_review "无法进入 V3 评审根目录：$WORK/review-root"
   KIRO_RUN_HOME=$(cd "$WORK/kiro-home" && pwd -P) || die_review "无法进入 V3 临时 HOME：$WORK/kiro-home"
+  # Kiro 的 TMPDIR（W7，Kent 2026-10-16）：kiro-cli 在 HOME 之外还往 $TMPDIR 写运行日志（kiro-log/）与更新暂存目录（kiro-cli-updates-<uid>）——
+  # v3 给它本次运行专用的一个，建在执行器的 TMPDIR 下，退出清理里删（_review_cleanup）
+  KIRO_RUN_TMP=$(kiro_run_tmp_create) || die_review "无法为 V3 建本次运行专用的临时目录（TMPDIR=${TMPDIR:-/tmp}）"
   REVIEW_WS_FOR_MODEL="${KIRO_CWD}/repo"
   kiro_run_home_prepare "$KIRO_RUN_HOME" "$KIRO_CLI_CMD" || die_review "V3 临时 HOME 准备失败：$KIRO_RUN_HOME"
   # --name 同 v2（P1-2）；--real-home：deny 清单里的 ~/ 形状按真实 HOME 补一份绝对副本（Kiro 在临时 HOME 下把 ~ 解析成临时目录）
@@ -1354,7 +1359,7 @@ if [[ "$KIRO_ENGINE" == v3 ]]; then
   AGENT_NAME=$(basename "$INSTALLED_AGENT" .json)
   log "已安装受信 custom agent：${AGENT_NAME}（${INSTALLED_AGENT}；V3 临时 HOME）"
   if kiro_agent_selfcheck_v3 "$INSTALLED_AGENT" "$KIRO_CWD" "$CH_P" "$HOME"; then
-    log "受信 agent 自检通过（V3）：fs_read allow 恰好是评审根目录 + chunks 物理路径、其余规则全是 deny（fs_read 拒绝清单含必需形状与真实 HOME 副本，fs_write / shell / web_fetch / web_search 整体拒绝）、prompt 为相对 file://、没有 toolsSettings / hooks / mcpServers"
+    log "受信 agent 自检通过（V3）：fs_read allow 恰好是评审根目录 + chunks 物理路径、其余规则全是 deny（fs_read 拒绝清单含必需形状与真实 HOME 副本，fs_read 之外的 11 种能力都整体拒绝）、prompt 为相对 file://、没有 toolsSettings / hooks / mcpServers"
   else
     die_review "受信 agent 安装结果异常：${KIRO_AGENT_SELFCHECK_ERROR}（集成包缺陷，请报告）"
   fi
@@ -1384,11 +1389,11 @@ fi
 env_allowlist_or_die
 # v3：许可清单里的 HOME 与 XDG_* 换成临时 HOME（ADR-0008）——五处调用从这里起看到的都是临时 HOME，真实 HOME 的 ~/.kiro 一个字节都不碰
 if [[ "$KIRO_ENGINE" == v3 ]]; then
-  kiro_env_isolate_home "$KIRO_RUN_HOME" || die_review "V3 临时 HOME 无法写进 Kiro 进程环境：$KIRO_RUN_HOME"
+  kiro_env_isolate_home "$KIRO_RUN_HOME" "$KIRO_RUN_TMP" || die_review "V3 临时 HOME 无法写进 Kiro 进程环境：$KIRO_RUN_HOME"
 fi
 # 所有 kiro-cli 子命令都在 $KIRO_CWD 下执行，绝不在业务库工作树里（15-fix4 #1）
 if [[ "$KIRO_ENGINE" == v3 ]]; then
-  log "Kiro 运行目录：${KIRO_CWD}（V3 评审根目录：第 5.5 步之后放入业务库副本 repo/；HOME = 临时目录 ${KIRO_RUN_HOME}）"
+  log "Kiro 运行目录：${KIRO_CWD}（V3 评审根目录：第 5.5 步之后放入业务库副本 repo/；HOME = 临时目录 ${KIRO_RUN_HOME}；TMPDIR = 本次运行专用的 ${KIRO_RUN_TMP}）"
 else
   log "Kiro 运行目录：${KIRO_CWD}（空目录；业务库 ${WS_P} 只在 allowedPaths 里，模型按绝对路径读取）"
 fi
@@ -1690,7 +1695,7 @@ grep -qF '{{' "$WORK/prompt.txt" && die_review "运行时提示词渲染后仍�
 log "本次契约标记随机串：${REVIEW_NONCE}"
 
 if [[ "$KIRO_ENGINE" == v3 ]]; then
-  log "Kiro 引擎：v3（--agent-engine v3；默认引擎，ADR-0008：评审根目录 + 临时 HOME + kiroignore，跑完再核对事件流的实际引擎与三条兜底）"
+  log "Kiro 引擎：v3（--agent-engine v3；默认引擎，ADR-0008：评审根目录 + 临时 HOME + kiroignore，跑完再核对实际引擎、兜底与内容收集 / 权限规则 / 工具名单）"
 else
   log "Kiro 引擎：v2（--agent-engine v2；KIRO_ENGINE=v2 显式回退，ADR-0008：v2 冻结在已探测名单里的 v2 组合上）"
 fi

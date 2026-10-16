@@ -158,6 +158,8 @@ WORK=$(mktemp -d)
 if [[ "$PROBE_ENGINE" == v3 ]]; then
   # 评审根目录布局（ADR-0008 / H5）：Kiro 的 cwd 是 $WORK/root，业务库在其下的 repo/；HOME 是本次探测的临时目录
   ROOT_DIR="$WORK/root"; REPO="$ROOT_DIR/repo"; CHUNKS="$WORK/chunks"; KIRO_CWD="$ROOT_DIR"; RUN_HOME="$WORK/kiro-home"
+  # Kiro 的 TMPDIR 与生产同一个函数（W7）：执行器 TMPDIR 下本次专用的 kiro-tmp.<随机>，cleanup 里删
+  RUN_TMP=$(kiro_run_tmp_create) || { echo "v3 的 Kiro 临时目录建不出来（退出码 5）" >&2; rm -rf "$WORK"; exit 5; }
   mkdir -p "$REPO/src" "$CHUNKS" "$RUN_HOME"
 else
   REPO="$WORK/repo"; CHUNKS="$WORK/chunks"; KIRO_CWD="$WORK/cwd"; mkdir -p "$REPO/src" "$CHUNKS" "$KIRO_CWD"
@@ -170,6 +172,8 @@ AGENT_DST="$AGENT_DIR/${PROBE_AGENT}.json"
 cleanup() {
   rm -f "$CANARY_PATH" "$AGENT_DST" "$AGENT_DST".backup*
   rm -rf "$WORK"
+  [[ -n "${RUN_TMP:-}" ]] && rm -rf "$RUN_TMP"
+  return 0
 }
 trap cleanup EXIT
 
@@ -263,7 +267,7 @@ fi
 kiro_env_allowlist || { echo "KIRO_ENV_PASSTHROUGH 不合法：${KIRO_ENV_ALLOW_ERROR}，中止（退出码 5）" >&2; exit 5; }
 # v3：许可清单的 HOME 与 XDG_* 换成临时 HOME，再按生产清单写设置（KIRO_V3_SETTINGS）——之后每一次 kiro-cli 调用都只看得见临时 HOME
 if [[ "$PROBE_ENGINE" == v3 ]]; then
-  kiro_env_isolate_home "$RUN_HOME" || { echo "v3 临时 HOME 写不进许可清单（退出码 5）" >&2; exit 5; }
+  kiro_env_isolate_home "$RUN_HOME" "$RUN_TMP" || { echo "v3 临时 HOME 写不进许可清单（退出码 5）" >&2; exit 5; }
   for _kv in "${KIRO_V3_SETTINGS[@]}"; do
     read -r _sk _sv <<<"$_kv"
     ( cd "$KIRO_CWD" && kiro_env_exec KIRO_ENV_ALLOW "$TIMEOUT_BIN" 60 kiro-cli settings "$_sk" "$_sv" ) >/dev/null 2>&1 \
