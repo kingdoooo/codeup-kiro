@@ -54,7 +54,7 @@ T5/T6 传 `--trust-tools`、T7 传 `--trust-all-tools`，那是正控与 INFO �
 | `probe-codeup-inline.sh` | P1-00 身份/MR · P1-01 版本列表 · P1-02 行号侧向 · P1-03 必填字段 · P1-04 草稿一次提交 · P1-05 原地更新 · P1-06 评论列表 · P1-09 `<details>` 渲染 | 令牌：代码只读 + 合并请求读写；一个打开的测试 MR |
 | `probe-flow-run.sh` | P1-07 `CreatePipelineRun` 的 `envs` / `runningBranchs` 覆写 | 令牌：流水线读写；已配置的评审流水线 |
 | `probe-kiro-headless.sh` | P1-08 `stream-json` 事件形态 · P1-10 AGENTS.md 继承隔离 · P1-11 禁止路径。引擎：`KIRO_ENGINE=v2|v3`（默认 v3；v3 必须用 `KIRO_API_KEY`，按生产形态跑：评审根目录 + 临时 HOME + kiroignore，正控 `PROBE_NO_ISOLATION=1` 是不写 kiroignore；2.31.1 上正控也 PASS——它本来就不加载嵌套的 AGENTS.md，这时 AGENTS.md 一项的放行依据是 allowlist 探测的 T11 与 T13） | 装有 kiro-cli 的机器 + `KIRO_API_KEY`（或本机已 `kiro-cli login`） |
-| `probe-kiro-allowlist.sh` | P1-15 读取**许可清单**（`allowedPaths`）在 headless 下是不是边界。门禁用例：T1 allow 内 read 可读 · T1b/T1c allow 内 grep/glob 可用（不带 `--trust-tools`）· T2 allow 外/deny 外的 canary 被**拒绝**（不是等确认到超时）· T3 deny 先于 allow（`.git/logs/HEAD`）· T4 `env -i` 许可清单下能启动 · T8a 业务库内指向 `$HOME` 的符号链接被拒 · T8b `<业务库>/../` 越界路径被拒 · T9a–T9d 业务库里提交的 `.ssh/config`、`.aws/config`、`keys/id_rsa.pub`、`keys/id_ed25519.pub` 各自被拒（allow 内的仓库相对 deny 形状，四条各一；**每个 canary 一次调用**，拒绝痕迹按运行归因而不是按文件名回扫）。装好的探测 agent 先过生产同一个 `kiro_agent_selfcheck`，不通过记 INCONCLUSIVE。非门禁：T5 正控（无 allowedPaths 的旧形态 + `--trust-tools` 读出 canary；默认跑）· T6/T7 INFO（`--trust-tools` 不覆盖 allow；`--trust-all-tools` **绕过** allow；要跑得显式 `PROBE_CASES`）。**v3（`KIRO_ENGINE` 默认）**另有门禁 T10 业务库的 `.kiro/hooks` 不执行 · T11 `AGENTS.md`（根与嵌套）与 `.kiro/steering` 不加载 · T12 同名工作区 agent 顶替不了受信 agent（T10–T12 另核对临时 HOME 里 Kiro 日志的 hook 注册数），非门禁 T13 正控（cwd = 业务库时这些信号确实出现；steering、agent 来源、hook 三条分开记账，hook 一支单列 INFO）；T5 在 v3 下是「同一 agent + `--trust-all-tools`」，T7 不适用；v3 在临时 HOME 里装 agent，必须用 `KIRO_API_KEY` | 同上；每用例一次调用（约 0.3 credit，v2 默认 13 次、v3 默认 17 次） |
+| `probe-kiro-allowlist.sh` | P1-15 读取**许可清单**（`allowedPaths`）在 headless 下是不是边界。门禁用例：T1 allow 内 read 可读 · T1b/T1c allow 内 grep/glob 可用（不带 `--trust-tools`）· T2 allow 外/deny 外的 canary 被**拒绝**（不是等确认到超时）· T3 deny 先于 allow（`.git/logs/HEAD`）· T4 `env -i` 许可清单下能启动 · T8a 业务库内指向 `$HOME` 的符号链接被拒 · T8b `<业务库>/../` 越界路径被拒 · T9a–T9d 业务库里提交的 `.ssh/config`、`.aws/config`、`keys/id_rsa.pub`、`keys/id_ed25519.pub` 各自被拒（allow 内的仓库相对 deny 形状，四条各一；**每个 canary 一次调用**，拒绝痕迹按运行归因而不是按文件名回扫）。装好的探测 agent 先过生产同一个 `kiro_agent_selfcheck`，不通过记 INCONCLUSIVE。非门禁：T5 正控（无 allowedPaths 的旧形态 + `--trust-tools` 读出 canary；默认跑）· T6/T7 INFO（`--trust-tools` 不覆盖 allow；`--trust-all-tools` **绕过** allow；要跑得显式 `PROBE_CASES`）。**v3（`KIRO_ENGINE` 默认）**另有门禁 T10 业务库的 `.kiro/hooks` 不执行 · T11 `AGENTS.md`（根与嵌套）与 `.kiro/steering` 不加载 · T12 同名工作区 agent 顶替不了受信 agent（T10–T12 另核对临时 HOME 里 Kiro 日志的 hook 注册数、没有被跳过的权限规则，以及用到的工具都在只读名单内），非门禁 T13 正控（cwd = 业务库时这些信号确实出现；steering、agent 来源、hook 三条分开记账，hook 一支单列 INFO）· T14 正控（受信 agent 多一条认不出能力名的 deny 时 Kiro 日志确实报「跳过规则」）；T5 在 v3 下是「同一 agent + `--trust-all-tools`」，T7 不适用；v3 在临时 HOME 里装 agent，必须用 `KIRO_API_KEY` | 同上；每用例一次调用（约 0.3 credit，v2 默认 13 次、v3 默认 18 次） |
 
 ## 用法
 
@@ -87,7 +87,7 @@ KIRO_API_KEY=… PROBE_NO_ISOLATION=1 bash -p scripts/probe/probe-kiro-headless.
 
 # 5) 读取许可清单边界（P1-15；票 15 主方案的前提，改动 agent 定义 / kiro_install_agent / 许可清单函数后重跑）
 bash -p scripts/probe/probe-kiro-allowlist.sh
-# 默认引擎 v3（必须用 KIRO_API_KEY）= 十五个门禁用例 + T5 / T13 正控（17 次调用）；KIRO_ENGINE=v2 = 十二个门禁用例 + T5 正控（13 次）。
+# 默认引擎 v3（必须用 KIRO_API_KEY）= 十五个门禁用例 + T5 / T13 / T14 正控（18 次调用）；KIRO_ENGINE=v2 = 十二个门禁用例 + T5 正控（13 次）。
 # 每个用例一次、约 0.3 credit / 15–55 s；T6/T7 是 INFO，要跑得显式列出
 # 只跑子集省额度：PROBE_CASES="T1 T2 T4" bash -p scripts/probe/probe-kiro-allowlist.sh
 #   用例名逐个校验（写错 → 退出码 2、零调用）；子集运行时结论打「不作发布判定」并以 4 退出，只有该引擎的门禁用例全跑才打「走主方案」
@@ -142,7 +142,7 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
   0 = 门禁用例（v2 十二个：T1 T1b T1c T2 T3 T4 T8a T8b T9a T9b T9c T9d；v3 另加 T10 T11 T12）全部实际运行且全部 PASS → 走主方案
   1 = 门禁用例有 FAIL（allowedPaths 不是边界 / deny 未生效 / ../ 越界未被拒），不得上线
   2 = 参数错（PROBE_CASES 含未知用例名；零调用）
-  3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 / T13 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过自检）——探测本身不可信，不是 allowedPaths 的结论
+  3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 / T13 / T14 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过自检）——探测本身不可信，不是 allowedPaths 的结论
   4 = 门禁用例未全部运行（PROBE_CASES 子集），已跑的全 PASS，不作发布判定
   5 = 环境准备失败（启动环境不可信、**PATH 不可信**、缺 kiro-cli/jq/timeout、未登录、v3 缺 KIRO_API_KEY、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
   ```
