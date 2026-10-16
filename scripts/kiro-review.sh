@@ -188,9 +188,13 @@ KIRO_ENV_PASSTHROUGH="${KIRO_ENV_PASSTHROUGH:-}"
 #                         kiroignore 在这个版本上只是纵深（第 5.5 步的删除与事件流兜底仍在）。
 #                         2026-10-16 按生产配置（S8 设置与环境变量、hook 注册数核对）重跑：门禁 + T5 / T13 全 PASS；T13 三条判定都有信号——
 #                         业务库的 hook 在 2.31.1 上被注册（Kiro 日志 hooks.reload.loaded registered=1）却不发 hook_update，评审根目录布局下注册数 0。
+#                         2026-10-16 第二轮（567cd60：fs_read 之外的能力全部整体 deny、规则跳过 / 工具名单两项核对、本次运行专用的 TMPDIR）：
+#                         门禁十五个 + T5 / T13 / T14 正控全 PASS、headless 全 PASS；T14 证明 Kiro 跳过认不出的能力名时日志里看得到。
 # linux/x86_64:2.31.1:v3  2026-10-15 在 sandbox 的一次性 Fargate 任务里跑同一套 v3 探测（AWS 执行器同一镜像、NAT 私有子网 / 安全组、DNS Firewall BLOCK）：
 #                         入口 /root/.local/bin/kiro-cli（sha256 d474072c…，musl 变体），门禁十五个用例 + T5 / T13 正控全 PASS、退出码 0；
 #                         临时 HOME 下 kiro-cli 兄弟程序的布局与 darwin 相同。Flow 的钉版档位装的是同一个安装包、同一个入口文件。
+#                         2026-10-16 第二轮（567cd60 的执行器镜像，同一种一次性任务）：门禁十五个 + T5 / T13 / T14 正控全 PASS；探测前后的容器快照里
+#                         Kiro 在临时 HOME 与本次运行专用的 TMPDIR 之外没有写任何东西。
 KIRO_TESTED_TARGETS="darwin/arm64:2.29.0:v2 linux/x86_64:2.29.0:v2 darwin/arm64:2.31.1:v3 linux/x86_64:2.31.1:v3"
 # 使用方自己探测过的元组（不变式 I8，2026-09-15）：只做**并集**——加得进来，删不掉也覆盖不了上面那个常量里的条目。
 # 为什么需要它：上面的名单写死在集成包源码里，于是升级仪式要求使用方**改集成包的源码**；他们要么 fork（然后永远合不回来），

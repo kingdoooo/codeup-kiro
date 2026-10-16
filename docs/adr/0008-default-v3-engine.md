@@ -56,6 +56,6 @@ Kiro 2026-10-09 公告 CLI V3 在 10 月底随 3.0 成为默认引擎、Classic 
 
   AWS 档位的出口白名单**不需要新的主机**：V3 用到的 `app.kiro.dev`、`runtime.us-east-1.kiro.dev`、`management.{us-east-1,eu-central-1}.kiro.dev` 都已在名单里；
   sandbox（DNS Firewall BLOCK）的真实评审里被拦的只有 `cognito-identity.us-east-1.amazonaws.com`（v1.10.1 同样被拦）与 `management.us-gov-*.kiro.dev`（C），评审照常完成。
-- **ADR-0004 的四个切换门槛**：官方 GA 公告（2026-10-09 的 CLI 3.0 公告）；headless 文档支持 V3；`--trust-tools` 语义定型（V3 只认内部工具 id；生产从不传，探测 T6 记录）；canary 负向测试在 V3 下全过（`probe-kiro-allowlist.sh` 的门禁 15 个用例 + T5 / T13 正控：`darwin/arm64:2.31.1:v3` 2026-10-15 本机、`linux/x86_64:2.31.1:v3` 2026-10-15 sandbox 一次性 Fargate 任务）。
+- **ADR-0004 的四个切换门槛**：官方 GA 公告（2026-10-09 的 CLI 3.0 公告）；headless 文档支持 V3；`--trust-tools` 语义定型（V3 只认内部工具 id；生产从不传，探测 T6 记录）；canary 负向测试在 V3 下全过（`probe-kiro-allowlist.sh` 的门禁 15 个用例 + T5 / T13 正控：`darwin/arm64:2.31.1:v3` 2026-10-15 本机、`linux/x86_64:2.31.1:v3` 2026-10-15 sandbox 一次性 Fargate 任务；2026-10-16 两个平台都在最终的 V3 定义与运行环境上重跑——门禁 15 个 + T5 / T13 / T14 正控全过，darwin 那次是生产配置）。
   真实环境另有：sandbox AWS 档位一次 `/review`、Flow 的 V3 与 V2 各一次评审、业务库自带 AGENTS.md / steering / hook 的 V3 负控（评论里没有任何 canary，这些文件的改动照常被评审）。
 - **ADR-0006**：「每个进入已探测名单的元组连带发布两个摘要」不变；摘要按版本发布，同一版本的 v2 / v3 组合共用。
