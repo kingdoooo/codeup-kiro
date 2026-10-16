@@ -377,6 +377,10 @@ def blackhole(monkeypatch):
 
     monkeypatch.setattr(socket, "getaddrinfo", gai)
     monkeypatch.setattr(socket, "create_connection", cc)
+    # 不走本机的系统代理：macOS 上 urllib 会读系统代理设置（开着本地代理时连的是 127.0.0.1，立即失败成 code=network，替身根本没被调用）；
+    # Lambda 里没有系统代理，这里要测的是「直连黑洞地址」那条路径
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
     return tried
 
 
