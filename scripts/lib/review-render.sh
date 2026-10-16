@@ -421,6 +421,31 @@ review_stream_v3_tools() {
   if [[ "$bad" != 0 ]]; then printf '（另有 %s 个不合形，不显示）' "$bad"; fi
 }
 
+# --- V3 用到的工具必须在只读名单内（ADR-0008；复审 M-3，Kent 2026-10-16）---
+# 受信 agent 的 tools 是 read / grep / glob，2.31.1 上对应的工具 id 只有下面五个（69 份真实 V3 事件流里出现过的只有其中三个）。
+# 名单外的工具出现在 usedTools 里，说明权限之外还有别的路让模型调到了工具（skill 类的 disclose_context 不看 tools、引擎总是加进来），
+# 无论那次调用最后被没被拒，都不采用这次的输出；不合形的 id 同样按违规（看不清就不放行）。没有 usedTools = 这次没用工具，不算违规。
+REVIEW_V3_TOOLS_ALLOWED="read_file read_files list_directory file_search grep_search"
+# 用法：review_stream_v3_tools_outside <stream.jsonl> → rc 0 = 都在名单内（或没有 usedTools），不输出；
+#   rc 1 = 有名单外或不合形的，stdout 名单外的合形 id（去重排序、逗号分隔）与「（另有 N 个不合形，不显示）」；rc 2 = 读不了 / 解析失败
+review_stream_v3_tools_outside() {
+  local f="${1-}" all out bad
+  [[ -r "$f" ]] || return 2
+  all=$(jq -R -n -r --arg allowed "$REVIEW_V3_TOOLS_ALLOWED" '($allowed | split(" ")) as $ok
+                      | [inputs | fromjson? | select(type == "object" and .type == "sessionUpdate")
+                      | .data | objects | .update | objects | select(.sessionUpdate == "session_info_update")
+                      | ._meta | objects | .kiro | objects | select(.kind == "turn_completion")
+                      | .promptTurnSummaries | arrays | .[] | objects | .usedTools | arrays | .[]
+                      | if type == "string" then . else "<不是字符串>" end
+                      | select(. as $t | $ok | index($t) | not)] | unique | .[]' "$f" 2>/dev/null) || return 2
+  [[ -n "$all" ]] || return 0
+  out=$(printf '%s\n' "$all" | LC_ALL=C grep -E '^[A-Za-z0-9_.-]{1,64}$' | paste -sd, - || true)
+  bad=$(printf '%s\n' "$all" | LC_ALL=C grep -cvE '^[A-Za-z0-9_.-]{1,64}$' || true)
+  printf '%s' "$out"
+  if [[ "$bad" != 0 ]]; then printf '（另有 %s 个不合形，不显示）' "$bad"; fi
+  return 1
+}
+
 # --- V3 的某个会话选项（ADR-0008；S8 关掉的通道的回归守卫）---
 # 用法：review_stream_v3_option <stream.jsonl> <选项 id> → stdout 最后一次 config_option_update 里该 id 的 currentValue
 #   rc 0 = 取到；rc 1 = 没有；rc 3 = 有但取值不合形（不显示）；rc 2 = 读不了。只认 Kiro 写的 config_option_update，模型文本伪造不出。
@@ -450,6 +475,23 @@ review_v3_hook_registrations() {
                      | if length == 0 then empty elif all(type == "number" and . >= 0 and . == floor) then (max | tostring) else "<不合形>" end' 2>/dev/null) || return 2
   [[ -n "$v" ]] || return 1
   [[ "$v" =~ ^[0-9]+$ ]] || return 3
+  printf '%s' "$v"
+}
+
+# --- V3 有没有跳过权限规则（ADR-0008；复审 M-3）---
+# Kiro 加载 agent 的 permissions.rules 时，认不出的能力名、不合规的路径都只是**跳过那条规则**、记一行警告，不报错——受信 agent 的
+# 某条 deny 没了，评审照样跑。所有来源的规则加载问题都经 `[PolicySession] Policy reload warning|error (<scope>): …` 写进
+# HOME 下的 ~/.kiro/logs/<时间>/kiro.log，解析器另记 `[PolicyParser] …`（2.31.1 / KAS 0.66.34 源码）。临时 HOME 里除了受信 agent
+# 没有别的规则来源，所以出现任何一条都说明受信 agent 的规则没有原样生效。只认 message 以这两个前缀开头的行（Kiro 自己的文件，模型写不了）。
+# 用法：review_v3_policy_warnings <日志目录> → stdout 这类行的条数；rc 0 = 数出来了（可以是 0）；rc 1 = 目录里没有 kiro.log；rc 2 = 目录读不了
+review_v3_policy_warnings() {
+  local d="${1-}" v
+  [[ -d "$d" && -r "$d" ]] || return 2
+  [[ -n "$(LC_ALL=C find "$d" -type f -name kiro.log -print 2>/dev/null | head -n 1)" ]] || return 1
+  v=$(LC_ALL=C find "$d" -type f -name kiro.log -exec cat {} + 2>/dev/null \
+      | jq -R -n -r '[inputs | fromjson? | objects | .message | strings
+                      | select(startswith("[PolicySession] Policy reload ") or startswith("[PolicyParser] "))] | length' 2>/dev/null) || return 2
+  [[ "$v" =~ ^[0-9]+$ ]] || return 2
   printf '%s' "$v"
 }
 

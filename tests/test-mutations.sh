@@ -2458,4 +2458,14 @@ assert_eq "$([[ -n "$m_v3u_home" && -e "$(dirname "$m_v3u_home")/review-root/rep
 [[ -n "$m_v3u_home" ]] && rm -rf "$(dirname "$m_v3u_home")"
 unset m_v3u_home
 
+# --- M-v3v：规则被跳过的核对不再拒绝 → 受信 agent 少了一条 deny 也照样评审（复审 M-3）---
+pkg=$(make_mutant m-v3v-no-policy-check '/^    0) \[\[ "\$_pw" == 0 \]\] || die_review/s/\[\[ "\$_pw" == 0 \]\]/true/')
+run_case m-v3v "$pkg" "${V3[@]}" MOCK_KIRO_V3_POLICY_WARN=1
+assert_rc "$RC" 0 "M-v3v：规则被跳过的运行照常完成——端到端「V3：Kiro 日志说跳过了权限规则 → 拒绝」断言会失败"
+
+# --- M-v3w：工具名单的核对只记日志 → 用到了 disclose_context 也照样评审（复审 M-3）---
+pkg=$(make_mutant m-v3w-tools-log 's/^    1) die_review "V3 用到了只读名单之外的工具/    1) log "V3 用到了只读名单之外的工具/')
+run_case m-v3w "$pkg" "${V3[@]}" MOCK_KIRO_V3_USED_TOOLS=read_file,disclose_context
+assert_rc "$RC" 0 "M-v3w：用到名单外工具的运行照常完成——端到端「V3：用到了名单外的工具 → 拒绝」断言会失败"
+
 report

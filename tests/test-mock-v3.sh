@@ -50,6 +50,16 @@ assert_contains "$(review_stream_v3_guard "$tmp/g.jsonl" codeup-reviewer-0123456
 v3_run MOCK_KIRO_ENGINE_REPORT=none > "$tmp/g.jsonl"
 rc=0; review_stream_engine "$tmp/g.jsonl" >/dev/null || rc=$?
 assert_eq "$rc" "1" "替身 V3：MOCK_KIRO_ENGINE_REPORT=none → runStarted 不带 engine"
+v3_run MOCK_KIRO_V3_POLICY_WARN=1 > "$tmp/g.jsonl"
+assert_eq "$(review_v3_policy_warnings "$H/.kiro/logs")" "1" "替身 V3：MOCK_KIRO_V3_POLICY_WARN=1 → Kiro 日志里多一行规则被跳过的警告"
+rm -rf "$H/.kiro/logs"; v3_run > "$tmp/g.jsonl"
+assert_eq "$(review_v3_policy_warnings "$H/.kiro/logs")" "0" "替身 V3：默认没有规则被跳过"
+rc=0; review_stream_v3_tools_outside "$tmp/g.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "0" "替身 V3：默认 usedTools 在名单内"
+v3_run MOCK_KIRO_V3_USED_TOOLS=read_file,disclose_context > "$tmp/g.jsonl"
+assert_eq "$(review_stream_v3_tools_outside "$tmp/g.jsonl" || true)" "disclose_context" "替身 V3：MOCK_KIRO_V3_USED_TOOLS 可改"
+v3_run MOCK_KIRO_V3_USED_TOOLS=none > "$tmp/g.jsonl"
+rc=0; review_stream_v3_tools "$tmp/g.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "1" "替身 V3：MOCK_KIRO_V3_USED_TOOLS=none → 没有 usedTools"
+assert_eq "$(review_stream_usage "$tmp/g.jsonl")" "credits=0.2609 context=3.8%" "替身 V3：改 usedTools 不影响用量"
 # V2 模式同一个开关同一个意思（复审 M-1 之前 V2 分支把 none 当成取值写进 engine："none" 是「不合形」，不是「缺字段」）
 v2_run() { # [MOCK_X=值…] → stdout 事件流
   mock_config_write "$C/home" MOCK_KIRO_VERSION=2.29.0 "$@"

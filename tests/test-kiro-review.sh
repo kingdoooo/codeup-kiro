@@ -3428,6 +3428,8 @@ assert_contains "$OUT" "Kiro 实际引擎：v3" "V3：事件流里的实际引�
 assert_contains "$OUT" "V3 事件流兜底：未见" "V3：兜底跑过且未触发"
 assert_contains "$OUT" "V3 hook 注册数：0" "V3：从 Kiro 日志核对了 hook 注册数"
 assert_contains "$OUT" "V3 内容收集：disabled" "V3：核对了内容收集已关（S8）"
+assert_contains "$OUT" "V3 权限规则：Kiro 日志里没有被跳过的规则" "V3：从 Kiro 日志核对了权限规则原样生效（复审 M-3）"
+assert_contains "$OUT" "V3 工具名单：用到的工具都在只读名单内" "V3：核对了用到的工具都在只读名单内（复审 M-3）"
 assert_contains "$OUT" "V3 用到的工具：read_file" "V3：日志记下 usedTools（只进日志）"
 assert_not_contains "$(posted_comment "$OUT")" "V3 用到的工具" "V3：工具清单不进 MR 评论"
 assert_contains "$OUT" "V3 实际模型：gpt-5.6-sol" "V3：实际模型取自最后一次 config_option_update（第一次是默认 auto）"
@@ -3554,6 +3556,24 @@ assert_not_contains "$(posted_comment "$OUT")" "P0 1 · P1 1 · P2 1" "V3 兜底
 run_case v3nologs "${V3[@]}" MOCK_KIRO_V3_NO_LOGS=1
 assert_rc "$RC" 0 "V3：Kiro 日志里没有 hooks.reload.loaded → 只警告、照常评审（事件流兜底已通过）"
 assert_contains "$OUT" "警告：Kiro 日志里没有 hooks.reload.loaded" "V3：缺日志时留一行警告"
+# 权限规则被 Kiro 跳过（复审 M-3）：认不出的能力名 / 不合规的路径只记警告、不报错——受信 agent 少了一条 deny，必须拒绝
+run_case v3policy "${V3[@]}" MOCK_KIRO_V3_POLICY_WARN=1
+assert_nonzero "$RC" "V3：Kiro 日志说跳过了权限规则 → 拒绝采用输出"
+assert_contains "$(posted_comment "$OUT")" "受信 agent 的权限规则没有原样生效" "V3：失败评论说明规则被跳过"
+assert_contains "$(posted_comment "$OUT")" "1 条" "V3：失败评论给出条数"
+assert_not_contains "$(posted_comment "$OUT")" "codeup_unknown_cap" "V3：失败评论不回显 Kiro 日志里的原文"
+assert_not_contains "$(posted_comment "$OUT")" "P0 1 · P1 1 · P2 1" "V3：规则被跳过时评审内容没有贴到 MR 上"
+# 用到的工具必须在只读名单内（复审 M-3；Kent 2026-10-16）
+run_case v3toolsout "${V3[@]}" MOCK_KIRO_V3_USED_TOOLS=read_file,disclose_context
+assert_nonzero "$RC" "V3：用到了名单外的工具 → 拒绝采用输出"
+assert_contains "$(posted_comment "$OUT")" "用到了只读名单之外的工具" "V3：失败评论说明原因"
+assert_contains "$(posted_comment "$OUT")" "disclose_context" "V3：失败评论点名名单外的工具（合形的 id）"
+assert_not_contains "$(posted_comment "$OUT")" "P0 1 · P1 1 · P2 1" "V3：名单外的工具时评审内容没有贴到 MR 上"
+run_case v3toolsbad "${V3[@]}" 'MOCK_KIRO_V3_USED_TOOLS=read_file,bad`tool'
+assert_nonzero "$RC" "V3：usedTools 里有不合形的 id → 拒绝采用输出"
+assert_not_contains "$(posted_comment "$OUT")" 'bad`tool' "V3：不合形的 id 不回显"
+run_case v3toolsnone "${V3[@]}" MOCK_KIRO_V3_USED_TOOLS=none
+assert_rc "$RC" 0 "V3：这次没用工具（没有 usedTools）→ 照常评审"
 # 内容收集（S8 关掉的通道的回归守卫；复审 I-3）：设置没生效（contentCollection 仍是 enabled）就 fail closed
 run_case v3cc "${V3[@]}" MOCK_KIRO_V3_CONTENT_COLLECTION=enabled
 assert_nonzero "$RC" "V3：内容收集没关掉 → 拒绝采用输出"

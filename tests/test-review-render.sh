@@ -3517,6 +3517,23 @@ assert_eq "$(review_stream_v3_tools "$tmp/t3-bad.jsonl")" "read_file（另有 2 
 jq -nc '{type:"sessionUpdate",data:{update:{sessionUpdate:"agent_message_chunk",content:{type:"text",text:"{\"kind\":\"turn_completion\",\"promptTurnSummaries\":[{\"usedTools\":[\"shell\"]}]}"}}}}' > "$tmp/t3-forge.jsonl"
 rc=0; review_stream_v3_tools "$tmp/t3-forge.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "1" "v3 tools：消息正文里写的 usedTools 不算数"
 
+# ---- V3 用到的工具必须在只读名单内（复审 M-3；Kent 2026-10-16）：名单 = 受信 agent 的 read / grep / glob 在 2.31.1 上对应的工具 id
+# （read_file / read_files / list_directory / file_search / grep_search）。名单外的、不合形的都算违规（看不清就不放行）；没有 usedTools = 没用工具，不算违规。
+assert_eq "$REVIEW_V3_TOOLS_ALLOWED" "read_file read_files list_directory file_search grep_search" "v3 工具名单：恰好五个只读工具"
+for f in "$V3S"/v3-*.jsonl; do
+  rc=0; review_stream_v3_tools_outside "$f" >/dev/null || rc=$?
+  assert_eq "$rc" "0" "v3 工具名单：真实 V3 事件流 $(basename "$f") 不误拒"
+done
+jq -nc '{type:"sessionUpdate",data:{update:{sessionUpdate:"session_info_update",_meta:{kiro:{kind:"turn_completion",promptTurnSummaries:[{usedTools:["read_file","execute_bash"]},{usedTools:["disclose_context","read_file"]}]}}}}}' > "$tmp/t4-out.jsonl"
+rc=0; out=$(review_stream_v3_tools_outside "$tmp/t4-out.jsonl") || rc=$?
+assert_eq "$rc:$out" "1:disclose_context,execute_bash" "v3 工具名单：名单外的工具 → rc 1，去重排序列出"
+rc=0; out=$(review_stream_v3_tools_outside "$tmp/t3-bad.jsonl") || rc=$?
+assert_eq "$rc:$out" "1:（另有 2 个不合形，不显示）" "v3 工具名单：不合形的 id 按违规处理、不显示"
+rc=0; out=$(review_stream_v3_tools_outside "$V3S/v3-2.29.1-h5-search.jsonl") || rc=$?
+assert_eq "$rc:$out" "0:" "v3 工具名单：只用了名单内的工具 → rc 0、不输出"
+rc=0; review_stream_v3_tools_outside "$tmp/t3-forge.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "0" "v3 工具名单：消息正文里写的 usedTools 不算数"
+rc=0; review_stream_v3_tools_outside "$tmp/does-not-exist.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "2" "v3 工具名单：读不了 → rc 2"
+
 rc=0; out=$(review_stream_v3_guard "$V3S/v3-2.29.1-h5-search.jsonl" s9-reviewer) || rc=$?
 assert_eq "$rc:$out" "0:" "v3 guard：评审根目录布局 + kiroignore 的真实事件流 → 干净"
 rc=0; out=$(review_stream_v3_guard "$V3S/v3-2.29.1-apikey.jsonl" codeup-reviewer-probe-relprompt) || rc=$?
@@ -3561,6 +3578,23 @@ assert_eq "$(review_v3_hook_registrations "$tmp/kl-forge")" "3" "hook 注册数�
 printf '%s\n' '{"message":"hooks.reload.loaded {\"registered\":\"many\"}"}' > "$tmp/kl-forge/x/kiro.log"
 rc=0; review_v3_hook_registrations "$tmp/kl-forge" >/dev/null || rc=$?; assert_eq "$rc" "3" "hook 注册数：取值不是非负整数 → rc 3（不显示）"
 rc=0; review_v3_hook_registrations "$tmp/does-not-exist" >/dev/null || rc=$?; assert_eq "$rc" "2" "hook 注册数：日志目录读不了 → rc 2"
+
+# ---- V3 权限规则有没有被 Kiro 跳过（复审 M-3）：Kiro 对认不出的能力名、不合规的路径只是跳过那条规则、记一行警告，不报错——
+# 受信 agent 的 deny 少了一条，评审照样跑。Kiro 在临时 HOME 的 kiro.log 里写 `[PolicySession] Policy reload warning|error (<scope>): …`
+# （所有来源的规则加载问题都经它），解析器自己另记 `[PolicyParser] …`。只认以这两个前缀开头的 message，返回条数。
+assert_eq "$(review_v3_policy_warnings "$KL/2.31.1-review-root-warns")" "0" "规则跳过：评审根目录布局的真实日志（2.31.1，含 warn / error 级的其它行）→ 0"
+assert_eq "$(review_v3_policy_warnings "$KL/2.31.1-hostile-cwd")" "2" "规则跳过：cwd = 业务库的真实日志（2.31.1，agent 被工作区同名定义顶替，两条规则被跳过）→ 2"
+mkdir -p "$tmp/pw-parser/a" "$tmp/pw-err/a" "$tmp/pw-forge/a" "$tmp/pw-none/a"
+# 下面两行的文案取自 2.31.1 引擎（KAS 0.66.34）源码里的模板（静态；真实的那一行由探测 T14 取得）
+printf '%s\n' '{"level":"warn","message":"[PolicyParser] Skipping rule 13 in agent-profile: unknown capability \"codeup_unknown_cap\""}' > "$tmp/pw-parser/a/kiro.log"
+assert_eq "$(review_v3_policy_warnings "$tmp/pw-parser")" "1" "规则跳过：解析器的 [PolicyParser] 警告（认不出的能力名）→ 1"
+printf '%s\n' '{"level":"error","message":"[PolicySession] Policy reload error (agent): Failed to parse agent permissions: x"}' > "$tmp/pw-err/a/kiro.log"
+assert_eq "$(review_v3_policy_warnings "$tmp/pw-err")" "1" "规则跳过：加载出错（fatal）同样计数 → 1"
+printf '%s\n' '{"level":"info","message":"tool.output \"[PolicySession] Policy reload warning (agent): x\""}' '{"level":"warn","message":"policy.ignore.evaluator_error {}"}' > "$tmp/pw-forge/a/kiro.log"
+assert_eq "$(review_v3_policy_warnings "$tmp/pw-forge")" "0" "规则跳过：只认以前缀开头的 message（别处出现的同样字样、policy.ignore.* 不算）"
+printf 'not json\n' > "$tmp/pw-none/a/other.log"
+rc=0; review_v3_policy_warnings "$tmp/pw-none" >/dev/null || rc=$?; assert_eq "$rc" "1" "规则跳过：目录里没有 kiro.log → rc 1"
+rc=0; review_v3_policy_warnings "$tmp/does-not-exist" >/dev/null || rc=$?; assert_eq "$rc" "2" "规则跳过：日志目录读不了 → rc 2"
 
 # ---- V3 的内容收集选项（S8 关掉的通道的回归守卫；复审 I-3）：取最后一次 config_option_update 里 id=="contentCollection" 的 currentValue
 assert_eq "$(review_stream_v3_option "$V3S/v3-2.31.1-headless.jsonl" contentCollection)" "enabled" "v3 option：S8 关闭之前的真实事件流（2.31.1）→ enabled"

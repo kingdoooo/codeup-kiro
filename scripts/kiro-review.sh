@@ -8,7 +8,8 @@
 # 第 5.5 步对业务库工作树里 AGENTS.md/lsp.json/.kiro/符号链接 的删除对这些根目录层面的面是**第二道**（v3 副本里嵌套的 AGENTS.md 靠的是它）。
 # 引擎（ADR-0008，取代 ADR-0004）：默认 v3，KIRO_ENGINE=v2 显式回退。v2 在 $WORK/cwd（空目录）下运行、业务库只在 allowedPaths 里；
 # v3 的搜索只覆盖工作区根目录，所以在**评审根目录** $WORK/review-root 下运行（里面只有业务库副本 repo/），HOME 指向本次运行的临时目录
-# $WORK/kiro-home（agent、设置、kiroignore 都在里面），事件流再过三条兜底（steering / hook / agent 来源）。
+# $WORK/kiro-home（agent、设置、kiroignore 都在里面），跑完核对实际引擎，再过兜底（steering / hook 执行与注册 / agent 来源）与三项核对
+# （内容收集已关、权限规则没有被跳过、用到的工具都在只读名单内），任一不符就失败评论。
 # 输出契约：Kiro 以 --output-format stream-json 输出事件流，评审报告是 runFinished.data.finalText 里
 # 由 <<<KIRO_REVIEW_JSON>>> 包裹的一段 JSON；汇总评论由 scripts/lib/review-render.sh 渲染。
 # 汇总评论生命周期：每评审员每 MR 至多一条（spec I4）。发评论前先查 MR 的全局评论，按
@@ -1797,6 +1798,16 @@ if [[ "$KIRO_ENGINE" == v3 ]]; then
     *) log "警告：Kiro 日志里没有 hooks.reload.loaded（${KIRO_RUN_HOME}/.kiro/logs；无法从日志确认 hook 注册数，事件流兜底已通过）" ;;
   esac
   unset _hr _hr_rc
+  # 权限规则有没有被 Kiro 跳过（复审 M-3）：Kiro 对认不出的能力名、不合规的路径只是跳过那条规则、在临时 HOME 的 kiro.log 里记一行
+  # `[PolicySession] Policy reload warning|error …` / `[PolicyParser] …`，不报错——受信 agent 少了一条 deny，评审照样跑。临时 HOME 里
+  # 除了受信 agent 没有别的规则来源，出现任何一条都 fail closed；原文含路径，不进评论，只给条数。日志里没有 kiro.log 只警告（同 hook 那条）。
+  _pw_rc=0; _pw=$(review_v3_policy_warnings "$KIRO_RUN_HOME/.kiro/logs") || _pw_rc=$?
+  case "$_pw_rc" in
+    0) [[ "$_pw" == 0 ]] || die_review "受信 agent 的权限规则没有原样生效，拒绝采用这次评审的输出（ADR-0008：Kiro 日志里有 ${_pw} 条「跳过规则 / 规则加载出错」的记录）"
+       log "V3 权限规则：Kiro 日志里没有被跳过的规则" ;;
+    *) log "警告：Kiro 日志里没有 kiro.log（${KIRO_RUN_HOME}/.kiro/logs；无法从日志确认权限规则原样生效）" ;;
+  esac
+  unset _pw _pw_rc
   # 内容收集（S8 关掉的通道的回归守卫；复审 I-3）：临时 HOME 里写了 codeWhisperer.shareCodeWhispererContentWithAWS false，
   # Kiro 在 config_option_update 里报 contentCollection 的当前值。不是 disabled 就 fail closed——设置没生效时数据通道比 Kent 接受的多（W9）。
   # 事件流里没有这个选项（以后的版本改了形态）只警告。
@@ -1823,9 +1834,18 @@ if [[ "$KIRO_ENGINE" == v3 ]]; then
     *) log "警告：V3 事件流里取不到实际模型（建议性检查，不阻断评审）" ;;
   esac
   unset _m3 _m3_rc
-  # 用到的工具只进日志（spec E2）：看得出评审员实际搜过、读过哪些；取值是 Kiro 写的结构，不合形的 id 不显示、只计数。
+  # 用到的工具写进日志（spec E2）：看得出评审员实际搜过、读过哪些；取值是 Kiro 写的结构，不合形的 id 不显示、只计数。
   if _t3=$(review_stream_v3_tools "$WORK/stream.jsonl"); then log "V3 用到的工具：${_t3}"; else log "V3 用到的工具：事件流里没有记录"; fi
   unset _t3
+  # 并且必须都在只读名单内（复审 M-3；Kent 2026-10-16，超出 spec E2「只进日志」）：名单外的工具出现在 usedTools 里，说明权限之外还有
+  # 别的路让模型调到了工具（skill 类的 disclose_context 不看 tools），无论那次调用被没被拒都不采用输出；不合形的 id 同样拒绝、不显示。
+  _to_rc=0; _to=$(review_stream_v3_tools_outside "$WORK/stream.jsonl") || _to_rc=$?
+  case "$_to_rc" in
+    0) log "V3 工具名单：用到的工具都在只读名单内（${REVIEW_V3_TOOLS_ALLOWED}）" ;;
+    1) die_review "V3 用到了只读名单之外的工具，拒绝采用这次评审的输出（ADR-0008：受信 agent 只该用 ${REVIEW_V3_TOOLS_ALLOWED// / / }）" "名单外：${_to}" ;;
+    *) die_review "V3 用到的工具核对无法完成（事件流读不了或解析失败），拒绝采用这次评审的输出（ADR-0008）" ;;
+  esac
+  unset _to _to_rc
 fi
 
 # --- 6.1 成本与上下文可观测指标写流水线日志（spec §4.1：metadata.meteringUsage 作为成本指标）---
