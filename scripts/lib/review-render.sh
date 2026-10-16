@@ -378,8 +378,9 @@ review_stream_model_switch() {
 review_stream_engine() {
   local f="${1-}" e
   [[ -r "$f" ]] || return 2
-  e=$(jq -R -n -r '[inputs | fromjson? | select(type == "object" and .type == "runStarted") | (.data | objects | .engine) // null]
-                   | (first // null) | if . == null then "-" elif type == "string" then "=" + . else "?" end' "$f" 2>/dev/null) || return 2
+  # 用 has("engine") 而不是 `.engine // null`：`//` 连 false 一起吞掉，engine:false 会被当成「缺字段」（复审 2 M-1）
+  e=$(jq -R -n -r '[inputs | fromjson? | select(type == "object" and .type == "runStarted") | (.data | objects | if has("engine") then .engine else null end)]
+                   | (if length == 0 then null else first end) | if . == null then "-" elif type == "string" then "=" + . else "?" end' "$f" 2>/dev/null) || return 2
   [[ "$e" != "-" ]] || return 1
   [[ "$e" =~ ^=v[0-9]{1,2}$ ]] || return 3
   printf '%s' "${e#=}"
@@ -429,20 +430,29 @@ REVIEW_V3_TOOLS_ALLOWED="read_file read_files list_directory file_search grep_se
 # 用法：review_stream_v3_tools_outside <stream.jsonl> → rc 0 = 都在名单内（或没有 usedTools），不输出；
 #   rc 1 = 有名单外或不合形的，stdout 名单外的合形 id（去重排序、逗号分隔）与「（另有 N 个不合形，不显示）」；rc 2 = 读不了 / 解析失败
 review_stream_v3_tools_outside() {
-  local f="${1-}" all out bad
+  local f="${1-}" res
   [[ -r "$f" ]] || return 2
-  all=$(jq -R -n -r --arg allowed "$REVIEW_V3_TOOLS_ALLOWED" '($allowed | split(" ")) as $ok
-                      | [inputs | fromjson? | select(type == "object" and .type == "sessionUpdate")
-                      | .data | objects | .update | objects | select(.sessionUpdate == "session_info_update")
-                      | ._meta | objects | .kiro | objects | select(.kind == "turn_completion")
-                      | .promptTurnSummaries | arrays | .[] | objects | .usedTools | arrays | .[]
-                      | if type == "string" then . else "<不是字符串>" end
-                      | select(. as $t | $ok | index($t) | not)] | unique | .[]' "$f" 2>/dev/null) || return 2
-  [[ -n "$all" ]] || return 0
-  out=$(printf '%s\n' "$all" | LC_ALL=C grep -E '^[A-Za-z0-9_.-]{1,64}$' | paste -sd, - || true)
-  bad=$(printf '%s\n' "$all" | LC_ALL=C grep -cvE '^[A-Za-z0-9_.-]{1,64}$' || true)
-  printf '%s' "$out"
-  if [[ "$bad" != 0 ]]; then printf '（另有 %s 个不合形，不显示）' "$bad"; fi
+  # 判定整个在 jq 里做（复审 2 M-1）：按行在 shell 里判断时，空串 id 打成空行、被 $(...) 吃掉，就漏判了。
+  # 每个元素归成「合形的 id」或 null（不合形：不是字符串、空串、含白名单外的字符）；usedTools / promptTurnSummaries 存在但不是数组、
+  # summary 不是对象，也算一个不合形。输出一行 JSON：{"out": [名单外的合形 id，去重排序], "bad": 不合形的个数}
+  res=$(jq -R -n -c --arg allowed "$REVIEW_V3_TOOLS_ALLOWED" '($allowed | split(" ")) as $ok
+          | def idok: if type == "string" and test("\\A[A-Za-z0-9_.-]{1,64}\\z") then . else null end;
+          [inputs | fromjson? | select(type == "object" and .type == "sessionUpdate")
+           | .data | objects | .update | objects | select(.sessionUpdate == "session_info_update")
+           | ._meta | objects | .kiro | objects | select(.kind == "turn_completion")
+           | if has("promptTurnSummaries") | not then empty
+             elif (.promptTurnSummaries | type) != "array" then null
+             else .promptTurnSummaries[]
+                  | if type != "object" then null
+                    elif has("usedTools") | not then empty
+                    elif (.usedTools | type) != "array" then null
+                    else .usedTools[] | idok end
+             end] as $all
+          | {out: ([$all[] | strings | select(. as $t | $ok | index($t) | not)] | unique), bad: ([$all[] | select(. == null)] | length)}' "$f" 2>/dev/null) || return 2
+  [[ "$res" == '{"out":[],"bad":0}' ]] && return 0
+  [[ "$res" =~ ^\{\"out\":\[.*\],\"bad\":[0-9]+\}$ ]] || return 2
+  printf '%s' "$(jq -r '.out | join(",")' <<< "$res")"
+  if [[ "$(jq -r '.bad' <<< "$res")" != 0 ]]; then printf '（另有 %s 个不合形，不显示）' "$(jq -r '.bad' <<< "$res")"; fi
   return 1
 }
 

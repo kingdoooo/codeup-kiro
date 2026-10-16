@@ -3585,6 +3585,8 @@ assert_not_contains "$(posted_comment "$OUT")" "P0 1 · P1 1 · P2 1" "V3：名�
 run_case v3toolsbad "${V3[@]}" 'MOCK_KIRO_V3_USED_TOOLS=read_file,bad`tool'
 assert_nonzero "$RC" "V3：usedTools 里有不合形的 id → 拒绝采用输出"
 assert_not_contains "$(posted_comment "$OUT")" 'bad`tool' "V3：不合形的 id 不回显"
+run_case v3toolsempty "${V3[@]}" MOCK_KIRO_V3_USED_TOOLS=read_file,
+assert_nonzero "$RC" "V3：usedTools 里有空串 id → 拒绝采用输出（复审 2 M-1：空串曾被当成「都在名单内」）"
 run_case v3toolsnone "${V3[@]}" MOCK_KIRO_V3_USED_TOOLS=none
 assert_rc "$RC" 0 "V3：这次没用工具（没有 usedTools）→ 照常评审"
 # 内容收集（S8 关掉的通道的回归守卫；复审 I-3）：设置没生效（contentCollection 仍是 enabled）就 fail closed

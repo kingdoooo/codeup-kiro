@@ -3491,6 +3491,8 @@ for eng_v in v3.1 classic V3 'v3 ' ''; do
 done
 printf '{"type":"runStarted","data":{"payloadSchema":"acp"}}\n' > "$tmp/eng-nofield.jsonl"
 rc=0; review_stream_engine "$tmp/eng-nofield.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "1" "engine：runStarted 没有 engine 字段 → rc 1（缺字段）"
+printf '{"type":"runStarted","data":{"engine":false}}\n' > "$tmp/eng-false.jsonl"
+rc=0; review_stream_engine "$tmp/eng-false.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "3" "engine：engine 为 false → rc 3（有字段但不合形，不是「缺」；复审 2 M-1）"
 printf '{"type":"runStarted","data":{"engine":null}}\n' > "$tmp/eng-null.jsonl"
 rc=0; review_stream_engine "$tmp/eng-null.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "1" "engine：engine 为 null → rc 1（按缺字段）"
 printf '{"type":"runFinished","data":{}}\n' > "$tmp/eng-none.jsonl"
@@ -3533,6 +3535,19 @@ rc=0; out=$(review_stream_v3_tools_outside "$V3S/v3-2.29.1-h5-search.jsonl") || 
 assert_eq "$rc:$out" "0:" "v3 工具名单：只用了名单内的工具 → rc 0、不输出"
 rc=0; review_stream_v3_tools_outside "$tmp/t3-forge.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "0" "v3 工具名单：消息正文里写的 usedTools 不算数"
 rc=0; review_stream_v3_tools_outside "$tmp/does-not-exist.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "2" "v3 工具名单：读不了 → rc 2"
+# 形状不对的一律按违规（复审 2 M-1）：空串 / 只含换行的 id、usedTools 不是数组、promptTurnSummaries 不是数组、summary 不是对象
+tc() { jq -nc --argjson p "$1" '{type:"sessionUpdate",data:{update:{sessionUpdate:"session_info_update",_meta:{kiro:{kind:"turn_completion",promptTurnSummaries:$p}}}}}'; }
+for shape in '[{"usedTools":[""]}]' '[{"usedTools":["read_file",""]}]' '[{"usedTools":["\n"]}]' '[{"usedTools":"execute_bash"}]' \
+             '[{"usedTools":{"a":"read_file"}}]' '{"usedTools":["execute_bash"]}' '["read_file"]' '[{"usedTools":[null]}]'; do
+  tc "$shape" > "$tmp/t5.jsonl"
+  rc=0; out=$(review_stream_v3_tools_outside "$tmp/t5.jsonl") || rc=$?
+  assert_eq "$rc" "1" "v3 工具名单：形状不对 ${shape} → rc 1（不合形按违规）"
+  assert_contains "$out" "不合形" "v3 工具名单：${shape} 说明是不合形"
+done
+tc '[{"usedTools":["read_file"]},{"usage":0.1}]' > "$tmp/t5ok.jsonl"
+rc=0; review_stream_v3_tools_outside "$tmp/t5ok.jsonl" >/dev/null || rc=$?; assert_eq "$rc" "0" "v3 工具名单：有的 summary 没有 usedTools 不算违规"
+tc '[{"usedTools":["read_file","bad tool"]}]' > "$tmp/t5mix.jsonl"
+assert_eq "$(review_stream_v3_tools_outside "$tmp/t5mix.jsonl" || true)" "（另有 1 个不合形，不显示）" "v3 工具名单：只有不合形的时只给计数"
 
 rc=0; out=$(review_stream_v3_guard "$V3S/v3-2.29.1-h5-search.jsonl" s9-reviewer) || rc=$?
 assert_eq "$rc:$out" "0:" "v3 guard：评审根目录布局 + kiroignore 的真实事件流 → 干净"
