@@ -2482,4 +2482,10 @@ assert_eq "$([[ "$(basename "$m_v3y_t")" == kiro-tmp.* && -d "$m_v3y_t" ]] && ec
 [[ "$(basename "$m_v3y_t")" == kiro-tmp.* ]] && rm -rf "$m_v3y_t"
 unset m_v3y_t
 
+# --- M-v3z：退出清理的目标改回 trap 之后才初始化 → 环境里继承来的 KIRO_RUN_TMP 被 rm -rf（复审 2 I-1）---
+pkg=$(make_mutant m-v3z-late-init '/^KIRO_RUN_HOME=""; KIRO_RUN_TMP=""   # 退出清理的目标/d')
+mkdir -p "$tmp/m-v3z-sentinel"; printf 'keep\n' > "$tmp/m-v3z-sentinel/keep.txt"
+run_case m-v3z "$pkg" KIRO_INSTALL_PROFILE= "KIRO_RUN_TMP=$tmp/m-v3z-sentinel"
+assert_eq "$(cat "$tmp/m-v3z-sentinel/keep.txt" 2>/dev/null || echo gone)" "gone" "M-v3z：继承来的 KIRO_RUN_TMP 指的目录被删了——端到端「i1early：…原样还在」断言会失败"
+
 report

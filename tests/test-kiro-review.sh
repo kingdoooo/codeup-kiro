@@ -3643,6 +3643,17 @@ assert_contains "$(posted_comment "$OUT")" "V3 评审根目录准备失败" "V3 
 assert_eq "$(call_count "$MD/calls" chat)" "0" "V3 解包到一半失败：Kiro 未启动"
 assert_eq "$(v3_leftovers)" "0" "V3 解包到一半失败：临时 HOME 与评审根目录（连同半个副本）已删除"
 assert_eq "$(v3_tmp_leftovers)" "0" "V3 解包到一半失败：本次运行专用的 TMPDIR 已删除"
+# 退出清理只删本次建的东西（复审 2 I-1）：环境里继承来的同名变量指着别的目录时，早退与正常结束都不能删它（两种引擎）
+for i1_case in "i1early:KIRO_INSTALL_PROFILE=" "i1v2:" "i1v3:v3"; do
+  i1_n="${i1_case%%:*}" i1_x="${i1_case#*:}"
+  mkdir -p "$tmp/sentinel-$i1_n"; printf 'keep\n' > "$tmp/sentinel-$i1_n/keep.txt"
+  case "$i1_x" in
+    v3) run_case "$i1_n" "${V3[@]}" "KIRO_RUN_TMP=$tmp/sentinel-$i1_n" "KIRO_RUN_HOME=$tmp/sentinel-$i1_n" ;;
+    "") run_case "$i1_n" "KIRO_RUN_TMP=$tmp/sentinel-$i1_n" ;;
+    *) run_case "$i1_n" "$i1_x" "KIRO_RUN_TMP=$tmp/sentinel-$i1_n" ;;
+  esac
+  assert_eq "$(cat "$tmp/sentinel-$i1_n/keep.txt" 2>/dev/null)" "keep" "${i1_n}：环境里的 KIRO_RUN_TMP 指的目录原样还在（退出清理只删本次建的）"
+done
 # 文件名带空格、以 - 开头、非 ASCII：副本条目数与（已隔离的）业务库一致
 tweak_odd_names() { printf 'x\n' > 'a b.py'; printf 'y\n' > ./-dash.py; printf 'z\n' > 'ünï.py'; git add -A && git commit -qm "odd names"; }
 CASE_TWEAK=tweak_odd_names run_case v3odd "${V3[@]}"

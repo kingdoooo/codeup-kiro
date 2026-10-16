@@ -1007,6 +1007,7 @@ MR_LOCATED=1
 WORK=$(mktemp -d)
 # 退出清理：工作目录 + **本次**安装的 agent 文件——只删精确路径，不 glob（同一 HOME 下并发的别的运行有各自的文件；CodeX 2026-09-09 P1-2）
 INSTALLED_AGENT=""
+KIRO_RUN_HOME=""; KIRO_RUN_TMP=""   # 退出清理的目标都在装 trap 之前置空：环境里继承来的同名变量不能被 rm -rf（复审 2 I-1）
 # kiro-cli 2.21.1 加载 agent 时会在旁边写 <文件>.backup 与 <文件>.backup.<时间戳>（本机实测），一并删——glob 只带本次文件的完整
 # 文件名前缀（含随机串），不会碰到别的运行的文件。
 _review_cleanup() {

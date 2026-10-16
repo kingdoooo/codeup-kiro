@@ -154,6 +154,7 @@ echo "[probe] 输出目录 $KEEP" >&2
 source "$PKG_ROOT/scripts/lib/kiro-agent.sh"
 # v3 的兜底判定（T10–T13）用生产同一个函数 review_stream_v3_guard——规则只有一份
 source "$PKG_ROOT/scripts/lib/review-render.sh"
+RUN_TMP=""   # cleanup 会删它：先置空，环境里继承来的同名变量不能被 rm -rf（复审 2 I-1；v2 探测从不建它）
 WORK=$(mktemp -d)
 if [[ "$PROBE_ENGINE" == v3 ]]; then
   # 评审根目录布局（ADR-0008 / H5）：Kiro 的 cwd 是 $WORK/root，业务库在其下的 repo/；HOME 是本次探测的临时目录

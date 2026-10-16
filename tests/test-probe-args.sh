@@ -65,6 +65,11 @@ assert_contains "$err" "版本号解析不出" "版本未知：报错点名"
 assert_not_contains "$err" "全部 PASS" "版本未知：绝不打「全部 PASS」"
 assert_not_contains "$err" "走主方案" "版本未知：绝不打「走主方案」"
 assert_eq "$([[ -e "$tmp/calls" ]] && echo called || echo none)" "none" "版本未知：零次 kiro-cli chat 调用（没烧额度）"
+# 退出清理只删本次建的东西（复审 2 I-1）：v2 探测从不建 Kiro 临时目录，环境里继承来的 RUN_TMP 指的目录不能被删
+mkdir -p "$tmp/runtmp-sentinel"; printf 'keep\n' > "$tmp/runtmp-sentinel/keep.txt"
+rc=0; env PATH="$tmp/fakebin:$PATH" HOME="$tmp/home" RUN_TMP="$tmp/runtmp-sentinel" PROBE_KEEP_DIR="$tmp/keep-runtmp" bash "$PROBE" >/dev/null 2>&1 || rc=$?
+assert_eq "$rc" "5" "继承 RUN_TMP 的 v2 探测：照常以 5 退出（版本未知）"
+assert_eq "$(cat "$tmp/runtmp-sentinel/keep.txt" 2>/dev/null)" "keep" "继承 RUN_TMP 的 v2 探测：那个目录原样还在"
 # 版本能解析时不该被这条挡住（正控：换一个报合法版本的假 kiro-cli，就会走到后面的环境准备而不是「版本未知」）
 mkdir -p "$tmp/fakebin2"
 cat > "$tmp/fakebin2/kiro-cli" <<'SH'
