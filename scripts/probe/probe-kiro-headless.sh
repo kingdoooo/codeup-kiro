@@ -58,6 +58,8 @@ PROBE_FAIL=0; PROBE_INCONCLUSIVE=0
 source "$PKG_ROOT/scripts/lib/kiro-agent.sh"
 WORK=$(mktemp -d)
 RUN_HOME=""; RUN_TMP=""
+# 下面的 cleanup trap 要等 agent 目录、设置这些都定下来才装；在那之前退出也得删掉 $WORK 与本次的 Kiro 临时目录（复审 2 M-2）
+trap 'rm -rf "$WORK"; [[ -n "${RUN_TMP:-}" ]] && rm -rf "$RUN_TMP"' EXIT
 if [[ "$KIRO_ENGINE" == v3 ]]; then
   RUN_HOME="$WORK/kiro-home"; mkdir -p "$RUN_HOME"
   # Kiro 的 TMPDIR 与生产同一个函数（W7）：执行器 TMPDIR 下本次专用的 kiro-tmp.<随机>，cleanup 里删
