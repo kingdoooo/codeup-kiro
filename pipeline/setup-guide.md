@@ -475,7 +475,7 @@ V3 的运行方式与 V2 不同（第 12 节）：Kiro 在本次工作目录下�
    业务库 checkout 里——第一段路径必须与第 1 项第二条许可路径（`…/chunks`）同一个父目录，第二段必须等于第 1 项的第一条许可路径。
    v3（默认）下这一行是「Kiro 运行目录：<路径>/review-root（V3 评审根目录：…；HOME = 临时目录 <路径>/kiro-home）」，两段路径与 `…/chunks` 同一个父目录。
 4. 引擎：日志出现「Kiro 引擎：v3（--agent-engine v3；…）」（`KIRO_ENGINE=v2` 时是「Kiro 引擎：v2（--agent-engine v2；…）」），
-   评审跑完还有一行「Kiro 实际引擎：<同一个引擎>」；v3 另有「V3 评审根目录：已把业务库复制到 …」「V3 事件流兜底：未见 …」「V3 hook 注册数：0」与「V3 内容收集：disabled」。原因见第 12 节。
+   评审跑完还有一行「Kiro 实际引擎：<同一个引擎>」；v3 另有「V3 评审根目录：已把业务库复制到 …」「V3 事件流兜底：未见 …」「V3 hook 注册数：0」「V3 内容收集：disabled」「V3 权限规则：Kiro 日志里没有被跳过的规则」与「V3 工具名单：用到的工具都在只读名单内（…）」。原因见第 12 节。
 5. 调用行**没有** `--trust-tools`、更没有 `--trust-all-tools`（第 12 节）：免确认只来自受信 agent 的
    `allowedPaths`。核对方式：日志「Kiro 进程环境许可清单（只透传这些变量）：…」那一行列出的变量名必须是**固定名单**
    （完整名字列表只写在第 12 节「Kiro 进程环境只含固定名单变量」那一行，与代码 `KIRO_ENV_FIXED_NAMES` 由测试比对）的子集——
@@ -730,6 +730,8 @@ V3 的运行方式与 V2 不同（第 12 节）：Kiro 在本次工作目录下�
 | 评论说「kiro-cli 版本 X 未经 P1-15 探测…拒绝评审」或「版本号无法解析」 | 版本门（2026-09-10 起）：执行器上的 kiro-cli 不在 `KIRO_TESTED_TARGETS` 名单内，或 `--version` 解析不出版本号。云托管执行器 `curl \| bash` 装的是 latest，Kiro 发新版后就会这样；读取边界（符号链接 / `../` 是否先解析再比对 allowedPaths）只在名单内版本上实测过，不放行未验证版本。处置：生产执行器预装名单内版本（第 7 节）；确需在新版本上跑，先按 `scripts/probe/README.md`「升级 kiro-cli 之后」探测，通过后把元组加进流水线变量 `KIRO_TESTED_TARGETS_EXTRA`（只追加，不必改集成包源码）；**没跑探测**的临时放行才用 `KIRO_ACK_UNTESTED_TARGET=<与本次「平台:版本:引擎」逐字相同>`（汇总带醒目 notice，探测通过后删掉）。确认值与本次组合不一致、或版本 / 平台确定不了，一律拒绝。旧的 `KIRO_ACK_UNTESTED_VERSION` 已废弃，设了会直接拒绝运行 |
 | 评论说「KIRO_ENGINE 不合法」 | 流水线变量 `KIRO_ENGINE` 只认整串 `v2` / `v3`（不设 = v3）；大小写、首尾空白都算不合法。改正后重跑（第 6.2 节） |
 | 评论说「该版本在已探测名单里只有 v2（或 v3）引擎的组合」 | 引擎与安装包没配套：v2 只在 2.29.0 上验证过，v3 从 2.31.1 起。按第 6.2 节的表同时改 `KIRO_ENGINE`、OSS 对象与两个摘要 |
+| 评论说「受信 agent 的权限规则没有原样生效」 | Kiro 跳过了受信 agent 的某条权限规则（认不出的能力名、不合规的路径——新版本改了能力名最常见）。不要放行：回到已探测的组合，在新版本上重跑探测（T14 正控会报出这类问题） |
+| 评论说「V3 用到了只读名单之外的工具」 | 模型调到了 read / grep / glob 之外的工具（评论点名是哪个）。不要放行：多半是 Kiro 新版本改了工具集，回到已探测的组合并重跑探测 |
 | 评论说「Kiro 实际运行的引擎（…）与 KIRO_ENGINE=… 不一致」「无法确认 Kiro 用的是 v3 引擎」或「runStarted.data.engine 的取值不合形」 | kiro-cli 没按 `--agent-engine` 运行（新版本改了行为）。不要放行：回到已探测的组合，并在新版本上重跑探测（`scripts/probe/README.md`） |
 | 评论说「V3 的内容收集没有关闭」 | 临时 HOME 里写的 `codeWhisperer.shareCodeWhispererContentWithAWS false` 没生效（kiro-cli 改了设置键、或这次写设置失败）。评审内容没有贴出。不要放行：回到已探测的组合，在新版本上重跑 S8 与探测（ADR-0008） |
 | 评论说「V3 事件流兜底触发」 | V3 加载了 steering / 上下文文件、执行了或注册了 hook，或用的不是本次安装的 agent——业务库或执行器环境在改变受信 agent，评审内容没有贴出。查执行器 HOME 与 kiro-cli 版本；确认是 Kiro 的新行为后先切 `KIRO_ENGINE=v2` 并报告，不要放宽兜底 |
@@ -941,8 +943,12 @@ v1（`main` 分支 Phase 1 合入之前的最后一个提交 `6e9c0d0`）的评�
 - **V3 的事件流兜底（第三道）。** 出现 `steering_inclusion`、非空的 `contextFiles`、`hook_update`，或最后一次 `config_option_update`
   里用的 agent 不是本次安装的、来源不是 `global`，或临时 HOME 里 Kiro 自己的日志（`~/.kiro/logs/*/kiro.log`）报 `hooks.reload.loaded` 注册了 hook
   （注册了就拦，不等它触发），任一命中就回写失败评论、不贴评审内容。只认 Kiro 写的结构，模型文本伪造不出。
-  同一处还核对 S8 关掉的内容收集：`config_option_update` 里的 `contentCollection` 不是 `disabled` 就回写失败评论（设置没生效时，数据通道比 ADR-0008 接受的多）。
-  日志里没有 `hooks.reload.loaded`、事件流里没有 `contentCollection`（以后的版本改了形态）只留一行警告。
+  同一处还有三项核对，不符同样回写失败评论：S8 关掉的内容收集——`config_option_update` 里的 `contentCollection` 不是 `disabled`（设置没生效时，数据通道比 ADR-0008 接受的多）；
+  权限规则被跳过——Kiro 对认不出的能力名、不合规的路径只跳过那条规则、在同一份日志里记 `[PolicySession] Policy reload warning`，不报错，受信 agent 就少了一条 deny；
+  用到的工具不在只读名单内——事件流 `usedTools` 只许 `read_file` / `read_files` / `list_directory` / `file_search` / `grep_search`。
+  受信 agent 对 fs_read 之外的全部能力（写、shell、网络，以及 subagent / skill / power / context / diagnostics / mcp / sandbox_network）都是整体 deny：
+  skill 类工具 `disclose_context`（按需加载 skill 与 `inclusion: auto` 的 steering）不看 `tools`、Kiro 总是把它加进工具集。
+  日志里没有 `hooks.reload.loaded` 或没有 `kiro.log`、事件流里没有 `contentCollection`（以后的版本改了形态）只留一行警告。
 - **`chat.disableInheritingDefaultResources=true` 的作用与局限**：让 Kiro 不继承工作区的默认资源
   （实测验证过的是工作区 `AGENTS.md`）。局限有三点：① **只对 v2 引擎有效**（v3 不写它：v3 的对应措施是上面的评审根目录、临时 HOME 与 kiroignore）；② 它写在执行账号
   `$HOME` 的**全局**设置里且不回滚（常驻执行器注意事项见第 7 节第 5 条）；

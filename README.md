@@ -139,7 +139,7 @@ Flow 档位只做 Kiro 代码评审。
 | `prompts/review-agent-prompt.md` | agent 提示词（稳定部分）：只读角色、不受信输入、P0/P1/P2 判定、掩码规则、输出契约 |
 | `prompts/review-prompt.md` | 运行时提示词（每次不同）：MR 元信息与本次契约标记随机串 `{{REVIEW_NONCE}}` |
 | `kiro/agent-codeup-reviewer.json` | 只读 custom agent 定义：工具仅 read/grep/glob，`allowedPaths` 许可清单（两个运行时路径占位符，安装时注入），拒绝清单 V2/V3 双写，不加载工作区 MCP/Powers |
-| `kiro/agent-codeup-reviewer.v3.json` | V3 受信 agent 定义：只有 `permissions.rules`（一条 `fs_read` allow、一条与 V2 同一份的 `fs_read` deny、写 / shell / 网络整体 deny），prompt 用相对 `file://`；上一行那份 V2 定义冻结（ADR-0008） |
+| `kiro/agent-codeup-reviewer.v3.json` | V3 受信 agent 定义：只有 `permissions.rules`（一条 `fs_read` allow、一条与 V2 同一份的 `fs_read` deny、写 / shell / 网络以及其余全部能力整体 deny），prompt 用相对 `file://`；上一行那份 V2 定义冻结（ADR-0008） |
 | `pipeline/flow-pipeline.yaml` | 云效 Flow 流水线参考配置：双代码源 + MR 触发事件 + 评审任务 + 变量清单 |
 | `pipeline/setup-guide.md` | 部署指南：前提、流水线搭建、开关矩阵、验收清单、故障排查、安全隔离说明 |
 | `tests/` | 测试套件：DRY_RUN + mock kiro-cli + golden file + 变异测试，全程无网络依赖 |

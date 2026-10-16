@@ -14,7 +14,7 @@ Kiro 2026-10-09 公告 CLI V3 在 10 月底随 3.0 成为默认引擎、Classic 
 - **V3 在评审根目录里运行**：V3 的 grep / 文件搜索只覆盖工作区根目录（cwd），空 cwd 下什么也搜不到；cwd 设成业务库时，仓库的 `.kiro/hooks` 会在执行器上**被执行**、同名工作区 agent 会**顶替**受信 agent（spike S9 c05 实测，2.29.1；2.31.1 上探测 T13 复现：steering 被加载、agent 被顶替、业务库的 hook 被注册——`hooks.reload.loaded registered=1`，事件流里没有 `hook_update`，所以兜底另读 Kiro 日志里的注册数）。所以 cwd 是集成包每次新建的 `$WORK/review-root`，第 5.5 步之后把已隔离的业务库复制到其下 `repo/`（不含 `.git`）；运行目录本身的根 `AGENTS.md`、`.kiro/steering`、`.kiro/hooks`、`.kiro/agents` 都不在业务库手里（S9 c10 / c12 实测：搜索与读取可用、这些面都不加载）。
 - **V3 用临时 HOME**：`$WORK/kiro-home`，五处 kiro-cli 调用只看得见它（`HOME` 与四个 `XDG_*` 都换掉）；agent、设置（关掉 code intelligence、knowledge，以及 S8 判定能关的遥测与内容收集）、kiroignore（`AGENTS.md`）都只在里面，跑完随 `$WORK` 删除；
   V3 的 Kiro 进程环境另外固定带两个常量（S8：只有环境变量能关的通道）。kiroignore 在 2.29.1 上承重（不写就加载嵌套的 `AGENTS.md`，S9 c11），在 2.31.1 上只是纵深（不写也不加载）。V3 不认 `KIRO_HOME` / `KIRO_AGENT_CONFIG_DIR`（S6），用户级 `~/.kiro/settings/permissions.yaml` 能打穿读取边界（S3），临时 HOME 同时消掉这两个问题。脚本从不写 `chat.agentEngine`。
-- **跑完核对**：事件流第一个 `runStarted.data.engine` 必须等于 `KIRO_ENGINE`（v3 上缺字段也拒绝；v2 上缺字段维持旧行为；有字段但不是 `v<数字>`——比如 3.x 改叫 `v3.1`——两种引擎都拒绝）。v3 再过三条兜底，任一命中就失败评论、不贴任何评审内容：`steering_inclusion` 或非空的 `contextFiles`；`hook_update`，或临时 HOME 里 Kiro 自己的日志报 `hooks.reload.loaded` 的 `registered` 大于 0（注册了就拦，不等触发；spec E3-2）；最后一次 `config_option_update` 的 `mode` 不是本次安装的 agent、或来源不是 `global`。只认 Kiro 写的结构，模型文本伪造不出（模型没有写文件的工具，日志是 Kiro 写的）。同一处核对 S8 关掉的内容收集：`contentCollection` 不是 `disabled` 就失败评论。日志里没有 hook 那一行、事件流里没有 `contentCollection`（版本改了形态）只警告。V3 的实际模型取自 `config_option_update`，与声明不同时挂提示、不拒绝。
+- **跑完核对**：事件流第一个 `runStarted.data.engine` 必须等于 `KIRO_ENGINE`（v3 上缺字段也拒绝；v2 上缺字段维持旧行为；有字段但不是 `v<数字>`——比如 3.x 改叫 `v3.1`——两种引擎都拒绝）。v3 再过三条兜底，任一命中就失败评论、不贴任何评审内容：`steering_inclusion` 或非空的 `contextFiles`；`hook_update`，或临时 HOME 里 Kiro 自己的日志报 `hooks.reload.loaded` 的 `registered` 大于 0（注册了就拦，不等触发；spec E3-2）；最后一次 `config_option_update` 的 `mode` 不是本次安装的 agent、或来源不是 `global`。只认 Kiro 写的结构，模型文本伪造不出（模型没有写文件的工具，日志是 Kiro 写的）。同一处另有三项核对，不符同样失败评论：S8 关掉的内容收集——`contentCollection` 不是 `disabled`；受信 agent 的权限规则被 Kiro 跳过——Kiro 对认不出的能力名、不合规的路径只跳过那条规则、在临时 HOME 的日志里记 `[PolicySession] Policy reload warning|error` / `[PolicyParser]`，不报错，出现任何一条就拒绝（只给条数）；用到的工具不在只读名单内——turn_completion 的 `usedTools` 只许 `read_file` / `read_files` / `list_directory` / `file_search` / `grep_search`，名单外或不合形就拒绝，不论那次调用被没被拒（Kent 2026-10-16，超出 spec E2「工具身份只进日志」）。日志里没有 hook 那一行或没有 kiro.log、事件流里没有 `contentCollection`（版本改了形态）只警告。V3 的实际模型取自 `config_option_update`，与声明不同时挂提示、不拒绝。
 - **V3 上不传任何 `--trust*`**：两者在 V3 下都打穿 allow 边界（S3：`--trust-all-tools` 与 `--trust-tools=read_file` 都读出了 allow 之外的 canary）。
 
 ## Considered Options
@@ -35,19 +35,24 @@ Kiro 2026-10-09 公告 CLI V3 在 10 月底随 3.0 成为默认引擎、Classic 
 - **临时 HOME 的开销**：每次运行在新 HOME 里准备一次引擎，另加四项设置写入与业务库副本。实测（2026-10-15，demo-app !10，与 v1.10.1 / V2 2.29.0 比）：
   AWS 档位 sandbox 执行器日志首尾 49 s 对 45 s（+4 s）；Flow 进 Kiro 之前 34 s 对 27 s（+7 s）。Flow 那次的模型一段 V3 124 s、V2 45 s，
   同一时段 gpt-5.6-sol 正在限流（前一次运行被 `ModelThrottleError` 拒掉），算模型时延，不算这套隔离的开销。
-- **V3 每次运行多一次生成会话标题的模型调用**（S5），计入 credit。
-- **数据与网络通道（spike S8，2026-10-15，kiro-cli 2.31.1，API key 身份）**。能关的都关掉了，并确认关后停了（只作用于 v3 路径，v2 不变）：
-  - 遥测（OTLP → `telemetry.us-east-1.kiro.dev`）：临时 HOME 的设置 `telemetry.enabled false`。
-  - 内容收集（service improvement）：设置 `codeWhisperer.shareCodeWhispererContentWithAWS false`（引擎日志 `content_collection.resolved {"enabled":false}`、请求带 optout 头）；
-    环境变量 `KIRO_CONTENT_COLLECTION_ENABLED=false` 无效（kiro-cli 自己替引擎设这个变量）。活动发布的日志随之不再出现。
-  - 服务端实验配置拉取：进程环境 `KIRO_DISABLE_EXPERIMENT_CONFIG=true`。
-  - 生成会话标题的那次模型调用：进程环境 `KIRO_DISABLE_SESSION_TITLE_LLM=true`。
+- **生成会话标题的那次模型调用**：2.29.1 上 V3 每次运行多这一次（S5，计入 credit）；v3 路径用 `KIRO_DISABLE_SESSION_TITLE_LLM=true` 关掉（见下一条）。
+- **数据与网络通道（spike S8，2026-10-15，kiro-cli 2.31.1，API key 身份）**。能关的都关掉了（只作用于 v3 路径，v2 不变）；「关后停了」的证据逐项不同：
+  - 遥测（OTLP → `telemetry.us-east-1.kiro.dev`）：临时 HOME 的设置 `telemetry.enabled false`。证据：本机 debug 日志 `Telemetry disabled by user preference`、端点里不再有 telemetry 主机（integration-local）。
+  - 内容收集（service improvement）：设置 `codeWhisperer.shareCodeWhispererContentWithAWS false`；环境变量 `KIRO_CONTENT_COLLECTION_ENABLED=false` 无效（kiro-cli 自己替引擎设这个变量）。
+    证据：本机引擎日志 `content_collection.resolved {"enabled":false}`、请求带 optout 头（integration-local）；sandbox 与本机探测的事件流 `contentCollection` = `disabled`，生产每次跑完都核对（上一条）。
+  - 活动发布（`activity.publish`）：随内容收集一起不再出现——证据只是「日志不再出现」，代码路径没核实（推断）。
+  - 服务端实验配置拉取：进程环境 `KIRO_DISABLE_EXPERIMENT_CONFIG=true`。证据：本机日志里不再出现（integration-local）。
+  - 生成会话标题的那次模型调用：进程环境 `KIRO_DISABLE_SESSION_TITLE_LLM=true`。证据：读代码（`=== "true"` 直接返回；static）——2.31.1 未关的那组本来就没出现这次调用（实验配置超时、按缺省值），实测证明不了关后停了。
 
   关不掉、**Kent 2026-10-15 逐项接受**：
   - A 远程会话（`app.kiro.dev`）：每次都「已启用」，但一次性运行的 debug 日志里没有任何远程会话的网络调用；端点由 kiro-cli 以进程参数传给引擎，环境变量盖不掉。3.x 重新探测时复查。
   - B 云端配置拉取（`app.kiro.dev`）：API key 身份下每次 401，什么也拉不到；即使将来拉到，事件流兜底仍拦被改的 agent。
   - C API key 的区域探测：带 API key 向 `management.{us-east-1, eu-central-1, us-gov-east-1, us-gov-west-1}.kiro.dev` 发 `GetProfile`，us-east-1 成功后其余中止——Kiro 自己的凭证到 Kiro 自己的控制面。
   - D 远程工具清单：只拉清单（按 profile 过滤后只剩 `web_search`），受信 agent 用不了（工具只有 read / grep / glob，`web_search` 整体 deny）。
+
+  另有一项不是外发通道、但 S8 点名要查的：`disclose_context`（skill 类工具，2026-10-16 补，static）。它按需把 skill 与 `inclusion: auto` 的 steering 文件读进上下文，
+  不看 agent 的 `tools`、引擎总是把它加进工具集（S4 实测模型看得到它），调用时走权限检查。临时 HOME 与评审根目录里没有可加载的 skill / steering；
+  受信 agent 对 `skill` 整体 deny，跑完再核对用到的工具都在只读名单内（69 份真实 V3 事件流里没用过它）。
 
   AWS 档位的出口白名单**不需要新的主机**：V3 用到的 `app.kiro.dev`、`runtime.us-east-1.kiro.dev`、`management.{us-east-1,eu-central-1}.kiro.dev` 都已在名单里；
   sandbox（DNS Firewall BLOCK）的真实评审里被拦的只有 `cognito-identity.us-east-1.amazonaws.com`（v1.10.1 同样被拦）与 `management.us-gov-*.kiro.dev`（C），评审照常完成。
