@@ -185,6 +185,34 @@ run_probe v3 T10 timeout
 assert_eq "$RC" "3" "E18：V3 T10 超时且无证据 → INCONCLUSIVE"
 assert_contains "$OUT" "[T10] INCONCLUSIVE  超时，无法判定" "E18：超时文案照旧"
 
+# ============ headless 探测（V3）：没有 runFinished 就是「未成功运行」============
+# V3 失败前先写十几 KB 元数据，旧的「rc≠0 且输出 < 400 字符」从不触发，P1-10 打出假 PASS（2026-10-15 注册表错误那次实测）
+run_headless throttle
+assert_eq "$RC" "2" "H1：headless 被限流 → 退出码 2（未成功运行）"
+assert_contains "$OUT" "[P1-08 ] INFO    没有 runFinished，最终消息所在的事件没核到" "H1：P1-08 补一行 INFO"
+assert_contains "$OUT" "[P1-10 ] INCONCLUSIVE  Kiro 没跑完：暂时性服务端错误 ModelThrottleError（THROTTLING）" "H1：P1-10 点名 Kiro 的错误类"
+assert_contains "$OUT" "[P1-11 ] INCONCLUSIVE  同上" "H1：P1-11 同上"
+assert_contains "$OUT" "完成（未成功运行）" "H1：走未成功运行分支"
+assert_not_contains "$OUT" "[P1-10 ] PASS" "H1：不再打出假 PASS"
+run_headless nofinish
+assert_eq "$RC" "2" "H2：没跑完、没有 runError（元数据超过 400 字符）→ 退出码 2"
+assert_contains "$OUT" "[P1-10 ] INCONCLUSIVE  Kiro 没跑完（没有 runFinished，见 out.jsonl / err.log）" "H2：说清没跑完"
+run_headless agentsmd-throttle
+assert_eq "$RC" "1" "H3：没跑完但 AGENTS.md canary 出现 → FAIL（失效证据优先）"
+assert_contains "$OUT" "[P1-10 ] FAIL" "H3：P1-10 FAIL"
+run_headless nofinish-rc0
+assert_eq "$RC" "2" "H4：rc 0 但没有 runFinished → 退出码 2（不管 rc）"
+run_headless finished-review
+assert_eq "$RC" "3" "H5：正常跑完 → 与改动前相同（P1-11 没有读取尝试 → INCONCLUSIVE）"
+assert_contains "$OUT" "[P1-10 ] PASS" "H5：跑完的运行 P1-10 照常 PASS"
+assert_contains "$OUT" "[P1-11 ] INCONCLUSIVE" "H5：P1-11 照常判"
+run_headless throttle PROBE_NO_ISOLATION=1
+assert_eq "$RC" "2" "H6（RF5）：正控模式下没跑完 → 退出码 2"
+assert_not_contains "$OUT" "[P1-10 ] PASS" "H6：正控模式下不打出 P1-10 PASS（那会读成「正控没咬人」）"
+run_headless quota
+assert_eq "$RC" "2" "H7：用量上限 → 退出码 2"
+assert_contains "$OUT" "Kiro 拒绝服务（额度或账号问题）：UsageLimitReachedError（CLIENT_ERROR）" "H7：需人处理的说法"
+
 # ============ S-I3：错误类名单只有一份 ============
 errclass_sites() { # <树根> → 空格分隔的相对路径（scripts/ 下含错误类名的 *.sh）
   ( cd "$1" && { LC_ALL=C grep -rlE 'ModelThrottleError|UsageLimitReachedError' --include='*.sh' scripts || true; } | LC_ALL=C sort | LC_ALL=C paste -sd' ' - )
