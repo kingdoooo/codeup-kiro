@@ -648,7 +648,8 @@ if [[ -x /usr/bin/git && -x /usr/bin/jq ]] && command -v python3 >/dev/null; the
   assert_contains "$lease_lib" 'head-check result=superseded' "㉒ 租约库里有核对最新提交那一段"
   assert_contains "$lease_block" 'if head_check_superseded; then' "㉒ 抽到的租约段调用了核对最新提交"
   assert_contains "$tail_block" 'scripts/kiro-review.sh' "㉒ 抽到了调引擎与收尾那一段"
-  printf '#!/bin/sh\nexec python3 "%s" "$@"\n' "$PWD/fake-aws-dynamodb.py" > "$ltmp/aws"
+  # FAKE_AWS_DELAY：每次调用前先真睡这么久（模拟高负载下 python 起得慢、或 DynamoDB 慢）——续期相关用例要在它下面照样成立
+  printf '#!/bin/sh\n[ -n "${FAKE_AWS_DELAY:-}" ] && /bin/sleep "$FAKE_AWS_DELAY"\nexec python3 "%s" "$@"\n' "$PWD/fake-aws-dynamodb.py" > "$ltmp/aws"
   cat > "$ltmp/date" <<'STUB'
 #!/bin/sh
 if [ -n "${FAKE_CLOCK:-}" ]; then cat "$FAKE_CLOCK"; else exec /bin/date "$@"; fi
@@ -683,6 +684,12 @@ STUB
 echo "engine-start $LOCK_KEY" >> "$EVENTS"
 cp "$FAKE_DDB_STATE" "$ENGINE_SNAPSHOT"
 if [ -n "${ENGINE_HOOK:-}" ]; then sh -c "$ENGINE_HOOK"; fi
+# ENGINE_UNTIL：引擎一直「跑」到这个条件成立（每 0.1 秒查一次，最多 ENGINE_MAX_POLLS 次，默认 150 = 15 秒），之后再睡 ENGINE_SECONDS。
+# 续期相关的用例靠它而不是固定的 1 秒——续期要起 python 假 aws，高负载下 1 秒里可能一次都续不完（phase2a 起的偶发 5120）。
+# 条件到上限仍不成立（续期真的坏了）时照样往下走，断言照样红。
+if [ -n "${ENGINE_UNTIL:-}" ]; then
+  i=0; while ! sh -c "$ENGINE_UNTIL" && [ "$i" -lt "${ENGINE_MAX_POLLS:-150}" ]; do /bin/sleep 0.1; i=$((i + 1)); done
+fi
 /bin/sleep "${ENGINE_SECONDS:-0}"
 cp "$FAKE_DDB_STATE" "$ENGINE_SNAPSHOT.end"
 echo "engine-end $LOCK_KEY" >> "$EVENTS"
@@ -747,6 +754,22 @@ STUB
   attr() { /usr/bin/jq -r --arg k "$2" --arg a "$3" '.[$k][$a] | (.S // .N // empty)' "$1"; }
   sleeps() { grep -cx 10 "$ltmp/sleep.log" | tr -d ' '; }   # 只数等待租约的那几轮（续期那一轮是 30）
   updates_ok() { grep -c "^update-item $LEASE ok$" "$ltmp/ddb.log" | tr -d ' '; }
+  # 给引擎替身的 ENGINE_UNTIL 用的条件（在引擎进程里由 sh -c 求值；FAKE_DDB_STATE / FAKE_DDB_LOG 是 run_lease 传进去的）
+  until_lease_is() { printf '/usr/bin/jq -e --arg k %q --arg v %q '"'"'.[$k].lease_until.N == $v'"'"' "$FAKE_DDB_STATE" >/dev/null 2>&1' "$LEASE" "$1"; }
+  until_writes_ok() { printf '[ "$(grep -c %q "$FAKE_DDB_LOG")" -ge %s ]' "^update-item $LEASE ok\$" "$1"; }
+  until_ok_after_error() { printf 'LC_ALL=C awk -v k=%q '"'"'$2==k && $3=="injected-error"{f=1; next} f && $2==k && $3=="ok"{n++} END{exit !(n>=1)}'"'"' "$FAKE_DDB_LOG"' "$LEASE"; }
+  # 正控：三个条件在 sh -c 里真的会成立、也真的会不成立（拼错时它们永远不成立，用例只是每次等满 15 秒照样绿）
+  ucheck() { FAKE_DDB_STATE="$ltmp/ucheck.json" FAKE_DDB_LOG="$ltmp/ucheck.log" sh -c "$1" && echo true || echo false; }
+  printf '{"%s":{"lease_until":{"N":"5120"}}}' "$LEASE" > "$ltmp/ucheck.json"; a=$(ucheck "$(until_lease_is 7120)")
+  printf '{"%s":{"lease_until":{"N":"7120"}}}' "$LEASE" > "$ltmp/ucheck.json"; b=$(ucheck "$(until_lease_is 7120)")
+  assert_eq "$a/$b" "false/true" "㉒ 正控：until_lease_is 7120 在 5120 时不成立、7120 时成立"
+  printf 'update-item %s ok\n' "$LEASE" > "$ltmp/ucheck.log"; a=$(ucheck "$(until_writes_ok 2)")
+  printf 'update-item %s ok\n' "$LEASE" >> "$ltmp/ucheck.log"; b=$(ucheck "$(until_writes_ok 2)")
+  assert_eq "$a/$b" "false/true" "㉒ 正控：until_writes_ok 2 在一次写入时不成立、两次时成立"
+  printf 'update-item %s ok\nupdate-item %s injected-error\n' "$LEASE" "$LEASE" > "$ltmp/ucheck.log"; a=$(ucheck "$(until_ok_after_error)")
+  printf 'update-item %s ok\n' "$LEASE" >> "$ltmp/ucheck.log"; b=$(ucheck "$(until_ok_after_error)")
+  assert_eq "$a/$b" "false/true" "㉒ 正控：until_ok_after_error 在失败之后还没有成功写入时不成立、有一次时成立"
+  rm -f "$ltmp/ucheck.json" "$ltmp/ucheck.log"; unset a b
 
   # 正向对照：空表 → 拿到、评审、释放。持有者是自己，lease_until 清零，expires_at 一直在（N4）。
   reset_lease; push_c2 "$c1"
@@ -784,10 +807,16 @@ STUB
   # 续期那一轮不拨假时钟（RENEW_CLOCK_STEP=0），引擎一开始把时钟拨到 7000——之后每次续期读到的都是 7000，
   # 引擎结束时 lease_until 必须正好是 7120（复审 Important 2：只断言「越过 5120」时，续 30 或 90 秒也能过）。
   reset_lease; echo 5000 > "$ltmp/clock"
-  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" ENGINE_SECONDS=1 RENEW_REAL_SLEEP=0.1 RENEW_CLOCK_STEP=0 \
+  # 引擎跑到「表上 lease_until = 7120」为止（最多 15 秒），而不是固定 1 秒：续期坏了时等满上限、断言照样红
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" ENGINE_UNTIL="$(until_lease_is 7120)" RENEW_REAL_SLEEP=0.1 RENEW_CLOCK_STEP=0 \
                ENGINE_HOOK='echo 7000 > "$FAKE_CLOCK"')" "0" "㉒ 前提：带续期的评审正常结束"
   end_until=$(attr "$ltmp/snap.json.end" "$LEASE" lease_until)
   assert_eq "$end_until" "7120" "㉒ 续期把租约续到「续期那一刻 + 120 秒」（引擎结束时的快照）"
+  # 同一条在「每次 aws 调用慢 0.6 秒」下照样成立（高负载下 python 起得慢：phase2a 起这条在全套里偶发 5120）
+  reset_lease; echo 5000 > "$ltmp/clock"
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" FAKE_AWS_DELAY=0.6 ENGINE_UNTIL="$(until_lease_is 7120)" RENEW_REAL_SLEEP=0.1 RENEW_CLOCK_STEP=0 \
+               ENGINE_HOOK='echo 7000 > "$FAKE_CLOCK"')" "0" "㉒ 前提（慢 aws）：带续期的评审正常结束"
+  assert_eq "$(attr "$ltmp/snap.json.end" "$LEASE" lease_until)" "7120" "㉒ 慢 aws 下续期照样把租约续到 7120"
   # 续期循环每一轮睡的都正好是 LEASE_RENEW_EVERY（30）秒：sleep 替身只数 10 秒的等待，续期间隔改成比租期还长
   # 也不会有别的断言变红（复审 Important 1 实测过 150 秒）
   assert_eq "$(LC_ALL=C grep -vx 10 "$ltmp/sleep.log" | sort -u)" "30" "㉒ 续期循环每一轮睡 30 秒"
@@ -798,7 +827,8 @@ STUB
   # 起续期循环时先立刻续一次（拿租约那次调用可能慢慢才成功，复审 Minor）：续期那一轮真睡 5 秒、引擎 1 秒，
   # 这期间能出现的续期只有那「立刻一次」
   reset_lease
-  assert_eq "$(run_lease 'r1#7#A' ENGINE_SECONDS=1 RENEW_REAL_SLEEP=5)" "0" "㉒ 前提：评审正常结束"
+  # 跑到「拿租约 + 立刻续期」两次写入都落表为止，再多跑 0.5 秒（续期周期 5 秒，这期间不该有第二次续期）
+  assert_eq "$(run_lease 'r1#7#A' ENGINE_UNTIL="$(until_writes_ok 2)" ENGINE_SECONDS=0.5 RENEW_REAL_SLEEP=5)" "0" "㉒ 前提：评审正常结束"
   assert_eq "$(updates_ok)" "3" "㉒ 起续期循环时先立刻续一次（拿租约 + 立刻续期 + 释放）"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "0" "㉒ 带续期的评审结束后照样释放"
   # L6：退出之后续期循环已经停了——再等一会儿，表上不再有任何写入
@@ -810,7 +840,7 @@ STUB
   assert_contains "$renew_fn" "update-item --cli-connect-timeout 2 --cli-read-timeout 5" "㉒ 续期调用带短的 CLI 超时"
   # 续期遇到别的错误（限流）：打代号、下一轮接着续，不停。第 1 次写是拿租约，第 2 次是第一次续期
   reset_lease
-  assert_eq "$(run_lease 'r1#7#A' FAKE_DDB_FAIL_NTH=2 ENGINE_SECONDS=1 RENEW_REAL_SLEEP=0.1)" "0" \
+  assert_eq "$(run_lease 'r1#7#A' FAKE_DDB_FAIL_NTH=2 ENGINE_UNTIL="$(until_ok_after_error)" RENEW_REAL_SLEEP=0.1)" "0" \
     "㉒ 续期失败一次不影响评审"
   assert_contains "$(cat "$ltmp/err.r1#7#A")" "续期 MR 租约失败（code=ProvisionedThroughputExceededException），下一轮再试" \
     "㉒ 续期失败打一行带错误码的消息"
@@ -927,7 +957,8 @@ STUB
   steal="$ltmp/aws dynamodb update-item --region x --table-name t --key '{\"pk\":{\"S\":\"$LEASE\"}}' \
 --update-expression 'SET #h = :h, #u = :u' --expression-attribute-names '{\"#h\":\"holder\",\"#u\":\"lease_until\"}' \
 --expression-attribute-values '{\":h\":{\"S\":\"r1#7#new\"},\":u\":{\"N\":\"77777777777\"}}'"
-  assert_eq "$(run_lease 'r1#7#A' ENGINE_HOOK="$steal" ENGINE_SECONDS=1 RENEW_REAL_SLEEP=0.1)" "0" \
+  # 跑到续期循环打出「已被接管」为止，再多跑 0.5 秒（续期周期 0.1 秒、五轮）：没停的话那一行会再打几次
+  assert_eq "$(run_lease 'r1#7#A' ENGINE_HOOK="$steal" ENGINE_UNTIL="grep -q '已被接管' $(printf %q "$ltmp/err.r1#7#A")" ENGINE_SECONDS=0.5 RENEW_REAL_SLEEP=0.1)" "0" \
     "㉒ 前提：被接管的任务自己正常结束"
   assert_contains "$(cat "$ltmp/err.r1#7#A")" "MR 租约已被别的任务接管，停止续期" "㉒ 续期发现被接管时打一行并停止续期"
   assert_eq "$(grep -c 'MR 租约已被别的任务接管，停止续期' "$ltmp/err.r1#7#A" | tr -d ' ')" "1" \
