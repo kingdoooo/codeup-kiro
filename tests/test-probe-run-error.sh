@@ -263,11 +263,11 @@ unset _f
 
 # ============ S-I3：错误类名单只有一份 ============
 # 类名直接从 review_stream_run_error_class 的两个 jq 名单里取：名单加了名字，守卫自动跟上（不在测试里另抄一份）。
-# 名单区 = 函数里从 `jq -R -n -r '` 那一行到 `as $transient` 那一行；取区里**每个**带引号的串，再按判据函数自己的类名形状筛——
-# 不按后缀（Error / Exception）认，否则名单里加一个形状不同的名字时守卫会悄悄漏掉它
+# 名单区 = 函数里从 `jq -R -n -r '` 那一行到名单之后那一行（`[inputs | fromjson? | objects] as $ev`）——在 $transient 后面再加名单也在区里；
+# 取区里**每个**带引号的串，再按判据函数自己的类名形状筛——不按后缀（Error / Exception）认，否则名单里加一个形状不同的名字时守卫会悄悄漏掉它
 errclass_tokens() { # <树根> → 名单区里每个带引号的串（去掉引号），一行一个
   LC_ALL=C sed -n '/^review_stream_run_error_class() {/,/^}/p' "$1/scripts/lib/review-render.sh" \
-    | LC_ALL=C sed -n "/jq -R -n -r '/,/as \\\$transient/p" | LC_ALL=C grep -oE '"[^"]*"' | LC_ALL=C tr -d '"'
+    | LC_ALL=C sed -n "/jq -R -n -r '/,/\\[inputs | fromjson? | objects\\] as \\\$ev/p" | LC_ALL=C grep -oE '"[^"]*"' | LC_ALL=C tr -d '"'
 }
 errclass_names() { # <树根> → 每行一个类名（合形、去重）
   errclass_tokens "$1" | { LC_ALL=C grep -E '^[A-Za-z][A-Za-z0-9]{0,63}$' || true; } | LC_ALL=C sort -u
@@ -293,5 +293,12 @@ mkdir -p "$tmp/i3bad"; cp -R "$ROOT/scripts" "$tmp/i3bad/"
 LC_ALL=C sed -i.bak 's/"StreamIdleTimeoutError", /"StreamIdleTimeoutError", "Bad Name", /' "$tmp/i3bad/scripts/lib/review-render.sh"
 assert_eq "$([[ "$(errclass_tokens "$tmp/i3bad" | grep -c .)" != "$(errclass_names "$tmp/i3bad" | grep -c .)" ]] && echo caught)" "caught" \
   "I3 元测试：名单区里混进不合形的串 → 上面那条一致性断言会红"
+# 将来在 $transient 后面再加一个名单：名单区一直到「名单之后那一行」，新名单里的类名同样被提取
+mkdir -p "$tmp/i3third"; cp -R "$ROOT/scripts" "$tmp/i3third/"
+LC_ALL=C sed -i.bak 's/"OutputParseError"\] as \$transient/"OutputParseError"] as $transient\
+    | ["ThirdListError"] as $third/' "$tmp/i3third/scripts/lib/review-render.sh"
+printf '# ThirdListError\n' >> "$tmp/i3third/scripts/probe/probe-kiro-allowlist.sh"
+assert_eq "$(errclass_names "$tmp/i3third" | grep -c .)" "20" "I3 元测试：\$transient 之后新加的名单同样被提取（取出 20 个）"
+assert_eq "$(errclass_sites "$tmp/i3third")" "scripts/lib/review-render.sh scripts/probe/probe-kiro-allowlist.sh" "I3 元测试：新名单里的类名在别处出现同样被抓到"
 
 report

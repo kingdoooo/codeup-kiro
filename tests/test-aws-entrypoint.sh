@@ -964,7 +964,7 @@ STUB
     "㉒ 前提：被接管的任务自己正常结束"
   assert_contains "$(cat "$ltmp/err.r1#7#A")" "MR 租约已被别的任务接管，停止续期" "㉒ 续期发现被接管时打一行并停止续期"
   assert_eq "$(grep -c 'MR 租约已被别的任务接管，停止续期' "$ltmp/err.r1#7#A" | tr -d ' ')" "1" \
-    "㉒ 被接管之后真的停止续期（引擎还跑了约 1 秒、续期一轮 0.1 秒，没停的话这一行会打很多次）"
+    "㉒ 被接管之后真的停止续期（发现被接管后引擎还跑 0.5 秒、续期一轮 0.1 秒，没停的话这一行会再打几次）"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" holder)" "r1#7#new" "㉒ L3：退出时不改别人的持有"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "77777777777" \
     "㉒ L3：退出时绝不放掉别人的租约（lease_until 原样）"
