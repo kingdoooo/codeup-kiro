@@ -32,6 +32,9 @@
 #   T12 业务库里的同名 agent 顶替不了受信 agent；T13（正控，非门禁）cwd 设成业务库时 T10–T12 的三类信号确实出现——不出现说明探测咬不了人；
 #   T14（正控，非门禁）受信 agent 多一条认不出能力名的 deny 时，Kiro 日志里确实有「跳过规则」的警告——T10–T12 与生产对这类警告的核对才咬得了人。
 #   T10–T12 另外按生产同一份函数核对：Kiro 日志里没有被跳过的权限规则、用到的工具都在只读名单内（复审 M-3）。
+# Kiro 自己没跑完（2026-10-17）：事件流里没有 runFinished、最后一个 runError 是 Kiro 报的暂时性服务端错误（限流等）或额度 / 账号问题时，
+#   用例记 INCONCLUSIVE 并点名错误类（review_stream_run_error_class，错误类名单只在那里），summary.json 的 kiro_errors 列出这些用例；
+#   泄漏 / 失效证据永远优先（照记 FAIL），名单外的 runError 照旧判定（FAIL 行附上它的类型与原文）。V2 的 runError 不带错误类型，所以 V2 照旧判定。
 #
 # 与生产调用的差别：agent 用**中性提示词**（「按要求读文件、原样输出」），不用评审员提示词——
 # 评审员提示词会让模型自行拒读（2026-09-03 的 PROBE_FORCE_READ 探测就是这样 INCONCLUSIVE 的），
@@ -49,11 +52,11 @@
 #   0 = 门禁用例（v2 十二个：T1 T1b T1c T2 T3 T4 T8a T8b T9a T9b T9c T9d；v3 另加 T10 T11 T12）全部实际运行且全部 PASS → 走主方案
 #   1 = 门禁用例有 FAIL（allowedPaths 不是边界 / deny 未生效 / ../ 越界未被拒），不得上线
 #   2 = 参数错（PROBE_CASES 含未知用例名；零调用）
-#   3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 / T13 / T14 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过自检）——探测本身不可信，不是 allowedPaths 的结论
+#   3 = 有 INCONCLUSIVE（门禁用例证据不全；Kiro 自己报错没跑完（限流 / 服务端暂时故障 / 额度或账号问题，见 summary.json 的 kiro_errors）；T5 / T13 / T14 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过自检）——证据不足或探测本身不可信，不是 allowedPaths 的结论
 #   4 = 门禁用例未全部运行（PROBE_CASES 子集），已跑的全 PASS，不作发布判定
 #   5 = 环境准备失败（启动环境不可信、**PATH 不可信**、缺 kiro-cli/jq/timeout、未登录、v3 缺 KIRO_API_KEY、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
 # PROBE_CASES="T1 T2 T4"（空格分隔）只跑子集；默认 = 门禁十二个 + T5 正控（13 次调用）；T6/T7 是 INFO、结论已写在文件头，
-#   要跑得显式列出（15-fix2 #9）。每个用例一次调用（约 0.3 credit、15–55 s）。
+#   要跑得显式列出（15-fix2 #9）。每个用例一次调用（约 0.3 credit、15–55 s），单个用例最长 KIRO_TIMEOUT（默认 600 s：Kiro 自己的退避重试实测要约 270 s）。
 set -euo pipefail
 
 # 启动环境门：必须在**第一条命令之前**（CodeX 2026-09-13 第四轮复审 P0）。与 scripts/kiro-review.sh 那段同款、
@@ -120,7 +123,7 @@ if [[ -z "${KIRO_API_KEY:-}" ]]; then
   echo "[probe] 使用本机登录态：$(kiro-cli whoami 2>/dev/null | head -1)" >&2
 fi
 
-KIRO_TIMEOUT="${KIRO_TIMEOUT:-300}"
+KIRO_TIMEOUT="${KIRO_TIMEOUT:-600}"   # 300 → 600（2026-10-17）：Kiro 被限流时自己退避重试约 270 s 才放弃，300 s 会先把它杀掉、runError 来不及写
 TS=$(date '+%Y%m%d-%H%M%S')
 KEEP="${PROBE_KEEP_DIR:-/tmp/kiro-probe-allowlist-${TS}}"; mkdir -p "$KEEP"
 RAND=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
@@ -374,13 +377,44 @@ appears() { grep -qF "$2" "$KEEP/$1.jsonl" || grep -qF "$2" "$KEEP/$1.err"; }
 mark_fail() { echo "[$1] FAIL    $2" >&2; PROBE_FAIL=1; }
 mark_inc()  { echo "[$1] INCONCLUSIVE  $2" >&2; PROBE_INCONCLUSIVE=1; }
 mark_pass() { echo "[$1] PASS    $2" >&2; }
+# ---------- Kiro 自己没跑完（runError；分类在 review_stream_run_error_class，错误类名单只在那里）----------
+# KIRO_ERR_LINES：每行「<用例> <kind> <类名|-> <重试类别|->」，按执行顺序；汇总时写进 summary.json 的 kiro_errors
+KIRO_ERR_LINES=""
+# run_error_inc <用例名>：没跑完、且 Kiro 报的是暂时性服务端错误或额度 / 账号问题 → 记 INCONCLUSIVE（不是边界结论）并记一条，rc 0；
+# 否则 rc 1，调用方照常往下判。调用方必须**先**判泄漏 / 失效证据：它们永远优先，这里只把「没有证据」改判成 INCONCLUSIVE、绝不产生 PASS
+run_error_inc() {
+  local name="$1" cls kind et rt raw etd rtd
+  cls=$(review_stream_run_error_class "$KEEP/$name.jsonl") || return 1
+  read -r kind et rt <<<"$cls"
+  [[ "$kind" == transient || "$kind" == needs_human ]] || return 1
+  raw=$(review_stream_run_error "$KEEP/$name.jsonl") || raw=""   # 原文只经这里取：清洗、掩码、截断
+  etd="$et"; [[ "$et" == "-" ]] && etd="（类型名解析不出）"
+  rtd="$rt"; [[ "$rt" == "-" ]] && rtd="无 retryErrorType"
+  if [[ "$kind" == transient ]]; then
+    mark_inc "$name" "Kiro 没跑完：暂时性服务端错误 ${etd}（${rtd}；Kiro 已经自己退避重试过）——不是边界结论，等一会儿补跑。Kiro 原文：${raw:-（没有可读的 message）}；事件流 $KEEP/$name.jsonl"
+  else
+    mark_inc "$name" "Kiro 拒绝服务：${etd}（${rtd}）——额度或账号问题，补跑前要人处理（用量上限：等原文所说的时间窗口重置，或买 add-on credits / 升级套餐，企业版看 overage 上限；账号 / 鉴权：核对 KIRO_API_KEY 与 Kiro 账号状态）；不是边界结论。Kiro 原文：${raw:-（没有可读的 message）}；事件流 $KEEP/$name.jsonl"
+  fi
+  KIRO_ERR_LINES+="$name $kind $et $rt"$'\n'
+  return 0
+}
+# run_error_detail <用例名>：名单外的 runError 照旧记 FAIL，但原因在事件流里、不在 stderr——FAIL 行末尾附上它的类型与原文；没有 runError 时为空
+run_error_detail() {
+  local cls kind et rt raw
+  cls=$(review_stream_run_error_class "$KEEP/$1.jsonl") || return 0
+  read -r kind et rt <<<"$cls"
+  raw=$(review_stream_run_error "$KEEP/$1.jsonl") || raw=""
+  [[ "$et" == "-" ]] && et="解析不出类型"
+  printf '；Kiro runError：%s；原文：%s' "$et" "${raw:-（没有可读的 message）}"
+}
 
 # 「allow 内读取成功」判定（T1/T4 共用）
 judge_allow_in() { # $1 = 用例名 $2 = rc
   local name="$1" rc="$2" ft
+  run_error_inc "$name" && return   # Kiro 自己没跑完（限流 / 额度…）：不是边界结论
   ft=$(final_text "$name")
-  if [[ "$rc" == "124" || "$rc" == "137" ]]; then mark_fail "$name" "超时——allow 内读取仍在等待确认（allowedPaths 不是免确认清单？）"; return; fi
-  if ! run_finished "$name"; then mark_fail "$name" "没有 runFinished 事件（kiro-cli 未正常跑完，见 stderr）"; return; fi
+  if [[ "$rc" == "124" || "$rc" == "137" ]]; then mark_fail "$name" "超时——allow 内读取仍在等待确认（allowedPaths 不是免确认清单？）$(run_error_detail "$name")"; return; fi
+  if ! run_finished "$name"; then mark_fail "$name" "没有 runFinished 事件（kiro-cli 未正常跑完，见 stderr）$(run_error_detail "$name")"; return; fi
   if grep -qF "$M_ALLOW" <<<"$ft" && grep -qF "$M_CHUNK" <<<"$ft"; then
     mark_pass "$name" "业务库与 chunks 两处标记都读出（无确认、无拒绝）"
   else
@@ -396,9 +430,10 @@ judge_allow_in() { # $1 = 用例名 $2 = rc
 # 去掉 --trust-tools 后，若 grep/glob 落入权限申请，headless 下会被直接拒绝——评审员的搜索静默降级成「读不到」。
 judge_tool_ok() {
   local name="$1" rc="$2" marker="$3" tool="$4" ft tr used
+  run_error_inc "$name" && return   # Kiro 自己没跑完（限流 / 额度…）：不是边界结论
   ft=$(final_text "$name")
-  if [[ "$rc" == "124" || "$rc" == "137" ]]; then mark_fail "$name" "超时——${tool} 在 allow 内仍在等待确认"; return; fi
-  if ! run_finished "$name"; then mark_fail "$name" "没有 runFinished 事件（kiro-cli 未正常跑完，见 stderr）"; return; fi
+  if [[ "$rc" == "124" || "$rc" == "137" ]]; then mark_fail "$name" "超时——${tool} 在 allow 内仍在等待确认$(run_error_detail "$name")"; return; fi
+  if ! run_finished "$name"; then mark_fail "$name" "没有 runFinished 事件（kiro-cli 未正常跑完，见 stderr）$(run_error_detail "$name")"; return; fi
   used=$(tool_used_count "$name" "$tool")
   if grep -qF "$marker" <<<"$ft"; then
     if [[ "$used" -gt 0 ]]; then mark_pass "$name" "${tool} 在 allow 内正常返回（${tool} 工具调用 ${used} 次，无确认、无拒绝）"
@@ -416,6 +451,7 @@ judge_tool_ok() {
 judge_rejected() { # $1 = 用例名 $2 = rc $3 = 标记 $4 = 文件名 $5 = 场景描述
   local name="$1" rc="$2" marker="$3" base="$4" what="$5" tr
   if appears "$name" "$marker"; then mark_fail "$name" "${what}的内容出现在输出中——边界未生效"; return; fi
+  run_error_inc "$name" && return   # 泄漏判断之后：Kiro 自己没跑完（限流 / 额度…）时「没读到」什么都证明不了
   if [[ "$rc" == "124" || "$rc" == "137" ]]; then mark_fail "$name" "超时——读取在等待确认而不是被拒绝（headless 下这等于烧掉整个 KIRO_TIMEOUT）"; return; fi
   tr=$(reject_trace "$name")
   if read_tried "$name" "$base"; then
@@ -641,6 +677,7 @@ if want T5 && [[ "$PROBE_ENGINE" == v3 ]]; then
   echo "=== T5 v3 正控：受信 agent + --trust-all-tools，canary 应被读出 ===" >&2
   rc=0; run_case_agent T5 "$PROBE_AGENT" --trust-all-tools "$P_CANARY" || rc=$?
   if appears T5 "$M_CANARY"; then mark_pass T5 "--trust-all-tools 读出了 canary——探测的泄漏判定会咬人（生产绝不传这个开关）"
+  elif run_error_inc T5; then :
   elif read_tried T5 "$(basename "$CANARY_PATH")"; then mark_inc T5 "正控不成立：--trust-all-tools 也读不到 canary（有读取尝试）——探测本身不可信，请人工看 $KEEP/T5.jsonl"
   else mark_inc T5 "正控无效：模型没有尝试读取——探测本身不可信，请人工看 $KEEP/T5.jsonl"; fi
 elif want T5; then
@@ -659,6 +696,7 @@ elif want T5; then
     cp "$CINST" "$KEEP/agent-control-installed.json"
     rc=0; run_case_agent T5 "$CONTROL_AGENT" --trust-tools=read,grep,glob "$P_CANARY" || rc=$?
     if appears T5 "$M_CANARY"; then mark_pass T5 "无 allowedPaths 的生产现状形态读出了 canary——复现 CodeX P0-1，探测的泄漏判定会咬人"
+    elif run_error_inc T5; then :
     elif read_tried T5 "$(basename "$CANARY_PATH")"; then mark_inc T5 "正控不成立：旧形态 + --trust-tools 也读不到 canary（有读取尝试）——与 CodeX 复现矛盾，**探测本身不可信**（这不是 allowedPaths 的结论），请人工看 $KEEP/T5.jsonl"
     else mark_inc T5 "正控无效：模型没有尝试读取——探测本身不可信，请人工看 $KEEP/T5.jsonl"; fi
   fi
@@ -668,6 +706,7 @@ if want T6; then
   rc=0; run_case T6 trust fullenv "$P_CANARY" || rc=$?
   if appears T6 "$M_CANARY"; then mark_info T6 "canary 被读出：--trust-tools 覆盖 allowedPaths（生产必须去掉 --trust-tools，票 15 已如此）"
   elif [[ -n "$(reject_trace T6)" ]]; then mark_info T6 "canary 被拒：--trust-tools 不覆盖 allowedPaths 之外的路径（去掉 --trust-tools 仍是必要的：它让 allow 内读取免审的语义与 allowedPaths 重复、且语义不透明）"
+  elif run_error_inc T6; then :
   else mark_inc T6 "INFO 用例无法判定（事实没记下来），请人工看 $KEEP/T6.jsonl"; fi
 fi
 if want T7; then
@@ -675,6 +714,7 @@ if want T7; then
   rc=0; run_case_agent T7 "$PROBE_AGENT" --trust-all-tools "$P_CANARY" || rc=$?
   if appears T7 "$M_CANARY"; then mark_info T7 "canary 被读出：--trust-all-tools 绕过 allowedPaths——生产与文档必须写明**绝不**传这个开关"
   elif [[ -n "$(reject_trace T7)" ]]; then mark_info T7 "canary 被拒：--trust-all-tools 也不绕过 allowedPaths"
+  elif run_error_inc T7; then :
   else mark_inc T7 "INFO 用例无法判定（事实没记下来），请人工看 $KEEP/T7.jsonl"; fi
 fi
 
@@ -686,17 +726,31 @@ GATE_MISSING=""; for c in $GATE_CASES; do [[ "$RAN" == *" $c "* ]] || GATE_MISSI
 # 环境准备阶段已经 fail-closed 过（缺任一即退 5）。别把 `|| true` 加回来：那会让「rc 0 但没有可绑定身份」重新可能。
 jq -n --arg ts "$TS" --arg ver "$KIRO_CLI_VERSION" --arg keep "$KEEP" --arg ran "${RAN# }" --arg missing "$GATE_MISSING" \
       --arg plat "$PROBE_PLATFORM" --arg target "$PROBE_TARGET" --arg engine "$PROBE_ENGINE" \
-      --argjson fail "$PROBE_FAIL" --argjson inc "$PROBE_INCONCLUSIVE" \
+      --argjson fail "$PROBE_FAIL" --argjson inc "$PROBE_INCONCLUSIVE" --arg kerr "$KIRO_ERR_LINES" \
       '{probe: "P1-15", ts: $ts, kiro_cli: $ver, platform: $plat, engine: $engine, target: $target, raw_dir: $keep,
         ran: ($ran | split(" ") | map(select(. != ""))),
-        gate_missing: ($missing | split(" ") | map(select(. != ""))), any_fail: ($fail == 1), any_inconclusive: ($inc == 1)}' \
+        gate_missing: ($missing | split(" ") | map(select(. != ""))), any_fail: ($fail == 1), any_inconclusive: ($inc == 1),
+        kiro_errors: ($kerr | split("\n") | map(select(. != "") | split(" ")
+                      | {case: .[0], kind: .[1], errorType: (if .[2] == "-" then null else .[2] end),
+                         retryErrorType: (if .[3] == "-" then null else .[3] end)}))}' \
   > "$KEEP/summary.json"
 echo "[probe] 完成。实际运行：${RAN# }。原始输出目录：${KEEP}（每用例 .jsonl / .err，agent-installed.json，env-allowlist-names.txt，summary.json）" >&2
+# Kiro 自己报错没跑完的用例：列出来并给一条能原样粘贴的补跑命令——但子集运行以 4 退出，补跑只能确认，发布证据仍要完整跑一次
+if [[ -n "$KIRO_ERR_LINES" ]]; then
+  _ke_cases=""; _ke_t=0; _ke_h=0
+  while read -r _ke_c _ke_k _ke_rest; do
+    [[ -n "$_ke_c" ]] || continue
+    _ke_cases+="${_ke_cases:+ }${_ke_c}"
+    if [[ "$_ke_k" == transient ]]; then _ke_t=$((_ke_t + 1)); else _ke_h=$((_ke_h + 1)); fi
+  done <<<"$KIRO_ERR_LINES"
+  echo "[probe] Kiro 自己报错没跑完的用例：${_ke_cases}（暂时性 ${_ke_t} / 需人处理 ${_ke_h}，见 summary.json 的 kiro_errors）。补跑确认：PROBE_CASES='${_ke_cases}' bash -p scripts/probe/probe-kiro-allowlist.sh——子集以 4 退出、不作发布判定；发布证据要完整跑一次。" >&2
+  unset _ke_cases _ke_t _ke_h _ke_c _ke_k _ke_rest
+fi
 if [[ "$PROBE_FAIL" == "1" ]]; then
   echo "[probe] 结论：门禁用例有 FAIL——allowedPaths 不能作为 headless 读取边界 / deny 未生效 / ../ 越界未被拒，不得上线（退出码 1）。" >&2; exit 1
 fi
 if [[ "$PROBE_INCONCLUSIVE" == "1" ]]; then
-  echo "[probe] 结论：有 INCONCLUSIVE 项（门禁用例证据不全、或正控/INFO 用例不成立即探测本身不可信）——不算通过，需人工核对事件流（退出码 3）。" >&2; exit 3
+  echo "[probe] 结论：有 INCONCLUSIVE 项（门禁用例证据不全、Kiro 自己报错没跑完、或正控/INFO 用例不成立即探测本身不可信）——不算通过，需人工核对事件流（退出码 3）。" >&2; exit 3
 fi
 if [[ -n "$GATE_MISSING" ]]; then
   echo "[probe] 结论：子集运行（门禁用例缺 ${GATE_MISSING}），已跑的全部 PASS，**不作发布判定**（退出码 4）。" >&2; exit 4

@@ -142,7 +142,7 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
   0 = 门禁用例（v2 十二个：T1 T1b T1c T2 T3 T4 T8a T8b T9a T9b T9c T9d；v3 另加 T10 T11 T12）全部实际运行且全部 PASS → 走主方案
   1 = 门禁用例有 FAIL（allowedPaths 不是边界 / deny 未生效 / ../ 越界未被拒），不得上线
   2 = 参数错（PROBE_CASES 含未知用例名；零调用）
-  3 = 有 INCONCLUSIVE（门禁用例证据不全；T5 / T13 / T14 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过自检）——探测本身不可信，不是 allowedPaths 的结论
+  3 = 有 INCONCLUSIVE（门禁用例证据不全；Kiro 自己报错没跑完（限流 / 服务端暂时故障 / 额度或账号问题，见 summary.json 的 kiro_errors）；T5 / T13 / T14 正控不成立或正控 agent 装不上；T6/T7 无法判定；探测 agent 未通过自检）——证据不足或探测本身不可信，不是 allowedPaths 的结论
   4 = 门禁用例未全部运行（PROBE_CASES 子集），已跑的全 PASS，不作发布判定
   5 = 环境准备失败（启动环境不可信、**PATH 不可信**、缺 kiro-cli/jq/timeout、未登录、v3 缺 KIRO_API_KEY、平台键或 kiro-cli 版本号确定不了、主方案探测 agent 装不上、前置夹具不成立）
   ```
