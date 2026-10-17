@@ -105,13 +105,13 @@ assert_eq "$(kerr '[.any_fail, .any_inconclusive, .ran]')" '[false,true,["T1"]]'
 run_probe v2 "" throttle
 assert_eq "$RC" "3" "E2：默认用例全被限流 → 退出码 3"
 assert_eq "$(kerr '.kiro_errors | length')" "13" "E2：kiro_errors 13 条"
-assert_contains "$OUT" "[probe] Kiro 自己报错没跑完的用例：T1 T1b T1c T2 T3 T4 T8a T8b T9a T9b T9c T9d T5（暂时性 13 / 需人处理 0，见 summary.json 的 kiro_errors）。补跑确认：PROBE_CASES='T1 T1b T1c T2 T3 T4 T8a T8b T9a T9b T9c T9d T5' bash -p scripts/probe/probe-kiro-allowlist.sh——子集以 4 退出、不作发布判定；发布证据要完整跑一次。" "E2：结尾汇总"
+assert_contains "$OUT" "[probe] Kiro 自己报错没跑完的用例：T1 T1b T1c T2 T3 T4 T8a T8b T9a T9b T9c T9d T5（暂时性 13 / 需人处理 0，见 summary.json 的 kiro_errors）。补跑确认：KIRO_ENGINE=v2 PROBE_CASES='T1 T1b T1c T2 T3 T4 T8a T8b T9a T9b T9c T9d T5' bash -p scripts/probe/probe-kiro-allowlist.sh——只补跑这几个用例时以 4 退出、不作发布判定（列表含全部门禁用例时除外）；发布证据要完整跑一次。" "E2：结尾汇总（补跑命令带上本次的引擎，spec 修订 R5）"
 assert_contains "$OUT" "结论：有 INCONCLUSIVE 项（门禁用例证据不全、Kiro 自己报错没跑完、或正控/INFO 用例不成立即探测本身不可信）" "E2：结论行提到 Kiro 自己报错没跑完"
 E2_OUT="$OUT"
-# E16（RF4）：结尾提示里的 PROBE_CASES 原样粘贴回去能跑
-pc=""; [[ "$E2_OUT" =~ PROBE_CASES=\'([^\']*)\' ]] && pc="${BASH_REMATCH[1]}"
-assert_eq "$([[ -n "$pc" ]] && echo got)" "got" "E16：（准备）从结尾提示里截出了 PROBE_CASES"
-run_probe v2 "$pc" throttle
+# E16（RF4）：结尾提示里的 KIRO_ENGINE 与 PROBE_CASES 原样粘贴回去能跑（引擎也来自提示本身，不是测试自己记的）
+pe=""; pc=""; [[ "$E2_OUT" =~ KIRO_ENGINE=([a-z0-9]+)\ PROBE_CASES=\'([^\']*)\' ]] && { pe="${BASH_REMATCH[1]}"; pc="${BASH_REMATCH[2]}"; }
+assert_eq "$([[ -n "$pc" && "$pe" == v2 ]] && echo got)" "got" "E16：（准备）从结尾提示里截出了 KIRO_ENGINE=v2 与 PROBE_CASES"
+run_probe "$pe" "$pc" throttle
 assert_eq "$RC" "3" "E16：照提示补跑 → 正常跑到结论（不退 2、不在启动时静默退 1）"
 assert_eq "$(kerr '.ran | sort')" "$(jq -cn --arg s "$pc" '$s | split(" ") | sort')" "E16：summary.json 的 ran 正好是提示里的用例（ran 按用例表顺序、提示按执行顺序，比集合）"
 # E3 / E4：额度、账号 → 需人处理
@@ -199,6 +199,7 @@ for c in T10 T13 T14 T5; do
   assert_contains "$OUT" "[$c] INCONCLUSIVE  Kiro 没跑完：暂时性服务端错误" "E13：${c} 点名 Kiro 的错误类"
 done
 assert_not_contains "$OUT" "] PASS" "E13：被限流的运行一个 PASS 都没有"
+assert_contains "$OUT" "补跑确认：KIRO_ENGINE=v3 PROBE_CASES='" "E13：V3 运行的补跑命令写明 KIRO_ENGINE=v3"
 # E14（I2）：跑完的运行照原次序判——兜底函数先报
 run_probe v3 T10 hook-finished
 assert_eq "$RC" "1" "E14：V3 T10 跑完了、hook 执行过、没有 mode 信息 → FAIL"

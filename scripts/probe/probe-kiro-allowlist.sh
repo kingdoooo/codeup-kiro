@@ -761,7 +761,8 @@ jq -n --arg ts "$TS" --arg ver "$KIRO_CLI_VERSION" --arg keep "$KEEP" --arg ran 
                          retryErrorType: (if .[3] == "-" then null else .[3] end)}))}' \
   > "$KEEP/summary.json"
 echo "[probe] 完成。实际运行：${RAN# }。原始输出目录：${KEEP}（每用例 .jsonl / .err，agent-installed.json，env-allowlist-names.txt，summary.json）" >&2
-# Kiro 自己报错没跑完的用例：列出来并给一条能原样粘贴的补跑命令——但子集运行以 4 退出，补跑只能确认，发布证据仍要完整跑一次
+# Kiro 自己报错没跑完的用例：列出来并给一条能原样粘贴的补跑命令——带上本次的引擎（不设 KIRO_ENGINE 就是 v3，V2 的运行照抄
+# 「PROBE_CASES=…」会换成 V3 跑）。只补跑一部分用例时以 4 退出，补跑只能确认，发布证据仍要完整跑一次
 if [[ -n "$KIRO_ERR_LINES" ]]; then
   _ke_cases=""; _ke_t=0; _ke_h=0
   while read -r _ke_c _ke_k _ke_rest; do
@@ -769,7 +770,7 @@ if [[ -n "$KIRO_ERR_LINES" ]]; then
     _ke_cases+="${_ke_cases:+ }${_ke_c}"
     if [[ "$_ke_k" == transient ]]; then _ke_t=$((_ke_t + 1)); else _ke_h=$((_ke_h + 1)); fi
   done <<<"$KIRO_ERR_LINES"
-  echo "[probe] Kiro 自己报错没跑完的用例：${_ke_cases}（暂时性 ${_ke_t} / 需人处理 ${_ke_h}，见 summary.json 的 kiro_errors）。补跑确认：PROBE_CASES='${_ke_cases}' bash -p scripts/probe/probe-kiro-allowlist.sh——子集以 4 退出、不作发布判定；发布证据要完整跑一次。" >&2
+  echo "[probe] Kiro 自己报错没跑完的用例：${_ke_cases}（暂时性 ${_ke_t} / 需人处理 ${_ke_h}，见 summary.json 的 kiro_errors）。补跑确认：KIRO_ENGINE=${PROBE_ENGINE} PROBE_CASES='${_ke_cases}' bash -p scripts/probe/probe-kiro-allowlist.sh——只补跑这几个用例时以 4 退出、不作发布判定（列表含全部门禁用例时除外）；发布证据要完整跑一次。" >&2
   unset _ke_cases _ke_t _ke_h _ke_c _ke_k _ke_rest
 fi
 if [[ "$PROBE_FAIL" == "1" ]]; then

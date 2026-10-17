@@ -165,8 +165,8 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
   泄漏 / 失效证据永远优先（canary 出现、V3 门禁里业务库的 hook 执行过 / 注册过、规则被跳过 → 照记 FAIL，不等 runFinished）；
   名单外的 runError 照旧判定，FAIL 行末尾附上它的类型与原文。只有 v3 的 runError 带错误类型；V2 的 runError 只有「Internal error」，V2 照旧判定。
   summary.json 的 `kiro_errors` 列出这些用例：`[{case, kind, errorType, retryErrorType}]`，`kind` 是 `transient`（等一会儿补跑）或
-  `needs_human`（补跑前要人处理），解析不出的值是 `null`，没有就是 `[]`。有记录时探测在结尾打出一条可直接粘贴的 `PROBE_CASES=…` 补跑命令——
-  子集运行以 4 退出、不作发布判定，补跑只用来确认，发布证据要完整跑一次。Kiro 被限流时自己会退避重试约 270 s 才放弃，所以单个用例的
+  `needs_human`（补跑前要人处理），解析不出的值是 `null`，没有就是 `[]`。有记录时探测在结尾打出一条可直接粘贴的 `KIRO_ENGINE=… PROBE_CASES=…` 补跑命令（带上本次的引擎：
+  不设 KIRO_ENGINE 就是 v3）——只补跑一部分用例时以 4 退出、不作发布判定，补跑只用来确认，发布证据要完整跑一次。Kiro 被限流时自己会退避重试约 270 s 才放弃，所以单个用例的
   `KIRO_TIMEOUT` 默认 600 s（2026-10-17 前是 300 s，会先把 Kiro 杀掉、runError 来不及写）。
   T5 的正控 agent 由安装器的 `--allow-none` 装（唯一合法的第二调用方：file:// 改写、deny 检查、同名旧文件清理照做）；正控 agent
   装不上时记为 T5 INCONCLUSIVE 进入汇总（不是 exit 5——门禁用例此时已跑完，直接退出会把真正的门禁 FAIL 降级成「环境准备失败」且不写 summary.json）。
