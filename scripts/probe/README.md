@@ -188,8 +188,9 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
   - **T9**（15-fix2 #21）：拒绝清单里约 20 条绝对路径（`~/.ssh`、`/root/.aws`…）都落在 allow 之外，永远测不到——某版 kiro-cli
     静默不再解析 deniedPaths 时只有 `.git` 两条会发现。所以定义里另加了仓库相对形状 `**/.aws/**`、`**/.ssh/**`、`**/id_rsa*`、
     `**/id_ed25519*`，T9 在业务库里**提交**四个对应 canary（配置/公钥这类无害文件名——用 id_rsa / credentials 时模型会自己拒读、零工具调用，
-    测不到 CLI 层）并要求读取 → 都必须被拒。每种形状一条正控：临时从
-    `kiro/agent-codeup-reviewer.json` 删掉对应条目重跑 T9 → 应 FAIL（读出 canary）；看完 `git checkout` 还原。
+    测不到 CLI 层）并要求读取 → 都必须被拒。每种形状一条正控：去掉受信 agent 定义里对应的那一条重跑 T9 → 应 FAIL（读出 canary）。
+    做法同 P1-11 的正控（上文）：这几条都在 `KIRO_AGENT_REQUIRED_DENY_JQ` 里，安装器与探测的自检都会拒绝缺它们的定义，
+    所以在一次性副本里连同那份必需清单一起改、用副本里的脚本跑，不改仓库（这条做法对 T9 **未实测**，P1-11 的那条 2026-10-17 实测过）。
   - **T2 的判据**：canary 未出现 **且** 事件流里有对该文件的读取尝试 **且** 有拒绝痕迹
     （`tool_call_update.status=failed`、`Permission request failed … not supported in non-interactive mode`、
     stderr `[denied]`），运行正常结束——**超时（124/137）算 FAIL**：「等待确认到超时」正是要排除的行为。

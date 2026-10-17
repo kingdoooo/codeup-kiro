@@ -264,7 +264,6 @@ assert_not_contains "$(cat "$FAKE/last.stdin")" "token" "H8：强制读取的提
 assert_contains "$(cat "$FAKE/last.stdin")" "含 MARKER 的那一行" "H8：提示词要的是含 MARKER 的那一行"
 assert_contains "$(cat "$FAKE/read.log" 2>/dev/null)" "# MARKER " "H8：canary 文件写成「# MARKER …」"
 assert_not_contains "$(cat "$FAKE/read.log" 2>/dev/null)" "token=" "H8：canary 文件里没有 token="
-rm -f "$FAKE/read.log"
 run_headless read-denied
 assert_not_contains "$(cat "$FAKE/last.stdin")" "token" "H8：默认模式的提示词同样不再要 token"
 # H9（正控）：canary 内容出现在输出里 → P1-11 FAIL（改了写法之后这条判定仍然咬人）
@@ -289,6 +288,8 @@ assert_contains "$(cat "$PR")" "重新提取 Kiro 错误类名单" "文档：REA
 assert_contains "$(cat "$ADR8")" "重新提取 Kiro 错误类名单" "文档：ADR-0008 的 3.x 清单要求重新提取错误类名单"
 assert_contains "$(cat "$PR")" "KIRO_AGENT_REQUIRED_DENY_JQ" "文档：README 的 P1-11 正控写明安装器的必需拒绝清单也要在副本里拿掉"
 assert_eq "$(LC_ALL=C grep -c '看完务必 .git checkout' "$PR" || true)" "0" "文档：README 不再让人改仓库里的 agent 定义再 git checkout 还原"
+assert_eq "$(LC_ALL=C grep -c '看完 .git checkout. 还原' "$PR" || true)" "0" "文档：T9 的正控同样不再让人改仓库再还原（与 P1-11 正控同一节里不能互相矛盾）"
+assert_contains "$(cat "$PR")" "做法同 P1-11 的正控" "文档：T9 的正控指向 P1-11 正控的一次性副本做法"
 # 终审 minor #2：2026-10-16 那次 runError 是在 271 s 写出来的（300 s 之内），改成 600 的理由是余量太薄，不是「300 s 一定先杀掉」
 for _f in "$PR" "$PROBE"; do
   assert_eq "$(LC_ALL=C grep -c '会先把.*杀掉、runError 来不及写' "$_f" || true)" "0" "文档：$(basename "$_f") 不再说 300 s「会先把 Kiro 杀掉」"
