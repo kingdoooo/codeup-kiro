@@ -213,6 +213,15 @@ run_headless quota
 assert_eq "$RC" "2" "H7：用量上限 → 退出码 2"
 assert_contains "$OUT" "Kiro 拒绝服务（额度或账号问题）：UsageLimitReachedError（CLIENT_ERROR）" "H7：需人处理的说法"
 
+# ============ 文档：README 与 ADR-0008 跟上判定 ============
+PR="$ROOT/scripts/probe/README.md"; ADR8="$ROOT/docs/adr/0008-default-v3-engine.md"
+assert_contains "$(cat "$PR")" "只有 v3 的 runError 带错误类型" "文档：README 写明 V2 照旧判定"
+assert_contains "$(cat "$PR")" "没跑完（事件流里没有 runFinished：限流、额度用完、启动失败等）→ 2" "文档：README 的 headless 退出码说明换成「没有 runFinished」"
+assert_eq "$(LC_ALL=C grep -c '运行本身没跑起来 → 2' "$PR" || true)" "0" "文档：README 不再保留旧说法「运行本身没跑起来 → 2」"
+assert_contains "$(cat "$PR")" "kiro_errors" "文档：README 讲到 summary.json 的 kiro_errors"
+assert_contains "$(cat "$PR")" "重新提取 Kiro 错误类名单" "文档：README 的升级步骤要求重新提取错误类名单"
+assert_contains "$(cat "$ADR8")" "重新提取 Kiro 错误类名单" "文档：ADR-0008 的 3.x 清单要求重新提取错误类名单"
+
 # ============ S-I3：错误类名单只有一份 ============
 errclass_sites() { # <树根> → 空格分隔的相对路径（scripts/ 下含错误类名的 *.sh）
   ( cd "$1" && { LC_ALL=C grep -rlE 'ModelThrottleError|UsageLimitReachedError' --include='*.sh' scripts || true; } | LC_ALL=C sort | LC_ALL=C paste -sd' ' - )

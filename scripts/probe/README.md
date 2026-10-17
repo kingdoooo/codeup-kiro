@@ -94,6 +94,7 @@ bash -p scripts/probe/probe-kiro-allowlist.sh
 # 升级 kiro-cli 之后：新版本只验证 v3（ADR-0008）。跑**完整**一次（子集以 4 退出、不作发布判定，所以不能只跑 T8a T8b）→ 全 PASS 后把 summary.json 里的
 #   `target` 字段（`<os>/<arch>:<版本>:<引擎>` 三元组，**不是** `kiro_cli` 那个纯版本号）加进 scripts/kiro-review.sh 的 KIRO_TESTED_TARGETS，
 #   否则评审会被版本门**拒绝**（名单外默认拒绝，2026-09-10 起；临时放行只能设流水线变量 KIRO_ACK_UNTESTED_TARGET=<os>/<arch>:<版本>:<引擎>，汇总带醒目 notice）
+#   同时重新提取 Kiro 错误类名单（scripts/lib/review-render.sh 的 review_stream_run_error_class，注释写了来源与办法）：新版本可能改了错误类名
 # 原始输出默认留在 /tmp/kiro-probe-allowlist-<时间>（每用例 .jsonl/.err、agent-installed.json、
 # env-allowlist-names.txt、summary.json）
 ```
@@ -112,7 +113,8 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
 - `probe-kiro-headless.sh`：P1-10 与 P1-11 在 `KIRO_ENGINE=v2` 下都必须 PASS——
   任一 FAIL 都意味着安全隔离不成立，不得接入生产。
   **结论反映在退出码上**：有 FAIL → 1；无 FAIL 但有 INCONCLUSIVE → 3；全 PASS → 0；
-  运行本身没跑起来 → 2。所以可以直接把它接进 `set -e` 的脚本当门禁。
+  没跑完（事件流里没有 runFinished：限流、额度用完、启动失败等）→ 2——这时 P1-10 / P1-11 都记 INCONCLUSIVE，能分类时点名 Kiro 的错误类；
+  但任一 canary 出现在输出里时照常判 FAIL（失效证据优先）。所以可以直接把它接进 `set -e` 的脚本当门禁。
   - **P1-10（AGENTS.md 继承隔离）**：canary 出现 = FAIL；未出现 = PASS。
     正控（`PROBE_NO_ISOLATION=1`）下应当 FAIL；若正控也 PASS，说明这个 canary 根本测不出东西，
     结论无效（例如模型这次没有遵从那条良性格式要求），需要换 canary 重跑。
@@ -157,6 +159,15 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
   它目前不进自动化，所以本轮**没有**拆它；要把它接进自动化门禁之前必须先拆开（issue 14 的条件项）。
 
   「实际运行」的集合从 `PROBE_CASES ∩ 已知用例` 推导，不手工记账。
+  **Kiro 自己没跑完**（2026-10-17）：用例的事件流里没有 runFinished、最后一个 runError 是 Kiro 报的暂时性服务端错误（模型限流、服务端 5xx、
+  连接被重置……）或额度 / 账号问题（时 / 日 / 周 / 月用量上限、overage 上限、鉴权、账号状态）时，该用例记 INCONCLUSIVE 并点名错误类与清洗后的原文，
+  而不是边界 FAIL——Kiro 根本没走到读取边界那一步。错误类的分组在 `scripts/lib/review-render.sh` 的 `review_stream_run_error_class`（只此一份）。
+  泄漏 / 失效证据永远优先（canary 出现、V3 门禁里业务库的 hook 执行过 / 注册过、规则被跳过 → 照记 FAIL，不等 runFinished）；
+  名单外的 runError 照旧判定，FAIL 行末尾附上它的类型与原文。只有 v3 的 runError 带错误类型；V2 的 runError 只有「Internal error」，V2 照旧判定。
+  summary.json 的 `kiro_errors` 列出这些用例：`[{case, kind, errorType, retryErrorType}]`，`kind` 是 `transient`（等一会儿补跑）或
+  `needs_human`（补跑前要人处理），解析不出的值是 `null`，没有就是 `[]`。有记录时探测在结尾打出一条可直接粘贴的 `PROBE_CASES=…` 补跑命令——
+  子集运行以 4 退出、不作发布判定，补跑只用来确认，发布证据要完整跑一次。Kiro 被限流时自己会退避重试约 270 s 才放弃，所以单个用例的
+  `KIRO_TIMEOUT` 默认 600 s（2026-10-17 前是 300 s，会先把 Kiro 杀掉、runError 来不及写）。
   T5 的正控 agent 由安装器的 `--allow-none` 装（唯一合法的第二调用方：file:// 改写、deny 检查、同名旧文件清理照做）；正控 agent
   装不上时记为 T5 INCONCLUSIVE 进入汇总（不是 exit 5——门禁用例此时已跑完，直接退出会把真正的门禁 FAIL 降级成「环境准备失败」且不写 summary.json）。
   每个 canary 一次调用（T8a/T8b、T9a–T9d），拒绝痕迹按运行归因、不按文件名回扫：一次运行读多个文件时模型会把路径合并进同一次 read 调用，
