@@ -3398,6 +3398,63 @@ out=$(review_stream_run_error "$tmp/rerr-split.jsonl")
 assert_not_contains "$out" "Zq7hunt3" "run_error：键与取值分两行、截断点落在取值里也不带出残片（折行后再掩码，复审 I-1）"
 assert_contains "$out" "password:" "run_error：（准备）键还在，截断点确实落在取值附近"
 
+# ============ 探测：review_stream_run_error_class（Kiro 自己没跑完时的错误类）============
+# 探测（allowlist / headless）用它把「Kiro 自己报错没跑完」与读取边界的结论分开；生产不调用。两份真实流来自 kiro-cli 2.31.1 本机探测（脱敏，见 fixtures/stream/README.md）。
+cls() { local rc=0 out; out=$(review_stream_run_error_class "$1") || rc=$?; printf '%s|%s' "$rc" "$out"; }
+recm() { # <文件> <message>：runStarted + 一条 runError
+  { printf '%s\n' '{"type":"runStarted","data":{"engine":"v3"}}'
+    jq -nc --arg m "$2" '{type: "runError", data: {sessionId: "s", stage: "prompt", message: $m}}'; } > "$1"
+}
+recj() { recm "$1" "x (code -32000): $2"; }                                   # <文件> <JSON 尾巴原文>
+rec() { recj "$1" "$(jq -nc --arg e "$2" --arg r "$3" '{errorType: $e, retryErrorType: $r}')"; }   # <文件> <errorType> <retryErrorType>
+assert_eq "$(cls fixtures/stream/v3-2.31.1-throttle.jsonl)" "0|transient ModelThrottleError THROTTLING" "run_error_class：真实限流流（2.31.1）→ 暂时性"
+assert_eq "$(cls fixtures/stream/v3-2.31.1-registry-unavailable.jsonl)" "0|transient ModelRegistryUnavailableError SERVER_ERROR" "run_error_class：真实模型列表加载失败流（2.31.1）→ 暂时性"
+for n in UsageLimitReachedError OverageLimitReachedError AccessDeniedError TemporarilySuspendedError NewUserAccessPausedError AccountNotSupportedError UnsupportedClientVersionError; do
+  rec "$tmp/rec-nh.jsonl" "$n" CLIENT_ERROR
+  assert_eq "$(cls "$tmp/rec-nh.jsonl")" "0|needs_human $n CLIENT_ERROR" "run_error_class：${n} → 需人处理"
+done
+for n in ModelThrottleError ServiceThrottleError ClientThrottleError InsufficientModelCapacityError HighLoadError ModelRegistryUnavailableError \
+         InternalServerError ServerConnectionResetError ConnectionResetError StreamIdleTimeoutError NoResponseError OutputParseError; do
+  rec "$tmp/rec-tr.jsonl" "$n" SERVER_ERROR
+  assert_eq "$(cls "$tmp/rec-tr.jsonl")" "0|transient $n SERVER_ERROR" "run_error_class：${n} → 暂时性（按名单，不看 retryErrorType）"
+done
+rec "$tmp/rec-future.jsonl" FutureThrottleError THROTTLING
+assert_eq "$(cls "$tmp/rec-future.jsonl")" "0|transient FutureThrottleError THROTTLING" "run_error_class：名单外的类名 + THROTTLING → 暂时性（接住将来的限流类）"
+rec "$tmp/rec-other.jsonl" GenericValidationError CLIENT_ERROR
+assert_eq "$(cls "$tmp/rec-other.jsonl")" "0|other GenericValidationError CLIENT_ERROR" "run_error_class：名单外 CLIENT_ERROR → 其它"
+rec "$tmp/rec-407.jsonl" ProxyAuthenticationRequiredError TRANSIENT
+assert_eq "$(cls "$tmp/rec-407.jsonl")" "0|other ProxyAuthenticationRequiredError TRANSIENT" "run_error_class：代理 407（TRANSIENT 但要改配置）→ 其它，TRANSIENT 不整类放行"
+recm "$tmp/rec-v2.jsonl" "Internal error"
+assert_eq "$(cls "$tmp/rec-v2.jsonl")" "0|other - -" "run_error_class：V2 形状（message 不带 JSON 尾巴）→ 其它、两个字段都是 -"
+# RF2：errorType 不合形 → -；有 THROTTLING 仍是暂时性，否则其它
+for bad in '123' '""' '"Bad Name"' "\"$(printf 'A%.0s' {1..65})\""; do
+  recj "$tmp/rec-bad.jsonl" "{\"errorType\":${bad},\"retryErrorType\":\"THROTTLING\"}"
+  assert_eq "$(cls "$tmp/rec-bad.jsonl")" "0|transient - THROTTLING" "run_error_class：errorType=${bad:0:12} 不合形 + THROTTLING → 暂时性、类名记 -"
+  recj "$tmp/rec-bad.jsonl" "{\"errorType\":${bad},\"retryErrorType\":\"CLIENT_ERROR\"}"
+  assert_eq "$(cls "$tmp/rec-bad.jsonl")" "0|other - CLIENT_ERROR" "run_error_class：errorType=${bad:0:12} 不合形 + CLIENT_ERROR → 其它"
+done
+# RF1：错误被包了一层再抛出，message 里有两段 (code N): {…} → 取最后一段
+recm "$tmp/rec-two.jsonl" 'outer (code -32603): {"errorType":"GenericValidationError","retryErrorType":"CLIENT_ERROR"} wrapped (code -32000): {"errorType":"ModelThrottleError","retryErrorType":"THROTTLING"}'
+assert_eq "$(cls "$tmp/rec-two.jsonl")" "0|transient ModelThrottleError THROTTLING" "run_error_class：两段 (code N): {…} → 取最后一段"
+rec "$tmp/rec-fin.jsonl" ModelThrottleError THROTTLING; printf '%s\n' '{"type":"runFinished","data":{"finalText":"ok"}}' >> "$tmp/rec-fin.jsonl"
+assert_eq "$(cls "$tmp/rec-fin.jsonl")" "1|" "run_error_class：有 runFinished（跑完了）→ rc 1，不看 runError"
+printf '%s\n' '{"type":"runStarted","data":{"engine":"v3"}}' > "$tmp/rec-none.jsonl"
+assert_eq "$(cls "$tmp/rec-none.jsonl")" "1|" "run_error_class：没有 runError → rc 1"
+assert_eq "$(cls "$tmp/does-not-exist.jsonl")" "1|" "run_error_class：文件不存在 → rc 1"
+rec "$tmp/rec-last.jsonl" ModelThrottleError THROTTLING
+jq -nc '{type: "runError", data: {stage: "prompt", message: "y (code -32000): {\"errorType\":\"GenericValidationError\",\"retryErrorType\":\"CLIENT_ERROR\"}"}}' >> "$tmp/rec-last.jsonl"
+assert_eq "$(cls "$tmp/rec-last.jsonl")" "0|other GenericValidationError CLIENT_ERROR" "run_error_class：取最后一个 runError"
+jq -nc '{type: "sessionUpdate", data: {update: {sessionUpdate: "agent_message_chunk", content: {type: "text", text: "(code -32000): {\"errorType\":\"ModelThrottleError\",\"retryErrorType\":\"THROTTLING\"}"}}}}' > "$tmp/rec-chunk.jsonl"
+assert_eq "$(cls "$tmp/rec-chunk.jsonl")" "1|" "run_error_class：同样的 JSON 只在模型文本（agent_message_chunk）里 → 不算"
+# RF3：最后一行是半行 JSON（kiro-cli 写到一半被杀）→ 半行忽略，用之前那个完整的 runError
+rec "$tmp/rec-half.jsonl" ModelThrottleError THROTTLING; printf '%s' '{"type":"runError","data":{"mess' >> "$tmp/rec-half.jsonl"
+assert_eq "$(cls "$tmp/rec-half.jsonl")" "0|transient ModelThrottleError THROTTLING" "run_error_class：最后一行半截 JSON → 用前一个完整的 runError"
+rec "$tmp/rec-lower.jsonl" FutureThrottleError throttling
+assert_eq "$(cls "$tmp/rec-lower.jsonl")" "0|other FutureThrottleError -" "run_error_class：retryErrorType 不合形（小写）→ -，名单外类名不靠它认成暂时性"
+recm "$tmp/rec-ws.jsonl" "x (code -32000): {\"errorType\":\"FutureThrottleError\",\"retryErrorType\":\"THROTTLING\"}"$'\n  '
+assert_eq "$(cls "$tmp/rec-ws.jsonl")" "0|transient FutureThrottleError THROTTLING" "run_error_class：JSON 尾巴之后还有空白与换行 → 照样解析"
+unset -f cls recm recj rec
+
 # 复审 m-1 / m-2：Flow 的三份文档与 #06 对拍（REVIEW_LOG_HINT 有一行；BUILD_NUMBER 不再说「构建号 ?」；REVIEW_RERUN_HINT 写明它也换掉「重跑流水线即可」）
 pg="$ROOT/pipeline/setup-guide.md"
 bn_row=$(grep '^| `BUILD_NUMBER` |' "$pg" || true)

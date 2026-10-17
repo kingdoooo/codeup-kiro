@@ -1819,6 +1819,54 @@ review_stream_run_error() {
   printf 'runError%s：%s' "${stage:+（${stage}）}" "$msg"
 }
 
+# --- Kiro 自己没跑完时的错误类（探测用；生产不调用）---
+# 探测要把「Kiro 自己报错没跑完」与读取边界的结论分开：限流时 allow 内读取的用例没有 runFinished，旧判定记成边界 FAIL（2026-10-16 本机
+# 2.31.1 实测）。只看**没跑完**的运行（有 runFinished 就 rc 1：跑完了的运行照常判），取**最后一个** runError（选择器与
+# review_stream_run_error 相同），从 message 末尾的 JSON-RPC 错误数据 `(code <整数>): {"errorType":…,"retryErrorType":…}` 里取两个字段——
+# 有多段时取最后一段（错误被包一层再抛出时，外层的类型说明不了真正的原因）。review_stream_run_error 截到 200 个字符，会截掉这段 JSON，所以这里读原文；
+# 输出只含合形的类名（字母开头、字母数字、最长 64）与重试类别（大写与下划线），不回显原文。
+# 分类（次序即优先级）：
+#   needs_human —— 额度或账号问题，要人处理：UsageLimitReachedError（时 / 日 / 周 / 月用量上限，窗口只写在原文里）、OverageLimitReachedError，
+#                  以及鉴权 / 账号状态 / 客户端版本几类。它们的 retryErrorType 是 CLIENT_ERROR，等一会儿重跑不会好。
+#   transient   —— 服务端暂时故障，等一会儿重跑：三个限流类、模型容量 / 高负载、模型列表加载失败、5xx、连接被重置、流空闲超时、没收到回应、
+#                  回应解析不了；外加任何 retryErrorType = THROTTLING 的类（接住将来新增的限流类名）。
+#                  TRANSIENT 不整类放行：里面有代理 407（ProxyAuthenticationRequiredError）、TLS、本地网络错误，要改配置而不是等。
+#   other       —— 其余一切（含解析不出类型的，如 V2 的「Internal error」）：调用方照旧判定。
+# 名单来源：kiro-cli 2.31.1 内置 KAS 0.66.34 的 acp-server.js（错误基类的 27 个子类及各自的 retryErrorType、JSON-RPC 错误
+# ModelRegistryUnavailableError、执行层内部重试的 InsufficientModelCapacityError / HighLoadError；静态，2026-10-17）。
+# **升级 Kiro 后要按新版本的 bundle 重新提取**（bundle 不随仓库分发，提取办法在维护者本地记录里）；漏掉的新类名会落进 other（保守：误报，不是漏报）。
+# 用法：review_stream_run_error_class <stream.jsonl> → rc 0，stdout 一行 `<transient|needs_human|other> <类名|-> <重试类别|->`；
+#       文件读不了 / 有 runFinished / 没有合格的 runError → rc 1、无输出
+review_stream_run_error_class() {
+  local f="${1-}" out
+  [[ -r "$f" ]] || return 1
+  out=$(jq -R -n -r '
+    ["UsageLimitReachedError", "OverageLimitReachedError", "AccessDeniedError", "TemporarilySuspendedError",
+     "NewUserAccessPausedError", "AccountNotSupportedError", "UnsupportedClientVersionError"] as $needs_human
+    | ["ModelThrottleError", "ServiceThrottleError", "ClientThrottleError", "InsufficientModelCapacityError", "HighLoadError",
+       "ModelRegistryUnavailableError", "InternalServerError", "ServerConnectionResetError", "ConnectionResetError",
+       "StreamIdleTimeoutError", "NoResponseError", "OutputParseError"] as $transient
+    | [inputs | fromjson? | objects] as $ev
+    | if any($ev[]; .type == "runFinished") then empty else
+        ([$ev[] | select(.type == "runError" and (.data | type) == "object" and (.data.message | type) == "string")] | last) as $re
+        | if $re == null then empty else
+            $re.data.message as $m
+            | ([$m | match("\\(code -?[0-9]+\\): "; "g")] | last) as $c
+            | (if $c == null then null else ($m[($c.offset + $c.length):] | fromjson?) end) as $j
+            | (if ($j | type) == "object" then $j else {} end) as $o
+            | ($o.errorType | if type == "string" and test("^[A-Za-z][A-Za-z0-9]{0,63}$") then . else null end) as $et
+            | ($o.retryErrorType | if type == "string" and test("^[A-Z_]{1,32}$") then . else null end) as $rt
+            | (if $et != null and any($needs_human[]; . == $et) then "needs_human"
+               elif $et != null and any($transient[]; . == $et) then "transient"
+               elif $rt == "THROTTLING" then "transient"
+               else "other" end) as $k
+            | "\($k) \($et // "-") \($rt // "-")"
+          end
+      end' "$f" 2>/dev/null) || return 1
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+}
+
 # --- 页脚（第 N 次评审 + 图例 + 重新评审提示）---
 # 用法：review_render_footer <run>（公开：kiro-review.sh 的失败评论也要用同一份页脚）
 review_render_footer() {
