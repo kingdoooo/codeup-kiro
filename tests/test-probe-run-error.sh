@@ -146,6 +146,13 @@ assert_not_contains "$OUT" "[T1] INCONCLUSIVE" "E20：不因为后来的限流�
 assert_eq "$(kerr)" "[]" "E20：kiro_errors 为空"
 run_probe v2 T1b reject-throttle
 assert_eq "$RC" "1" "E20：T1b（grep）有拒绝痕迹 + 限流 → 同样 FAIL"
+# E22（spec 修订 R4）：名单外 runError 落到 INCONCLUSIVE 的地方也点名原因——「没有读取尝试」「正控无效」不该在 Kiro 已经报错时让人去查模型
+run_probe v2 T3 other
+assert_contains "$OUT" "[T3] INCONCLUSIVE" "E22：T3 名单外 runError、没读 → INCONCLUSIVE（原判定不变）"
+assert_contains "$OUT" "；Kiro runError：GenericValidationError；原文：runError（prompt）：A validation error occurred." "E22：judge_rejected 的 INCONCLUSIVE 行附上 Kiro runError"
+run_probe v2 T5 other
+assert_contains "$OUT" "[T5] INCONCLUSIVE  正控无效：模型没有尝试读取" "E22：T5 正控没读到 → 原判定不变"
+assert_contains "$OUT" "；Kiro runError：GenericValidationError" "E22：T5 的 INCONCLUSIVE 行附上 Kiro runError"
 # E8 / E9：没有 runError 的没跑完与超时 → 照旧 FAIL
 run_probe v2 T1 chunk-only
 assert_eq "$RC" "1" "E8：限流文字只在模型文本里、没有 runError → FAIL"
@@ -196,6 +203,10 @@ assert_not_contains "$OUT" "] PASS" "E13：被限流的运行一个 PASS 都没�
 run_probe v3 T10 hook-finished
 assert_eq "$RC" "1" "E14：V3 T10 跑完了、hook 执行过、没有 mode 信息 → FAIL"
 assert_contains "$OUT" "兜底信号：" "E14：跑完的运行仍由兜底函数先报（次序与改动前相同）"
+# E22（V3）：v3_judge 无法判定的分支同样附上名单外 runError
+run_probe v3 T10 other
+assert_contains "$OUT" "[T10] INCONCLUSIVE" "E22：V3 T10 名单外 runError → INCONCLUSIVE（原判定不变）"
+assert_contains "$OUT" "；Kiro runError：GenericValidationError" "E22：v3_judge 的 INCONCLUSIVE 行附上 Kiro runError"
 # E18：超时、没跑完、没有失效证据、没有 runError → 原文案
 run_probe v3 T10 timeout
 assert_eq "$RC" "3" "E18：V3 T10 超时且无证据 → INCONCLUSIVE"
