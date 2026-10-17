@@ -133,9 +133,12 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
     2.32.0 上评审员 agent 直接拒读、零工具调用，P1-11 只剩 INCONCLUSIVE——与 allowlist 探测 T9 同一个坑），只被 `**/.git/**` 这两条
     deny 挡住。放在 allow 之外（旧版放 `~/.kiro/`）的话，deny 规则删掉它照样被 allow 边界拒绝，正控永远「PASS」，
     P1-11 就测不出 deny 的任何问题。
-  - **P1-11 的正控**：临时去掉 `kiro/agent-codeup-reviewer.json` 里 `toolsSettings.read.deniedPaths`（至少 `**/.git` 与
-    `**/.git/**` 两条）与 `permissions.rules` 中 `fs_read` 的 deny 规则，以 `PROBE_FORCE_READ=1` 重跑 → 应 FAIL
-    （读到 canary：它在 allow 之内，去掉 deny 就能读）。看完务必 `git checkout kiro/agent-codeup-reviewer.json` 还原。
+  - **P1-11 的正控**：安装器按 `KIRO_AGENT_REQUIRED_DENY_JQ`（`scripts/lib/kiro-agent.sh`）拒装缺 `**/.git`、`**/.git/**` 的定义——
+    这是生产要的保护，所以正控**不改仓库**，在一次性副本里做（`git archive HEAD` 解到 `/tmp`）：去掉受信 agent 定义里的这两条
+    （V2：`kiro/agent-codeup-reviewer.json` 里 `toolsSettings.read.deniedPaths` 与 `permissions.rules` 中 `fs_read` 的 deny；
+    V3：`kiro/agent-codeup-reviewer.v3.json` 里 `fs_read` 的 deny），再把副本里 `KIRO_AGENT_REQUIRED_DENY_JQ` 的这两条也拿掉，
+    用副本里的 `probe-kiro-headless.sh` 以 `PROBE_FORCE_READ=1` 跑 → 应 FAIL（读到 canary：它在 allow 之内，去掉 deny 就能读）。
+    2026-10-17 kiro-cli 2.32.0、V3 实测：主仓库 PASS（读取尝试被 deny 拒绝）、正控副本 FAIL（输出 `# MARKER KIRONOTE-9c1d`）。跑完删掉副本即可。
 
 - `probe-kiro-allowlist.sh`：探测 agent 就是**生产定义**改名换成中性提示词，三处 allowedPaths 由生产的 `kiro_install_agent
   --workspace/--chunks` 结构化写入、`env -i` 许可清单用生产的 `kiro_env_allowlist`——测的就是生产要跑的那份规则。

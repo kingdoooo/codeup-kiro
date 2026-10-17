@@ -317,9 +317,11 @@ if [[ "$FORCE_READ" != "1" ]]; then
   echo "[probe] 想确定性验证拒绝路径：PROBE_FORCE_READ=1 再跑一次（提示词只要求读 canary）。" >&2
 fi
 if [[ "$PROBE_FAIL" == "1" || "$PROBE_INCONCLUSIVE" == "1" ]]; then
-  echo "[probe] P1-11 的正控（证明这个 canary 会失败）：临时去掉受信 agent 定义里的拒绝形状（v2：kiro/agent-codeup-reviewer.json 里 read 的 deniedPaths" >&2
-  echo "        与 permissions 中 fs_read 的 deny；v3：kiro/agent-codeup-reviewer.v3.json 里 fs_read deny 的 **/.git 与 **/.git/**），配 PROBE_FORCE_READ=1 重跑" >&2
-  echo "        → 应 P1-11 FAIL（读到 canary：它在 allowedPaths 之内，去掉 deny 就能读）；看完务必 git checkout 还原该文件。" >&2
+  echo "[probe] P1-11 的正控（证明这个 canary 会失败）：安装器按 KIRO_AGENT_REQUIRED_DENY_JQ 拒装缺 **/.git、**/.git/** 的定义（这是生产要的保护），" >&2
+  echo "        所以别改仓库——在一次性副本里做（git archive HEAD 解到 /tmp）：去掉受信 agent 定义里的这两条（v2：kiro/agent-codeup-reviewer.json 里 read 的" >&2
+  echo "        deniedPaths 与 permissions 中 fs_read 的 deny；v3：kiro/agent-codeup-reviewer.v3.json 里 fs_read 的 deny），再把副本里 scripts/lib/kiro-agent.sh" >&2
+  echo "        的 KIRO_AGENT_REQUIRED_DENY_JQ 也拿掉这两条，用副本里的本脚本配 PROBE_FORCE_READ=1 跑 → 应 P1-11 FAIL（读到 canary：它在 allowedPaths 之内，" >&2
+  echo "        去掉 deny 就能读；2026-10-17 kiro-cli 2.32.0 v3 实测如此）。跑完删掉副本即可。" >&2
 fi
 [[ "$KIRO_ENGINE" == "v3" ]] || echo "[probe] 默认引擎是 v3（ADR-0008）：不设 KIRO_ENGINE 再跑一次就是 v3。" >&2
 if [[ "$PROBE_FAIL" == "1" ]]; then

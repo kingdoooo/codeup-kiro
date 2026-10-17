@@ -271,6 +271,10 @@ assert_not_contains "$(cat "$FAKE/last.stdin")" "token" "H8：默认模式的提
 run_headless read-leak PROBE_FORCE_READ=1
 assert_eq "$RC" "1" "H9：canary 内容出现在输出里 → 退出码 1"
 assert_contains "$OUT" "[P1-11 ] FAIL" "H9：P1-11 FAIL"
+# 结尾的「P1-11 正控」提示要能照着做：安装器按 KIRO_AGENT_REQUIRED_DENY_JQ 拒装缺 **/.git 的定义（2026-10-17 实测：照旧提示改仓库只会「安装 agent 失败」）
+assert_contains "$OUT" "KIRO_AGENT_REQUIRED_DENY_JQ" "H9：正控提示点名安装器的必需拒绝清单（照旧提示做只会装不上）"
+assert_contains "$OUT" "一次性副本" "H9：正控提示要求在一次性副本里做，不改仓库"
+assert_not_contains "$OUT" "git checkout 还原" "H9：正控提示不再让人改仓库再还原"
 run_headless quota
 assert_eq "$RC" "2" "H7：用量上限 → 退出码 2"
 assert_contains "$OUT" "Kiro 拒绝服务（额度或账号问题）：UsageLimitReachedError（CLIENT_ERROR）" "H7：需人处理的说法"
@@ -283,6 +287,8 @@ assert_eq "$(LC_ALL=C grep -c '运行本身没跑起来 → 2' "$PR" || true)" "
 assert_contains "$(cat "$PR")" "kiro_errors" "文档：README 讲到 summary.json 的 kiro_errors"
 assert_contains "$(cat "$PR")" "重新提取 Kiro 错误类名单" "文档：README 的升级步骤要求重新提取错误类名单"
 assert_contains "$(cat "$ADR8")" "重新提取 Kiro 错误类名单" "文档：ADR-0008 的 3.x 清单要求重新提取错误类名单"
+assert_contains "$(cat "$PR")" "KIRO_AGENT_REQUIRED_DENY_JQ" "文档：README 的 P1-11 正控写明安装器的必需拒绝清单也要在副本里拿掉"
+assert_eq "$(LC_ALL=C grep -c '看完务必 .git checkout' "$PR" || true)" "0" "文档：README 不再让人改仓库里的 agent 定义再 git checkout 还原"
 # 终审 minor #2：2026-10-16 那次 runError 是在 271 s 写出来的（300 s 之内），改成 600 的理由是余量太薄，不是「300 s 一定先杀掉」
 for _f in "$PR" "$PROBE"; do
   assert_eq "$(LC_ALL=C grep -c '会先把.*杀掉、runError 来不及写' "$_f" || true)" "0" "文档：$(basename "$_f") 不再说 300 s「会先把 Kiro 杀掉」"
