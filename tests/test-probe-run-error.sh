@@ -251,11 +251,19 @@ assert_contains "$(cat "$PR")" "重新提取 Kiro 错误类名单" "文档：REA
 assert_contains "$(cat "$ADR8")" "重新提取 Kiro 错误类名单" "文档：ADR-0008 的 3.x 清单要求重新提取错误类名单"
 
 # ============ S-I3：错误类名单只有一份 ============
-errclass_sites() { # <树根> → 空格分隔的相对路径（scripts/ 下含错误类名的 *.sh）
-  ( cd "$1" && { LC_ALL=C grep -rlE 'ModelThrottleError|UsageLimitReachedError' --include='*.sh' scripts || true; } | LC_ALL=C sort | LC_ALL=C paste -sd' ' - )
+# 类名直接从 review_stream_run_error_class 的两个 jq 名单里取：名单加了名字，守卫自动跟上（不在测试里另抄一份）
+errclass_names() { # <树根> → 每行一个类名
+  LC_ALL=C sed -n '/^review_stream_run_error_class() {/,/^}/p' "$1/scripts/lib/review-render.sh" \
+    | LC_ALL=C grep -oE '"[A-Z][A-Za-z]*Error"' | LC_ALL=C tr -d '"' | LC_ALL=C sort -u
 }
+errclass_sites() { # <树根> → 空格分隔的相对路径（scripts/ 下含任一错误类名的 *.sh）
+  local pat; pat=$(errclass_names "$1" | LC_ALL=C paste -sd'|' -)
+  [[ -n "$pat" ]] || { echo "（没取到类名）"; return 0; }
+  ( cd "$1" && { LC_ALL=C grep -rlwE "$pat" --include='*.sh' scripts || true; } | LC_ALL=C sort | LC_ALL=C paste -sd' ' - )
+}
+assert_eq "$(errclass_names "$ROOT" | grep -c .)" "19" "I3 正控：从 review_stream_run_error_class 的两个名单里取出了 19 个类名（取不出时守卫会空转）"
 assert_eq "$(errclass_sites "$ROOT")" "scripts/lib/review-render.sh" "I3：错误类名只出现在 review-render.sh（review_stream_run_error_class）"
-mkdir -p "$tmp/i3root"; cp -R "$ROOT/scripts" "$tmp/i3root/"; printf '# ModelThrottleError\n' >> "$tmp/i3root/scripts/probe/probe-kiro-allowlist.sh"
-assert_eq "$(errclass_sites "$tmp/i3root")" "scripts/lib/review-render.sh scripts/probe/probe-kiro-allowlist.sh" "I3 元测试：别处再写一份名单会被这条守卫抓到"
+mkdir -p "$tmp/i3root"; cp -R "$ROOT/scripts" "$tmp/i3root/"; printf '# OverageLimitReachedError\n' >> "$tmp/i3root/scripts/probe/probe-kiro-allowlist.sh"
+assert_eq "$(errclass_sites "$tmp/i3root")" "scripts/lib/review-render.sh scripts/probe/probe-kiro-allowlist.sh" "I3 元测试：别处再写任一个类名（这里是名单里的 OverageLimitReachedError）会被守卫抓到"
 
 report
