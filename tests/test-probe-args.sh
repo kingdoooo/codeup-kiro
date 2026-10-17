@@ -70,14 +70,8 @@ mkdir -p "$tmp/runtmp-sentinel"; printf 'keep\n' > "$tmp/runtmp-sentinel/keep.tx
 rc=0; env PATH="$tmp/fakebin:$PATH" HOME="$tmp/home" RUN_TMP="$tmp/runtmp-sentinel" PROBE_KEEP_DIR="$tmp/keep-runtmp" bash "$PROBE" >/dev/null 2>&1 || rc=$?
 assert_eq "$rc" "5" "继承 RUN_TMP 的 v2 探测：照常以 5 退出（版本未知）"
 assert_eq "$(cat "$tmp/runtmp-sentinel/keep.txt" 2>/dev/null)" "keep" "继承 RUN_TMP 的 v2 探测：那个目录原样还在"
-# headless 探测（v3）在装 cleanup trap 之前就退出（许可清单不合法）：本次建的 kiro-tmp 不能留在执行器 TMPDIR 里（复审 2 M-2）
-mkdir -p "$tmp/hl-tmp"
-HEADLESS_PROBE="$ROOT/scripts/probe/probe-kiro-headless.sh"
-rc=0; env PATH="$tmp/fakebin2:$PATH" HOME="$tmp/home" TMPDIR="$tmp/hl-tmp" KIRO_ENGINE=v3 KIRO_API_KEY=fake KIRO_ENV_PASSTHROUGH='bad name' \
-  PROBE_KEEP_DIR="$tmp/keep-hl" bash "$HEADLESS_PROBE" >/dev/null 2>&1 || rc=$?
-assert_eq "$rc" "1" "headless v3 + 许可清单不合法：以 1 退出"
-assert_eq "$(find "$tmp/hl-tmp" -maxdepth 1 -name 'kiro-tmp.*' | wc -l | tr -d ' ')" "0" "headless v3 早退：执行器 TMPDIR 里没有留下 kiro-tmp.*"
-# 版本能解析时不该被这条挡住（正控：换一个报合法版本的假 kiro-cli，就会走到后面的环境准备而不是「版本未知」）
+# 报合法版本的假 kiro-cli（9.9.9）：下面 headless 早退用例与「版本合法」正控都用它。必须建在 headless 用例**之前**——
+# 原先建在之后，PATH 里的 $tmp/fakebin2 还不存在：本机落到真实 kiro-cli 上，没装 kiro-cli 的机器上则在「缺少 kiro-cli」就退出、什么都没测
 mkdir -p "$tmp/fakebin2"
 cat > "$tmp/fakebin2/kiro-cli" <<'SH'
 #!/usr/bin/env bash
@@ -88,6 +82,15 @@ case "${1:-}" in
 esac
 SH
 chmod +x "$tmp/fakebin2/kiro-cli"
+# headless 探测（v3）在装 cleanup trap 之前就退出（许可清单不合法）：本次建的 kiro-tmp 不能留在执行器 TMPDIR 里（复审 2 M-2）
+mkdir -p "$tmp/hl-tmp"
+HEADLESS_PROBE="$ROOT/scripts/probe/probe-kiro-headless.sh"
+rc=0; err=$(env PATH="$tmp/fakebin2:$PATH" HOME="$tmp/home" TMPDIR="$tmp/hl-tmp" KIRO_ENGINE=v3 KIRO_API_KEY=fake KIRO_ENV_PASSTHROUGH='bad name' \
+  PROBE_KEEP_DIR="$tmp/keep-hl" bash "$HEADLESS_PROBE" 2>&1) || rc=$?
+assert_eq "$rc" "1" "headless v3 + 许可清单不合法：以 1 退出"
+assert_eq "$(find "$tmp/hl-tmp" -maxdepth 1 -name 'kiro-tmp.*' | wc -l | tr -d ' ')" "0" "headless v3 早退：执行器 TMPDIR 里没有留下 kiro-tmp.*"
+assert_contains "$err" "KIRO_ENV_PASSTHROUGH 不合法" "headless v3 早退（正控）：失败点在许可清单，说明已经建过 kiro-tmp（不是在「缺少 kiro-cli」那一步就退出）"
+# 版本能解析时不该被这条挡住（正控：换成报合法版本的假 kiro-cli，就会走到后面的环境准备而不是「版本未知」）
 rc=0; err=$(env PATH="$tmp/fakebin2:$PATH" HOME="$tmp/home2" PROBE_KEEP_DIR="$tmp/keep-ident" bash "$PROBE" 2>&1) || rc=$?
 assert_not_contains "$err" "版本号解析不出" "正控：版本合法时不再报「版本未知」"
 assert_contains "$err" "本次探测身份：" "正控：版本合法时打出「平台:版本」身份行"
