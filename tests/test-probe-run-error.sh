@@ -161,6 +161,30 @@ for c in T1b T3 T6; do
   assert_contains "$OUT" "[$c] INCONCLUSIVE  Kiro 没跑完：暂时性服务端错误 ModelThrottleError" "E17：${c} 被限流时点名 Kiro 的错误类"
 done
 
+# ============ allowlist 探测：V3 专有的判定点（T10–T14）============
+# E12（I1）：没跑完，但业务库的 hook 已经执行了 → 失效证据优先，FAIL
+run_probe v3 T10 hook-throttle
+assert_eq "$RC" "1" "E12：V3 T10 被限流、但业务库 hook 已执行 → FAIL（失效证据不等 runFinished）"
+assert_contains "$OUT" "[T10] FAIL" "E12：T10 FAIL"
+assert_contains "$OUT" "hook 日志非空：业务库的 SessionStart hook 在本机执行了" "E12：点名 hook 日志"
+assert_eq "$(kerr)" "[]" "E12：FAIL 不记 kiro_errors"
+# E13：V3 默认 18 个全被限流 → T10–T14、T5 都点名 Kiro 的错误类，没有任何 PASS
+run_probe v3 "" throttle
+assert_eq "$RC" "3" "E13：V3 默认用例全被限流 → 退出码 3"
+assert_eq "$(kerr '.kiro_errors | length')" "18" "E13：kiro_errors 18 条"
+for c in T10 T13 T14 T5; do
+  assert_contains "$OUT" "[$c] INCONCLUSIVE  Kiro 没跑完：暂时性服务端错误" "E13：${c} 点名 Kiro 的错误类"
+done
+assert_not_contains "$OUT" "] PASS" "E13：被限流的运行一个 PASS 都没有"
+# E14（I2）：跑完的运行照原次序判——兜底函数先报
+run_probe v3 T10 hook-finished
+assert_eq "$RC" "1" "E14：V3 T10 跑完了、hook 执行过、没有 mode 信息 → FAIL"
+assert_contains "$OUT" "兜底信号：" "E14：跑完的运行仍由兜底函数先报（次序与改动前相同）"
+# E18：超时、没跑完、没有失效证据、没有 runError → 原文案
+run_probe v3 T10 timeout
+assert_eq "$RC" "3" "E18：V3 T10 超时且无证据 → INCONCLUSIVE"
+assert_contains "$OUT" "[T10] INCONCLUSIVE  超时，无法判定" "E18：超时文案照旧"
+
 # ============ S-I3：错误类名单只有一份 ============
 errclass_sites() { # <树根> → 空格分隔的相对路径（scripts/ 下含错误类名的 *.sh）
   ( cd "$1" && { LC_ALL=C grep -rlE 'ModelThrottleError|UsageLimitReachedError' --include='*.sh' scripts || true; } | LC_ALL=C sort | LC_ALL=C paste -sd' ' - )

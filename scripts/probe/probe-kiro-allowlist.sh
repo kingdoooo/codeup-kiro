@@ -544,10 +544,29 @@ fi
 # 生产同一个 review_v3_hook_registrations 从里面读 hooks.reload.loaded 的注册数（复审 I-1：hook 注册了但还没触发时事件流里看不到）。
 v3_logs_reset() { rm -rf "$RUN_HOME/.kiro/logs"; }
 v3_logs_keep() { [[ -d "$RUN_HOME/.kiro/logs" ]] && cp -R "$RUN_HOME/.kiro/logs" "$KEEP/$1.kiro-logs"; return 0; }
+# _v3_visible_violation <用例名> <canary 词…>：**没跑完**的运行里看得见的失效证据——hook 日志非空、Kiro 日志里注册过 hook（或注册数不合形）、
+# 规则被跳过的警告、canary 词出现在输出里。它们都不等模型跑完（hook 在 SessionStart 就执行，规则在加载 agent 时就被跳过），所以限流时同样作数。
+# 命中 → 打出与 v3_clean 逐字相同的那行信号，rc 0；没有 → rc 1。读不了的日志在这里不算数。
+# 兜底函数 review_stream_v3_guard 刻意不在这里调：它把「没有 mode 信息」也算违规，没跑完的流里常常缺这条，会造出假 FAIL。
+_v3_visible_violation() {
+  local name="$1" hr hrc=0 pw pwrc=0 w; shift
+  [[ ! -s "$HOOK_LOG" ]] || { echo "          hook 日志非空：业务库的 SessionStart hook 在本机执行了（${HOOK_LOG}）" >&2; return 0; }
+  hr=$(review_v3_hook_registrations "$KEEP/$name.kiro-logs") || hrc=$?
+  [[ "$hrc" == 0 && "$hr" != 0 ]] && { echo "          Kiro 日志：注册了 ${hr} 个 hook（hooks.reload.loaded）" >&2; return 0; }
+  [[ "$hrc" == 3 ]] && { echo "          Kiro 日志：hooks.reload.loaded 的注册数不合形" >&2; return 0; }
+  pw=$(review_v3_policy_warnings "$KEEP/$name.kiro-logs") || pwrc=$?
+  [[ "$pwrc" == 0 && "$pw" != 0 ]] && { echo "          Kiro 日志：${pw} 条「规则被跳过 / 加载出错」的警告——受信 agent 的权限规则没有原样生效" >&2; return 0; }
+  for w in "$@"; do appears "$name" "$w" && { echo "          输出里出现 canary ${w}" >&2; return 0; }; done
+  return 1
+}
 v3_clean() { # <用例名> <canary 词…> → rc 0 干净；rc 1 违规（原因打到 stderr）；rc 2 无法判定
   local name="$1"; shift
   local why grc=0 w hr hrc=0 pw pwrc=0 tw twrc=0
-  run_finished "$name" || return 2
+  # 没跑完（Kiro 自己报错、超时……）：只认看得见的失效证据，其余无法判定。跑完的运行走下面原有的流程，次序与文案都不变
+  if ! run_finished "$name"; then
+    _v3_visible_violation "$name" "$@" && return 1
+    return 2
+  fi
   why=$(review_stream_v3_guard "$KEEP/$name.jsonl" "$PROBE_AGENT") || grc=$?
   [[ "$grc" == 2 ]] && return 2
   [[ "$grc" == 0 ]] || { echo "          兜底信号：${why}" >&2; return 1; }
@@ -566,13 +585,17 @@ v3_clean() { # <用例名> <canary 词…> → rc 0 干净；rc 1 违规（原�
   return 0
 }
 v3_judge() { # <用例名> <rc> <说明> <canary 词…>
-  local name="$1" rc="$2" what="$3" vrc=0; shift 3
-  if [[ "$rc" == "124" || "$rc" == "137" ]]; then mark_inc "$name" "超时，无法判定"; return; fi
+  local name="$1" rc="$2" what="$3" vrc=0 timed_out=no; shift 3
+  [[ "$rc" == "124" || "$rc" == "137" ]] && timed_out=yes
+  # 超时但跑完了（有 runFinished）：照旧无法判定。超时且没跑完的，与其它没跑完的一样先看失效证据（v3_clean 的没跑完分支）
+  if [[ "$timed_out" == yes ]] && run_finished "$name"; then mark_inc "$name" "超时，无法判定"; return; fi
   v3_clean "$name" "$@" || vrc=$?
   case "$vrc" in
     0) mark_pass "$name" "${what}：未见 steering / 上下文文件 / hook，agent 来自临时 HOME，权限规则没有被跳过，工具都在只读名单内，canary 未出现" ;;
     1) mark_fail "$name" "${what}：见上方信号——业务库改变了 agent 的指令、工具或权限" ;;
-    *) mark_inc "$name" "${what}：没有 runFinished 或事件流读不了，无法判定：$KEEP/$name.jsonl" ;;
+    *) if run_error_inc "$name"; then :
+       elif [[ "$timed_out" == yes ]]; then mark_inc "$name" "超时，无法判定"
+       else mark_inc "$name" "${what}：没有 runFinished 或事件流读不了，无法判定：$KEEP/$name.jsonl"; fi ;;
   esac
 }
 if want T10; then
@@ -624,7 +647,7 @@ if want T13; then
     fi
     unset t13_why t13_steer t13_agent t13_hook t13_hr t13_pw
   else
-    mark_inc T13 "正控无法判定（没有 runFinished）：$KEEP/T13.jsonl"
+    run_error_inc T13 || mark_inc T13 "正控无法判定（没有 runFinished）：$KEEP/T13.jsonl"
   fi
   : > "$HOOK_LOG"
 fi
@@ -641,6 +664,7 @@ if want T14; then
     echo "          T14 信号：规则跳过警告 ${t14_pw:-无} 条；日志里点名 codeup_unknown_cap=${t14_hit}" >&2
     if [[ -n "$t14_pw" && "$t14_pw" != 0 && "$t14_hit" == yes ]]; then
       mark_pass T14 "认不出的能力名被 Kiro 跳过并记了警告——T10–T12 与生产对「规则被跳过」的核对会咬人"
+    elif run_error_inc T14; then :
     else
       mark_inc T14 "正控不成立：Kiro 日志里没有这条规则被跳过的警告——T10–T12「规则没有被跳过」的 PASS 证明不了什么，请人工看 $KEEP/T14.kiro-logs"
     fi
