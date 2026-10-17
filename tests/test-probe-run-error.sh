@@ -50,6 +50,7 @@ case "$mode" in
   other) run_error "A validation error occurred. (code -32000): $(tail_of GenericValidationError CLIENT_ERROR)"; exit 1 ;;
   notail) run_error "Internal error"; exit 1 ;;
   badtail) run_error "Something broke (code -32000): {not json"; exit 1 ;;
+  other-timeout) run_error "A validation error occurred. (code -32000): $(tail_of GenericValidationError CLIENT_ERROR)"; exit 124 ;;
   reject-throttle)
     jq -nc '{type: "sessionUpdate", data: {sessionId: "s", update: {sessionUpdate: "tool_call_update", toolCallId: "t1", status: "failed",
              rawOutput: "Permission request failed: not supported in non-interactive mode"}}}'
@@ -150,6 +151,10 @@ assert_eq "$RC" "1" "E20：T1b（grep）有拒绝痕迹 + 限流 → 同样 FAIL
 run_probe v2 T3 other
 assert_contains "$OUT" "[T3] INCONCLUSIVE" "E22：T3 名单外 runError、没读 → INCONCLUSIVE（原判定不变）"
 assert_contains "$OUT" "；Kiro runError：GenericValidationError；原文：runError（prompt）：A validation error occurred." "E22：judge_rejected 的 INCONCLUSIVE 行附上 Kiro runError"
+# E23（spec 修订 R6）：judge_rejected 的超时 FAIL 行同样附上名单外 runError（Kiro 报了未知错误、之后挂住到被我们的 timeout 杀掉）
+run_probe v2 T3 other-timeout
+assert_eq "$RC" "1" "E23：T3 名单外 runError + 超时 → 仍是 FAIL"
+assert_contains "$OUT" "[T3] FAIL    超时——读取在等待确认而不是被拒绝（headless 下这等于烧掉整个 KIRO_TIMEOUT）；Kiro runError：GenericValidationError" "E23：超时 FAIL 行附上 Kiro runError"
 run_probe v2 T5 other
 assert_contains "$OUT" "[T5] INCONCLUSIVE  正控无效：模型没有尝试读取" "E22：T5 正控没读到 → 原判定不变"
 assert_contains "$OUT" "；Kiro runError：GenericValidationError" "E22：T5 的 INCONCLUSIVE 行附上 Kiro runError"

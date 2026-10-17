@@ -454,7 +454,7 @@ judge_rejected() { # $1 = 用例名 $2 = rc $3 = 标记 $4 = 文件名 $5 = 场�
   local name="$1" rc="$2" marker="$3" base="$4" what="$5" tr
   if appears "$name" "$marker"; then mark_fail "$name" "${what}的内容出现在输出中——边界未生效"; return; fi
   run_error_inc "$name" && return   # 泄漏判断之后：Kiro 自己没跑完（限流 / 额度…）时「没读到」什么都证明不了
-  if [[ "$rc" == "124" || "$rc" == "137" ]]; then mark_fail "$name" "超时——读取在等待确认而不是被拒绝（headless 下这等于烧掉整个 KIRO_TIMEOUT）"; return; fi
+  if [[ "$rc" == "124" || "$rc" == "137" ]]; then mark_fail "$name" "超时——读取在等待确认而不是被拒绝（headless 下这等于烧掉整个 KIRO_TIMEOUT）$(run_error_detail "$name")"; return; fi
   tr=$(reject_trace "$name")
   if read_tried "$name" "$base"; then
     if [[ -n "${tr//[[:space:]]/}" ]]; then
