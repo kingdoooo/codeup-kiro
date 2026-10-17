@@ -257,10 +257,15 @@ done
 unset _f
 
 # ============ S-I3：错误类名单只有一份 ============
-# 类名直接从 review_stream_run_error_class 的两个 jq 名单里取：名单加了名字，守卫自动跟上（不在测试里另抄一份）
-errclass_names() { # <树根> → 每行一个类名
+# 类名直接从 review_stream_run_error_class 的两个 jq 名单里取：名单加了名字，守卫自动跟上（不在测试里另抄一份）。
+# 名单区 = 函数里从 `jq -R -n -r '` 那一行到 `as $transient` 那一行；取区里**每个**带引号的串，再按判据函数自己的类名形状筛——
+# 不按后缀（Error / Exception）认，否则名单里加一个形状不同的名字时守卫会悄悄漏掉它
+errclass_tokens() { # <树根> → 名单区里每个带引号的串（去掉引号），一行一个
   LC_ALL=C sed -n '/^review_stream_run_error_class() {/,/^}/p' "$1/scripts/lib/review-render.sh" \
-    | LC_ALL=C grep -oE '"[A-Z][A-Za-z]*Error"' | LC_ALL=C tr -d '"' | LC_ALL=C sort -u
+    | LC_ALL=C sed -n "/jq -R -n -r '/,/as \\\$transient/p" | LC_ALL=C grep -oE '"[^"]*"' | LC_ALL=C tr -d '"'
+}
+errclass_names() { # <树根> → 每行一个类名（合形、去重）
+  errclass_tokens "$1" | { LC_ALL=C grep -E '^[A-Za-z][A-Za-z0-9]{0,63}$' || true; } | LC_ALL=C sort -u
 }
 errclass_sites() { # <树根> → 空格分隔的相对路径（scripts/ 下含任一错误类名的 *.sh）
   local pat; pat=$(errclass_names "$1" | LC_ALL=C paste -sd'|' -)
@@ -271,5 +276,17 @@ assert_eq "$(errclass_names "$ROOT" | grep -c .)" "19" "I3 正控：从 review_s
 assert_eq "$(errclass_sites "$ROOT")" "scripts/lib/review-render.sh" "I3：错误类名只出现在 review-render.sh（review_stream_run_error_class）"
 mkdir -p "$tmp/i3root"; cp -R "$ROOT/scripts" "$tmp/i3root/"; printf '# OverageLimitReachedError\n' >> "$tmp/i3root/scripts/probe/probe-kiro-allowlist.sh"
 assert_eq "$(errclass_sites "$tmp/i3root")" "scripts/lib/review-render.sh scripts/probe/probe-kiro-allowlist.sh" "I3 元测试：别处再写任一个类名（这里是名单里的 OverageLimitReachedError）会被守卫抓到"
+# 不以 Error 结尾的类名（AWS SDK 的 ThrottlingException 这类）加进名单后同样被守卫覆盖
+mkdir -p "$tmp/i3exc"; cp -R "$ROOT/scripts" "$tmp/i3exc/"
+LC_ALL=C sed -i.bak 's/"StreamIdleTimeoutError", /"StreamIdleTimeoutError", "ThrottlingException", /' "$tmp/i3exc/scripts/lib/review-render.sh"
+printf '# ThrottlingException\n' >> "$tmp/i3exc/scripts/probe/probe-kiro-allowlist.sh"
+assert_eq "$(errclass_names "$tmp/i3exc" | grep -c .)" "20" "I3 元测试：名单里加一个不以 Error 结尾的类名 → 取出 20 个（不被提取规则悄悄漏掉）"
+assert_eq "$(errclass_sites "$tmp/i3exc")" "scripts/lib/review-render.sh scripts/probe/probe-kiro-allowlist.sh" "I3 元测试：那个类名在别处出现同样被抓到"
+# 名单区里每个带引号的串都必须是合形的类名：混进不合形的（比如带空格）时一致性断言变红，而不是被提取规则跳过
+assert_eq "$(errclass_tokens "$ROOT" | grep -c .)" "$(errclass_names "$ROOT" | grep -c .)" "I3：名单区里每个带引号的串都是合形、不重复的类名"
+mkdir -p "$tmp/i3bad"; cp -R "$ROOT/scripts" "$tmp/i3bad/"
+LC_ALL=C sed -i.bak 's/"StreamIdleTimeoutError", /"StreamIdleTimeoutError", "Bad Name", /' "$tmp/i3bad/scripts/lib/review-render.sh"
+assert_eq "$([[ "$(errclass_tokens "$tmp/i3bad" | grep -c .)" != "$(errclass_names "$tmp/i3bad" | grep -c .)" ]] && echo caught)" "caught" \
+  "I3 元测试：名单区里混进不合形的串 → 上面那条一致性断言会红"
 
 report
