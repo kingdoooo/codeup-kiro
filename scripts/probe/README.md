@@ -167,7 +167,7 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
   summary.json 的 `kiro_errors` 列出这些用例：`[{case, kind, errorType, retryErrorType}]`，`kind` 是 `transient`（等一会儿补跑）或
   `needs_human`（补跑前要人处理），解析不出的值是 `null`，没有就是 `[]`。有记录时探测在结尾打出一条可直接粘贴的 `KIRO_ENGINE=… PROBE_CASES=…` 补跑命令（带上本次的引擎：
   不设 KIRO_ENGINE 就是 v3）——只补跑一部分用例时以 4 退出、不作发布判定，补跑只用来确认，发布证据要完整跑一次。Kiro 被限流时自己会退避重试约 270 s 才放弃，所以单个用例的
-  `KIRO_TIMEOUT` 默认 600 s（2026-10-17 前是 300 s，会先把 Kiro 杀掉、runError 来不及写）。
+  `KIRO_TIMEOUT` 默认 600 s（2026-10-17 前是 300 s：那次 Kiro 在 271 s 放弃，300 s 只剩约 30 s 余量——再久一点就会先被我们杀掉、runError 来不及写，又落回超时 FAIL）。
   T5 的正控 agent 由安装器的 `--allow-none` 装（唯一合法的第二调用方：file:// 改写、deny 检查、同名旧文件清理照做）；正控 agent
   装不上时记为 T5 INCONCLUSIVE 进入汇总（不是 exit 5——门禁用例此时已跑完，直接退出会把真正的门禁 FAIL 降级成「环境准备失败」且不写 summary.json）。
   每个 canary 一次调用（T8a/T8b、T9a–T9d），拒绝痕迹按运行归因、不按文件名回扫：一次运行读多个文件时模型会把路径合并进同一次 read 调用，

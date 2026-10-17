@@ -249,6 +249,12 @@ assert_eq "$(LC_ALL=C grep -c '运行本身没跑起来 → 2' "$PR" || true)" "
 assert_contains "$(cat "$PR")" "kiro_errors" "文档：README 讲到 summary.json 的 kiro_errors"
 assert_contains "$(cat "$PR")" "重新提取 Kiro 错误类名单" "文档：README 的升级步骤要求重新提取错误类名单"
 assert_contains "$(cat "$ADR8")" "重新提取 Kiro 错误类名单" "文档：ADR-0008 的 3.x 清单要求重新提取错误类名单"
+# 终审 minor #2：2026-10-16 那次 runError 是在 271 s 写出来的（300 s 之内），改成 600 的理由是余量太薄，不是「300 s 一定先杀掉」
+for _f in "$PR" "$PROBE"; do
+  assert_eq "$(LC_ALL=C grep -c '会先把.*杀掉、runError 来不及写' "$_f" || true)" "0" "文档：$(basename "$_f") 不再说 300 s「会先把 Kiro 杀掉」"
+  assert_contains "$(cat "$_f")" "300 s 只剩约 30 s 余量" "文档：$(basename "$_f") 说清 600 的理由是余量"
+done
+unset _f
 
 # ============ S-I3：错误类名单只有一份 ============
 # 类名直接从 review_stream_run_error_class 的两个 jq 名单里取：名单加了名字，守卫自动跟上（不在测试里另抄一份）

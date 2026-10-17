@@ -123,7 +123,7 @@ if [[ -z "${KIRO_API_KEY:-}" ]]; then
   echo "[probe] 使用本机登录态：$(kiro-cli whoami 2>/dev/null | head -1)" >&2
 fi
 
-KIRO_TIMEOUT="${KIRO_TIMEOUT:-600}"   # 300 → 600（2026-10-17）：Kiro 被限流时自己退避重试约 270 s 才放弃，300 s 会先把它杀掉、runError 来不及写
+KIRO_TIMEOUT="${KIRO_TIMEOUT:-600}"   # 300 → 600（2026-10-17）：Kiro 被限流时自己退避重试约 270 s 才放弃，300 s 只剩约 30 s 余量——再久一点就会先被我们杀掉、runError 来不及写
 TS=$(date '+%Y%m%d-%H%M%S')
 KEEP="${PROBE_KEEP_DIR:-/tmp/kiro-probe-allowlist-${TS}}"; mkdir -p "$KEEP"
 RAND=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
