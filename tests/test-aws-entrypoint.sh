@@ -824,12 +824,14 @@ STUB
     "㉒ 续期时 expires_at 同步 = lease_until + 1 天（N4）"
   assert_eq "$(attr "$ltmp/snap.json.end" "$LEASE" holder)" "r1#7#A|$ARN_A" "㉒ 续期不改持有者"
   assert_eq "$([ "$(updates_ok)" -ge 3 ] && echo yes)" "yes" "㉒ 拿租约 + 至少一次续期 + 释放（共 $(updates_ok) 次写入）"
-  # 起续期循环时先立刻续一次（拿租约那次调用可能慢慢才成功，复审 Minor）：续期那一轮真睡 5 秒、引擎 1 秒，
-  # 这期间能出现的续期只有那「立刻一次」
-  reset_lease
-  # 跑到「拿租约 + 立刻续期」两次写入都落表为止，再多跑 0.5 秒（续期周期 5 秒，这期间不该有第二次续期）
-  assert_eq "$(run_lease 'r1#7#A' ENGINE_UNTIL="$(until_writes_ok 2)" ENGINE_SECONDS=0.5 RENEW_REAL_SLEEP=5)" "0" "㉒ 前提：评审正常结束"
-  assert_eq "$(updates_ok)" "3" "㉒ 起续期循环时先立刻续一次（拿租约 + 立刻续期 + 释放）"
+  # 起续期循环时先立刻续一次（拿租约那次调用可能慢慢才成功，复审 Minor）。
+  # 跑到「拿租约 + 一次续期」两次写入都落表为止，再多跑 0.5 秒（续期那一轮真睡 5 秒，这期间不该有第二次续期）。
+  # 「立刻」靠假时钟钉住、不靠墙钟：续期循环每轮的 sleep 替身把假时钟拨快 30，所以先睡后续的那次续期读到 5030、写 5150——
+  # 只有不睡就续，引擎结束时 lease_until 才是 5120。光数「3 次写入」钉不住它：等条件最多 15 秒，先睡 5 秒再续也能凑够 3 次
+  reset_lease; echo 5000 > "$ltmp/clock"
+  assert_eq "$(run_lease 'r1#7#A' FAKE_CLOCK="$ltmp/clock" ENGINE_UNTIL="$(until_writes_ok 2)" ENGINE_SECONDS=0.5 RENEW_REAL_SLEEP=5)" "0" "㉒ 前提：评审正常结束"
+  assert_eq "$(updates_ok)" "3" "㉒ 起续期循环时先立刻续一次（拿租约 + 一次续期 + 释放）"
+  assert_eq "$(attr "$ltmp/snap.json.end" "$LEASE" lease_until)" "5120" "㉒ 那一次续期是**立刻**续的（读到的还是 5000，没先睡一轮）"
   assert_eq "$(attr "$ltmp/state.json" "$LEASE" lease_until)" "0" "㉒ 带续期的评审结束后照样释放"
   # L6：退出之后续期循环已经停了——再等一会儿，表上不再有任何写入
   n_before=$(wc -l < "$ltmp/ddb.log"); /bin/sleep 0.6
