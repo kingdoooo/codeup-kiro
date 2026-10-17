@@ -129,7 +129,8 @@ agent 目录、`chat.disableInheritingDefaultResources` 设置与临时业务库
     INCONCLUSIVE 时去原始输出目录看 `out.jsonl` 里有没有对 canary 文件的工具调用——
     目录名在脚本 stderr 的「原始输出目录：/tmp/kiro-probe-<时间>」一行里（`PROBE_KEEP_DIR`
     是**输入**变量、默认不设置，别指望在 shell 里 `echo $PROBE_KEEP_DIR`）。
-  - **P1-11 的 canary 在 allowedPaths 之内**：放在临时业务库的 `.git/probe-canary-<ts>.txt`，只被 `**/.git/**` 这两条
+  - **P1-11 的 canary 在 allowedPaths 之内**：放在临时业务库的 `.git/probe-notes-<ts>.txt`（内容是一行「# MARKER …」：写成令牌、要「token= 后面的值」时，
+    2.32.0 上评审员 agent 直接拒读、零工具调用，P1-11 只剩 INCONCLUSIVE——与 allowlist 探测 T9 同一个坑），只被 `**/.git/**` 这两条
     deny 挡住。放在 allow 之外（旧版放 `~/.kiro/`）的话，deny 规则删掉它照样被 allow 边界拒绝，正控永远「PASS」，
     P1-11 就测不出 deny 的任何问题。
   - **P1-11 的正控**：临时去掉 `kiro/agent-codeup-reviewer.json` 里 `toolsSettings.read.deniedPaths`（至少 `**/.git` 与
