@@ -94,6 +94,12 @@ assert_contains "$err" "KIRO_ENV_PASSTHROUGH 不合法" "headless v3 早退（�
 rc=0; err=$(env PATH="$tmp/fakebin2:$PATH" HOME="$tmp/home2" PROBE_KEEP_DIR="$tmp/keep-ident" bash "$PROBE" 2>&1) || rc=$?
 assert_not_contains "$err" "版本号解析不出" "正控：版本合法时不再报「版本未知」"
 assert_contains "$err" "本次探测身份：" "正控：版本合法时打出「平台:版本」身份行"
+# N1：子集不含 ALL_CASES 的最后一个用例（v2 是 T9d）时，探测曾在 recalc_ran 处被 set -e 静默杀掉（一行输出、零调用、退出码 1）
+rm -f "$tmp/calls"
+rc=0; err=$(env PATH="$tmp/fakebin2:$PATH" HOME="$tmp/home-n1" PROBE_CASES="T1" PROBE_KEEP_DIR="$tmp/keep-n1" bash "$PROBE" 2>&1) || rc=$?
+assert_eq "$(grep -c '^chat ' "$tmp/calls" 2>/dev/null || true)" "1" "N1：PROBE_CASES=T1 真的跑了 T1（一次 chat 调用）"
+assert_contains "$err" "实际运行：T1 。" "N1：汇总写出实际运行的用例"
+assert_eq "$(jq -c .ran "$tmp/keep-n1/summary.json")" '["T1"]' "N1：summary.json 的 ran 只有 T1"
 
 # ============ 票 18 ④：参考 YAML 里 MR_TARGET_BRANCH 用 `:=`（envs 注入不被覆盖）============
 # 这段是**静态**断言（不跑 Flow）：YAML 的 run 块是一段 shell，抽出来做语法检查与两条语义检查。

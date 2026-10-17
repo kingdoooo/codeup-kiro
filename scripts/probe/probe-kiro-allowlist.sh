@@ -146,7 +146,9 @@ want() { [[ " $CASES " == *" $1 "* ]]; }
 # `RAN` 是「实际运行的集合」（15-fix2 #4）。它必须在**每次** CASES 变化之后重算（票 18 ⑫）：前置检查失败时下面会把 CASES 清空
 # （一个用例都不跑），而 RAN 若还冻结在清空之前的值，汇总里的「实际运行」与 summary.json 就会声称跑过十二个门禁用例——
 # 那是把「探测没跑」写成「探测通过」。所以收成函数，清空 CASES 的地方紧跟一次重算。
-recalc_ran() { RAN=" "; for c in $ALL_CASES; do want "$c" && RAN+="$c "; done; }
+# 末尾的 return 0 不能省：for 循环以最后一个 `want` 的状态返回，ALL_CASES 的最后一个用例不在 PROBE_CASES 里时函数返回 1，
+# set -e 在调用处直接杀掉脚本（一行输出、零调用、退出码 1 = 「门禁 FAIL」；388daea 起所有这样的子集运行都死在这里）
+recalc_ran() { RAN=" "; for c in $ALL_CASES; do want "$c" && RAN+="$c "; done; return 0; }
 recalc_ran
 echo "[probe] 输出目录 $KEEP" >&2
 
