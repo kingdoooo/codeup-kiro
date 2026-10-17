@@ -3453,6 +3453,16 @@ rec "$tmp/rec-lower.jsonl" FutureThrottleError throttling
 assert_eq "$(cls "$tmp/rec-lower.jsonl")" "0|other FutureThrottleError -" "run_error_class：retryErrorType 不合形（小写）→ -，名单外类名不靠它认成暂时性"
 recm "$tmp/rec-ws.jsonl" "x (code -32000): {\"errorType\":\"FutureThrottleError\",\"retryErrorType\":\"THROTTLING\"}"$'\n  '
 assert_eq "$(cls "$tmp/rec-ws.jsonl")" "0|transient FutureThrottleError THROTTLING" "run_error_class：JSON 尾巴之后还有空白与换行 → 照样解析"
+# 终审 F1：尾巴在、但解析不了 → 照约定 other - -（不是 rc 1：那会让 FAIL 行丢掉「Kiro runError：解析不出类型」那段原因）
+recm "$tmp/rec-garbage.jsonl" 'boom (code -32000): {"errorType":"ModelThrottleError"} then (code -32603): garbage'
+assert_eq "$(cls "$tmp/rec-garbage.jsonl")" "0|other - -" "run_error_class：最后一段尾巴解析不了、前面也解析不了 → 其它（不是 rc 1）"
+recm "$tmp/rec-prose.jsonl" 'x (code -32000): {"errorType":"ModelThrottleError","retryErrorType":"THROTTLING"}. Please retry.'
+assert_eq "$(cls "$tmp/rec-prose.jsonl")" "0|other - -" "run_error_class：JSON 后面还跟着散文 → 其它"
+recm "$tmp/rec-broken.jsonl" 'Something broke (code -32000): {not json'
+assert_eq "$(cls "$tmp/rec-broken.jsonl")" "0|other - -" "run_error_class：尾巴是半截 JSON → 其它"
+# 「(code N): 」出现在 JSON 的字符串值里：从最后一段往前找第一段能解析的
+recm "$tmp/rec-instr.jsonl" 'x (code -32000): {"errorType":"ModelThrottleError","retryErrorType":"THROTTLING","detail":"inner (code 5): y"}'
+assert_eq "$(cls "$tmp/rec-instr.jsonl")" "0|transient ModelThrottleError THROTTLING" "run_error_class：(code N): 出现在 JSON 字符串里 → 往前找到真正的尾巴"
 unset -f cls recm recj rec
 
 # 复审 m-1 / m-2：Flow 的三份文档与 #06 对拍（REVIEW_LOG_HINT 有一行；BUILD_NUMBER 不再说「构建号 ?」；REVIEW_RERUN_HINT 写明它也换掉「重跑流水线即可」）

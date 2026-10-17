@@ -49,6 +49,11 @@ case "$mode" in
   badname-throttle) run_error "Slow down. (code -32000): $(tail_of 'Bad Name' THROTTLING)"; exit 1 ;;
   other) run_error "A validation error occurred. (code -32000): $(tail_of GenericValidationError CLIENT_ERROR)"; exit 1 ;;
   notail) run_error "Internal error"; exit 1 ;;
+  badtail) run_error "Something broke (code -32000): {not json"; exit 1 ;;
+  reject-throttle)
+    jq -nc '{type: "sessionUpdate", data: {sessionId: "s", update: {sessionUpdate: "tool_call_update", toolCallId: "t1", status: "failed",
+             rawOutput: "Permission request failed: not supported in non-interactive mode"}}}'
+    run_error "$THROTTLE"; exit 1 ;;
   secret) run_error "request failed: Authorization: Bearer $(cat "$FAKE_DIR/secret") (code -32000): $(tail_of ModelThrottleError THROTTLING)"; exit 1 ;;
   chunk-only) chunk "$THROTTLE"; exit 1 ;;
   timeout) exit 124 ;;
@@ -130,6 +135,17 @@ assert_eq "$(kerr)" "[]" "E6：kiro_errors 为空数组（FAIL 不记）"
 run_probe v2 T1 notail
 assert_eq "$RC" "1" "E7：解析不出类型（V2 的形状）→ FAIL"
 assert_contains "$OUT" "；Kiro runError：解析不出类型；原文：runError（prompt）：Internal error" "E7：FAIL 行说「解析不出类型」"
+# E21（终审 F1）：runError 的 JSON 尾巴解析不了 → 仍 FAIL，FAIL 行照样附上「解析不出类型」与原文
+run_probe v2 T1 badtail
+assert_eq "$RC" "1" "E21：JSON 尾巴解析不了 → FAIL"
+assert_contains "$OUT" "；Kiro runError：解析不出类型；原文：runError（prompt）：Something broke" "E21：FAIL 行仍附上 Kiro runError 的原因"
+# E20（终审 F2，I1）：allow 内读取已经留下拒绝痕迹，之后 Kiro 才被限流 → 失效证据优先，仍是 FAIL
+run_probe v2 T1 reject-throttle
+assert_eq "$RC" "1" "E20：T1 有拒绝痕迹 + 限流 → FAIL（拒绝痕迹就是 allow 内读取的失效证据）"
+assert_not_contains "$OUT" "[T1] INCONCLUSIVE" "E20：不因为后来的限流改判成 INCONCLUSIVE"
+assert_eq "$(kerr)" "[]" "E20：kiro_errors 为空"
+run_probe v2 T1b reject-throttle
+assert_eq "$RC" "1" "E20：T1b（grep）有拒绝痕迹 + 限流 → 同样 FAIL"
 # E8 / E9：没有 runError 的没跑完与超时 → 照旧 FAIL
 run_probe v2 T1 chunk-only
 assert_eq "$RC" "1" "E8：限流文字只在模型文本里、没有 runError → FAIL"

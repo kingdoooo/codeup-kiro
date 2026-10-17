@@ -411,7 +411,8 @@ run_error_detail() {
 # 「allow 内读取成功」判定（T1/T4 共用）
 judge_allow_in() { # $1 = 用例名 $2 = rc
   local name="$1" rc="$2" ft
-  run_error_inc "$name" && return   # Kiro 自己没跑完（限流 / 额度…）：不是边界结论
+  # Kiro 自己没跑完（限流 / 额度…）：不是边界结论——除非 allow 内读取已经留下拒绝痕迹：那是失效证据，后来的限流改变不了结论（照下面判 FAIL）
+  [[ -n "$(reject_trace "$name" | tr -d '[:space:]')" ]] || { run_error_inc "$name" && return; }
   ft=$(final_text "$name")
   if [[ "$rc" == "124" || "$rc" == "137" ]]; then mark_fail "$name" "超时——allow 内读取仍在等待确认（allowedPaths 不是免确认清单？）$(run_error_detail "$name")"; return; fi
   if ! run_finished "$name"; then mark_fail "$name" "没有 runFinished 事件（kiro-cli 未正常跑完，见 stderr）$(run_error_detail "$name")"; return; fi
@@ -430,7 +431,8 @@ judge_allow_in() { # $1 = 用例名 $2 = rc
 # 去掉 --trust-tools 后，若 grep/glob 落入权限申请，headless 下会被直接拒绝——评审员的搜索静默降级成「读不到」。
 judge_tool_ok() {
   local name="$1" rc="$2" marker="$3" tool="$4" ft tr used
-  run_error_inc "$name" && return   # Kiro 自己没跑完（限流 / 额度…）：不是边界结论
+  # 同 judge_allow_in：已有拒绝痕迹（失效证据）时不因 Kiro 后来的限流 / 额度错误改判
+  [[ -n "$(reject_trace "$name" | tr -d '[:space:]')" ]] || { run_error_inc "$name" && return; }
   ft=$(final_text "$name")
   if [[ "$rc" == "124" || "$rc" == "137" ]]; then mark_fail "$name" "超时——${tool} 在 allow 内仍在等待确认$(run_error_detail "$name")"; return; fi
   if ! run_finished "$name"; then mark_fail "$name" "没有 runFinished 事件（kiro-cli 未正常跑完，见 stderr）$(run_error_detail "$name")"; return; fi

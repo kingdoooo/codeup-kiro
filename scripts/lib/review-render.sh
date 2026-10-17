@@ -1823,7 +1823,8 @@ review_stream_run_error() {
 # 探测要把「Kiro 自己报错没跑完」与读取边界的结论分开：限流时 allow 内读取的用例没有 runFinished，旧判定记成边界 FAIL（2026-10-16 本机
 # 2.31.1 实测）。只看**没跑完**的运行（有 runFinished 就 rc 1：跑完了的运行照常判），取**最后一个** runError（选择器与
 # review_stream_run_error 相同），从 message 末尾的 JSON-RPC 错误数据 `(code <整数>): {"errorType":…,"retryErrorType":…}` 里取两个字段——
-# 有多段时取最后一段（错误被包一层再抛出时，外层的类型说明不了真正的原因）。review_stream_run_error 截到 200 个字符，会截掉这段 JSON，所以这里读原文；
+# 从最后一段 `(code N): ` 往前，取第一段其后能整段解析成 JSON 对象的（错误被包一层再抛出时，外层的类型说明不了真正的原因；`(code N): ` 也可能出现在
+# JSON 的字符串值里）；一段都解析不了就是 other（rc 0，不是「没有 runError」）。review_stream_run_error 截到 200 个字符，会截掉这段 JSON，所以这里读原文；
 # 输出只含合形的类名（字母开头、字母数字、最长 64）与重试类别（大写与下划线），不回显原文。
 # 分类（次序即优先级）：
 #   needs_human —— 额度或账号问题，要人处理：UsageLimitReachedError（时 / 日 / 周 / 月用量上限，窗口只写在原文里）、OverageLimitReachedError，
@@ -1851,9 +1852,9 @@ review_stream_run_error_class() {
         ([$ev[] | select(.type == "runError" and (.data | type) == "object" and (.data.message | type) == "string")] | last) as $re
         | if $re == null then empty else
             $re.data.message as $m
-            | ([$m | match("\\(code -?[0-9]+\\): "; "g")] | last) as $c
-            | (if $c == null then null else ($m[($c.offset + $c.length):] | fromjson?) end) as $j
-            | (if ($j | type) == "object" then $j else {} end) as $o
+            | ([$m | match("\\(code -?[0-9]+\\): "; "g")] | reverse
+               | map(. as $c | (try ($m[($c.offset + $c.length):] | fromjson) catch null) | objects)
+               | first // {}) as $o
             | ($o.errorType | if type == "string" and test("^[A-Za-z][A-Za-z0-9]{0,63}$") then . else null end) as $et
             | ($o.retryErrorType | if type == "string" and test("^[A-Z_]{1,32}$") then . else null end) as $rt
             | (if $et != null and any($needs_human[]; . == $et) then "needs_human"
